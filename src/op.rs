@@ -257,9 +257,9 @@ mod tests {
 
     fn make_fatop<O: Operation>(op: O, site: &str) -> FatOp<O> {
         FatOp {
-            seq: Some(1),
+            seq: None,
             site: site.to_string(),
-            site_seq: 1,
+            site_seq: 1, // Dummy value.
             doc: "".to_string(),
             op,
         }
