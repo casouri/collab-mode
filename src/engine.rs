@@ -2,6 +2,8 @@ use std::{result::Result, cmp::max};
 use thiserror::Error;
 use crate::op::*;
 
+// *** Data structure
+
 /// The history buffer that reflects the history seen by the editor.
 #[derive(Debug, Clone)]
 pub struct EditorHistory<O> {
@@ -70,6 +72,8 @@ pub enum EngineError<O> {
 }
 
 type EngineResult<T, O> = Result<T, EngineError<O>>;
+
+// *** Processing functions
 
 impl<O: Operation> ClientEngine<O> {
 
@@ -155,6 +159,8 @@ impl<O: Operation> ServerEngine<O> {
         Ok(ops)
     }
 }
+
+// *** Test
 
 #[cfg(test)]
 mod tests {

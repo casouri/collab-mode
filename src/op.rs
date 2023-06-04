@@ -1,3 +1,6 @@
+
+// *** Types
+
 /// Local sequence number, unique on the same site, starts at 1.
 pub type LocalSeq = u64;
 /// Global sequence number, globally unique, starts at 1.
@@ -5,9 +8,13 @@ pub type GlobalSeq = u64;
 pub type DocId = String;
 pub type SiteId = String;
 
+// *** Trait
+
 pub trait Operation: std::fmt::Debug + Clone + PartialEq + Eq {
     fn transform(&self, base: &Self, self_site: &SiteId, base_site: &SiteId) -> Self;
 }
+
+// *** Op and tranform functions
 
 /// An string-wise operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +216,8 @@ impl Operation for Op {
     }
 }
 
+// *** FatOp
+
 /// Op with meta info.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FatOp<O> {
@@ -250,6 +259,7 @@ impl<O: Operation> FatOp<O> {
     }
 }
 
+// *** Tests
 
 #[cfg(test)]
 mod tests {
@@ -380,6 +390,7 @@ mod tests {
         );
     }
 
+    // I'm too tired to refactor the tests below.
     #[test]
     fn test_transform_di() {
         println!("Del Ins, op < base.");
