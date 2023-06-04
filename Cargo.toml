@@ -1,0 +1,12 @@
+[package]
+name = "collab-mode"
+version = "0.1.0"
+edition = "2021"
+authors = ["Yuan Fu <casouri@gmail.com>"]
+description = "One-stop-shop for collaborative editing"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+thiserror = "1.0.40"
+anyhow = "1.0.71"
