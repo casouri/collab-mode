@@ -4,6 +4,16 @@ use crate::op::*;
 
 // *** Data structure
 
+/// A continuous series of local ops with a context. The context
+/// sequence represents the context on which the first local op in the
+/// series is based: all the global ops with a sequence number leq to
+/// the context seq number. The rest local ops are based on the
+/// context plus precious ops in the series.
+pub struct ContextOps<O> {
+    context: GlobalSeq,
+    ops: Vec<FatOp<O>>,
+}
+
 /// The history buffer that reflects the history seen by the editor.
 #[derive(Debug, Clone)]
 pub struct EditorHistory<O> {
@@ -96,6 +106,24 @@ impl<O: Operation> ClientEngine<O> {
             current_site_seq: 0,
             last_acked_site_seq: 0,
         }
+    }
+
+    /// Return whether the previous ops we sent to the server have
+    /// been acked.
+    pub fn prev_op_acked(&self) -> bool {
+        if self.current_site_seq == self.last_acked_site_seq {
+            true
+        } else {
+            let op = &self.gh.local[0];
+            self.last_acked_site_seq + 1 == op.site_seq
+        }
+    }
+
+    /// Remove queuing local ops in the engine and return them.
+    pub fn package_local_ops(&mut self) -> ContextOps<O> {
+        assert!(self.prev_op_acked());
+        let ops: Vec<FatOp<O>> = self.gh.local.drain(0..self.gh.local.len()).collect();
+        ContextOps { context: self.current_seq, ops }
     }
 
     /// Process local op, possibly transform it and add it to history.
