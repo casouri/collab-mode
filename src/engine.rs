@@ -49,6 +49,14 @@ pub struct ClientEngine<O> {
     /// The largest global sequence number we've seen. Any remote op
     /// we receive should have sequence equal to this number plus one.
     current_seq: GlobalSeq,
+    // The largest local sequence number we've seen. Any local op we
+    // receive should be have local sequence equal to this number plus
+    // one.
+    current_site_seq: LocalSeq,
+    /// The local sequence number of the last op acked by the server.
+    /// Client can't send new ops before the server has acked the
+    /// previous ops the client have sent (stop-and-wait).
+    last_acked_site_seq: LocalSeq,
 }
 
 /// OT control algorithm engine for server.
@@ -65,8 +73,10 @@ pub enum EngineError<O> {
     OpMissing(FatOp<O>),
     #[error("We expect to find the first Op, but find the second instead")]
     OpMismatch(FatOp<O>, FatOp<O>),
-    #[error("We expect to see this sequence number in the op")]
+    #[error("We expect to see this global sequence number in the op")]
     SeqMismatch(GlobalSeq, FatOp<O>),
+    #[error("We expect to see this site sequence number in the op")]
+    SiteSeqMismatch(LocalSeq, FatOp<O>),
     #[error("The op should have a global seq number, but doesn't")]
     SeqMissing(FatOp<O>),
 }
@@ -77,23 +87,30 @@ type EngineResult<T, O> = Result<T, EngineError<O>>;
 
 impl<O: Operation> ClientEngine<O> {
 
-    fn new(site: &SiteId) -> ClientEngine<O> {
+    pub fn new(site: &SiteId) -> ClientEngine<O> {
         ClientEngine {
             gh: GlobalHistory { global: vec![], local: vec![], },
             eh: EditorHistory { history: vec![], last_sequenced_idx: 0 },
             site: site.clone(),
             current_seq: 0,
+            current_site_seq: 0,
+            last_acked_site_seq: 0,
         }
     }
 
     /// Process local op, possibly transform it and add it to history.
-    fn process_local_op(&mut self, op: FatOp<O>) {
+    pub fn process_local_op(&mut self, op: FatOp<O>) -> EngineResult<(), O> {
+        if op.site_seq != self.current_site_seq + 1 {
+            return Err(EngineError::SiteSeqMismatch(self.current_site_seq + 1, op));
+        }
+        self.current_site_seq = op.site_seq;
         self.eh.history.push(op.clone());
         self.gh.local.push(op);
+        Ok(())
     }
 
     /// Process remote op, possibly transform it and add it to history.
-    fn process_remote_op(&mut self, mut op: FatOp<O>) -> EngineResult<Option<FatOp<O>>, O> {
+    pub fn process_remote_op(&mut self, mut op: FatOp<O>) -> EngineResult<Option<FatOp<O>>, O> {
         let seq = op.seq.ok_or_else(|| EngineError::SeqMissing(op.clone()))?;
         if seq != self.current_seq + 1 {
             return Err(EngineError::SeqMismatch(self.current_seq + 1, op.clone()));
@@ -106,6 +123,7 @@ impl<O: Operation> ClientEngine<O> {
                 let local_op = &mut self.eh.history[idx];
                 if local_op.site == op.site && local_op.site_seq == op.site_seq {
                     local_op.seq = op.seq;
+                    self.eh.last_sequenced_idx = idx as u64;
                     break;
                 }
             }
@@ -118,15 +136,17 @@ impl<O: Operation> ClientEngine<O> {
             if local_op.site != op.site || local_op.site_seq != op.site_seq {
                 return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
             }
-            self.gh.global.push(op);
+            self.last_acked_site_seq = op.site_seq;
             self.current_seq = seq;
+            self.gh.global.push(op);
             Ok(None)
         } else {
             // We received an op generated at another site, transform
             // it, add it to history, and return it.
             let new_local_ops = op.symmetric_transform(&self.gh.local[..]);
-            self.gh.local = new_local_ops;
             self.current_seq = seq;
+            self.gh.local = new_local_ops;
+            self.gh.global.push(op.clone());
             Ok(Some(op))
         }
 
@@ -135,7 +155,7 @@ impl<O: Operation> ClientEngine<O> {
 
 impl<O: Operation> ServerEngine<O> {
 
-    fn new() -> ServerEngine<O> {
+    pub fn new() -> ServerEngine<O> {
         ServerEngine {
             gh: GlobalHistory { global: vec![], local: vec![], },
             current_seq: 0,
@@ -143,7 +163,7 @@ impl<O: Operation> ServerEngine<O> {
     }
 
     /// Process `op` from a client, return the transformed `ops`.
-    fn process_ops(&mut self, mut ops: Vec<FatOp<O>>, context: GlobalSeq) -> EngineResult<Vec<FatOp<O>>, O> {
+    pub fn process_ops(&mut self, mut ops: Vec<FatOp<O>>, context: GlobalSeq) -> EngineResult<Vec<FatOp<O>>, O> {
         let l1 = self.gh.ops_after(context);
         // Transform ops against L1, then we can append ops to global
         // history.
@@ -179,16 +199,21 @@ mod tests {
         }
     }
 
-    fn make_fatop<O: Operation>(op: O, site: &SiteId) -> FatOp<O> {
+    fn make_fatop<O: Operation>(op: O, site: &SiteId, site_seq: LocalSeq) -> FatOp<O> {
         FatOp {
             seq: None,
             site: site.to_string(),
-            site_seq: 1, // Dummy value.
+            site_seq,
             doc: "".to_string(),
             op,
         }
     }
 
+// **** Puzzles
+
+    /// deOPT puzzle, take from II.c in "A Time Interval Based
+    // Consistency Control Algorithm for Interactive Groupware
+    // Applications".
     #[test]
     fn deopt_puzzle() {
         let mut doc_a = "abcd".to_string();
@@ -201,21 +226,21 @@ mod tests {
 
         let mut server = ServerEngine::<SimpleOp>::new();
 
-        let op_a1 = make_fatop(SimpleOp::Del(0, Some('a')), &site_a);
-        let op_a2 = make_fatop(SimpleOp::Ins(2, 'x'), &site_a);
-        let op_b1 = make_fatop(SimpleOp::Del(2, Some('c')), &site_b);
+        let op_a1 = make_fatop(SimpleOp::Del(0, Some('a')), &site_a, 1);
+        let op_a2 = make_fatop(SimpleOp::Ins(2, 'x'), &site_a, 2);
+        let op_b1 = make_fatop(SimpleOp::Del(2, Some('c')), &site_b, 1);
 
         // Local edits.
         apply(&mut doc_a, &op_a1.op);
-        client_a.process_local_op(op_a1.clone());
+        client_a.process_local_op(op_a1.clone()).unwrap();
         assert_eq!(doc_a, "bcd");
 
         apply(&mut doc_a, &op_a2.op);
-        client_a.process_local_op(op_a2.clone());
+        client_a.process_local_op(op_a2.clone()).unwrap();
         assert_eq!(doc_a, "bcxd");
 
         apply(&mut doc_b, &op_b1.op);
-        client_b.process_local_op(op_b1.clone());
+        client_b.process_local_op(op_b1.clone()).unwrap();
         assert_eq!(doc_b, "abd");
 
         // Server processing.
@@ -244,6 +269,9 @@ mod tests {
         assert_eq!(doc_b, "bxd");
     }
 
+    // False-tie puzzle, take from II.D in "A Time Interval Based
+    // Consistency Control Algorithm for Interactive Groupware
+    // Applications".
     #[test]
     fn false_tie_puzzle() {
         let mut doc_a = "abc".to_string();
@@ -259,21 +287,21 @@ mod tests {
 
         let mut server = ServerEngine::<SimpleOp>::new();
 
-        let op_a1 = make_fatop(SimpleOp::Ins(2, '1'), &site_a);
-        let op_b1 = make_fatop(SimpleOp::Ins(1, '2'), &site_b);
-        let op_c1 = make_fatop(SimpleOp::Del(1, Some('b')), &site_c);
+        let op_a1 = make_fatop(SimpleOp::Ins(2, '1'), &site_a, 1);
+        let op_b1 = make_fatop(SimpleOp::Ins(1, '2'), &site_b, 1);
+        let op_c1 = make_fatop(SimpleOp::Del(1, Some('b')), &site_c, 1);
 
         // Local edits.
         apply(&mut doc_a, &op_a1.op);
-        client_a.process_local_op(op_a1.clone());
+        client_a.process_local_op(op_a1.clone()).unwrap();
         assert_eq!(doc_a, "ab1c");
 
         apply(&mut doc_b, &op_b1.op);
-        client_b.process_local_op(op_b1.clone());
+        client_b.process_local_op(op_b1.clone()).unwrap();
         assert_eq!(doc_b, "a2bc");
 
         apply(&mut doc_c, &op_c1.op);
-        client_c.process_local_op(op_c1.clone());
+        client_c.process_local_op(op_c1.clone()).unwrap();
         assert_eq!(doc_c, "ac");
 
         // Server processing.
@@ -285,6 +313,7 @@ mod tests {
         let b1_at_a = client_a.process_remote_op(b_ops[0].clone()).unwrap().unwrap();
         let c1_at_a = client_a.process_remote_op(c_ops[0].clone()).unwrap().unwrap();
         let a1_at_a = client_a.process_remote_op(a_ops[0].clone()).unwrap();
+        assert_eq!(a1_at_a, None);
 
         apply(&mut doc_a, &b1_at_a.op);
         assert_eq!(doc_a, "a2b1c");
@@ -295,6 +324,7 @@ mod tests {
         let b1_at_b = client_b.process_remote_op(b_ops[0].clone()).unwrap();
         let c1_at_b = client_b.process_remote_op(c_ops[0].clone()).unwrap().unwrap();
         let a1_at_b = client_b.process_remote_op(a_ops[0].clone()).unwrap().unwrap();
+        assert_eq!(b1_at_b, None);
 
         apply(&mut doc_b, &c1_at_b.op);
         assert_eq!(doc_b, "a2c");
@@ -305,6 +335,7 @@ mod tests {
         let b1_at_c = client_c.process_remote_op(b_ops[0].clone()).unwrap().unwrap();
         let c1_at_c = client_c.process_remote_op(c_ops[0].clone()).unwrap();
         let a1_at_c = client_c.process_remote_op(a_ops[0].clone()).unwrap().unwrap();
+        assert_eq!(c1_at_c, None);
 
         apply(&mut doc_c, &b1_at_c.op);
         assert_eq!(doc_c, "a2c");
