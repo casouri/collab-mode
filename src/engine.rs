@@ -213,6 +213,8 @@ impl<O: Operation> ServerEngine<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use rand::prelude::*;
 
     fn apply(doc: &mut String, op: &SimpleOp) {
         match op {
@@ -370,4 +372,108 @@ mod tests {
         apply(&mut doc_c, &a1_at_c.op);
         assert_eq!(doc_c, "a21c");
     }
+
+// **** Simulation
+
+    struct Simulator<O> {
+        /// N documents.
+        docs: Vec<String>,
+        /// N clients.
+        clients: Vec<ClientEngine<O>>,
+        /// N site sequences,
+        site_seqs: Vec<LocalSeq>,
+        /// The server.
+        server: ServerEngine<O>,
+        /// N connections from server to client.
+        conn_to_client: Vec<(mpsc::Sender<FatOp<O>>, mpsc::Receiver<FatOp<O>>)>,
+        /// N connections from client to server. N tx and one rx.
+        conn_to_server: Vec<(mpsc::Sender<ContextOps<O>>, mpsc::Receiver<ContextOps<O>>)>,
+    }
+
+    enum SimAction<O> {
+        // Client n makes an edit.
+        Edit(usize, O),
+        // Server receives one op from client n and processes it.
+        ServerReceive(usize),
+        // Client n receives an op from server.
+        ClientReceive(usize),
+    }
+
+    impl<O: Operation> Simulator<O> {
+        /// Return a new simulator with `clients` clients that will
+        /// make `n_edits` edits uniformly across all clients.
+        fn new(n_clients: usize) -> Simulator<O> {
+            let docs = (0..n_clients).map(|_| String::new()).collect();
+            let clients = (0..n_clients).map(|n| ClientEngine::new(&n.to_string())).collect();
+            let site_seqs = (0..n_clients).map(|_n| 0).collect();
+            let server = ServerEngine::new();
+            let conn_to_client = (0..n_clients).map(|_| mpsc::channel()).collect();
+            let conn_to_server = (0..n_clients).map(|_| mpsc::channel()).collect();
+            Simulator {
+                docs,
+                clients,
+                site_seqs,
+                server,
+                conn_to_client,
+                conn_to_server,
+            }
+        }
+    }
+
+    /// Run a simulation that will generate `n_edits` edits.
+    /// `edit_Frequency` is the ratio between generating edits and
+    /// processing them, a value larger than 1 means edits are
+    /// generated faster than being processed.
+    fn run_simulation(n_edits: usize, edit_frequency: f64) {
+        let n_clients = 3;
+        let mut sim = Simulator::<SimpleOp>::new(n_clients);
+        let edit_ratio: f64 = edit_frequency * (1f64 / ((1f64 + n_clients as f64) * 2f64 + 1f64));
+        let mut rng = rand::thread_rng();
+        let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+
+        loop {
+            let draw: f64 = rand::random();
+            if draw < edit_ratio {
+                // Client generates an edit, processes it, and sends
+                // it to server.
+                let client_idx = rand::random::<usize>() % n_clients;
+                let client = &mut sim.clients[client_idx];
+                let doc = &sim.docs[client_idx];
+                let op = if rand::random::<f64>() < 0.5 {
+                    let pos = rand::random::<usize>() % doc.len();
+                    SimpleOp::Ins(pos as u64, alphabet.choose(&mut rng).unwrap().clone())
+                } else {
+                    let pos = rand::random::<usize>() % (doc.len() - 1);
+                    SimpleOp::Del(pos as u64, Some(doc.chars().nth(pos).unwrap()))
+                };
+                sim.site_seqs[client_idx] += 1;
+                let fatop = make_fatop(op, &client_idx.to_string(), sim.site_seqs[client_idx]);
+                client.process_local_op(fatop).unwrap();
+
+                if client.prev_op_acked() {
+                    let ops = client.package_local_ops();
+                    sim.conn_to_server[client_idx].0.send(ops).unwrap();
+                }
+            } else if draw < (1f64 - edit_ratio) / 2f64 {
+                // Server receives an op from a random client.
+                let mut pool: Vec<usize> = vec![];
+                for idx in 0..n_clients {
+                    if sim.conn_to_server[idx].1.try_iter().next().is_some() {
+                        pool.push(idx);
+                    }
+                }
+                let idx = *pool.choose(&mut rng).unwrap();
+                let received_ops = sim.conn_to_server[idx].1.recv().unwrap();
+                let processed_ops = sim.server.process_ops(received_ops.ops, received_ops.context).unwrap();
+                for (tx, _) in &sim.conn_to_client {
+                    for op in &processed_ops {
+                        tx.send(op.clone()).unwrap();
+                    }
+                }
+            } else {
+                todo!()
+            }
+        }
+    }
+
 }
