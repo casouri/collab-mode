@@ -1,6 +1,6 @@
-use std::{result::Result, cmp::max};
-use thiserror::Error;
 use crate::op::*;
+use std::{cmp::max, result::Result};
+use thiserror::Error;
 
 // *** Data structure
 
@@ -32,7 +32,6 @@ pub struct GlobalHistory<O> {
     local: Vec<FatOp<O>>,
 }
 
-
 impl<O: Operation> GlobalHistory<O> {
     /// Get the global ops with sequence number larger than `seq`.
     fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp<O>> {
@@ -43,10 +42,8 @@ impl<O: Operation> GlobalHistory<O> {
         } else {
             vec![]
         }
-
     }
 }
-
 
 /// OT control algorithm engine for client.
 pub struct ClientEngine<O> {
@@ -96,11 +93,16 @@ type EngineResult<T, O> = Result<T, EngineError<O>>;
 // *** Processing functions
 
 impl<O: Operation> ClientEngine<O> {
-
     pub fn new(site: &SiteId) -> ClientEngine<O> {
         ClientEngine {
-            gh: GlobalHistory { global: vec![], local: vec![], },
-            eh: EditorHistory { history: vec![], last_sequenced_idx: 0 },
+            gh: GlobalHistory {
+                global: vec![],
+                local: vec![],
+            },
+            eh: EditorHistory {
+                history: vec![],
+                last_sequenced_idx: 0,
+            },
             site: site.clone(),
             current_seq: 0,
             current_site_seq: 0,
@@ -123,7 +125,10 @@ impl<O: Operation> ClientEngine<O> {
     pub fn package_local_ops(&mut self) -> ContextOps<O> {
         assert!(self.prev_op_acked());
         let ops: Vec<FatOp<O>> = self.gh.local.drain(0..self.gh.local.len()).collect();
-        ContextOps { context: self.current_seq, ops }
+        ContextOps {
+            context: self.current_seq,
+            ops,
+        }
     }
 
     /// Process local op, possibly transform it and add it to history.
@@ -177,21 +182,26 @@ impl<O: Operation> ClientEngine<O> {
             self.gh.global.push(op.clone());
             Ok(Some(op))
         }
-
     }
 }
 
 impl<O: Operation> ServerEngine<O> {
-
     pub fn new() -> ServerEngine<O> {
         ServerEngine {
-            gh: GlobalHistory { global: vec![], local: vec![], },
+            gh: GlobalHistory {
+                global: vec![],
+                local: vec![],
+            },
             current_seq: 0,
         }
     }
 
     /// Process `op` from a client, return the transformed `ops`.
-    pub fn process_ops(&mut self, mut ops: Vec<FatOp<O>>, context: GlobalSeq) -> EngineResult<Vec<FatOp<O>>, O> {
+    pub fn process_ops(
+        &mut self,
+        mut ops: Vec<FatOp<O>>,
+        context: GlobalSeq,
+    ) -> EngineResult<Vec<FatOp<O>>, O> {
         let l1 = self.gh.ops_after(context);
         // Transform ops against L1, then we can append ops to global
         // history.
@@ -213,8 +223,8 @@ impl<O: Operation> ServerEngine<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
     use rand::prelude::*;
+    use std::sync::mpsc;
 
     fn apply(doc: &mut String, op: &SimpleOp) {
         match op {
@@ -239,7 +249,7 @@ mod tests {
         }
     }
 
-// **** Puzzles
+    // **** Puzzles
 
     /// deOPT puzzle, take from II.c in "A Time Interval Based
     // Consistency Control Algorithm for Interactive Groupware
@@ -282,14 +292,23 @@ mod tests {
         assert_eq!(a1_at_a, None);
         let a2_at_a = client_a.process_remote_op(a_ops[1].clone()).unwrap();
         assert_eq!(a2_at_a, None);
-        let b1_at_a = client_a.process_remote_op(b_ops[0].clone()).unwrap().unwrap();
+        let b1_at_a = client_a
+            .process_remote_op(b_ops[0].clone())
+            .unwrap()
+            .unwrap();
 
         apply(&mut doc_a, &b1_at_a.op);
         assert_eq!(doc_a, "bxd");
 
         // Client B processing.
-        let a1_at_b = client_b.process_remote_op(a_ops[0].clone()).unwrap().unwrap();
-        let a2_at_b = client_b.process_remote_op(a_ops[1].clone()).unwrap().unwrap();
+        let a1_at_b = client_b
+            .process_remote_op(a_ops[0].clone())
+            .unwrap()
+            .unwrap();
+        let a2_at_b = client_b
+            .process_remote_op(a_ops[1].clone())
+            .unwrap()
+            .unwrap();
         let b1_at_b = client_b.process_remote_op(b_ops[0].clone()).unwrap();
         assert_eq!(b1_at_b, None);
 
@@ -340,8 +359,14 @@ mod tests {
         let a_ops = server.process_ops(vec![op_a1], 0).unwrap();
 
         // Client A processing.
-        let b1_at_a = client_a.process_remote_op(b_ops[0].clone()).unwrap().unwrap();
-        let c1_at_a = client_a.process_remote_op(c_ops[0].clone()).unwrap().unwrap();
+        let b1_at_a = client_a
+            .process_remote_op(b_ops[0].clone())
+            .unwrap()
+            .unwrap();
+        let c1_at_a = client_a
+            .process_remote_op(c_ops[0].clone())
+            .unwrap()
+            .unwrap();
         let a1_at_a = client_a.process_remote_op(a_ops[0].clone()).unwrap();
         assert_eq!(a1_at_a, None);
 
@@ -352,8 +377,14 @@ mod tests {
 
         // Client B processing.
         let b1_at_b = client_b.process_remote_op(b_ops[0].clone()).unwrap();
-        let c1_at_b = client_b.process_remote_op(c_ops[0].clone()).unwrap().unwrap();
-        let a1_at_b = client_b.process_remote_op(a_ops[0].clone()).unwrap().unwrap();
+        let c1_at_b = client_b
+            .process_remote_op(c_ops[0].clone())
+            .unwrap()
+            .unwrap();
+        let a1_at_b = client_b
+            .process_remote_op(a_ops[0].clone())
+            .unwrap()
+            .unwrap();
         assert_eq!(b1_at_b, None);
 
         apply(&mut doc_b, &c1_at_b.op);
@@ -362,9 +393,15 @@ mod tests {
         assert_eq!(doc_b, "a21c");
 
         // Client C processing.
-        let b1_at_c = client_c.process_remote_op(b_ops[0].clone()).unwrap().unwrap();
+        let b1_at_c = client_c
+            .process_remote_op(b_ops[0].clone())
+            .unwrap()
+            .unwrap();
         let c1_at_c = client_c.process_remote_op(c_ops[0].clone()).unwrap();
-        let a1_at_c = client_c.process_remote_op(a_ops[0].clone()).unwrap().unwrap();
+        let a1_at_c = client_c
+            .process_remote_op(a_ops[0].clone())
+            .unwrap()
+            .unwrap();
         assert_eq!(c1_at_c, None);
 
         apply(&mut doc_c, &b1_at_c.op);
@@ -373,7 +410,7 @@ mod tests {
         assert_eq!(doc_c, "a21c");
     }
 
-// **** Simulation
+    // **** Simulation
 
     struct Simulator<O> {
         /// N documents.
@@ -404,7 +441,9 @@ mod tests {
         /// make `n_edits` edits uniformly across all clients.
         fn new(n_clients: usize) -> Simulator<O> {
             let docs = (0..n_clients).map(|_| String::new()).collect();
-            let clients = (0..n_clients).map(|n| ClientEngine::new(&n.to_string())).collect();
+            let clients = (0..n_clients)
+                .map(|n| ClientEngine::new(&n.to_string()))
+                .collect();
             let site_seqs = (0..n_clients).map(|_n| 0).collect();
             let server = ServerEngine::new();
             let conn_to_client = (0..n_clients).map(|_| mpsc::channel()).collect();
@@ -464,7 +503,10 @@ mod tests {
                 }
                 let idx = *pool.choose(&mut rng).unwrap();
                 let received_ops = sim.conn_to_server[idx].1.recv().unwrap();
-                let processed_ops = sim.server.process_ops(received_ops.ops, received_ops.context).unwrap();
+                let processed_ops = sim
+                    .server
+                    .process_ops(received_ops.ops, received_ops.context)
+                    .unwrap();
                 for (tx, _) in &sim.conn_to_client {
                     for op in &processed_ops {
                         tx.send(op.clone()).unwrap();
@@ -475,5 +517,4 @@ mod tests {
             }
         }
     }
-
 }

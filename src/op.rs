@@ -1,4 +1,3 @@
-
 // *** Types
 
 /// Local sequence number, unique on the same site, starts at 1.
@@ -51,9 +50,7 @@ impl Operation for SimpleOp {
                     SimpleOp::Ins(pos1 - 1, *char1)
                 }
             }
-            (SimpleOp::Ins(pos1, char1), SimpleOp::Del(_, None)) => {
-                SimpleOp::Ins(*pos1, *char1)
-            }
+            (SimpleOp::Ins(pos1, char1), SimpleOp::Del(_, None)) => SimpleOp::Ins(*pos1, *char1),
             (SimpleOp::Del(pos1, char1), SimpleOp::Ins(pos2, _)) => {
                 if pos_less_than(*pos1, *pos2, self_site, base_site) {
                     SimpleOp::Del(*pos1, *char1)
@@ -70,19 +67,21 @@ impl Operation for SimpleOp {
                     SimpleOp::Del(pos1 - 1, *char1)
                 }
             }
-            (SimpleOp::Del(pos1, char1), SimpleOp::Del(_, None)) => {
-                SimpleOp::Del(*pos1, *char1)
-            }
+            (SimpleOp::Del(pos1, char1), SimpleOp::Del(_, None)) => SimpleOp::Del(*pos1, *char1),
         }
     }
-
 }
 
 fn pos_less_than(pos1: u64, pos2: u64, site1: &SiteId, site2: &SiteId) -> bool {
     pos1 < pos2 || (pos1 == pos2 && site1 < site2)
 }
 
-fn transform_ii(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base_site: &SiteId) -> (u64, String) {
+fn transform_ii(
+    op: &(u64, String),
+    base: &(u64, String),
+    op_site: &SiteId,
+    base_site: &SiteId,
+) -> (u64, String) {
     let pos1 = op.0;
     let pos2 = base.0;
     let content1 = &op.1;
@@ -96,7 +95,12 @@ fn transform_ii(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base
     }
 }
 
-fn transform_id(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base_site: &SiteId) -> (u64, String) {
+fn transform_id(
+    op: &(u64, String),
+    base: &(u64, String),
+    op_site: &SiteId,
+    base_site: &SiteId,
+) -> (u64, String) {
     let pos1 = op.0;
     let pos2 = base.0;
     let content1 = &op.1;
@@ -116,7 +120,12 @@ fn transform_id(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base
     }
 }
 
-fn transform_di(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base_site: &SiteId) -> Vec<(u64, String)> {
+fn transform_di(
+    op: &(u64, String),
+    base: &(u64, String),
+    op_site: &SiteId,
+    base_site: &SiteId,
+) -> Vec<(u64, String)> {
     let pos1 = op.0;
     let pos2 = base.0;
     let content1 = &op.1;
@@ -139,8 +148,12 @@ fn transform_di(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base
     }
 }
 
-fn transform_dd(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base_site: &SiteId) -> (u64, String) {
-
+fn transform_dd(
+    op: &(u64, String),
+    base: &(u64, String),
+    op_site: &SiteId,
+    base_site: &SiteId,
+) -> (u64, String) {
     let pos1 = op.0;
     let pos2 = base.0;
     let content1 = &op.1;
@@ -153,13 +166,15 @@ fn transform_dd(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base
         // | op |   | base |
         (pos1, content1.clone())
     } else if pos_less_than(pos1, pos2, op_site, base_site)
-        && pos_less_than(end1, end2, op_site, base_site) {
+        && pos_less_than(end1, end2, op_site, base_site)
+    {
         // op partially in front of base.
         // | op |
         //   | base |
         (pos1, content1[0..((pos2 - pos1) as usize)].to_string())
     } else if pos_less_than(pos1, pos2, op_site, base_site)
-        && pos_less_than(end2, end1, base_site, op_site) {
+        && pos_less_than(end2, end1, base_site, op_site)
+    {
         // op contains base.
         // |   op   |
         //   |base|
@@ -171,7 +186,8 @@ fn transform_dd(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base
         // | base |   | op |
         (pos1 - (end2 - pos2), content1.clone())
     } else if pos_less_than(end2, end1, base_site, op_site)
-        && pos_less_than(pos2, pos1, base_site, op_site) {
+        && pos_less_than(pos2, pos1, base_site, op_site)
+    {
         // op partially after base.
         // | base |
         //   |  op  |
@@ -185,7 +201,7 @@ fn transform_dd(op: &(u64, String), base: &(u64, String), op_site: &SiteId, base
 }
 
 impl Operation for Op {
-    fn transform(&self, base: &Op, self_site: &SiteId, base_site: &SiteId) -> Op{
+    fn transform(&self, base: &Op, self_site: &SiteId, base_site: &SiteId) -> Op {
         match (self, base) {
             (Op::Ins(op), Op::Ins(base)) => Op::Ins(transform_ii(op, base, self_site, base_site)),
             (Op::Ins(op), Op::Del(bases)) => {
@@ -194,14 +210,14 @@ impl Operation for Op {
                     new_op = transform_id(&new_op, base, self_site, base_site);
                 }
                 Op::Ins(new_op)
-            },
+            }
             (Op::Del(ops), Op::Ins(base)) => {
                 let mut new_ops = vec![];
                 for op in ops {
                     new_ops.extend(transform_di(op, base, self_site, base_site));
                 }
                 Op::Del(new_ops)
-            },
+            }
             (Op::Del(ops), Op::Del(bases)) => {
                 let mut new_ops = ops.clone();
                 for op in &mut new_ops {
@@ -210,8 +226,7 @@ impl Operation for Op {
                     }
                 }
                 Op::Del(new_ops)
-            },
-
+            }
         }
     }
 }
@@ -235,7 +250,6 @@ pub struct FatOp<O> {
     /// Site-local sequence number.
     pub site_seq: LocalSeq,
 }
-
 
 impl<O: Operation> FatOp<O> {
     /// Transform `self` against another op `base`. The two op must
@@ -289,28 +303,28 @@ mod tests {
         test(
             SimpleOp::Ins(1, 'x'),
             SimpleOp::Ins(2, 'y'),
-            SimpleOp::Ins(1, 'x')
+            SimpleOp::Ins(1, 'x'),
         );
 
         println!("Ins Ins, op > base.");
         test(
             SimpleOp::Ins(2, 'x'),
             SimpleOp::Ins(1, 'y'),
-            SimpleOp::Ins(3, 'x')
+            SimpleOp::Ins(3, 'x'),
         );
 
         println!("Ins Del, op < base.");
         test(
             SimpleOp::Ins(1, 'x'),
             SimpleOp::Del(2, Some('y')),
-            SimpleOp::Ins(1, 'x')
+            SimpleOp::Ins(1, 'x'),
         );
 
         println!("Ins Del, op > base.");
         test(
             SimpleOp::Ins(2, 'x'),
             SimpleOp::Del(1, Some('y')),
-            SimpleOp::Ins(1, 'x')
+            SimpleOp::Ins(1, 'x'),
         );
 
         println!("Del Ins, op < base.");
@@ -355,7 +369,7 @@ mod tests {
         test(
             Op::Ins((1, "x".to_string())),
             Op::Ins((2, "y".to_string())),
-            Op::Ins((1, "x".to_string()))
+            Op::Ins((1, "x".to_string())),
         );
 
         println!("Ins Ins, op > base.");
@@ -403,7 +417,10 @@ mod tests {
         println!("Del Ins, base inside op.");
         let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
         let base = make_fatop(Op::Ins((2, "y".to_string())), "b");
-        let result_op = make_fatop(Op::Del(vec![(1, "x".to_string()), (3, "xx".to_string())]), "a");
+        let result_op = make_fatop(
+            Op::Del(vec![(1, "x".to_string()), (3, "xx".to_string())]),
+            "a",
+        );
         op.transform(&base);
         assert_eq!(op, result_op);
 
@@ -458,6 +475,5 @@ mod tests {
         let result_op = make_fatop(Op::Del(vec![(1, "ooyy".to_string())]), "a");
         op.transform(&base);
         assert_eq!(op, result_op);
-
     }
 }
