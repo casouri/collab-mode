@@ -1,4 +1,4 @@
-use crate::collab_server::CollabServer;
+use crate::collab_server::LocalServer;
 use crate::collab_server::Snapshot;
 use crate::error::{CollabError, CollabResult};
 use crate::op::{DocId, GlobalSeq, LocalSeq, Op, SiteId};
@@ -58,7 +58,7 @@ pub struct GrpcClient {
 impl Doc {
     /// Create a new Doc by sharing a file with the local server.
     pub async fn new_share_file(
-        server: CollabServer,
+        server: LocalServer,
         file_name: &str,
         file: &str,
         external_notifier: std::sync::mpsc::Sender<DocDesignator>,
@@ -213,7 +213,7 @@ impl Doc {
         }
 
         // Try sending the new local ops.
-        self.new_ops_tx.send(()).context("Processed send_op request, send a notification to new_ops_tx since maybe we can send more local ops").unwrap();
+        self.new_ops_tx.send(()).unwrap();
 
         Ok(transformed_remote_ops.into_iter().map(|op| op.op).collect())
     }
@@ -346,7 +346,7 @@ fn spawn_thread_retreive_remote_op_from_docserver(
 fn spawn_thread_send_local_op_to_docserver(
     doc_id: DocId,
     engine: Arc<Mutex<ClientEngine>>,
-    server: CollabServer,
+    server: LocalServer,
     mut notifier_rx: watch::Receiver<()>,
     error_channel: mpsc::Sender<CollabError>,
 ) -> tokio::task::JoinHandle<()> {

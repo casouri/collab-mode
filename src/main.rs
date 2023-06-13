@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
             socket_port,
             server_port,
         }) => {
-            let collab_server = collab_server::CollabServer::new();
+            let collab_server = collab_server::LocalServer::new();
             let (err_tx, err_rx) = tokio::sync::mpsc::channel(32);
 
             let runtime = tokio::runtime::Runtime::new().unwrap();

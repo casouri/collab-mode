@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 
-use crate::rpc::{self, doc_server_server::DocServer};
+use crate::rpc::{self, doc_server_server};
 use tonic::{Request, Response};
 
 // *** Types
@@ -26,17 +26,24 @@ type TResult<T> = tonic::Result<T>;
 
 // *** Trait
 
-// #[async_trait]
-// pub trait DocServer {
-//     async fn share_file(&self, file_name: &str, file: &str, credentail: Credential) -> CollabResult<(SiteId, DocId)>;
-//     async fn send_op(&self, ops: ContextOps) -> CollabResult<()>;
-//     async fn recv_op(
-//         &self,
-//         doc_id: &DocId,
-//         mut after: GlobalSeq,
-//         channel: mpsc::UnboundedSender<FatOp>,
-//     ) -> CollabResult<()>;
-// }
+#[async_trait]
+pub trait Server {
+    async fn share_file(
+        &self,
+        file_name: &str,
+        file: &str,
+        credentail: Credential,
+    ) -> CollabResult<(SiteId, DocId)>;
+    async fn list_files(&self) -> CollabResult<Vec<DocId>>;
+    async fn request_file(&self, doc_id: &DocId) -> CollabResult<Snapshot>;
+    async fn send_op(&self, ops: ContextOps) -> CollabResult<()>;
+    async fn recv_op(
+        &self,
+        doc_id: &DocId,
+        mut after: GlobalSeq,
+        channel: mpsc::UnboundedSender<FatOp>,
+    ) -> CollabResult<()>;
+}
 
 // *** Structs
 
@@ -50,7 +57,7 @@ pub struct Snapshot {
 }
 
 #[derive(Debug, Clone)]
-pub struct CollabServer {
+pub struct LocalServer {
     docs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Doc>>>>>,
     user_list: Arc<Mutex<HashMap<Credential, SiteId>>>,
 }
@@ -120,9 +127,9 @@ impl Doc {
 
 // *** Functions for CollabServer
 
-impl CollabServer {
-    pub fn new() -> CollabServer {
-        CollabServer {
+impl LocalServer {
+    pub fn new() -> LocalServer {
+        LocalServer {
             docs: Arc::new(RwLock::new(HashMap::new())),
             user_list: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -258,7 +265,7 @@ impl CollabServer {
 // *** RPC
 
 #[async_trait]
-impl DocServer for CollabServer {
+impl doc_server_server::DocServer for LocalServer {
     type RecvOpStream = ReceiverStream<TResult<rpc::FatOp>>;
     type RequestFileStream = ReceiverStream<TResult<rpc::SnapshotChunk>>;
 

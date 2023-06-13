@@ -1,5 +1,5 @@
 use crate::collab_client::{Doc, GrpcClient};
-use crate::collab_server::CollabServer;
+use crate::collab_server::LocalServer;
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
 use anyhow::Context;
@@ -16,7 +16,7 @@ use types::*;
 // *** Structs
 
 pub struct JSONRPCServer {
-    server: CollabServer,
+    server: LocalServer,
     doc_map: HashMap<DocDesignator, Doc>,
     client_map: HashMap<String, GrpcClient>,
     notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
@@ -25,7 +25,7 @@ pub struct JSONRPCServer {
 // *** Entry functions
 
 /// Run the JSONRPC server on stdio.
-pub fn run_stdio(server: CollabServer, runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
+pub fn run_stdio(server: LocalServer, runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::stdio();
     main_loop(connection, server, runtime);
     io_threads.join()?;
@@ -35,7 +35,7 @@ pub fn run_stdio(server: CollabServer, runtime: tokio::runtime::Runtime) -> anyh
 /// Run the JSONRPC server on a socket listening on `addr` (host:port).
 pub fn run_socket(
     addr: &str,
-    server: CollabServer,
+    server: LocalServer,
     runtime: tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::listen(addr)?;
@@ -44,7 +44,7 @@ pub fn run_socket(
     Ok(())
 }
 
-fn main_loop(connection: Connection, server: CollabServer, runtime: tokio::runtime::Runtime) {
+fn main_loop(connection: Connection, server: LocalServer, runtime: tokio::runtime::Runtime) {
     let (notifier_tx, notifier_rx) = std::sync::mpsc::channel();
     let mut server = JSONRPCServer::new(server, notifier_tx);
 
@@ -134,7 +134,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
 
 impl JSONRPCServer {
     pub fn new(
-        server: CollabServer,
+        server: LocalServer,
         notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
     ) -> JSONRPCServer {
         JSONRPCServer {
