@@ -1,5 +1,6 @@
 use crate::op::*;
-use std::{cmp::max, result::Result};
+use serde::{Deserialize, Serialize};
+use std::{cmp::max, collections::hash_map::DefaultHasher, result::Result};
 use thiserror::Error;
 
 // *** Data structure
@@ -9,9 +10,21 @@ use thiserror::Error;
 /// series is based: all the global ops with a sequence number leq to
 /// the context seq number. The rest local ops are based on the
 /// context plus precious ops in the series.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextOps<O> {
-    context: GlobalSeq,
-    ops: Vec<FatOp<O>>,
+    pub context: GlobalSeq,
+    pub ops: Vec<FatOp<O>>,
+}
+
+impl<O> ContextOps<O> {
+    /// Return the site of the ops.
+    pub fn site(&self) -> SiteId {
+        self.ops[0].site.clone()
+    }
+    /// Return the doc of the ops.
+    pub fn doc(&self) -> DocId {
+        self.ops[0].doc.clone()
+    }
 }
 
 /// The history buffer that reflects the history seen by the editor.
@@ -35,10 +48,8 @@ pub struct GlobalHistory<O> {
 impl<O: Operation> GlobalHistory<O> {
     /// Get the global ops with sequence number larger than `seq`.
     fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp<O>> {
-        let len = self.global.len() as u64;
-        if seq < len {
-            let start = (max(seq, 1) as usize) - 1;
-            self.global[start..].to_vec()
+        if seq < self.global.len() as u64 {
+            self.global[(seq as usize)..].to_vec()
         } else {
             vec![]
         }
@@ -46,6 +57,7 @@ impl<O: Operation> GlobalHistory<O> {
 }
 
 /// OT control algorithm engine for client.
+#[derive(Debug, Clone)]
 pub struct ClientEngine<O> {
     /// History storing the global timeline (seen by the server).
     gh: GlobalHistory<O>,
@@ -67,6 +79,7 @@ pub struct ClientEngine<O> {
 }
 
 /// OT control algorithm engine for server.
+#[derive(Debug, Clone)]
 pub struct ServerEngine<O> {
     /// Global history.
     gh: GlobalHistory<O>,
@@ -74,17 +87,36 @@ pub struct ServerEngine<O> {
     current_seq: GlobalSeq,
 }
 
-#[derive(Debug, Clone, Error)]
+impl<O: Operation> ClientEngine<O> {
+    /// Return the site id.
+    pub fn site_id(&self) -> SiteId {
+        self.site.clone()
+    }
+}
+
+impl<O: Operation> ServerEngine<O> {
+    /// Return global ops after `seq`.
+    pub fn global_ops_after(&self, seq: GlobalSeq) -> Vec<FatOp<O>> {
+        self.gh.ops_after(seq)
+    }
+
+    /// Return the current global sequence number.
+    pub fn current_seq(&self) -> GlobalSeq {
+        self.current_seq
+    }
+}
+
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum EngineError<O> {
-    #[error("An op that we expect to exist isn't there")]
+    #[error("An op that we expect to exist isn't there: {0:?}")]
     OpMissing(FatOp<O>),
-    #[error("We expect to find the first Op, but find the second instead")]
+    #[error("We expect to find {0:?}, but instead find {1:?}")]
     OpMismatch(FatOp<O>, FatOp<O>),
-    #[error("We expect to see this global sequence number in the op")]
+    #[error("We expect to see global sequence {0:?} in op {1:?}")]
     SeqMismatch(GlobalSeq, FatOp<O>),
-    #[error("We expect to see this site sequence number in the op")]
+    #[error("We expect to see site sequence number {0:?} in op {1:?}")]
     SiteSeqMismatch(LocalSeq, FatOp<O>),
-    #[error("The op should have a global seq number, but doesn't")]
+    #[error("Op {0:?} should have a global seq number, but doesn't")]
     SeqMissing(FatOp<O>),
 }
 
@@ -93,7 +125,7 @@ type EngineResult<T, O> = Result<T, EngineError<O>>;
 // *** Processing functions
 
 impl<O: Operation> ClientEngine<O> {
-    pub fn new(site: &SiteId) -> ClientEngine<O> {
+    pub fn new(site: SiteId) -> ClientEngine<O> {
         ClientEngine {
             gh: GlobalHistory {
                 global: vec![],
@@ -103,7 +135,7 @@ impl<O: Operation> ClientEngine<O> {
                 history: vec![],
                 last_sequenced_idx: 0,
             },
-            site: site.clone(),
+            site,
             current_seq: 0,
             current_site_seq: 0,
             last_acked_site_seq: 0,
@@ -112,8 +144,10 @@ impl<O: Operation> ClientEngine<O> {
 
     /// Return whether the previous ops we sent to the server have
     /// been acked.
-    pub fn prev_op_acked(&self) -> bool {
-        if self.current_site_seq == self.last_acked_site_seq {
+    fn prev_op_acked(&self) -> bool {
+        if self.gh.local.len() == 0 {
+            false
+        } else if self.current_site_seq == self.last_acked_site_seq {
             true
         } else {
             let op = &self.gh.local[0];
@@ -122,7 +156,7 @@ impl<O: Operation> ClientEngine<O> {
     }
 
     /// Remove queuing local ops in the engine and return them.
-    pub fn package_local_ops(&mut self) -> ContextOps<O> {
+    fn package_local_ops(&mut self) -> ContextOps<O> {
         assert!(self.prev_op_acked());
         let ops: Vec<FatOp<O>> = self.gh.local.drain(0..self.gh.local.len()).collect();
         ContextOps {
@@ -131,8 +165,26 @@ impl<O: Operation> ClientEngine<O> {
         }
     }
 
+    /// Return packaged local ops if it's appropriate time to send
+    /// them out, return None if there's no pending local ops or it's
+    /// not time. (Client can only send out new local ops when
+    /// previous in-flight local ops are acked by the server.)
+    pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps<O>> {
+        if self.prev_op_acked() {
+            Some(self.package_local_ops())
+        } else {
+            None
+        }
+    }
+
     /// Process local op, possibly transform it and add it to history.
     pub fn process_local_op(&mut self, op: FatOp<O>) -> EngineResult<(), O> {
+        log::debug!(
+            "process_local_op({:?}) current_site_seq: {}",
+            &op,
+            self.current_site_seq
+        );
+
         if op.site_seq != self.current_site_seq + 1 {
             return Err(EngineError::SiteSeqMismatch(self.current_site_seq + 1, op));
         }
@@ -144,6 +196,12 @@ impl<O: Operation> ClientEngine<O> {
 
     /// Process remote op, possibly transform it and add it to history.
     pub fn process_remote_op(&mut self, mut op: FatOp<O>) -> EngineResult<Option<FatOp<O>>, O> {
+        log::debug!(
+            "process_remote_op({:?}) current_seq: {}",
+            &op,
+            self.current_seq
+        );
+
         let seq = op.seq.ok_or_else(|| EngineError::SeqMissing(op.clone()))?;
         if seq != self.current_seq + 1 {
             return Err(EngineError::SeqMismatch(self.current_seq + 1, op.clone()));
@@ -160,15 +218,19 @@ impl<O: Operation> ClientEngine<O> {
                     break;
                 }
             }
+
+            // Actually, we remove local ops from the local vector
+            // when we send local ops to remote server.
+
             // In global history, move the op from the local part to
             // the global part.
-            if self.gh.local.len() == 0 {
-                return Err(EngineError::OpMissing(op.clone()));
-            }
-            let local_op = self.gh.local.remove(0);
-            if local_op.site != op.site || local_op.site_seq != op.site_seq {
-                return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
-            }
+            // if self.gh.local.len() == 0 {
+            //     return Err(EngineError::OpMissing(op.clone()));
+            // }
+            // let local_op = self.gh.local.remove(0);
+            // if local_op.site != op.site || local_op.site_seq != op.site_seq {
+            //     return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
+            // }
             self.last_acked_site_seq = op.site_seq;
             self.current_seq = seq;
             self.gh.global.push(op);
@@ -261,8 +323,8 @@ mod tests {
 
         let site_a = "A".to_string();
         let site_b = "B".to_string();
-        let mut client_a = ClientEngine::<SimpleOp>::new(&site_a);
-        let mut client_b = ClientEngine::<SimpleOp>::new(&site_b);
+        let mut client_a = ClientEngine::<SimpleOp>::new(site_a.clone());
+        let mut client_b = ClientEngine::<SimpleOp>::new(site_b.clone());
 
         let mut server = ServerEngine::<SimpleOp>::new();
 
@@ -330,9 +392,9 @@ mod tests {
         let site_a = "A".to_string();
         let site_b = "B".to_string();
         let site_c = "C".to_string();
-        let mut client_a = ClientEngine::<SimpleOp>::new(&site_a);
-        let mut client_b = ClientEngine::<SimpleOp>::new(&site_b);
-        let mut client_c = ClientEngine::<SimpleOp>::new(&site_c);
+        let mut client_a = ClientEngine::<SimpleOp>::new(site_a.clone());
+        let mut client_b = ClientEngine::<SimpleOp>::new(site_b.clone());
+        let mut client_c = ClientEngine::<SimpleOp>::new(site_c.clone());
 
         let mut server = ServerEngine::<SimpleOp>::new();
 
@@ -442,7 +504,7 @@ mod tests {
         fn new(n_clients: usize) -> Simulator<O> {
             let docs = (0..n_clients).map(|_| String::new()).collect();
             let clients = (0..n_clients)
-                .map(|n| ClientEngine::new(&n.to_string()))
+                .map(|n| ClientEngine::new(n.to_string()))
                 .collect();
             let site_seqs = (0..n_clients).map(|_n| 0).collect();
             let server = ServerEngine::new();

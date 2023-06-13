@@ -1,3 +1,7 @@
+use serde::{Deserialize, Serialize};
+use std::fmt::Display;
+use thiserror::Error;
+
 // *** Types
 
 /// Local sequence number, unique on the same site, starts at 1.
@@ -16,7 +20,7 @@ pub trait Operation: std::fmt::Debug + Clone + PartialEq + Eq {
 // *** Op and tranform functions
 
 /// An string-wise operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     /// Insertion.
     //   pos  content
@@ -234,7 +238,7 @@ impl Operation for Op {
 // *** FatOp
 
 /// Op with meta info.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub struct FatOp<O> {
     /// Global sequence number. If None, the op is a locally generated
     /// op that hasn't been transmitted to the server yet. If not
