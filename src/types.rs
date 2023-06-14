@@ -13,3 +13,12 @@ pub struct DocDesignator {
     pub server: ServerId,
     pub doc: DocId,
 }
+
+impl DocDesignator {
+    pub fn new(doc_id: &DocId, server_id: &ServerId) -> DocDesignator {
+        DocDesignator {
+            doc: doc_id.clone(),
+            server: server_id.clone(),
+        }
+    }
+}

@@ -37,7 +37,7 @@ pub struct HelloParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareFileParams {
-    pub server: ServerId,
+    pub server_id: ServerId,
     pub file_name: String,
     pub file: String,
 }
@@ -52,8 +52,8 @@ pub struct ShareFileResp {
 #[serde(rename_all = "camelCase")]
 pub struct SendOpParams {
     pub ops: Vec<Op>,
-    pub doc: DocId,
-    pub server: ServerId,
+    pub doc_id: DocId,
+    pub server_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -65,7 +65,7 @@ pub struct SendOpResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
-    pub server: ServerId,
+    pub server_id: ServerId,
     pub credential: Credential,
 }
 
@@ -78,8 +78,8 @@ pub struct ListFilesResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectToFileParams {
-    pub doc: DocId,
-    pub server: ServerId,
+    pub doc_id: DocId,
+    pub server_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -91,32 +91,32 @@ pub struct ConnectToFileResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOpArrivedNotification {
-    pub doc: DocId,
-    pub server: ServerId,
+    pub doc_id: DocId,
+    pub server_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectFromFileParams {
-    pub doc: DocId,
-    pub server: ServerId,
+    pub doc_id: DocId,
+    pub server_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectFromFileResp {
-    pub doc: DocId,
-    pub server: ServerId,
+    pub doc_id: DocId,
+    pub server_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StopSharingFileParams {
-    pub doc: DocId,
+    pub doc_id: DocId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StopSharingFileResp {
-    pub doc: DocId,
+    pub doc_id: DocId,
 }

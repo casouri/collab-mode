@@ -15,7 +15,6 @@ use types::*;
 // *** Structs
 
 pub struct JSONRPCServer {
-    server: LocalServer,
     doc_map: HashMap<DocDesignator, Doc>,
     client_map: HashMap<String, ClientEnum>,
     notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
@@ -54,8 +53,8 @@ fn main_loop(connection: Connection, server: LocalServer, runtime: tokio::runtim
     std::thread::spawn(move || {
         for doc in notifier_rx.iter() {
             let params = RemoteOpArrivedNotification {
-                doc: doc.doc,
-                server: doc.server,
+                doc_id: doc.doc,
+                server_id: doc.server,
             };
             let msg = lsp_server::Notification {
                 method: "RemoteOpArrived".to_string(),
@@ -136,10 +135,11 @@ impl JSONRPCServer {
         server: LocalServer,
         notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
     ) -> JSONRPCServer {
+        let mut client_map = HashMap::new();
+        client_map.insert(SERVER_ID_SELF.to_string(), server.into());
         JSONRPCServer {
-            server,
             doc_map: HashMap::new(),
-            client_map: HashMap::new(),
+            client_map,
             notifier_tx,
         }
     }
@@ -200,12 +200,45 @@ impl JSONRPCServer {
     //     Ok(make_resp(request.id, ()))
     // }
 
+    pub fn get_client(&mut self, server_id: &ServerId) -> CollabResult<&mut ClientEnum> {
+        if let Some(cli) = self.client_map.get_mut(server_id) {
+            Ok(cli)
+        } else {
+            Err(CollabError::ServerNotConnected(server_id.to_string()))
+        }
+    }
+
+    pub fn get_doc(&mut self, doc_id: &DocId, server_id: &ServerId) -> CollabResult<&mut Doc> {
+        let key = DocDesignator {
+            doc: doc_id.to_string(),
+            server: server_id.to_string(),
+        };
+        if let Some(doc) = self.doc_map.get_mut(&key) {
+            Ok(doc)
+        } else {
+            Err(CollabError::DocNotFound(doc_id.clone()))
+        }
+    }
+
+    pub fn remove_client(&mut self, server_id: &ServerId) {
+        self.client_map.remove(server_id);
+    }
+
+    pub fn remove_doc(&mut self, doc_id: &DocId, server_id: &ServerId) {
+        let key = DocDesignator {
+            doc: doc_id.to_string(),
+            server: server_id.to_string(),
+        };
+        self.doc_map.remove(&key);
+    }
+
     pub async fn handle_share_file_request(
         &mut self,
         params: ShareFileParams,
     ) -> CollabResult<ShareFileResp> {
+        let client = self.get_client(&params.server_id)?;
         let doc = Doc::new_share_file(
-            self.server.clone().into(),
+            client.clone(),
             &params.file_name,
             &params.file,
             self.notifier_tx.clone(),
@@ -216,7 +249,7 @@ impl JSONRPCServer {
             doc_id: doc.doc_id(),
         };
         let key = DocDesignator {
-            server: SERVER_ID_SELF.to_string(),
+            server: params.server_id,
             doc: doc.doc_id(),
         };
         self.doc_map.insert(key, doc);
@@ -227,40 +260,34 @@ impl JSONRPCServer {
         &mut self,
         params: SendOpParams,
     ) -> CollabResult<SendOpResp> {
-        let key = DocDesignator {
-            server: params.server,
-            doc: params.doc.clone(),
-        };
-        if let Some(doc) = self.doc_map.get_mut(&key) {
-            let res = doc.send_op(params.ops).await;
-            if res.is_err() {
-                self.doc_map.remove(&key);
-            }
-            let remote_ops = res?;
-            let resp = SendOpResp { ops: remote_ops };
-            Ok(resp)
-        } else {
-            Err(CollabError::DocNotFound(params.doc))
+        let doc = self.get_doc(&params.doc_id, &params.server_id)?;
+        let res = doc.send_op(params.ops).await;
+        if res.is_err() {
+            self.remove_doc(&params.doc_id, &params.server_id);
         }
+        let remote_ops = res?;
+        let resp = SendOpResp { ops: remote_ops };
+        Ok(resp)
     }
 
     pub async fn handle_list_files_request(
         &mut self,
         params: ListFilesParams,
     ) -> CollabResult<ListFilesResp> {
-        let res = if let Some(client) = self.client_map.get_mut(&params.server) {
+        let res = if let Ok(client) = self.get_client(&params.server_id) {
             client.list_files().await
         } else {
-            let client = GrpcClient::new(params.server.clone(), params.credential).await?;
-            self.client_map.insert(params.server.clone(), client.into());
-            let client = self.client_map.get_mut(&params.server).unwrap();
+            let client = GrpcClient::new(params.server_id.clone(), params.credential).await?;
+            self.client_map
+                .insert(params.server_id.clone(), client.into());
+            let client = self.client_map.get_mut(&params.server_id).unwrap();
             client.list_files().await
         };
         if res.is_err() {
             // If a client has problems, all it's associated docs must
             // have problems too, but no need to clean them up right
             // here. They will cleanup themselves.
-            self.client_map.remove(&params.server);
+            self.client_map.remove(&params.server_id);
         }
         let files = res?;
         let resp = ListFilesResp { files };
@@ -271,25 +298,19 @@ impl JSONRPCServer {
         &mut self,
         params: ConnectToFileParams,
     ) -> CollabResult<ConnectToFileResp> {
-        let doc_desg = DocDesignator {
-            server: params.server,
-            doc: params.doc,
-        };
-        if self.doc_map.get(&doc_desg).is_some() {
-            self.doc_map.remove(&doc_desg);
+        if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
+            self.remove_doc(&params.doc_id, &params.server_id)
         }
-        if let Some(client) = self.client_map.get(&doc_desg.server) {
-            let (doc, content) = Doc::new_connect_file(
-                client.clone(),
-                doc_desg.doc.clone(),
-                self.notifier_tx.clone(),
-            )
-            .await?;
-            self.doc_map.insert(doc_desg, doc);
-            let resp = ConnectToFileResp { content };
-            Ok(resp)
-        } else {
-            Err(CollabError::ServerNotConnected(doc_desg.server))
-        }
+        let client = self.get_client(&params.server_id)?;
+        let (doc, content) = Doc::new_connect_file(
+            client.clone(),
+            params.doc_id.clone(),
+            self.notifier_tx.clone(),
+        )
+        .await?;
+        self.doc_map
+            .insert(DocDesignator::new(&params.doc_id, &params.server_id), doc);
+        let resp = ConnectToFileResp { content };
+        Ok(resp)
     }
 }
