@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package rpc;
+
+message Edit {
+  uint64 pos = 1;
+  string content = 2;
+}
+
+message Empty {}
+
+message FatOp {
+  bytes op = 1;
+}
+
+message ContextOps {
+  uint64 context = 1;
+  repeated bytes ops = 2;
+}
+
+message FileOps {
+  string doc_id = 1;
+  uint64 after = 2;
+}
+
+message SnapshotChunk {
+  uint64 seq = 1;
+  string content = 2;
+}
+
+message FileList {
+  repeated string doc_id = 1;
+}
+
+message DocId {
+  string doc_id = 1;
+}
+
+message Credential {
+  string cred = 1;
+}
+
+message SiteId {
+  string id = 1;
+}
+
+service DocServer {
+  rpc ListFiles(Empty) returns (FileList);
+  rpc SendOp(ContextOps) returns (Empty);
+  rpc RecvOp(FileOps) returns (stream FatOp);
+  rpc RequestFile(DocId) returns (stream SnapshotChunk);
+  rpc Login(Credential) returns (SiteId);
+}
