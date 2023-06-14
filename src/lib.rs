@@ -1,7 +1,9 @@
+pub mod abstract_server;
 pub mod collab_client;
 pub mod collab_server;
 pub mod engine;
 pub mod error;
+pub mod grpc_client;
 pub mod jsonrpc;
 pub mod op;
 mod rpc;

@@ -1,8 +1,9 @@
-use crate::collab_client::{Doc, GrpcClient};
+use crate::abstract_server::{ClientEnum, DocServer};
+use crate::collab_client::Doc;
 use crate::collab_server::LocalServer;
 use crate::error::{CollabError, CollabResult};
+use crate::grpc_client::GrpcClient;
 use crate::types::*;
-use anyhow::Context;
 use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response, ResponseError};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,14 +12,12 @@ use tokio::sync::mpsc;
 pub mod types;
 use types::*;
 
-// *** Types
-
 // *** Structs
 
 pub struct JSONRPCServer {
     server: LocalServer,
     doc_map: HashMap<DocDesignator, Doc>,
-    client_map: HashMap<String, GrpcClient>,
+    client_map: HashMap<String, ClientEnum>,
     notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
 }
 
@@ -206,7 +205,7 @@ impl JSONRPCServer {
         params: ShareFileParams,
     ) -> CollabResult<ShareFileResp> {
         let doc = Doc::new_share_file(
-            self.server.clone(),
+            self.server.clone().into(),
             &params.file_name,
             &params.file,
             self.notifier_tx.clone(),
@@ -253,7 +252,7 @@ impl JSONRPCServer {
             client.list_files().await
         } else {
             let client = GrpcClient::new(params.server.clone(), params.credential).await?;
-            self.client_map.insert(params.server.clone(), client);
+            self.client_map.insert(params.server.clone(), client.into());
             let client = self.client_map.get_mut(&params.server).unwrap();
             client.list_files().await
         };

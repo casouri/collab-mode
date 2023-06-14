@@ -1,3 +1,4 @@
+use crate::abstract_server::DocServer;
 use crate::error::{CollabError, CollabResult};
 use crate::op::{DocId, GlobalSeq, Op, SiteId};
 use crate::rpc::doc_server_server::DocServerServer;
@@ -6,11 +7,13 @@ use async_trait::async_trait;
 use jumprope::JumpRope;
 use std::cmp::min;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio_stream::{Stream, StreamExt};
 
 use crate::rpc::{self, doc_server_server};
 use tonic::{Request, Response};
@@ -24,25 +27,34 @@ type ClientEngine = crate::engine::ClientEngine<Op>;
 
 type TResult<T> = tonic::Result<T>;
 
-// *** Trait
-
 #[async_trait]
-pub trait Server {
-    async fn share_file(
-        &self,
-        file_name: &str,
-        file: &str,
-        credentail: Credential,
-    ) -> CollabResult<(SiteId, DocId)>;
-    async fn list_files(&self) -> CollabResult<Vec<DocId>>;
-    async fn request_file(&self, doc_id: &DocId) -> CollabResult<Snapshot>;
-    async fn send_op(&self, ops: ContextOps) -> CollabResult<()>;
+impl DocServer for LocalServer {
+    fn site_id(&self) -> SiteId {
+        SITE_ID_SELF.to_string()
+    }
+    fn server_id(&self) -> ServerId {
+        SERVER_ID_SELF.to_string()
+    }
+    async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId> {
+        self.share_file_1(file_name, file).await
+    }
+    async fn list_files(&mut self) -> CollabResult<Vec<DocId>> {
+        Ok(self.list_files_1().await)
+    }
+    async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {
+        self.request_file_1(doc_id).await
+    }
+    async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()> {
+        self.send_op_1(ops).await
+    }
     async fn recv_op(
-        &self,
+        &mut self,
         doc_id: &DocId,
-        mut after: GlobalSeq,
-        channel: mpsc::UnboundedSender<FatOp>,
-    ) -> CollabResult<()>;
+        after: GlobalSeq,
+    ) -> CollabResult<Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>> {
+        let stream = self.recv_op_1(doc_id, after).await?;
+        Ok(Box::pin(stream.map(|op| Ok(op))))
+    }
 }
 
 // *** Structs
@@ -167,7 +179,7 @@ impl LocalServer {
         Ok(())
     }
 
-    pub async fn share_file(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
+    pub async fn share_file_1(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
         // TODO permission check.
         let doc_id = file_name.to_string();
         let mut docs = self.docs.write().await;
@@ -180,7 +192,7 @@ impl LocalServer {
     }
 
     /// Send local ops to the server. TODO: access control.
-    pub async fn send_op(&self, ops: ContextOps) -> CollabResult<()> {
+    pub async fn send_op_1(&self, ops: ContextOps) -> CollabResult<()> {
         let doc_id = ops.doc();
         if let Some(doc) = self.docs.read().await.get(&doc_id) {
             let mut doc = doc.lock().await;
@@ -203,12 +215,12 @@ impl LocalServer {
 
     // Receive ops after `after`. from server. Server will send ops to
     // `channel`. TODO access control.
-    pub async fn recv_op(
+    pub async fn recv_op_1(
         &self,
         doc_id: &DocId,
         mut after: GlobalSeq,
-        channel: mpsc::UnboundedSender<FatOp>,
-    ) -> CollabResult<()> {
+    ) -> CollabResult<ReceiverStream<FatOp>> {
+        let (tx, rx) = mpsc::channel(1);
         // Clone a notification channel and a reference to the doc,
         // listen for notification and get new ops from the doc, and
         // feed into the channel.
@@ -234,17 +246,17 @@ impl LocalServer {
                             "recv_op() Local server sends op to gRPC server or local client: {:?}",
                             &op
                         );
-                        if let Err(err) = channel.send(op) {
-                            log::error!("Internal channel (local server --op--> local client or grpc server) closed: {:?}", &channel);
+                        if let Err(err) = tx.send(op).await {
+                            log::error!("Internal channel (local server --op--> local client or grpc server) closed");
                         }
                     }
                 }
             }
         });
-        Ok(())
+        Ok(ReceiverStream::from(rx))
     }
 
-    pub async fn list_files(&self) -> Vec<DocId> {
+    pub async fn list_files_1(&self) -> Vec<DocId> {
         self.docs
             .read()
             .await
@@ -253,11 +265,11 @@ impl LocalServer {
             .collect()
     }
 
-    pub async fn request_file(&self, doc_id: DocId) -> CollabResult<Snapshot> {
-        if let Some(doc) = self.docs.read().await.get(&doc_id) {
+    pub async fn request_file_1(&self, doc_id: &DocId) -> CollabResult<Snapshot> {
+        if let Some(doc) = self.docs.read().await.get(doc_id) {
             Ok(doc.lock().await.snapshot())
         } else {
-            Err(CollabError::DocNotFound(doc_id))
+            Err(CollabError::DocNotFound(doc_id.to_string()))
         }
     }
 }
@@ -266,7 +278,7 @@ impl LocalServer {
 
 #[async_trait]
 impl doc_server_server::DocServer for LocalServer {
-    type RecvOpStream = ReceiverStream<TResult<rpc::FatOp>>;
+    type RecvOpStream = Pin<Box<dyn Stream<Item = TResult<rpc::FatOp>> + Send>>;
     type RequestFileStream = ReceiverStream<TResult<rpc::SnapshotChunk>>;
 
     async fn login(&self, request: Request<rpc::Credential>) -> TResult<Response<rpc::SiteId>> {
@@ -294,7 +306,7 @@ impl doc_server_server::DocServer for LocalServer {
             "send_op() gRPC server receives ops, passing to local server to process: {:?}",
             &ops
         );
-        self.send_op(ContextOps { context, ops }).await?;
+        self.send_op_1(ContextOps { context, ops }).await?;
         Ok(Response::new(rpc::Empty {}))
     }
 
@@ -303,38 +315,19 @@ impl doc_server_server::DocServer for LocalServer {
         request: Request<rpc::FileOps>,
     ) -> TResult<Response<Self::RecvOpStream>> {
         let inner = request.into_inner();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        self.recv_op(&inner.doc_id, inner.after, tx).await?;
+        let stream = self.recv_op_1(&inner.doc_id, inner.after).await?;
 
-        let (txx, rxx) = mpsc::channel(1);
-        // TODO: Is there any way to directly map over the channel?
-        let _ = tokio::spawn(async move {
-            loop {
-                if let Some(op) = rx.recv().await {
-                    log::debug!(
-                        "recv_op() gRPC server receives op from local server, sending to remote host: {:?}",
-                        &op
-                    );
-                    let op = rpc::FatOp {
-                        op: bincode::serialize(&op).unwrap(),
-                    };
-                    if let Err(err) = txx.send(Ok(op)).await {
-                        log::error!("recv_op() Can't send op to grpc channel: {:#}", err);
-                        return;
-                    }
-                } else {
-                    log::error!(
-                        "recv_op() Internal channel (local server --op--> gRPC server) closed"
-                    );
-                    return;
-                }
-            }
+        let stream = stream.map(|op| {
+            let op = rpc::FatOp {
+                op: bincode::serialize(&op).unwrap(),
+            };
+            Ok(op)
         });
-        Ok(Response::new(ReceiverStream::from(rxx)))
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn list_files(&self, _request: Request<rpc::Empty>) -> TResult<Response<rpc::FileList>> {
-        let files = self.list_files().await;
+        let files = self.list_files_1().await;
         log::debug!("gRPC list_files request -> {:?}", &files);
         Ok(Response::new(rpc::FileList { doc_id: files }))
     }
@@ -343,7 +336,7 @@ impl doc_server_server::DocServer for LocalServer {
         &self,
         request: Request<rpc::DocId>,
     ) -> TResult<Response<Self::RequestFileStream>> {
-        let snapshot = self.request_file(request.into_inner().doc_id).await?;
+        let snapshot = self.request_file_1(&request.into_inner().doc_id).await?;
         let buffer = snapshot.buffer;
         let seq = snapshot.seq;
 
