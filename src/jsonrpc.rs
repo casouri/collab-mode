@@ -240,7 +240,7 @@ impl JSONRPCServer {
         let doc = Doc::new_share_file(
             client.clone(),
             &params.file_name,
-            &params.file,
+            &params.content,
             self.notifier_tx.clone(),
         )
         .await?;
@@ -289,8 +289,8 @@ impl JSONRPCServer {
             // here. They will cleanup themselves.
             self.client_map.remove(&params.server_id);
         }
-        let files = res?;
-        let resp = ListFilesResp { files };
+        let doc_ids = res?;
+        let resp = ListFilesResp { doc_ids };
         Ok(resp)
     }
 

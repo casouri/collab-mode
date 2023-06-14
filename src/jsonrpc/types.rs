@@ -39,7 +39,7 @@ pub struct HelloParams {
 pub struct ShareFileParams {
     pub server_id: ServerId,
     pub file_name: String,
-    pub file: String,
+    pub content: String,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -72,7 +72,7 @@ pub struct ListFilesParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesResp {
-    pub files: Vec<DocId>,
+    pub doc_ids: Vec<DocId>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
