@@ -44,6 +44,9 @@ impl DocServer for LocalServer {
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {
         self.request_file_1(doc_id).await
     }
+    async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
+        self.delete_file_1(doc_id).await
+    }
     async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()> {
         self.send_op_1(ops).await
     }
@@ -272,6 +275,12 @@ impl LocalServer {
             Err(CollabError::DocNotFound(doc_id.to_string()))
         }
     }
+
+    async fn delete_file_1(&self, doc_id: &DocId) -> CollabResult<()> {
+        let mut docs = self.docs.write().await;
+        docs.remove(doc_id);
+        Ok(())
+    }
 }
 
 // *** RPC
@@ -367,5 +376,10 @@ impl doc_server_server::DocServer for LocalServer {
             }
         });
         Ok(Response::new(ReceiverStream::from(rx)))
+    }
+
+    async fn delete_file(&self, request: Request<rpc::DocId>) -> TResult<Response<rpc::Empty>> {
+        self.delete_file_1(&request.into_inner().doc_id).await?;
+        Ok(Response::new(rpc::Empty {}))
     }
 }

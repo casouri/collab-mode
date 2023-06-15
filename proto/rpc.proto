@@ -49,5 +49,6 @@ service DocServer {
   rpc SendOp(ContextOps) returns (Empty);
   rpc RecvOp(FileOps) returns (stream FatOp);
   rpc RequestFile(DocId) returns (stream SnapshotChunk);
+  rpc DeleteFile(DocId) returns (Empty);
   rpc Login(Credential) returns (SiteId);
 }

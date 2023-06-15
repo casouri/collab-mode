@@ -52,7 +52,7 @@ fn main_loop(connection: Connection, server: LocalServer, runtime: tokio::runtim
     // TODO: Maybe we should throttle-control notifications?
     std::thread::spawn(move || {
         for doc in notifier_rx.iter() {
-            let params = RemoteOpArrivedNotification {
+            let params = DocIdParams {
                 doc_id: doc.doc,
                 server_id: doc.server,
             };
@@ -180,8 +180,16 @@ impl JSONRPCServer {
             let resp = self.handle_list_files_request(params).await?;
             make_resp(request.id, resp)
         } else if request.method == "ConnectToFile" {
-            let params: ConnectToFileParams = serde_json::from_value(request.params)?;
+            let params: DocIdParams = serde_json::from_value(request.params)?;
             let resp = self.handle_connect_to_file_request(params).await?;
+            make_resp(request.id, resp)
+        } else if request.method == "DisconnectFromFile" {
+            let params: DocIdParams = serde_json::from_value(request.params)?;
+            let resp = self.handle_disconnect_from_file_request(params).await?;
+            make_resp(request.id, resp)
+        } else if request.method == "DeleteFile" {
+            let params: DocIdParams = serde_json::from_value(request.params)?;
+            let resp = self.handle_delete_file_request(params).await?;
             make_resp(request.id, resp)
         } else {
             todo!()
@@ -296,7 +304,7 @@ impl JSONRPCServer {
 
     pub async fn handle_connect_to_file_request(
         &mut self,
-        params: ConnectToFileParams,
+        params: DocIdParams,
     ) -> CollabResult<ConnectToFileResp> {
         if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
             self.remove_doc(&params.doc_id, &params.server_id)
@@ -312,5 +320,28 @@ impl JSONRPCServer {
             .insert(DocDesignator::new(&params.doc_id, &params.server_id), doc);
         let resp = ConnectToFileResp { content };
         Ok(resp)
+    }
+
+    pub async fn handle_disconnect_from_file_request(
+        &mut self,
+        params: DocIdParams,
+    ) -> CollabResult<DocIdParams> {
+        if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
+            self.remove_doc(&params.doc_id, &params.server_id);
+        }
+        Ok(params)
+    }
+
+    pub async fn handle_delete_file_request(
+        &mut self,
+        params: DocIdParams,
+    ) -> CollabResult<DocIdParams> {
+        if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
+            self.remove_doc(&params.doc_id, &params.server_id);
+        }
+        if let Ok(cli) = self.get_client(&params.server_id) {
+            cli.delete_file(&params.doc_id).await?;
+        }
+        Ok(params)
     }
 }

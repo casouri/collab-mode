@@ -145,4 +145,12 @@ impl DocServer for GrpcClient {
         });
         Ok(Box::pin(stream))
     }
+    async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
+        self.client
+            .delete_file(Request::new(rpc::DocId {
+                doc_id: doc_id.to_string(),
+            }))
+            .await?;
+        Ok(())
+    }
 }

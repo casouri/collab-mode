@@ -20,6 +20,7 @@ pub trait DocServer: Send {
     async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId>;
     async fn list_files(&mut self) -> CollabResult<Vec<DocId>>;
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot>;
+    async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()>;
     async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()>;
     async fn recv_op(
         &mut self,

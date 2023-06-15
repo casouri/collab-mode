@@ -221,6 +221,23 @@ pub mod doc_server_client {
                 .insert(GrpcMethod::new("rpc.DocServer", "RequestFile"));
             self.inner.server_streaming(req, path, codec).await
         }
+        pub async fn delete_file(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DocId>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/DeleteFile");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("rpc.DocServer", "DeleteFile"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn login(
             &mut self,
             request: impl tonic::IntoRequest<super::Credential>,
@@ -271,6 +288,10 @@ pub mod doc_server_server {
             &self,
             request: tonic::Request<super::DocId>,
         ) -> std::result::Result<tonic::Response<Self::RequestFileStream>, tonic::Status>;
+        async fn delete_file(
+            &self,
+            request: tonic::Request<super::DocId>,
+        ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
         async fn login(
             &self,
             request: tonic::Request<super::Credential>,
@@ -498,6 +519,41 @@ pub mod doc_server_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/rpc.DocServer/DeleteFile" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteFileSvc<T: DocServer>(pub Arc<T>);
+                    impl<T: DocServer> tonic::server::UnaryService<super::DocId> for DeleteFileSvc<T> {
+                        type Response = super::Empty;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                        fn call(&mut self, request: tonic::Request<super::DocId>) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move { (*inner).delete_file(request).await };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = DeleteFileSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)
