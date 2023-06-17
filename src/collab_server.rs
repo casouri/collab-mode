@@ -24,7 +24,7 @@ use tonic::{Request, Response};
 type FatOp = crate::op::FatOp<Op>;
 type ContextOps = crate::engine::ContextOps<Op>;
 type ServerEngine = crate::engine::ServerEngine<Op>;
-type ClientEngine = crate::engine::ClientEngine<Op>;
+// type ClientEngine = crate::engine::ClientEngine<Op>;
 
 type TResult<T> = tonic::Result<T>;
 

@@ -1,4 +1,3 @@
-use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
 
 pub type ServerId = String;

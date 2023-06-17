@@ -1,5 +1,4 @@
 use crate::abstract_server::{ClientEnum, DocServer};
-use crate::collab_server::{self, Snapshot};
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
 use std::pin::Pin;
@@ -12,8 +11,8 @@ use tokio_stream::StreamExt;
 // *** Types
 
 type FatOp = crate::op::FatOp<Op>;
-type ContextOps = crate::engine::ContextOps<Op>;
-type ServerEngine = crate::engine::ServerEngine<Op>;
+// type ContextOps = crate::engine::ContextOps<Op>;
+// type ServerEngine = crate::engine::ServerEngine<Op>;
 type ClientEngine = crate::engine::ClientEngine<Op>;
 
 type OpStream = Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>;

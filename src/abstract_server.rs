@@ -9,8 +9,8 @@ use tokio_stream::Stream;
 
 type FatOp = crate::op::FatOp<Op>;
 type ContextOps = crate::engine::ContextOps<Op>;
-type ServerEngine = crate::engine::ServerEngine<Op>;
-type ClientEngine = crate::engine::ClientEngine<Op>;
+// type ServerEngine = crate::engine::ServerEngine<Op>;
+// type ClientEngine = crate::engine::ClientEngine<Op>;
 
 #[async_trait]
 #[enum_dispatch]

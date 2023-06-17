@@ -3,13 +3,8 @@ use crate::collab_server::Snapshot;
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
 use async_trait::async_trait;
-use std::cmp::min;
 use std::pin::Pin;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::Stream;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tonic::Request;
 
 use crate::rpc;
@@ -19,8 +14,8 @@ use crate::rpc::doc_server_client::DocServerClient;
 
 type FatOp = crate::op::FatOp<Op>;
 type ContextOps = crate::engine::ContextOps<Op>;
-type ServerEngine = crate::engine::ServerEngine<Op>;
-type ClientEngine = crate::engine::ClientEngine<Op>;
+// type ServerEngine = crate::engine::ServerEngine<Op>;
+// type ClientEngine = crate::engine::ClientEngine<Op>;
 
 type OpStream = Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>;
 
@@ -130,7 +125,7 @@ impl DocServer for GrpcClient {
             .await?;
         Ok(())
     }
-    async fn recv_op(&mut self, doc_id: &DocId, mut after: GlobalSeq) -> CollabResult<OpStream> {
+    async fn recv_op(&mut self, doc_id: &DocId, after: GlobalSeq) -> CollabResult<OpStream> {
         let resp = self
             .client
             .recv_op(Request::new(rpc::FileOps {

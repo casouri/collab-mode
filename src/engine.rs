@@ -1,6 +1,6 @@
 use crate::op::*;
 use serde::{Deserialize, Serialize};
-use std::{cmp::max, collections::hash_map::DefaultHasher, result::Result};
+use std::result::Result;
 use thiserror::Error;
 
 // *** Data structure

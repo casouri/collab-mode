@@ -4,10 +4,9 @@ use crate::collab_server::LocalServer;
 use crate::error::{CollabError, CollabResult};
 use crate::grpc_client::GrpcClient;
 use crate::types::*;
-use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response, ResponseError};
+use lsp_server::{Connection, Message, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 
 pub mod types;
 use types::*;
@@ -141,27 +140,6 @@ impl JSONRPCServer {
             doc_map: HashMap::new(),
             client_map,
             notifier_tx,
-        }
-    }
-
-    async fn handle_error(
-        error_channel: &mut mpsc::Receiver<(DocId, CollabError)>,
-    ) -> anyhow::Result<Option<Message>> {
-        loop {
-            let err = error_channel.recv().await;
-            if let Some(err) = err {
-                let error_code = match &err.1 {
-                    CollabError::TransportErr(_) => ErrorCode::ConnectionBroke,
-                    CollabError::EngineError { err } => ErrorCode::OTEngineError,
-                    CollabError::OpOutOfBound(_, _) => ErrorCode::OTEngineError,
-                    _ => ErrorCode::InternalError,
-                };
-                todo!()
-            } else {
-                return Err(
-                    CollabError::ChannelClosed("Internal error_channel broke".to_string()).into(),
-                );
-            }
         }
     }
 
