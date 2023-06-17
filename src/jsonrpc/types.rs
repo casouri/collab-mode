@@ -72,7 +72,7 @@ pub struct ListFilesParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesResp {
-    pub doc_ids: Vec<DocId>,
+    pub files: Vec<DocInfo>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

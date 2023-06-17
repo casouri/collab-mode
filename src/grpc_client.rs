@@ -3,7 +3,11 @@ use crate::collab_server::Snapshot;
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
 use async_trait::async_trait;
+use std::cmp::min;
 use std::pin::Pin;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tonic::Request;
@@ -54,22 +58,6 @@ impl GrpcClient {
             server_id: server_addr,
         })
     }
-
-    /// List files on the server.
-    pub async fn list_files(&mut self) -> CollabResult<Vec<DocId>> {
-        let resp = self.client.list_files(Request::new(rpc::Empty {})).await?;
-        Ok(resp.into_inner().doc_id)
-    }
-
-    /// Return the site id given to us by the connected server.
-    pub fn site_id(&self) -> SiteId {
-        self.site_id.clone()
-    }
-
-    /// Return the server id.
-    pub fn server_id(&self) -> ServerId {
-        self.server_id.clone()
-    }
 }
 
 // *** Impl Server for GrpcClient
@@ -83,12 +71,25 @@ impl DocServer for GrpcClient {
         self.server_id.clone()
     }
     async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId> {
-        todo!()
+        let req = Request::new(rpc::FileToShare {
+            file_name: file_name.to_string(),
+            content: file.to_string(),
+        });
+        let resp = self.client.share_file(req).await?;
+        return Ok(resp.into_inner().doc_id);
     }
 
-    async fn list_files(&mut self) -> CollabResult<Vec<DocId>> {
+    async fn list_files(&mut self) -> CollabResult<Vec<DocInfo>> {
         let resp = self.client.list_files(Request::new(rpc::Empty {})).await?;
-        Ok(resp.into_inner().doc_id)
+        let files = resp.into_inner().files;
+        let files = files
+            .into_iter()
+            .map(|info| DocInfo {
+                doc_id: info.doc_id,
+                file_name: info.file_name,
+            })
+            .collect();
+        Ok(files)
     }
 
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {

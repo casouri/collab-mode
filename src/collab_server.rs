@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tokio_stream::{Stream, StreamExt};
+use uuid::Uuid;
 
 use crate::rpc::{self, doc_server_server};
 use tonic::{Request, Response};
@@ -38,7 +39,7 @@ impl DocServer for LocalServer {
     async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId> {
         self.share_file_1(file_name, file).await
     }
-    async fn list_files(&mut self) -> CollabResult<Vec<DocId>> {
+    async fn list_files(&mut self) -> CollabResult<Vec<DocInfo>> {
         Ok(self.list_files_1().await)
     }
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {
@@ -95,10 +96,10 @@ struct Doc {
 // *** Functions for Doc
 
 impl Doc {
-    pub fn new(content: &str) -> Doc {
+    pub fn new(file_name: &str, content: &str) -> Doc {
         let (tx, rx) = watch::channel(());
         Doc {
-            name: "Untitled".to_string(),
+            name: file_name.to_string(),
             engine: ServerEngine::new(),
             buffer: JumpRope::from(content),
             tx,
@@ -184,14 +185,15 @@ impl LocalServer {
 
     pub async fn share_file_1(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
         // TODO permission check.
-        let doc_id = file_name.to_string();
+        let uuid = Uuid::new_v4();
+        let doc_id = uuid.to_string();
         let mut docs = self.docs.write().await;
-        if docs.get(&doc_id).is_some() {
-            Err(CollabError::DocAlreadyExists(doc_id))
-        } else {
-            docs.insert(doc_id.clone(), Arc::new(Mutex::new(Doc::new(file))));
-            Ok(doc_id)
-        }
+
+        docs.insert(
+            doc_id.clone(),
+            Arc::new(Mutex::new(Doc::new(file_name, file))),
+        );
+        Ok(doc_id)
     }
 
     /// Send local ops to the server. TODO: access control.
@@ -259,13 +261,15 @@ impl LocalServer {
         Ok(ReceiverStream::from(rx))
     }
 
-    pub async fn list_files_1(&self) -> Vec<DocId> {
-        self.docs
-            .read()
-            .await
-            .keys()
-            .map(|k| k.to_string())
-            .collect()
+    pub async fn list_files_1(&self) -> Vec<DocInfo> {
+        let mut res = vec![];
+        for (doc_id, doc) in self.docs.read().await.iter() {
+            res.push(DocInfo {
+                doc_id: doc_id.to_string(),
+                file_name: doc.lock().await.name.clone(),
+            });
+        }
+        res
     }
 
     pub async fn request_file_1(&self, doc_id: &DocId) -> CollabResult<Snapshot> {
@@ -303,6 +307,15 @@ impl doc_server_server::DocServer for LocalServer {
         Ok(Response::new(rpc::SiteId { id: site_id }))
     }
 
+    async fn share_file(
+        &self,
+        request: Request<rpc::FileToShare>,
+    ) -> TResult<Response<rpc::DocId>> {
+        let file = request.into_inner();
+        let doc_id = self.share_file_1(&file.file_name, &file.content).await?;
+        Ok(Response::new(rpc::DocId { doc_id }))
+    }
+
     async fn send_op(&self, request: Request<rpc::ContextOps>) -> TResult<Response<rpc::Empty>> {
         let inner = request.into_inner();
         let context = inner.context;
@@ -337,8 +350,15 @@ impl doc_server_server::DocServer for LocalServer {
 
     async fn list_files(&self, _request: Request<rpc::Empty>) -> TResult<Response<rpc::FileList>> {
         let files = self.list_files_1().await;
+        let files = files
+            .into_iter()
+            .map(|info| rpc::DocInfo {
+                doc_id: info.doc_id,
+                file_name: info.file_name,
+            })
+            .collect();
         log::debug!("gRPC list_files request -> {:?}", &files);
-        Ok(Response::new(rpc::FileList { doc_id: files }))
+        Ok(Response::new(rpc::FileList { files }))
     }
 
     async fn request_file(

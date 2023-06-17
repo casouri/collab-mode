@@ -260,6 +260,7 @@ impl JSONRPCServer {
             server: params.server_id,
             doc: doc.doc_id(),
         };
+
         self.doc_map.insert(key, doc);
         Ok(resp)
     }
@@ -297,8 +298,8 @@ impl JSONRPCServer {
             // here. They will cleanup themselves.
             self.client_map.remove(&params.server_id);
         }
-        let doc_ids = res?;
-        let resp = ListFilesResp { doc_ids };
+        let files = res?;
+        let resp = ListFilesResp { files };
         Ok(resp)
     }
 

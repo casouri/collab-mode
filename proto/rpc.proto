@@ -28,8 +28,13 @@ message SnapshotChunk {
   string content = 2;
 }
 
+message DocInfo {
+  string doc_id = 1;
+  string file_name = 2;
+}
+
 message FileList {
-  repeated string doc_id = 1;
+  repeated DocInfo files = 1;
 }
 
 message DocId {
@@ -44,7 +49,13 @@ message SiteId {
   string id = 1;
 }
 
+message FileToShare {
+  string file_name = 1;
+  string content = 3;
+}
+
 service DocServer {
+  rpc ShareFile(FileToShare) returns (DocId);
   rpc ListFiles(Empty) returns (FileList);
   rpc SendOp(ContextOps) returns (Empty);
   rpc RecvOp(FileOps) returns (stream FatOp);
