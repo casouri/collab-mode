@@ -55,7 +55,7 @@ impl Doc {
         let (err_tx, err_rx) = mpsc::channel(2);
         let doc_id = server.share_file(file_name, file).await?;
 
-        let mut doc = make_doc(SITE_ID_SELF.to_string(), doc_id.clone(), err_rx);
+        let mut doc = make_doc(server.site_id(), doc_id.clone(), err_rx);
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
         let notifier_tx = Arc::clone(&doc.new_ops_tx);
@@ -70,6 +70,8 @@ impl Doc {
         // `remote_op_buffer`
         let handle = spawn_thread_receive_remote_op(
             doc_id.clone(),
+            server.site_id(),
+            server.server_id(),
             stream,
             remote_op_buffer,
             notifier_tx,
@@ -116,6 +118,8 @@ impl Doc {
         // Spawn a thread that receives remote ops.
         let handle = spawn_thread_receive_remote_op(
             doc_id.clone(),
+            server.site_id(),
+            server.server_id(),
             stream,
             Arc::clone(&remote_op_buffer),
             notifier_tx,
@@ -236,6 +240,8 @@ fn make_doc(site_id: SiteId, doc_id: DocId, err_rx: mpsc::Receiver<CollabError>)
 /// `notifier_tx` as notification.
 fn spawn_thread_receive_remote_op(
     doc_id: DocId,
+    site_id: SiteId,
+    server_id: ServerId,
     mut remote_op_stream: OpStream,
     remote_op_buffer: Arc<Mutex<Vec<FatOp>>>,
     notifier_tx: Arc<watch::Sender<()>>,
@@ -244,7 +250,7 @@ fn spawn_thread_receive_remote_op(
 ) -> tokio::task::JoinHandle<()> {
     let msg = DocDesignator {
         doc: doc_id.clone(),
-        server: SERVER_ID_SELF.to_string(),
+        server: server_id,
     };
     tokio::spawn(async move {
         loop {
@@ -265,7 +271,7 @@ fn spawn_thread_receive_remote_op(
             let op = new_remote_op.unwrap();
             log::debug!("Doc({}) Received op from local server: {:?}", &doc_id, &op);
 
-            let truly_remote_op_arrived = &op.site != SITE_ID_SELF;
+            let truly_remote_op_arrived = op.site != site_id;
             remote_op_buffer.lock().await.push(op);
 
             // Got some op from server, maybe we can send

@@ -31,7 +31,7 @@ type TResult<T> = tonic::Result<T>;
 #[async_trait]
 impl DocServer for LocalServer {
     fn site_id(&self) -> SiteId {
-        SITE_ID_SELF.to_string()
+        self.site_id.clone()
     }
     fn server_id(&self) -> ServerId {
         SERVER_ID_SELF.to_string()
@@ -74,6 +74,7 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone)]
 pub struct LocalServer {
+    site_id: SiteId,
     docs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Doc>>>>>,
     user_list: Arc<Mutex<HashMap<Credential, SiteId>>>,
 }
@@ -145,7 +146,9 @@ impl Doc {
 
 impl LocalServer {
     pub fn new() -> LocalServer {
+        let uuid = Uuid::new_v4();
         LocalServer {
+            site_id: uuid.to_string(),
             docs: Arc::new(RwLock::new(HashMap::new())),
             user_list: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -251,8 +254,9 @@ impl LocalServer {
                             "recv_op() Local server sends op to gRPC server or local client: {:?}",
                             &op
                         );
-                        if let Err(err) = tx.send(op).await {
-                            log::error!("Internal channel (local server --op--> local client or grpc server) closed");
+                        if let Err(_) = tx.send(op).await {
+                            log::error!("Internal channel (local server --op--> local client or grpc server) closed. Maybe remove closed connection.");
+                            return;
                         }
                     }
                 }
@@ -301,7 +305,8 @@ impl doc_server_server::DocServer for LocalServer {
         let site_id = if let Some(site_id) = user_list.get(&cred) {
             site_id.to_string()
         } else {
-            user_list.insert(cred.clone(), cred.clone());
+            let uuid = Uuid::new_v4();
+            user_list.insert(cred.clone(), uuid.to_string());
             cred
         };
         Ok(Response::new(rpc::SiteId { id: site_id }))
