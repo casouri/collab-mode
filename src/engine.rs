@@ -1,4 +1,4 @@
-use crate::op::*;
+use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::result::Result;
 use thiserror::Error;
@@ -11,12 +11,12 @@ use thiserror::Error;
 /// the context seq number. The rest local ops are based on the
 /// context plus precious ops in the series.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextOps<O> {
+pub struct ContextOps {
     pub context: GlobalSeq,
-    pub ops: Vec<FatOp<O>>,
+    pub ops: Vec<FatOp>,
 }
 
-impl<O> ContextOps<O> {
+impl ContextOps {
     /// Return the site of the ops.
     pub fn site(&self) -> SiteId {
         self.ops[0].site.clone()
@@ -29,9 +29,9 @@ impl<O> ContextOps<O> {
 
 /// The history buffer that reflects the history seen by the editor.
 #[derive(Debug, Clone)]
-pub struct EditorHistory<O> {
+pub struct EditorHistory {
     /// History buffer.
-    history: Vec<FatOp<O>>,
+    history: Vec<FatOp>,
     /// The index of the last local-turned global op in the history.
     /// Any local op is after this index.
     last_sequenced_idx: u64,
@@ -40,14 +40,14 @@ pub struct EditorHistory<O> {
 /// Global history buffer. The whole buffer is made of global_buffer +
 /// local_buffer.
 #[derive(Debug, Clone)]
-pub struct GlobalHistory<O> {
-    global: Vec<FatOp<O>>,
-    local: Vec<FatOp<O>>,
+pub struct GlobalHistory {
+    global: Vec<FatOp>,
+    local: Vec<FatOp>,
 }
 
-impl<O: Operation> GlobalHistory<O> {
+impl GlobalHistory {
     /// Get the global ops with sequence number larger than `seq`.
-    fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp<O>> {
+    fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
         if seq < self.global.len() as u64 {
             self.global[(seq as usize)..].to_vec()
         } else {
@@ -58,11 +58,11 @@ impl<O: Operation> GlobalHistory<O> {
 
 /// OT control algorithm engine for client.
 #[derive(Debug, Clone)]
-pub struct ClientEngine<O> {
+pub struct ClientEngine {
     /// History storing the global timeline (seen by the server).
-    gh: GlobalHistory<O>,
+    gh: GlobalHistory,
     /// History storing the editor's timeline (seen by the editor).
-    eh: EditorHistory<O>,
+    eh: EditorHistory,
     /// The id of this site.
     site: String,
     /// The largest global sequence number we've seen. Any remote op
@@ -80,23 +80,23 @@ pub struct ClientEngine<O> {
 
 /// OT control algorithm engine for server.
 #[derive(Debug, Clone)]
-pub struct ServerEngine<O> {
+pub struct ServerEngine {
     /// Global history.
-    gh: GlobalHistory<O>,
+    gh: GlobalHistory,
     /// The largest global sequence number we've assigned.
     current_seq: GlobalSeq,
 }
 
-impl<O: Operation> ClientEngine<O> {
+impl ClientEngine {
     /// Return the site id.
     pub fn site_id(&self) -> SiteId {
         self.site.clone()
     }
 }
 
-impl<O: Operation> ServerEngine<O> {
+impl ServerEngine {
     /// Return global ops after `seq`.
-    pub fn global_ops_after(&self, seq: GlobalSeq) -> Vec<FatOp<O>> {
+    pub fn global_ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
         self.gh.ops_after(seq)
     }
 
@@ -107,25 +107,25 @@ impl<O: Operation> ServerEngine<O> {
 }
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
-pub enum EngineError<O> {
+pub enum EngineError {
     #[error("An op that we expect to exist isn't there: {0:?}")]
-    OpMissing(FatOp<O>),
+    OpMissing(FatOp),
     #[error("We expect to find {0:?}, but instead find {1:?}")]
-    OpMismatch(FatOp<O>, FatOp<O>),
+    OpMismatch(FatOp, FatOp),
     #[error("We expect to see global sequence {0:?} in op {1:?}")]
-    SeqMismatch(GlobalSeq, FatOp<O>),
+    SeqMismatch(GlobalSeq, FatOp),
     #[error("We expect to see site sequence number {0:?} in op {1:?}")]
-    SiteSeqMismatch(LocalSeq, FatOp<O>),
+    SiteSeqMismatch(LocalSeq, FatOp),
     #[error("Op {0:?} should have a global seq number, but doesn't")]
-    SeqMissing(FatOp<O>),
+    SeqMissing(FatOp),
 }
 
-type EngineResult<T, O> = Result<T, EngineError<O>>;
+type EngineResult<T> = Result<T, EngineError>;
 
 // *** Processing functions
 
-impl<O: Operation> ClientEngine<O> {
-    pub fn new(site: SiteId) -> ClientEngine<O> {
+impl ClientEngine {
+    pub fn new(site: SiteId) -> ClientEngine {
         ClientEngine {
             gh: GlobalHistory {
                 global: vec![],
@@ -156,9 +156,9 @@ impl<O: Operation> ClientEngine<O> {
     }
 
     /// Remove queuing local ops in the engine and return them.
-    fn package_local_ops(&mut self) -> ContextOps<O> {
+    fn package_local_ops(&mut self) -> ContextOps {
         assert!(self.prev_op_acked());
-        let ops: Vec<FatOp<O>> = self.gh.local.drain(0..self.gh.local.len()).collect();
+        let ops: Vec<FatOp> = self.gh.local.clone();
         ContextOps {
             context: self.current_seq,
             ops,
@@ -169,7 +169,7 @@ impl<O: Operation> ClientEngine<O> {
     /// them out, return None if there's no pending local ops or it's
     /// not time. (Client can only send out new local ops when
     /// previous in-flight local ops are acked by the server.)
-    pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps<O>> {
+    pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps> {
         if self.prev_op_acked() {
             Some(self.package_local_ops())
         } else {
@@ -178,7 +178,7 @@ impl<O: Operation> ClientEngine<O> {
     }
 
     /// Process local op, possibly transform it and add it to history.
-    pub fn process_local_op(&mut self, op: FatOp<O>) -> EngineResult<(), O> {
+    pub fn process_local_op(&mut self, op: FatOp) -> EngineResult<()> {
         log::debug!(
             "process_local_op({:?}) current_site_seq: {}",
             &op,
@@ -195,7 +195,7 @@ impl<O: Operation> ClientEngine<O> {
     }
 
     /// Process remote op, possibly transform it and add it to history.
-    pub fn process_remote_op(&mut self, mut op: FatOp<O>) -> EngineResult<Option<FatOp<O>>, O> {
+    pub fn process_remote_op(&mut self, mut op: FatOp) -> EngineResult<Option<FatOp>> {
         log::debug!(
             "process_remote_op({:?}) current_seq: {}",
             &op,
@@ -219,18 +219,15 @@ impl<O: Operation> ClientEngine<O> {
                 }
             }
 
-            // Actually, we remove local ops from the local vector
-            // when we send local ops to remote server.
-
             // In global history, move the op from the local part to
             // the global part.
-            // if self.gh.local.len() == 0 {
-            //     return Err(EngineError::OpMissing(op.clone()));
-            // }
-            // let local_op = self.gh.local.remove(0);
-            // if local_op.site != op.site || local_op.site_seq != op.site_seq {
-            //     return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
-            // }
+            if self.gh.local.len() == 0 {
+                return Err(EngineError::OpMissing(op.clone()));
+            }
+            let local_op = self.gh.local.remove(0);
+            if local_op.site != op.site || local_op.site_seq != op.site_seq {
+                return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
+            }
             self.last_acked_site_seq = op.site_seq;
             self.current_seq = seq;
             self.gh.global.push(op);
@@ -247,8 +244,8 @@ impl<O: Operation> ClientEngine<O> {
     }
 }
 
-impl<O: Operation> ServerEngine<O> {
-    pub fn new() -> ServerEngine<O> {
+impl ServerEngine {
+    pub fn new() -> ServerEngine {
         ServerEngine {
             gh: GlobalHistory {
                 global: vec![],
@@ -261,9 +258,9 @@ impl<O: Operation> ServerEngine<O> {
     /// Process `op` from a client, return the transformed `ops`.
     pub fn process_ops(
         &mut self,
-        mut ops: Vec<FatOp<O>>,
+        mut ops: Vec<FatOp>,
         context: GlobalSeq,
-    ) -> EngineResult<Vec<FatOp<O>>, O> {
+    ) -> EngineResult<Vec<FatOp>> {
         let l1 = self.gh.ops_after(context);
         // Transform ops against L1, then we can append ops to global
         // history.
@@ -285,23 +282,25 @@ impl<O: Operation> ServerEngine<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::op::Op;
     use rand::prelude::*;
     use std::sync::mpsc;
 
-    fn apply(doc: &mut String, op: &SimpleOp) {
+    fn apply(doc: &mut String, op: &Op) {
         match op {
-            SimpleOp::Ins(pos, char) => {
-                doc.insert_str(*pos as usize, &char.to_string());
+            Op::Ins((pos, str)) => {
+                doc.insert_str(*pos as usize, &str);
             }
-            SimpleOp::Del(pos, char) => {
-                if let Some(_) = char {
-                    doc.replace_range((*pos as usize)..(*pos as usize + 1), "")
+            Op::Del(edits) => {
+                for (pos, str) in edits.iter().rev() {
+                    println!("{} {}", &pos, &str);
+                    doc.replace_range((*pos as usize)..(*pos as usize + str.len()), "");
                 }
             }
         }
     }
 
-    fn make_fatop<O: Operation>(op: O, site: &SiteId, site_seq: LocalSeq) -> FatOp<O> {
+    fn make_fatop(op: Op, site: &SiteId, site_seq: LocalSeq) -> FatOp {
         FatOp {
             seq: None,
             site: site.to_string(),
@@ -323,14 +322,14 @@ mod tests {
 
         let site_a = "A".to_string();
         let site_b = "B".to_string();
-        let mut client_a = ClientEngine::<SimpleOp>::new(site_a.clone());
-        let mut client_b = ClientEngine::<SimpleOp>::new(site_b.clone());
+        let mut client_a = ClientEngine::new(site_a.clone());
+        let mut client_b = ClientEngine::new(site_b.clone());
 
-        let mut server = ServerEngine::<SimpleOp>::new();
+        let mut server = ServerEngine::new();
 
-        let op_a1 = make_fatop(SimpleOp::Del(0, Some('a')), &site_a, 1);
-        let op_a2 = make_fatop(SimpleOp::Ins(2, 'x'), &site_a, 2);
-        let op_b1 = make_fatop(SimpleOp::Del(2, Some('c')), &site_b, 1);
+        let op_a1 = make_fatop(Op::Del(vec![(0, "a".to_string())]), &site_a, 1);
+        let op_a2 = make_fatop(Op::Ins((2, "x".to_string())), &site_a, 2);
+        let op_b1 = make_fatop(Op::Del(vec![(2, "c".to_string())]), &site_b, 1);
 
         // Local edits.
         apply(&mut doc_a, &op_a1.op);
@@ -346,8 +345,14 @@ mod tests {
         assert_eq!(doc_b, "abd");
 
         // Server processing.
-        let a_ops = server.process_ops(vec![op_a1, op_a2], 0).unwrap();
-        let b_ops = server.process_ops(vec![op_b1], 0).unwrap();
+        let ops_from_a = client_a.maybe_package_local_ops().unwrap();
+        let ops_from_b = client_b.maybe_package_local_ops().unwrap();
+        let a_ops = server
+            .process_ops(ops_from_a.ops, ops_from_a.context)
+            .unwrap();
+        let b_ops = server
+            .process_ops(ops_from_b.ops, ops_from_b.context)
+            .unwrap();
 
         // Client A processing.
         let a1_at_a = client_a.process_remote_op(a_ops[0].clone()).unwrap();
@@ -392,15 +397,15 @@ mod tests {
         let site_a = "A".to_string();
         let site_b = "B".to_string();
         let site_c = "C".to_string();
-        let mut client_a = ClientEngine::<SimpleOp>::new(site_a.clone());
-        let mut client_b = ClientEngine::<SimpleOp>::new(site_b.clone());
-        let mut client_c = ClientEngine::<SimpleOp>::new(site_c.clone());
+        let mut client_a = ClientEngine::new(site_a.clone());
+        let mut client_b = ClientEngine::new(site_b.clone());
+        let mut client_c = ClientEngine::new(site_c.clone());
 
-        let mut server = ServerEngine::<SimpleOp>::new();
+        let mut server = ServerEngine::new();
 
-        let op_a1 = make_fatop(SimpleOp::Ins(2, '1'), &site_a, 1);
-        let op_b1 = make_fatop(SimpleOp::Ins(1, '2'), &site_b, 1);
-        let op_c1 = make_fatop(SimpleOp::Del(1, Some('b')), &site_c, 1);
+        let op_a1 = make_fatop(Op::Ins((2, "1".to_string())), &site_a, 1);
+        let op_b1 = make_fatop(Op::Ins((1, "2".to_string())), &site_b, 1);
+        let op_c1 = make_fatop(Op::Del(vec![(1, "b".to_string())]), &site_c, 1);
 
         // Local edits.
         apply(&mut doc_a, &op_a1.op);
@@ -416,9 +421,19 @@ mod tests {
         assert_eq!(doc_c, "ac");
 
         // Server processing.
-        let b_ops = server.process_ops(vec![op_b1], 0).unwrap();
-        let c_ops = server.process_ops(vec![op_c1], 0).unwrap();
-        let a_ops = server.process_ops(vec![op_a1], 0).unwrap();
+        let ops_from_a = client_a.maybe_package_local_ops().unwrap();
+        let ops_from_b = client_b.maybe_package_local_ops().unwrap();
+        let ops_from_c = client_c.maybe_package_local_ops().unwrap();
+
+        let b_ops = server
+            .process_ops(ops_from_b.ops, ops_from_b.context)
+            .unwrap();
+        let c_ops = server
+            .process_ops(ops_from_c.ops, ops_from_c.context)
+            .unwrap();
+        let a_ops = server
+            .process_ops(ops_from_a.ops, ops_from_a.context)
+            .unwrap();
 
         // Client A processing.
         let b1_at_a = client_a
@@ -474,34 +489,34 @@ mod tests {
 
     // **** Simulation
 
-    struct Simulator<O> {
+    struct Simulator {
         /// N documents.
         docs: Vec<String>,
         /// N clients.
-        clients: Vec<ClientEngine<O>>,
+        clients: Vec<ClientEngine>,
         /// N site sequences,
         site_seqs: Vec<LocalSeq>,
         /// The server.
-        server: ServerEngine<O>,
+        server: ServerEngine,
         /// N connections from server to client.
-        conn_to_client: Vec<(mpsc::Sender<FatOp<O>>, mpsc::Receiver<FatOp<O>>)>,
+        conn_to_client: Vec<(mpsc::Sender<FatOp>, mpsc::Receiver<FatOp>)>,
         /// N connections from client to server. N tx and one rx.
-        conn_to_server: Vec<(mpsc::Sender<ContextOps<O>>, mpsc::Receiver<ContextOps<O>>)>,
+        conn_to_server: Vec<(mpsc::Sender<ContextOps>, mpsc::Receiver<ContextOps>)>,
     }
 
-    enum SimAction<O> {
+    enum SimAction {
         // Client n makes an edit.
-        Edit(usize, O),
+        Edit(usize, Op),
         // Server receives one op from client n and processes it.
         ServerReceive(usize),
         // Client n receives an op from server.
         ClientReceive(usize),
     }
 
-    impl<O: Operation> Simulator<O> {
+    impl Simulator {
         /// Return a new simulator with `clients` clients that will
         /// make `n_edits` edits uniformly across all clients.
-        fn new(n_clients: usize) -> Simulator<O> {
+        fn new(n_clients: usize) -> Simulator {
             let docs = (0..n_clients).map(|_| String::new()).collect();
             let clients = (0..n_clients)
                 .map(|n| ClientEngine::new(n.to_string()))
@@ -527,7 +542,7 @@ mod tests {
     /// generated faster than being processed.
     fn run_simulation(n_edits: usize, edit_frequency: f64) {
         let n_clients = 3;
-        let mut sim = Simulator::<SimpleOp>::new(n_clients);
+        let mut sim = Simulator::new(n_clients);
         let edit_ratio: f64 = edit_frequency * (1f64 / ((1f64 + n_clients as f64) * 2f64 + 1f64));
         let mut rng = rand::thread_rng();
         let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
@@ -542,10 +557,13 @@ mod tests {
                 let doc = &sim.docs[client_idx];
                 let op = if rand::random::<f64>() < 0.5 {
                     let pos = rand::random::<usize>() % doc.len();
-                    SimpleOp::Ins(pos as u64, alphabet.choose(&mut rng).unwrap().clone())
+                    Op::Ins((pos as u64, alphabet.choose(&mut rng).unwrap().to_string()))
                 } else {
                     let pos = rand::random::<usize>() % (doc.len() - 1);
-                    SimpleOp::Del(pos as u64, Some(doc.chars().nth(pos).unwrap()))
+                    Op::Del(vec![(
+                        pos as u64,
+                        doc.chars().nth(pos).unwrap().to_string(),
+                    )])
                 };
                 sim.site_seqs[client_idx] += 1;
                 let fatop = make_fatop(op, &client_idx.to_string(), sim.site_seqs[client_idx]);

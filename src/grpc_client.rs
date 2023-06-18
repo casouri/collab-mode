@@ -12,11 +12,6 @@ use crate::rpc::doc_server_client::DocServerClient;
 
 // *** Types
 
-type FatOp = crate::op::FatOp<Op>;
-type ContextOps = crate::engine::ContextOps<Op>;
-// type ServerEngine = crate::engine::ServerEngine<Op>;
-// type ClientEngine = crate::engine::ClientEngine<Op>;
-
 type OpStream = Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>;
 
 // *** Structs

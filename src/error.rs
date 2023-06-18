@@ -11,7 +11,7 @@ pub enum CollabError {
     #[error("Fatal OT engine error: {err:?}")]
     EngineError {
         #[from]
-        err: EngineError<Op>,
+        err: EngineError,
     },
     #[error("A document with this id already exists: {0:?}")]
     DocAlreadyExists(DocId),

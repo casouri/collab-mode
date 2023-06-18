@@ -147,7 +147,14 @@ fn transform_di(
         // base inside op.
         let del_before_ins = (pos1, content1[..((pos2 - pos1) as usize)].to_string());
         let del_after_ins = (end2, content1[((pos2 - pos1) as usize)..].to_string());
-        vec![del_before_ins, del_after_ins]
+        let mut res = vec![];
+        if del_before_ins.1.len() > 0 {
+            res.push(del_before_ins)
+        }
+        if del_after_ins.1.len() > 0 {
+            res.push(del_after_ins)
+        }
+        res
     }
 }
 
