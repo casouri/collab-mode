@@ -68,14 +68,14 @@ pub struct ClientEngine {
     /// The largest global sequence number we've seen. Any remote op
     /// we receive should have sequence equal to this number plus one.
     current_seq: GlobalSeq,
-    // The largest local sequence number we've seen. Any local op we
-    // receive should be have local sequence equal to this number plus
-    // one.
+    /// The largest local sequence number we've seen. Any local op we
+    /// receive should be have local sequence equal to this number plus
+    /// one.
     current_site_seq: LocalSeq,
-    /// The local sequence number of the last op acked by the server.
-    /// Client can't send new ops before the server has acked the
-    /// previous ops the client have sent (stop-and-wait).
-    last_acked_site_seq: LocalSeq,
+    /// When we send local `ops` to server, record the largest site
+    /// seq in `ops`. Before server acked the op with this site seq,
+    /// we can't send more local ops to server (stop-and-wait).
+    last_site_seq_sent_out: LocalSeq,
 }
 
 /// OT control algorithm engine for server.
@@ -138,7 +138,7 @@ impl ClientEngine {
             site,
             current_seq: 0,
             current_site_seq: 0,
-            last_acked_site_seq: 0,
+            last_site_seq_sent_out: 0,
         }
     }
 
@@ -146,17 +146,18 @@ impl ClientEngine {
     /// been acked.
     fn prev_op_acked(&self) -> bool {
         if self.gh.local.len() == 0 {
-            false
-        } else if self.current_site_seq == self.last_acked_site_seq {
+            // This value doesn't matter, if local is empty, we are
+            // not sending out anything anyway.
+            true
+        } else if self.gh.local[0].site_seq == self.last_site_seq_sent_out + 1 {
             true
         } else {
-            let op = &self.gh.local[0];
-            self.last_acked_site_seq + 1 == op.site_seq
+            false
         }
     }
 
-    /// Remove queuing local ops in the engine and return them.
-    fn package_local_ops(&mut self) -> ContextOps {
+    /// Return pending local ops.
+    fn package_local_ops(&self) -> ContextOps {
         assert!(self.prev_op_acked());
         let ops: Vec<FatOp> = self.gh.local.clone();
         ContextOps {
@@ -168,10 +169,15 @@ impl ClientEngine {
     /// Return packaged local ops if it's appropriate time to send
     /// them out, return None if there's no pending local ops or it's
     /// not time. (Client can only send out new local ops when
-    /// previous in-flight local ops are acked by the server.)
+    /// previous in-flight local ops are acked by the server.) The
+    /// returned ops must be sent to server for engine to work right.
     pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps> {
         if self.prev_op_acked() {
-            Some(self.package_local_ops())
+            let ops = self.package_local_ops();
+            if let Some(op) = ops.ops.last() {
+                self.last_site_seq_sent_out = op.site_seq;
+            }
+            Some(ops)
         } else {
             None
         }
@@ -228,7 +234,6 @@ impl ClientEngine {
             if local_op.site != op.site || local_op.site_seq != op.site_seq {
                 return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
             }
-            self.last_acked_site_seq = op.site_seq;
             self.current_seq = seq;
             self.gh.global.push(op);
             Ok(None)
