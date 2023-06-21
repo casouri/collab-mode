@@ -18,32 +18,32 @@ pub struct FatOp {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ContextOps {
-    #[prost(uint64, tag = "1")]
-    pub context: u64,
+    #[prost(uint32, tag = "1")]
+    pub context: u32,
     #[prost(bytes = "vec", repeated, tag = "2")]
     pub ops: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FileOps {
-    #[prost(string, tag = "1")]
-    pub doc_id: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "2")]
-    pub after: u64,
+    #[prost(uint64, tag = "1")]
+    pub doc_id: u64,
+    #[prost(uint32, tag = "2")]
+    pub after: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SnapshotChunk {
-    #[prost(uint64, tag = "1")]
-    pub seq: u64,
+    #[prost(uint32, tag = "1")]
+    pub seq: u32,
     #[prost(string, tag = "2")]
     pub content: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DocInfo {
-    #[prost(string, tag = "1")]
-    pub doc_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "1")]
+    pub doc_id: u64,
     #[prost(string, tag = "2")]
     pub file_name: ::prost::alloc::string::String,
 }
@@ -56,8 +56,8 @@ pub struct FileList {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DocId {
-    #[prost(string, tag = "1")]
-    pub doc_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "1")]
+    pub doc_id: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -68,8 +68,8 @@ pub struct Credential {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SiteId {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -82,8 +82,8 @@ pub struct FileToShare {
 /// Generated client implementations.
 pub mod doc_server_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
-    use tonic::codegen::http::Uri;
     use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
     #[derive(Debug, Clone)]
     pub struct DocServerClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -127,8 +127,9 @@ pub mod doc_server_client {
                     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
                 >,
             >,
-            <T as tonic::codegen::Service<http::Request<tonic::body::BoxBody>>>::Error:
-                Into<StdError> + Send + Sync,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+            >>::Error: Into<StdError> + Send + Sync,
         {
             DocServerClient::new(InterceptedService::new(inner, interceptor))
         }
@@ -167,51 +168,57 @@ pub mod doc_server_client {
             &mut self,
             request: impl tonic::IntoRequest<super::FileToShare>,
         ) -> std::result::Result<tonic::Response<super::DocId>, tonic::Status> {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/ShareFile");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "ShareFile"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "ShareFile"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn list_files(
             &mut self,
             request: impl tonic::IntoRequest<super::Empty>,
         ) -> std::result::Result<tonic::Response<super::FileList>, tonic::Status> {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/ListFiles");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "ListFiles"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "ListFiles"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn send_op(
             &mut self,
             request: impl tonic::IntoRequest<super::ContextOps>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/SendOp");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "SendOp"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "SendOp"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn recv_op(
@@ -221,17 +228,19 @@ pub mod doc_server_client {
             tonic::Response<tonic::codec::Streaming<super::FatOp>>,
             tonic::Status,
         > {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/RecvOp");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "RecvOp"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "RecvOp"));
             self.inner.server_streaming(req, path, codec).await
         }
         pub async fn request_file(
@@ -241,51 +250,59 @@ pub mod doc_server_client {
             tonic::Response<tonic::codec::Streaming<super::SnapshotChunk>>,
             tonic::Status,
         > {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/RequestFile");
+            let path = http::uri::PathAndQuery::from_static(
+                "/rpc.DocServer/RequestFile",
+            );
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "RequestFile"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "RequestFile"));
             self.inner.server_streaming(req, path, codec).await
         }
         pub async fn delete_file(
             &mut self,
             request: impl tonic::IntoRequest<super::DocId>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/DeleteFile");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "DeleteFile"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "DeleteFile"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn login(
             &mut self,
             request: impl tonic::IntoRequest<super::Credential>,
         ) -> std::result::Result<tonic::Response<super::SiteId>, tonic::Status> {
-            self.inner.ready().await.map_err(|e| {
-                tonic::Status::new(
-                    tonic::Code::Unknown,
-                    format!("Service was not ready: {}", e.into()),
-                )
-            })?;
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/rpc.DocServer/Login");
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("rpc.DocServer", "Login"));
+            req.extensions_mut().insert(GrpcMethod::new("rpc.DocServer", "Login"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -310,7 +327,9 @@ pub mod doc_server_server {
             request: tonic::Request<super::ContextOps>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
         /// Server streaming response type for the RecvOp method.
-        type RecvOpStream: futures_core::Stream<Item = std::result::Result<super::FatOp, tonic::Status>>
+        type RecvOpStream: futures_core::Stream<
+                Item = std::result::Result<super::FatOp, tonic::Status>,
+            >
             + Send
             + 'static;
         async fn recv_op(
@@ -318,13 +337,18 @@ pub mod doc_server_server {
             request: tonic::Request<super::FileOps>,
         ) -> std::result::Result<tonic::Response<Self::RecvOpStream>, tonic::Status>;
         /// Server streaming response type for the RequestFile method.
-        type RequestFileStream: futures_core::Stream<Item = std::result::Result<super::SnapshotChunk, tonic::Status>>
+        type RequestFileStream: futures_core::Stream<
+                Item = std::result::Result<super::SnapshotChunk, tonic::Status>,
+            >
             + Send
             + 'static;
         async fn request_file(
             &self,
             request: tonic::Request<super::DocId>,
-        ) -> std::result::Result<tonic::Response<Self::RequestFileStream>, tonic::Status>;
+        ) -> std::result::Result<
+            tonic::Response<Self::RequestFileStream>,
+            tonic::Status,
+        >;
         async fn delete_file(
             &self,
             request: tonic::Request<super::DocId>,
@@ -357,7 +381,10 @@ pub mod doc_server_server {
                 max_encoding_message_size: None,
             }
         }
-        pub fn with_interceptor<F>(inner: T, interceptor: F) -> InterceptedService<Self, F>
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
         where
             F: tonic::service::Interceptor,
         {
@@ -413,9 +440,13 @@ pub mod doc_server_server {
                 "/rpc.DocServer/ShareFile" => {
                     #[allow(non_camel_case_types)]
                     struct ShareFileSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::UnaryService<super::FileToShare> for ShareFileSvc<T> {
+                    impl<T: DocServer> tonic::server::UnaryService<super::FileToShare>
+                    for ShareFileSvc<T> {
                         type Response = super::DocId;
-                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::FileToShare>,
@@ -451,10 +482,17 @@ pub mod doc_server_server {
                 "/rpc.DocServer/ListFiles" => {
                     #[allow(non_camel_case_types)]
                     struct ListFilesSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::UnaryService<super::Empty> for ListFilesSvc<T> {
+                    impl<T: DocServer> tonic::server::UnaryService<super::Empty>
+                    for ListFilesSvc<T> {
                         type Response = super::FileList;
-                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
-                        fn call(&mut self, request: tonic::Request<super::Empty>) -> Self::Future {
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::Empty>,
+                        ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move { (*inner).list_files(request).await };
                             Box::pin(fut)
@@ -486,9 +524,13 @@ pub mod doc_server_server {
                 "/rpc.DocServer/SendOp" => {
                     #[allow(non_camel_case_types)]
                     struct SendOpSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::UnaryService<super::ContextOps> for SendOpSvc<T> {
+                    impl<T: DocServer> tonic::server::UnaryService<super::ContextOps>
+                    for SendOpSvc<T> {
                         type Response = super::Empty;
-                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::ContextOps>,
@@ -524,11 +566,16 @@ pub mod doc_server_server {
                 "/rpc.DocServer/RecvOp" => {
                     #[allow(non_camel_case_types)]
                     struct RecvOpSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::ServerStreamingService<super::FileOps> for RecvOpSvc<T> {
+                    impl<
+                        T: DocServer,
+                    > tonic::server::ServerStreamingService<super::FileOps>
+                    for RecvOpSvc<T> {
                         type Response = super::FatOp;
                         type ResponseStream = T::RecvOpStream;
-                        type Future =
-                            BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::FileOps>,
@@ -564,14 +611,24 @@ pub mod doc_server_server {
                 "/rpc.DocServer/RequestFile" => {
                     #[allow(non_camel_case_types)]
                     struct RequestFileSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::ServerStreamingService<super::DocId> for RequestFileSvc<T> {
+                    impl<
+                        T: DocServer,
+                    > tonic::server::ServerStreamingService<super::DocId>
+                    for RequestFileSvc<T> {
                         type Response = super::SnapshotChunk;
                         type ResponseStream = T::RequestFileStream;
-                        type Future =
-                            BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
-                        fn call(&mut self, request: tonic::Request<super::DocId>) -> Self::Future {
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DocId>,
+                        ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move { (*inner).request_file(request).await };
+                            let fut = async move {
+                                (*inner).request_file(request).await
+                            };
                             Box::pin(fut)
                         }
                     }
@@ -601,10 +658,17 @@ pub mod doc_server_server {
                 "/rpc.DocServer/DeleteFile" => {
                     #[allow(non_camel_case_types)]
                     struct DeleteFileSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::UnaryService<super::DocId> for DeleteFileSvc<T> {
+                    impl<T: DocServer> tonic::server::UnaryService<super::DocId>
+                    for DeleteFileSvc<T> {
                         type Response = super::Empty;
-                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
-                        fn call(&mut self, request: tonic::Request<super::DocId>) -> Self::Future {
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DocId>,
+                        ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move { (*inner).delete_file(request).await };
                             Box::pin(fut)
@@ -636,9 +700,13 @@ pub mod doc_server_server {
                 "/rpc.DocServer/Login" => {
                     #[allow(non_camel_case_types)]
                     struct LoginSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::UnaryService<super::Credential> for LoginSvc<T> {
+                    impl<T: DocServer> tonic::server::UnaryService<super::Credential>
+                    for LoginSvc<T> {
                         type Response = super::SiteId;
-                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::Credential>,
@@ -671,14 +739,18 @@ pub mod doc_server_server {
                     };
                     Box::pin(fut)
                 }
-                _ => Box::pin(async move {
-                    Ok(http::Response::builder()
-                        .status(200)
-                        .header("grpc-status", "12")
-                        .header("content-type", "application/grpc")
-                        .body(empty_body())
-                        .unwrap())
-                }),
+                _ => {
+                    Box::pin(async move {
+                        Ok(
+                            http::Response::builder()
+                                .status(200)
+                                .header("grpc-status", "12")
+                                .header("content-type", "application/grpc")
+                                .body(empty_body())
+                                .unwrap(),
+                        )
+                    })
+                }
             }
         }
     }

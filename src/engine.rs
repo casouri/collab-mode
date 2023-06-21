@@ -48,7 +48,7 @@ pub struct GlobalHistory {
 impl GlobalHistory {
     /// Get the global ops with sequence number larger than `seq`.
     fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
-        if seq < self.global.len() as u64 {
+        if seq < self.global.len() as GlobalSeq {
             self.global[(seq as usize)..].to_vec()
         } else {
             vec![]
@@ -64,7 +64,7 @@ pub struct ClientEngine {
     /// History storing the editor's timeline (seen by the editor).
     eh: EditorHistory,
     /// The id of this site.
-    site: String,
+    site: SiteId,
     /// The largest global sequence number we've seen. Any remote op
     /// we receive should have sequence equal to this number plus one.
     current_seq: GlobalSeq,
@@ -157,12 +157,15 @@ impl ClientEngine {
     }
 
     /// Return pending local ops.
-    fn package_local_ops(&self) -> ContextOps {
-        assert!(self.prev_op_acked());
+    fn package_local_ops(&self) -> Option<ContextOps> {
         let ops: Vec<FatOp> = self.gh.local.clone();
-        ContextOps {
-            context: self.current_seq,
-            ops,
+        if ops.len() > 0 {
+            Some(ContextOps {
+                context: self.current_seq,
+                ops,
+            })
+        } else {
+            None
         }
     }
 
@@ -173,11 +176,13 @@ impl ClientEngine {
     /// returned ops must be sent to server for engine to work right.
     pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps> {
         if self.prev_op_acked() {
-            let ops = self.package_local_ops();
-            if let Some(op) = ops.ops.last() {
+            if let Some(context_ops) = self.package_local_ops() {
+                let op = context_ops.ops.last().unwrap();
                 self.last_site_seq_sent_out = op.site_seq;
+                Some(context_ops)
+            } else {
+                None
             }
-            Some(ops)
         } else {
             None
         }

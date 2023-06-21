@@ -26,7 +26,7 @@ type TResult<T> = tonic::Result<T>;
 #[async_trait]
 impl DocServer for LocalServer {
     fn site_id(&self) -> SiteId {
-        self.site_id.clone()
+        self.self_site_id.clone()
     }
     fn server_id(&self) -> ServerId {
         SERVER_ID_SELF.to_string()
@@ -69,7 +69,10 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone)]
 pub struct LocalServer {
-    site_id: SiteId,
+    /// SiteId given to ourselves.
+    self_site_id: SiteId,
+    /// SiteId given to the next connected client.
+    next_site_id: Arc<Mutex<SiteId>>,
     docs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Doc>>>>>,
     user_list: Arc<Mutex<HashMap<Credential, SiteId>>>,
 }
@@ -143,7 +146,8 @@ impl LocalServer {
     pub fn new() -> LocalServer {
         let uuid = Uuid::new_v4();
         LocalServer {
-            site_id: uuid.to_string(),
+            self_site_id: 0,
+            next_site_id: Arc::new(Mutex::new(1)),
             docs: Arc::new(RwLock::new(HashMap::new())),
             user_list: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -183,8 +187,7 @@ impl LocalServer {
 
     pub async fn share_file_1(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
         // TODO permission check.
-        let uuid = Uuid::new_v4();
-        let doc_id = uuid.to_string();
+        let doc_id: u64 = rand::random();
         let mut docs = self.docs.write().await;
 
         docs.insert(
@@ -243,7 +246,7 @@ impl LocalServer {
                         after
                     );
                     let ops = doc.engine.global_ops_after(after);
-                    after += ops.len() as u64;
+                    after += ops.len() as GlobalSeq;
                     for op in ops {
                         log::debug!(
                             "recv_op() Local server sends op to gRPC server or local client: {:?}",
@@ -264,7 +267,7 @@ impl LocalServer {
         let mut res = vec![];
         for (doc_id, doc) in self.docs.read().await.iter() {
             res.push(DocInfo {
-                doc_id: doc_id.to_string(),
+                doc_id: doc_id.clone(),
                 file_name: doc.lock().await.name.clone(),
             });
         }
@@ -275,7 +278,7 @@ impl LocalServer {
         if let Some(doc) = self.docs.read().await.get(doc_id) {
             Ok(doc.lock().await.snapshot())
         } else {
-            Err(CollabError::DocNotFound(doc_id.to_string()))
+            Err(CollabError::DocNotFound(doc_id.clone()))
         }
     }
 
@@ -298,11 +301,13 @@ impl doc_server_server::DocServer for LocalServer {
 
         let mut user_list = self.user_list.lock().await;
         let site_id = if let Some(site_id) = user_list.get(&cred) {
-            site_id.to_string()
+            site_id.clone()
         } else {
-            let uuid = Uuid::new_v4();
-            user_list.insert(cred.clone(), uuid.to_string());
-            cred
+            let mut next_site_id = self.next_site_id.lock().await;
+            let site_id = next_site_id.clone();
+            *next_site_id += 1;
+            user_list.insert(cred.clone(), site_id);
+            site_id
         };
         Ok(Response::new(rpc::SiteId { id: site_id }))
     }

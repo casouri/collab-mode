@@ -14,22 +14,22 @@ message FatOp {
 }
 
 message ContextOps {
-  uint64 context = 1;
+  uint32 context = 1;
   repeated bytes ops = 2;
 }
 
 message FileOps {
-  string doc_id = 1;
-  uint64 after = 2;
+  uint64 doc_id = 1;
+  uint32 after = 2;
 }
 
 message SnapshotChunk {
-  uint64 seq = 1;
+  uint32 seq = 1;
   string content = 2;
 }
 
 message DocInfo {
-  string doc_id = 1;
+  uint64 doc_id = 1;
   string file_name = 2;
 }
 
@@ -38,7 +38,7 @@ message FileList {
 }
 
 message DocId {
-  string doc_id = 1;
+  uint64 doc_id = 1;
 }
 
 message Credential {
@@ -46,7 +46,7 @@ message Credential {
 }
 
 message SiteId {
-  string id = 1;
+  uint32 id = 1;
 }
 
 message FileToShare {

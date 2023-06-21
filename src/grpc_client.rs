@@ -124,7 +124,7 @@ impl DocServer for GrpcClient {
         let resp = self
             .client
             .recv_op(Request::new(rpc::FileOps {
-                doc_id: doc_id.to_string(),
+                doc_id: doc_id.clone(),
                 after,
             }))
             .await?;
@@ -139,7 +139,7 @@ impl DocServer for GrpcClient {
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
         self.client
             .delete_file(Request::new(rpc::DocId {
-                doc_id: doc_id.to_string(),
+                doc_id: doc_id.clone(),
             }))
             .await?;
         Ok(())

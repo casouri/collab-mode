@@ -3,12 +3,14 @@ use thiserror::Error;
 
 // *** Types
 
-/// Local sequence number, unique on the same site, starts at 1.
-pub type LocalSeq = u64;
-/// Global sequence number, globally unique, starts at 1.
-pub type GlobalSeq = u64;
-pub type DocId = String;
-pub type SiteId = String;
+/// Local sequence number, unique on the same site, starts from 1.
+pub type LocalSeq = u32;
+/// Global sequence number, globally unique, starts from 1.
+pub type GlobalSeq = u32;
+/// A DocId is a randomly generated integer.
+pub type DocId = u64;
+/// SiteId is a monotonically increasing integer.
+pub type SiteId = u32;
 
 // *** Trait
 

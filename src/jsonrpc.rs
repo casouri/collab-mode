@@ -196,7 +196,7 @@ impl JSONRPCServer {
 
     pub fn get_doc(&mut self, doc_id: &DocId, server_id: &ServerId) -> CollabResult<&mut Doc> {
         let key = DocDesignator {
-            doc: doc_id.to_string(),
+            doc: doc_id.clone(),
             server: server_id.to_string(),
         };
         if let Some(doc) = self.doc_map.get_mut(&key) {
@@ -212,7 +212,7 @@ impl JSONRPCServer {
 
     pub fn remove_doc(&mut self, doc_id: &DocId, server_id: &ServerId) {
         let key = DocDesignator {
-            doc: doc_id.to_string(),
+            doc: doc_id.clone(),
             server: server_id.to_string(),
         };
         self.doc_map.remove(&key);
