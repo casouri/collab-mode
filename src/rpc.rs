@@ -26,8 +26,8 @@ pub struct ContextOps {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FileOps {
-    #[prost(uint64, tag = "1")]
-    pub doc_id: u64,
+    #[prost(uint32, tag = "1")]
+    pub doc_id: u32,
     #[prost(uint32, tag = "2")]
     pub after: u32,
 }
@@ -42,8 +42,8 @@ pub struct SnapshotChunk {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DocInfo {
-    #[prost(uint64, tag = "1")]
-    pub doc_id: u64,
+    #[prost(uint32, tag = "1")]
+    pub doc_id: u32,
     #[prost(string, tag = "2")]
     pub file_name: ::prost::alloc::string::String,
 }
@@ -56,8 +56,8 @@ pub struct FileList {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DocId {
-    #[prost(uint64, tag = "1")]
-    pub doc_id: u64,
+    #[prost(uint32, tag = "1")]
+    pub doc_id: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

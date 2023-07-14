@@ -6,9 +6,10 @@ pub const SITE_ID_SELF: &str = "self";
 pub type Credential = String;
 
 pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
-pub use crate::op::{DocId, GlobalSeq, LocalSeq, Op, SiteId};
+pub use crate::op::{DocId, GlobalSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
+pub type LeanOp = crate::op::LeanOp<Op>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocDesignator {

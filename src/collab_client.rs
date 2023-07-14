@@ -158,7 +158,7 @@ impl Doc {
     /// Send local `ops` and retrieve remote ops. `ops` can be empty,
     /// in which case the purpose is solely retrieving accumulated
     /// remote ops.
-    pub async fn send_op(&mut self, ops: Vec<Op>) -> CollabResult<Vec<Op>> {
+    pub async fn send_op(&mut self, ops: Vec<Op>, kind: OpKind) -> CollabResult<Vec<Op>> {
         self.check_async_errors()?;
 
         // 1. Package ops.
@@ -181,7 +181,7 @@ impl Doc {
 
         // 2. Process local ops.
         for op in &fatops {
-            engine.process_local_op(op.clone())?;
+            engine.process_local_op(op.clone(), kind)?;
         }
 
         // 3. Process pending remote ops.
@@ -198,6 +198,16 @@ impl Doc {
         self.new_ops_tx.send(()).unwrap();
 
         Ok(transformed_remote_ops.into_iter().map(|op| op.op).collect())
+    }
+
+    /// Return `n` consecutive undo ops from the current undo tip.
+    pub async fn undo(&self) -> Option<Op> {
+        self.engine.lock().await.generate_undo_op()
+    }
+
+    /// Return `n` consecutive redo ops from the current undo tip.
+    pub async fn redo(&self) -> Option<Op> {
+        self.engine.lock().await.generate_redo_op()
     }
 
     /// Handle errors created by worker threads.

@@ -54,6 +54,7 @@ pub struct SendOpParams {
     pub ops: Vec<Op>,
     pub doc_id: DocId,
     pub server_id: ServerId,
+    pub kind: OpKind,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -86,4 +87,18 @@ pub struct DocIdParams {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectToFileResp {
     pub content: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+pub enum UndoKind {
+    Undo,
+    Redo,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoParams {
+    pub doc_id: DocId,
+    pub server_id: ServerId,
+    pub kind: UndoKind,
 }

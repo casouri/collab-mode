@@ -1,3 +1,4 @@
+use prost::encoding::bool;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -8,9 +9,16 @@ pub type LocalSeq = u32;
 /// Global sequence number, globally unique, starts from 1.
 pub type GlobalSeq = u32;
 /// A DocId is a randomly generated integer.
-pub type DocId = u64;
+pub type DocId = u32;
 /// SiteId is a monotonically increasing integer.
 pub type SiteId = u32;
+
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]
+pub enum OpKind {
+    Original,
+    Undo,
+    Redo,
+}
 
 // *** Trait
 
@@ -243,6 +251,22 @@ impl Operation for Op {
     }
 }
 
+impl Op {
+    /// Create the inverse of self. If the op is a deletion with more
+    /// than one range, only the first range is reversed and the rest
+    /// are ignored. (As for now, we only need to reverse original
+    /// ops, and original delete op only have one range.)
+    pub fn inverse(&self) -> Op {
+        match self {
+            Op::Ins((pos, str)) => Op::Del(vec![(*pos, str.clone())]),
+            Op::Del(ops) => {
+                assert!(ops.len() == 1);
+                Op::Ins((ops[0].0, ops[0].1.clone()))
+            }
+        }
+    }
+}
+
 // *** FatOp
 
 /// Op with meta info.
@@ -265,7 +289,7 @@ pub struct FatOp<O> {
 
 impl<O: Operation> FatOp<O> {
     /// Transform `self` against another op `base`. The two op must
-    /// have the same context. IT stands for inclusive transform.
+    /// have the same context.
     pub fn transform(&mut self, base: &FatOp<O>) {
         self.op = self.op.transform(&base.op, &self.site, &base.site);
     }
@@ -285,26 +309,74 @@ impl<O: Operation> FatOp<O> {
     }
 }
 
-// *** Tests
+// *** LeanOp
 
+/// Op with less meta info, used by client history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub struct LeanOp<O> {
+    pub op: O,
+    pub site: SiteId,
+    /// `orig` holds the original op that's added to the history.
+    /// Later transformation (due to undo/redo) alters `op` but not
+    /// `orig`.
+    pub orig: O,
+    /// When the op is undone, `identify` is marked true so that
+    /// transformation function treats this op as identify.
+    pub identity: bool,
+}
+
+impl<O: Operation> LeanOp<O> {
+    pub fn new(op: &O, site: &SiteId) -> LeanOp<O> {
+        LeanOp {
+            op: op.clone(),
+            site: site.clone(),
+            orig: op.clone(),
+            identity: false,
+        }
+    }
+
+    /// Transform `self` against another op `base`. The two op must
+    /// have the same context.
+    pub fn transform(&mut self, base: &LeanOp<O>) {
+        if !base.identity {
+            self.op = self.op.transform(&base.op, &self.site, &base.site);
+        }
+    }
+
+    /// Transform `self` against every op in `ops` sequentially. In
+    /// the meantime, transform every op in `ops` against `self`, and
+    /// return the new `ops`.
+    pub fn symmetric_transform(&mut self, ops: &[LeanOp<O>]) -> Vec<LeanOp<O>> {
+        let mut new_ops = vec![];
+        for op in ops {
+            let mut new_op = op.clone();
+            new_op.transform(self);
+            self.transform(op);
+            new_ops.push(new_op);
+        }
+        new_ops
+    }
+}
+
+// *** Tests
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_fatop<O: Operation>(op: O, site: &str) -> FatOp<O> {
+    fn make_fatop<O: Operation>(op: O, site: SiteId) -> FatOp<O> {
         FatOp {
             seq: None,
-            site: site.to_string(),
+            site,
             site_seq: 1, // Dummy value.
-            doc: "".to_string(),
+            doc: 0,
             op,
         }
     }
 
     fn test<O: Operation>(op: O, base: O, result: O) {
-        let mut op = make_fatop(op, "a");
-        let base = make_fatop(base, "b");
-        let result_op = make_fatop(result, "a");
+        let mut op = make_fatop(op, 1);
+        let base = make_fatop(base, 2);
+        let result_op = make_fatop(result, 3);
         op.transform(&base);
         assert_eq!(op, result_op);
     }
@@ -420,26 +492,26 @@ mod tests {
     #[test]
     fn test_transform_di() {
         println!("Del Ins, op < base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
-        let base = make_fatop(Op::Ins((4, "y".to_string())), "b");
-        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let base = make_fatop(Op::Ins((4, "y".to_string())), 2);
+        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Ins, base inside op.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
-        let base = make_fatop(Op::Ins((2, "y".to_string())), "b");
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let base = make_fatop(Op::Ins((2, "y".to_string())), 2);
         let result_op = make_fatop(
             Op::Del(vec![(1, "x".to_string()), (3, "xx".to_string())]),
-            "a",
+            1,
         );
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Ins, op > base");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
-        let base = make_fatop(Op::Ins((0, "y".to_string())), "b");
-        let result_op = make_fatop(Op::Del(vec![(2, "xxx".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let base = make_fatop(Op::Ins((0, "y".to_string())), 2);
+        let result_op = make_fatop(Op::Del(vec![(2, "xxx".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
     }
@@ -447,44 +519,44 @@ mod tests {
     #[test]
     fn test_transform_dd() {
         println!("Del Del, op completely before base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
-        let base = make_fatop(Op::Del(vec![(4, "y".to_string())]), "b");
-        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let base = make_fatop(Op::Del(vec![(4, "y".to_string())]), 2);
+        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op partially before base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "oxx".to_string())]), "a");
-        let base = make_fatop(Op::Del(vec![(2, "xxy".to_string())]), "b");
-        let result_op = make_fatop(Op::Del(vec![(1, "o".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(1, "oxx".to_string())]), 1);
+        let base = make_fatop(Op::Del(vec![(2, "xxy".to_string())]), 2);
+        let result_op = make_fatop(Op::Del(vec![(1, "o".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op completely inside base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xx".to_string())]), "a");
-        let base = make_fatop(Op::Del(vec![(0, "ooxxy".to_string())]), "b");
-        let result_op = make_fatop(Op::Del(vec![(0, "".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(1, "xx".to_string())]), 1);
+        let base = make_fatop(Op::Del(vec![(0, "ooxxy".to_string())]), 2);
+        let result_op = make_fatop(Op::Del(vec![(0, "".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op completely after base.");
-        let mut op = make_fatop(Op::Del(vec![(4, "xx".to_string())]), "a");
-        let base = make_fatop(Op::Del(vec![(1, "yy".to_string())]), "b");
-        let result_op = make_fatop(Op::Del(vec![(2, "xx".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(4, "xx".to_string())]), 1);
+        let base = make_fatop(Op::Del(vec![(1, "yy".to_string())]), 2);
+        let result_op = make_fatop(Op::Del(vec![(2, "xx".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op partially after base.");
-        let mut op = make_fatop(Op::Del(vec![(2, "xxyy".to_string())]), "a");
-        let base = make_fatop(Op::Del(vec![(1, "oxx".to_string())]), "b");
-        let result_op = make_fatop(Op::Del(vec![(1, "yy".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(2, "xxyy".to_string())]), 1);
+        let base = make_fatop(Op::Del(vec![(1, "oxx".to_string())]), 2);
+        let result_op = make_fatop(Op::Del(vec![(1, "yy".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op completely covers base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "ooxxyy".to_string())]), "a");
-        let base = make_fatop(Op::Del(vec![(3, "xx".to_string())]), "b");
-        let result_op = make_fatop(Op::Del(vec![(1, "ooyy".to_string())]), "a");
+        let mut op = make_fatop(Op::Del(vec![(1, "ooxxyy".to_string())]), 1);
+        let base = make_fatop(Op::Del(vec![(3, "xx".to_string())]), 2);
+        let result_op = make_fatop(Op::Del(vec![(1, "ooyy".to_string())]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
     }

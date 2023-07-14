@@ -169,6 +169,10 @@ impl JSONRPCServer {
             let params: DocIdParams = serde_json::from_value(request.params)?;
             let resp = self.handle_delete_file_request(params).await?;
             make_resp(request.id, resp)
+        } else if request.method == "Undo" {
+            let params: UndoParams = serde_json::from_value(request.params)?;
+            let resp = self.handle_undo_request(params).await?;
+            make_resp(request.id, resp)
         } else {
             todo!()
         };
@@ -248,7 +252,7 @@ impl JSONRPCServer {
         params: SendOpParams,
     ) -> CollabResult<SendOpResp> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
-        let res = doc.send_op(params.ops).await;
+        let res = doc.send_op(params.ops, params.kind).await;
         if res.is_err() {
             self.remove_doc(&params.doc_id, &params.server_id);
         }
@@ -322,5 +326,17 @@ impl JSONRPCServer {
             cli.delete_file(&params.doc_id).await?;
         }
         Ok(params)
+    }
+
+    pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<SendOpResp> {
+        let doc = self.get_doc(&params.doc_id, &params.server_id)?;
+        let op = match params.kind {
+            UndoKind::Undo => doc.undo().await,
+            UndoKind::Redo => doc.redo().await,
+        };
+        let resp = SendOpResp {
+            ops: if let Some(op) = op { vec![op] } else { vec![] },
+        };
+        Ok(resp)
     }
 }

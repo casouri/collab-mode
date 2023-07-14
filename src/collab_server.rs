@@ -187,7 +187,7 @@ impl LocalServer {
 
     pub async fn share_file_1(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
         // TODO permission check.
-        let doc_id: u64 = rand::random();
+        let doc_id: DocId = rand::random();
         let mut docs = self.docs.write().await;
 
         docs.insert(

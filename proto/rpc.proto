@@ -19,7 +19,7 @@ message ContextOps {
 }
 
 message FileOps {
-  uint64 doc_id = 1;
+  uint32 doc_id = 1;
   uint32 after = 2;
 }
 
@@ -29,7 +29,7 @@ message SnapshotChunk {
 }
 
 message DocInfo {
-  uint64 doc_id = 1;
+  uint32 doc_id = 1;
   string file_name = 2;
 }
 
@@ -38,7 +38,7 @@ message FileList {
 }
 
 message DocId {
-  uint64 doc_id = 1;
+  uint32 doc_id = 1;
 }
 
 message Credential {
