@@ -1,3 +1,7 @@
+//! This module is the frontend of a collab process. It exposes two
+//!functions, [run_stdio] and [run_socket], that communicates with the
+//!editor with either pipe or socket.
+
 use crate::abstract_server::{ClientEnum, DocServer};
 use crate::collab_client::Doc;
 use crate::collab_server::LocalServer;
@@ -13,9 +17,18 @@ use types::*;
 
 // *** Structs
 
+/// Stores data that the jsonrpc frontend uses.
 pub struct JSONRPCServer {
+    /// Maps (Doc, Server) to the Doc object.
     doc_map: HashMap<DocDesignator, Doc>,
-    client_map: HashMap<String, ClientEnum>,
+    /// Maps ServerId (URL) to the server object, which can be either
+    /// the local server or a gRPC client connected to a remote
+    /// server.
+    client_map: HashMap<ServerId, ClientEnum>,
+    /// A notifier sender, JSONRPCServer clone it and pass it to the
+    /// Doc when we create one, and the Doc will send remote op
+    /// notification to the notification channel, which JSONRPCServer
+    /// will receive and send notification to the editor.
     notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
 }
 

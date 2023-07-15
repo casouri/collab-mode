@@ -1,3 +1,13 @@
+//! This module provides a [Doc] object, used by [crate::jspnrpc],
+//! that encapsulates communicating to local and remote server and
+//! sending and receiving ops.
+
+//! [Doc] can be created by either sharing
+//! a local file to a local or remote server [Doc::new_share_file], or
+//! connecting to a document on a local or remote server by
+//! [Doc::new_connect_file]. Editor can send local ops to the Doc and
+//! receive (transformed) remotes ops to be applied.
+
 use crate::abstract_server::{ClientEnum, DocServer};
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
@@ -15,10 +25,7 @@ type OpStream = Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>;
 // *** Structs
 
 /// A client that connects to the local server and remote server.
-/// Represents a local or remote document, users can send ops to the
-/// Doc and receive ops from the Doc. A [Doc] can be created by
-/// sharing a file ([Doc::new_share_file]), or connecting to a file
-/// ([Doc::new_connect_file]).
+/// Represents a local or remote document.
 pub struct Doc {
     doc_id: DocId,
     engine: Arc<Mutex<ClientEngine>>,

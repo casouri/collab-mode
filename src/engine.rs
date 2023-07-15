@@ -1,3 +1,6 @@
+//! This module provides [ClientEngine] and [ServerEngine] that
+//! implements the client and server part of the OT control algorithm.
+
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::result::Result;
@@ -29,7 +32,7 @@ impl ContextOps {
 
 /// The history buffer that reflects the history seen by the editor.
 #[derive(Debug, Clone)]
-pub struct EditorHistory {
+struct EditorHistory {
     /// History buffer.
     history: Vec<LeanOp>,
     // /// The index of the last local-turned global op in the history.
@@ -170,7 +173,7 @@ impl EditorHistory {
 /// Global history buffer. The whole buffer is made of global_buffer +
 /// local_buffer.
 #[derive(Debug, Clone)]
-pub struct GlobalHistory {
+struct GlobalHistory {
     global: Vec<FatOp>,
     local: Vec<FatOp>,
 }
@@ -339,7 +342,8 @@ impl ClientEngine {
         Ok(())
     }
 
-    /// Process remote op, possibly transform it and add it to history.
+    /// Process remote op, transform it and add it to history. Return
+    /// the ops for the editor to apply, if any.
     pub fn process_remote_op(&mut self, mut op: FatOp) -> EngineResult<Option<FatOp>> {
         log::debug!(
             "process_remote_op({:?}) current_seq: {}",

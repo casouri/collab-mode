@@ -1,3 +1,6 @@
+//! This module defines [CollabError], the error types used throughout
+//! the program.
+
 use crate::engine::EngineError;
 use crate::types::*;
 use serde::{Deserialize, Serialize};

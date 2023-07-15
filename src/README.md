@@ -74,30 +74,29 @@ convergence with undo operations. They are like TP1 and TP2, namely,
 you can either use a transform function that satisfies them, or use a
 control algorithm that avoids them.
 
-Most OT algorithm uses a transform function that satisfies TP1 and a
-control algorithm that avoids TP2. COT does exactly that. For IP2 and
-IP3, COT avoids both with its control algorithm, and our algorithm
-does the same.
+COT avoids both IP2 and IP3 in its control algorithm, and our
+algorithm does the same.
 
 IP2 says sequentially transforming an operation o against another
 operation o₁ and its inverse I(o₁) should end up giving you o back.
 This sounds trivially satisfiable but isn’t. A trivial example: let o
-= del(0, abc), o₁=del(0, abc). With a normal transform function,
+= del(0, abc), o₁ = del(0, abc). With a normal transform function,
 you’ll end up with del(0, ""). To avoid IP2, you just need to make
 sure you never transform ops sequentially against an op and its
 inverse.
 
-IP3 is a bit more complicated. In essence, it says transformed inverse
-of an op should be equal to the inverse of transformed op. The formal
-definition is this: let o₁ and o₂ be two ops with the same context (so
-they can transform against each other), let o₁’ = IT(o₁, o₂), o₂’ =
-IT(o₂, o₁), then IT(I(o₁), o₂’) should equal to I(o₁’). IOW,
+IP3 is a bit more complicated. In essence, it says the transformed
+inverse of an op should be equal to the inverse of the transformed op.
+The formal definition is as follows: let o₁ and o₂ be two ops with the
+same context (so they can transform against each other), let o₁’ =
+IT(o₁, o₂), o₂’ = IT(o₂, o₁), then IT(I(o₁), o₂’) should equal to
+I(o₁’). Ie,
 
 IT(I(o₁), IT(o₂, o₁)) = I(IT(o₁, o₂))
 
 To avoid IP3, you need to make sure you never transform an inverse op
 I(o₁) against an op o₂ where o₂ is concurrent (context-independent) to
-o₁. IOW, don’t mingle inverse with concurrent ops together.
+o₁. Ie, don’t mingle inverse with concurrent ops together.
 
 To keep things simple, we only allow undo and redo on a linear
 history. Basically, the default undo/redo behavior anyone would
@@ -105,32 +104,36 @@ expect. Users can undo some operations, and redo them; but once they
 make some original edit, the undone ops are “lost” and can’t be redone
 anymore.
 
-We also restrict undo and redo to ops created by the user, ie, you can
-only undo your own edits.
+We also restrict undo and redo to ops created by the user, ie,
+everyone can only undo their own edits.
 
 Alongside the global history, we keep track of a client history
 ([crate::engine::ClientHistory]). Ops in the client history are
 ordered by the sequence at which they are applied on the editor. All
 the ops apply one after another, so there is no concurrent ops, and
-IP3 is avoided.
+IP3 is avoided. (COT stores ops differently from us so IP3 isn’t as
+trivially satisfiable.)
 
 We also keep track of the local edits in the client history, these are
 the ops the user can undo.
 
 To undo/redo, the editor sends a Undo/Redo request, and if there are
 available ops to undo/redo, the collab process sends back an op that
-will perform the undo/redo. The editor should apply the op and send it
-back with a SendOp request, so that the collab process knows that the
-operation is applied.
+will perform the undo/redo (by generating the inverse of the op to
+undo/redo, and transform it against all the following ops in the
+client history). The editor should apply the op and send it back with
+a SendOp request, so that the collab process knows that the operation
+is actually applied.
 
-When the collab process receives a local op that’s labeled undo, it
-finds the corresponding original op in the editor history, and marks
-that op as undone, and transforms ops after it as if this op has
-become an identity op. Since we modify the ops in-place rather than
-appending the inverse at the end, we avoids IP2.
+And when the collab process receives that local undo op sent back from
+the editor, it finds the corresponding original op in the editor
+history, and marks that op as undone, and transforms ops after it as
+if this op has become an identity op. Since we modify the ops in-place
+rather than appending the inverse at the end, we avoids IP2.
 
-If the op is labeled redo, we find the corresponding op, flip it back
-from identify to the original op, and transform the ops after it.
+If the op is labeled redo, collab process finds the corresponding op,
+flip it back from identify to the original op, and transform the ops
+after it.
 
 Note that under our algorithm, we can’t freely redo any operation in
 any order, we have to redo in the reverse order in which we undone the
@@ -139,8 +142,9 @@ flipping it back to the original op, there is no ops before it that
 are undone. If there are, using the original op wouldn’t be correct.
 
 A more flexible undo system that allows any undo and redo order (like
-that of COT) is much more complicated to implement. I find the
-limitation to be quite a reasonable trade-off.
+that of COT) is much more complicated to implement and computes more
+transformations. I consider the limitation to be quite a reasonable
+trade-off.
 
 [1] Conditions and Patterns for Achieving Convergence in OT-Based
 Co-Editors

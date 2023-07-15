@@ -1,3 +1,12 @@
+//! This module provides [LocalServer], the server that linearizes ops
+//! and handle requests from sites. A collab process will start a
+//! [LocalServer] and access it through the
+//! [crate::abstract_server::DocServer] trait, and access remote
+//! servers with [crate::grpc_client::GrpcClient], also through
+//! [crate::DocServer] crate. At the same time, we expose the local
+//! server to remote sites with gRPC, by implementing the
+//! [crate::rpc::doc_server_server::DocServer] trait.
+
 use crate::abstract_server::DocServer;
 use crate::error::{CollabError, CollabResult};
 use crate::op::{DocId, GlobalSeq, Op, SiteId};
@@ -58,7 +67,8 @@ impl DocServer for LocalServer {
 
 // *** Structs
 
-/// A snapshot of a document.
+/// A snapshot of a document. Returned by the server when a site
+/// requests a file.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     /// The file content.
@@ -67,6 +77,7 @@ pub struct Snapshot {
     pub seq: GlobalSeq,
 }
 
+/// The server object.
 #[derive(Debug, Clone)]
 pub struct LocalServer {
     /// SiteId given to ourselves.

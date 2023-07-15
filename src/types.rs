@@ -1,3 +1,6 @@
+//! This module re-exports some common types for convenience, and
+//! define a couple more.
+
 use serde::{Deserialize, Serialize};
 
 pub type ServerId = String;
@@ -11,6 +14,7 @@ pub use crate::op::{DocId, GlobalSeq, LocalSeq, Op, OpKind, SiteId};
 pub type FatOp = crate::op::FatOp<Op>;
 pub type LeanOp = crate::op::LeanOp<Op>;
 
+/// Basically (Doc, Server). Uniquely identifies a document.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocDesignator {
     pub server: ServerId,
@@ -26,6 +30,8 @@ impl DocDesignator {
     }
 }
 
+/// File name plus doc id for a document. We might later add more meta
+/// info to a doc.
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocInfo {

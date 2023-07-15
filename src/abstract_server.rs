@@ -1,3 +1,6 @@
+//! This module exposes the [DocServer] trait that abstracts over a
+//!local and remote server.
+
 use crate::collab_server::{LocalServer, Snapshot};
 use crate::error::CollabResult;
 use crate::grpc_client::GrpcClient;
