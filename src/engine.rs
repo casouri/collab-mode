@@ -130,20 +130,17 @@ impl EditorHistory {
     fn generate_undo_op(&mut self) -> Option<Op> {
         let orig_ops = &self.orig_history;
         let ops = &self.history;
-        log::debug!("gen undo: {:?}", &ops);
         if orig_ops.len() == 0 {
             return None;
         }
-        let mut idx = self.undo_tip.or_else(|| Some(orig_ops.len())).unwrap();
-        if idx == 0 {
+        let mut idxidx = self.undo_tip.or_else(|| Some(orig_ops.len())).unwrap();
+        if idxidx == 0 {
             None
         } else {
-            idx -= 1;
-            log::debug!("idx: {}, orig_history: {:?}", idx, orig_ops);
-            let mut op = ops[orig_ops[idx]].clone();
-            log::debug!("op: {:?}", op);
+            idxidx -= 1;
+            let mut op = ops[orig_ops[idxidx]].clone();
             op.op = op.op.inverse();
-            let _ = op.symmetric_transform(&ops[orig_ops[idx] + 1..]);
+            let _ = op.symmetric_transform(&ops[orig_ops[idxidx] + 1..]);
             Some(op.op)
         }
     }
@@ -156,14 +153,16 @@ impl EditorHistory {
         }
         let orig_ops = &self.orig_history;
         let ops = &self.history;
-        let idx = self.undo_tip.unwrap();
-        let mut op = ops[orig_ops[idx]].clone();
-        // Use the original op rather than the transformed op.
-        // If everything goes right, there is no undone op
-        // before this op in the editor history, so using the
-        // original op is ok.
+        let idxidx = self.undo_tip.unwrap();
+        let mut op = ops[orig_ops[idxidx]].clone();
+        // Use the original op rather than the transformed op. If
+        // everything goes right, there is no undone op before this op
+        // in the editor history, so using the original op is ok.
+        // Inversing the op doesn't work, transformation could have
+        // transformed this op into identity, such that inversing it
+        // doesn't get the original op back.
         op.op = op.orig.clone();
-        let _ = op.symmetric_transform(&ops[orig_ops[idx] + 1..]);
+        let _ = op.symmetric_transform(&ops[orig_ops[idxidx] + 1..]);
         return Some(op.op);
     }
 }
