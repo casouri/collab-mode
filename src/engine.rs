@@ -8,11 +8,12 @@ use thiserror::Error;
 
 // *** Data structure
 
-/// A continuous series of local ops with a context. The context
-/// sequence represents the context on which the first local op in the
-/// series is based: all the global ops with a sequence number leq to
-/// the context seq number. The rest local ops are based on the
-/// context plus precious ops in the series.
+/// A continuous series of local ops with a context. Used by clients
+/// to send multiple ops to the server at once. The context sequence
+/// represents the context on which the first local op in the series
+/// is based: all the global ops with a sequence number leq to the
+/// context seq number. The rest local ops' context are inferred by
+/// their position in the vector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextOps {
     pub context: GlobalSeq,
@@ -189,7 +190,8 @@ impl GlobalHistory {
     }
 }
 
-/// OT control algorithm engine for client.
+/// OT control algorithm engine for client. Used by
+/// [crate::collab_client::Doc].
 #[derive(Debug, Clone)]
 pub struct ClientEngine {
     /// History storing the global timeline (seen by the server).
@@ -211,7 +213,8 @@ pub struct ClientEngine {
     last_site_seq_sent_out: LocalSeq,
 }
 
-/// OT control algorithm engine for server.
+/// OT control algorithm engine for server. Used by
+/// [crate::collab_server::LocalServer].
 #[derive(Debug, Clone)]
 pub struct ServerEngine {
     /// Global history.

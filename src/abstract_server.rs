@@ -10,6 +10,9 @@ use enum_dispatch::enum_dispatch;
 use std::pin::Pin;
 use tokio_stream::Stream;
 
+/// Functions one can expect from a server, implemented by both
+/// [crate::collab_server::LocalServer] and
+/// [crate::grpc_client::GrpcClient].
 #[async_trait]
 #[enum_dispatch]
 pub trait DocServer: Send {
@@ -27,6 +30,7 @@ pub trait DocServer: Send {
     ) -> CollabResult<Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>>;
 }
 
+/// Either a local server or a gRPC client connect to a remote server.
 #[enum_dispatch(DocServer)]
 #[derive(Debug, Clone)]
 pub enum ClientEnum {
