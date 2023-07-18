@@ -49,7 +49,7 @@ pub struct JSONRPCServer {
 /// Run the JSONRPC server on stdio.
 pub fn run_stdio(
     server: LocalServer,
-    mut server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
+    server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
     runtime: tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -62,7 +62,7 @@ pub fn run_stdio(
 pub fn run_socket(
     addr: &str,
     server: LocalServer,
-    mut server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
+    server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
     runtime: tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::listen(addr)?;

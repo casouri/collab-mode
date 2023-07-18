@@ -155,7 +155,6 @@ impl Doc {
 
 impl LocalServer {
     pub fn new() -> LocalServer {
-        let uuid = Uuid::new_v4();
         LocalServer {
             self_site_id: 0,
             next_site_id: Arc::new(Mutex::new(1)),
