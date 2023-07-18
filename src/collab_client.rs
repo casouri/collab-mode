@@ -8,6 +8,13 @@
 //! [Doc::new_connect_file]. Editor can send local ops to the Doc and
 //! receive (transformed) remotes ops to be applied.
 
+//! [Doc] starts background threads to send/receive ops, if error
+//! occurs, the error is captured and saved, the next time we caller
+//! uses one of [Doc]'s methods (sendop, undo, and redo), the error
+//! will be returned immediately. The caller should report the error
+//! to the editor and drop the [Doc], which will clean up the
+//! background threads.
+
 use crate::abstract_server::{ClientEnum, DocServer};
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
@@ -208,13 +215,15 @@ impl Doc {
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.
-    pub async fn undo(&self) -> Option<Op> {
-        self.engine.lock().await.generate_undo_op()
+    pub async fn undo(&mut self) -> CollabResult<Option<Op>> {
+        self.check_async_errors()?;
+        Ok(self.engine.lock().await.generate_undo_op())
     }
 
     /// Return `n` consecutive redo ops from the current undo tip.
-    pub async fn redo(&self) -> Option<Op> {
-        self.engine.lock().await.generate_redo_op()
+    pub async fn redo(&mut self) -> CollabResult<Option<Op>> {
+        self.check_async_errors()?;
+        Ok(self.engine.lock().await.generate_redo_op())
     }
 
     /// Handle errors created by worker threads.
@@ -263,6 +272,9 @@ fn spawn_thread_receive_remote_op(
         doc: doc_id.clone(),
         server: server_id,
     };
+    // Draining remote_op_stream and storing ops into a buffer seems
+    // redundant, but is easier to write and understand in the big
+    // picture.
     tokio::spawn(async move {
         loop {
             let new_remote_op = remote_op_stream.next().await;

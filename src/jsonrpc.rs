@@ -1,6 +1,19 @@
 //! This module is the frontend of a collab process. It exposes two
-//!functions, [run_stdio] and [run_socket], that communicates with the
-//!editor with either pipe or socket.
+//! functions, [run_stdio] and [run_socket], that communicates with
+//! the editor with either pipe or socket.
+
+//! Then entry function will start two threads, one listens for
+//! "remote arrived" notification, and sends that notification to the
+//! editor; the other reads JSONRPC requests and serves them.
+
+//! Error handling: Error handling is synchronous, if error occurs
+//! when serving a request, the error is captured and packaged into a
+//! JSONRPC error and send back as the response.
+
+// TODO Non-fatal errors occurred in
+// [crate::collab_server::LocalServer] should also be communicated to
+// the editor, they are sent to the editor in the form of JSONRPC
+// notifications.
 
 use crate::abstract_server::{ClientEnum, DocServer};
 use crate::collab_client::Doc;
@@ -73,7 +86,8 @@ fn main_loop(connection: Connection, server: LocalServer, runtime: tokio::runtim
                 params: serde_json::to_value(params).unwrap(),
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
-                log::error!("Error sending jsonrpc notification: {:#}", err);
+                log::error!("Error sending jsonrpc notification to editor: {:#}", err);
+                panic!();
             }
         }
     });
@@ -86,23 +100,25 @@ fn main_loop(connection: Connection, server: LocalServer, runtime: tokio::runtim
                 match res {
                     Ok(msg) => {
                         if let Err(err) = connection.sender.send(msg) {
-                            log::error!("Error sending jsonrpc response: {:#}", err);
+                            log::error!("Error sending jsonrpc response to editor: {:#}", err);
+                            panic!();
                         }
                     }
                     Err(err) => {
                         let code = error_code(&err);
                         let msg = make_err(id, code, format!("{:#}", err));
                         if let Err(err) = connection.sender.send(msg) {
-                            log::error!("Error sending jsonrpc response: {:#}", err);
+                            log::error!("Error sending jsonrpc response to editor: {:#}", err);
+                            panic!();
                         }
                     }
                 }
             }
             Message::Response(_) => {
-                eprintln!("Received a response");
+                log::info!("Received a response");
             }
             Message::Notification(_) => {
-                eprintln!("Received a notification");
+                log::info!("Received a notification");
             }
         }
     }
@@ -344,8 +360,8 @@ impl JSONRPCServer {
     pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<SendOpResp> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
         let op = match params.kind {
-            UndoKind::Undo => doc.undo().await,
-            UndoKind::Redo => doc.redo().await,
+            UndoKind::Undo => doc.undo().await?,
+            UndoKind::Redo => doc.redo().await?,
         };
         let resp = SendOpResp {
             ops: if let Some(op) = op { vec![op] } else { vec![] },

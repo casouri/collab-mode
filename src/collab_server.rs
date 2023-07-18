@@ -230,8 +230,8 @@ impl LocalServer {
         }
     }
 
-    // Receive ops after `after`. from server. Server will send ops to
-    // `channel`. TODO access control.
+    // Receive ops after `after` from server. Returns a stream of ops.
+    // TODO access control.
     pub async fn recv_op_1(
         &self,
         doc_id: &DocId,
@@ -264,7 +264,11 @@ impl LocalServer {
                             &op
                         );
                         if let Err(_) = tx.send(op).await {
-                            log::error!("Internal channel (local server --op--> local client or grpc server) closed. Maybe remove closed connection.");
+                            // When the local or remote
+                            // [crate::collab_client::Doc] is dropped,
+                            // its connection to us is dropped. This
+                            // is not an error.
+                            log::info!("Internal channel (local server --op--> local client or grpc server) closed.");
                             return;
                         }
                     }
@@ -402,7 +406,7 @@ impl doc_server_server::DocServer for LocalServer {
                     }))
                     .await
                 {
-                    log::error!(
+                    log::warn!(
                         "request_file() Can't send snapshot chunk to grpc channel: {:#}",
                         err
                     );
