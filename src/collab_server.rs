@@ -188,7 +188,7 @@ impl LocalServer {
         let _ = tokio::spawn(async move {
             if let Err(err) = server.serve_with_incoming(incoming46).await {
                 error_channel
-                    .send(CollabError::TransportErr(err.to_string()))
+                    .send(CollabError::ServerDied(err.to_string()))
                     .await
                     .unwrap();
             }

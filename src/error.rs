@@ -9,6 +9,8 @@ use tonic::Status;
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum CollabError {
+    #[error("Server errors out and died: {0}")]
+    ServerDied(String),
     #[error("Cannot parse request: {0}")]
     ParseError(String),
     #[error("Fatal OT engine error: {err:?}")]

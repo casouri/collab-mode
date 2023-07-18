@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
             server_port,
         }) => {
             let collab_server = collab_server::LocalServer::new();
-            let (err_tx, err_rx) = tokio::sync::mpsc::channel(32);
+            let (err_tx, err_rx) = tokio::sync::mpsc::channel(1);
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
 
@@ -59,11 +59,12 @@ fn main() -> anyhow::Result<()> {
                 });
             }
             if !socket {
-                return jsonrpc::run_stdio(collab_server, runtime);
+                return jsonrpc::run_stdio(collab_server, err_rx, runtime);
             } else {
                 return jsonrpc::run_socket(
                     &format!("localhost:{}", socket_port),
                     collab_server,
+                    err_rx,
                     runtime,
                 );
             }
