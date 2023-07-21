@@ -272,6 +272,9 @@ impl JSONRPCServer {
 
 // *** Subroutines for handle_request
 
+// Request handler that operates on documents must handle errors by
+// removing the doc from doc_map, and returning the error.
+
 impl JSONRPCServer {
     // fn handle_hello_request(&self, request: Request) -> anyhow::Result<Message> {
     //     let params: HelloParams =
@@ -420,13 +423,21 @@ impl JSONRPCServer {
 
     pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<SendOpResp> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
-        let op = match params.kind {
-            UndoKind::Undo => doc.undo().await?,
-            UndoKind::Redo => doc.redo().await?,
+        let res = match params.kind {
+            UndoKind::Undo => doc.undo().await,
+            UndoKind::Redo => doc.redo().await,
         };
-        let resp = SendOpResp {
-            ops: if let Some(op) = op { vec![op] } else { vec![] },
-        };
-        Ok(resp)
+        match res {
+            Ok(op) => {
+                let resp = SendOpResp {
+                    ops: if let Some(op) = op { vec![op] } else { vec![] },
+                };
+                Ok(resp)
+            }
+            Err(err) => {
+                self.remove_doc(&params.doc_id, &params.server_id);
+                Err(err)
+            }
+        }
     }
 }

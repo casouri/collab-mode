@@ -9,10 +9,19 @@ pub const SITE_ID_SELF: &str = "self";
 pub type Credential = String;
 
 pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
-pub use crate::op::{DocId, GlobalSeq, LocalSeq, Op, OpKind, SiteId};
+pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
 pub type LeanOp = crate::op::LeanOp<Op>;
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupedOp {
+    pub op: Op,
+    // Allow the field to be absent.
+    #[serde(default)]
+    pub group_seq: Option<GroupSeq>,
+}
 
 /// Basically (Doc, Server). Uniquely identifies a document.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

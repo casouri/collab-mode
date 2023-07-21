@@ -83,10 +83,18 @@ impl EditorHistory {
     }
 
     /// Process the new local `op`.
-    fn process_local_op(&mut self, op: &FatOp, kind: OpKind) -> EngineResult<()> {
+    fn process_local_op(
+        &mut self,
+        op: &FatOp,
+        group_seq: Option<GroupSeq>,
+        kind: OpKind,
+    ) -> EngineResult<()> {
         match kind {
             OpKind::Original => {
-                self.history.push(LeanOp::new(&op.op, &op.site));
+                if group_seq.is_none() {
+                    return Err(EngineError::GroupSeqMissing(op.clone()));
+                }
+                self.history.push(LeanOp::new(&op.op, &op.site, group_seq));
                 let index = self.history.len() - 1;
 
                 // Trim off the undone ops: now that the user have
@@ -126,7 +134,7 @@ impl EditorHistory {
     }
 
     fn process_remote_op(&mut self, op: &FatOp) {
-        self.history.push(LeanOp::new(&op.op, &op.site));
+        self.history.push(LeanOp::new(&op.op, &op.site, None));
     }
 
     /// Generate an undo op from the current undo tip. Return None if
@@ -254,6 +262,8 @@ pub enum EngineError {
     SiteSeqMismatch(LocalSeq, FatOp),
     #[error("Op {0:?} should have a global seq number, but doesn't")]
     SeqMissing(FatOp),
+    #[error("Operation doesn't have a group sequence: {0:?}")]
+    GroupSeqMissing(FatOp),
     #[error("Undo error: {0}")]
     UndoError(String),
 }
@@ -329,7 +339,12 @@ impl ClientEngine {
     }
 
     /// Process local op, possibly transform it and add it to history.
-    pub fn process_local_op(&mut self, op: FatOp, kind: OpKind) -> EngineResult<()> {
+    pub fn process_local_op(
+        &mut self,
+        op: FatOp,
+        group_seq: Option<GroupSeq>,
+        kind: OpKind,
+    ) -> EngineResult<()> {
         log::debug!(
             "process_local_op({:?}) current_site_seq: {}",
             &op,
@@ -340,7 +355,7 @@ impl ClientEngine {
             return Err(EngineError::SiteSeqMismatch(self.current_site_seq + 1, op));
         }
         self.current_site_seq = op.site_seq;
-        self.eh.process_local_op(&op, kind)?;
+        self.eh.process_local_op(&op, group_seq, kind)?;
         self.gh.local.push(op);
         Ok(())
     }

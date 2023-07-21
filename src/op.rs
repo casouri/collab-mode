@@ -1,5 +1,5 @@
 //! This module defines OT operations and various types. [Op] is the
-//!one we actually use, [SimpleOp] was used for prototyping.
+//! one we actually use, [SimpleOp] was used for prototyping.
 
 use prost::encoding::bool;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,9 @@ pub type GlobalSeq = u32;
 pub type DocId = u32;
 /// SiteId is a monotonically increasing integer.
 pub type SiteId = u32;
+/// Group sequence number. Consecutive ops with the same group seq
+/// number are undone together.
+pub type GroupSeq = u32;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]
 pub enum OpKind {
@@ -329,15 +332,17 @@ pub struct LeanOp<O> {
     /// When the op is undone, `identify` is marked true so that
     /// transformation function treats this op as identify.
     pub identity: bool,
+    pub group_seq: Option<GroupSeq>,
 }
 
 impl<O: Operation> LeanOp<O> {
-    pub fn new(op: &O, site: &SiteId) -> LeanOp<O> {
+    pub fn new(op: &O, site: &SiteId, group_seq: Option<GroupSeq>) -> LeanOp<O> {
         LeanOp {
             op: op.clone(),
             site: site.clone(),
             orig: op.clone(),
             identity: false,
+            group_seq,
         }
     }
 

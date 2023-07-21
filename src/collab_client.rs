@@ -172,35 +172,30 @@ impl Doc {
     /// Send local `ops` and retrieve remote ops. `ops` can be empty,
     /// in which case the purpose is solely retrieving accumulated
     /// remote ops.
-    pub async fn send_op(&mut self, ops: Vec<Op>, kind: OpKind) -> CollabResult<Vec<Op>> {
+    pub async fn send_op(&mut self, ops: Vec<GroupedOp>, kind: OpKind) -> CollabResult<Vec<Op>> {
         self.check_async_errors()?;
 
-        // 1. Package ops.
-        let mut site_seq = self.site_seq;
-        let mut engine = self.engine.lock().await;
-        let fatops: Vec<FatOp> = ops
-            .into_iter()
-            .map(|op| {
-                site_seq += 1;
-                FatOp {
-                    seq: None,
-                    doc: self.doc_id.clone(),
-                    site: engine.site_id(),
-                    op,
-                    site_seq,
-                }
-            })
-            .collect();
-        self.site_seq = site_seq;
+        // Get remote ops before locking engine.
+        let remote_ops: Vec<FatOp> = {
+            let mut remote_ops = self.remote_op_buffer.lock().await;
+            remote_ops.drain(..).collect()
+        };
 
-        // 2. Process local ops.
-        for op in &fatops {
-            engine.process_local_op(op.clone(), kind)?;
+        // 1. Process local ops.
+        let mut engine = self.engine.lock().await;
+        for op in ops {
+            self.site_seq += 1;
+            let fatop = FatOp {
+                seq: None,
+                doc: self.doc_id.clone(),
+                site: engine.site_id(),
+                op: op.op,
+                site_seq: self.site_seq,
+            };
+            engine.process_local_op(fatop, op.group_seq, kind)?;
         }
 
-        // 3. Process pending remote ops.
-        let mut remote_ops = self.remote_op_buffer.lock().await;
-        let remote_ops = remote_ops.drain(..);
+        // 2. Process pending remote ops.
         let mut transformed_remote_ops: Vec<FatOp> = vec![];
         for op in remote_ops {
             if let Some(op) = engine.process_remote_op(op)? {
