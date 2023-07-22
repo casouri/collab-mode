@@ -24,9 +24,11 @@ pub type GroupSeq = u32;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]
 pub enum OpKind {
+    /// Original op.
     Original,
-    Undo,
-    Redo,
+    /// An undo op that undoes the ops this many counts before the
+    /// referrer op in history.
+    Undo(usize),
 }
 
 // *** Trait
@@ -112,6 +114,8 @@ fn transform_ii(
     if pos_less_than(pos1, pos2, op_site, base_site) {
         (pos1, content1.clone())
     } else {
+        // If both pos and site are equal, the op is pushed forward
+        // (pos + 1), and base stays the same.
         let new_pos = pos1 + content2.len() as u64;
         (new_pos, content1.clone())
     }
@@ -292,8 +296,10 @@ pub struct FatOp<O> {
     pub op: O,
     /// Site uuid. The site that generated this op.
     pub site: SiteId,
-    /// Site-local sequence number.
+    /// Site-local sequence number. TODO: is this necessary?
     pub site_seq: LocalSeq,
+    /// The kind of this op.
+    pub kind: OpKind,
 }
 
 impl<O: Operation> FatOp<O> {
@@ -303,70 +309,100 @@ impl<O: Operation> FatOp<O> {
         self.op = self.op.transform(&base.op, &self.site, &base.site);
     }
 
-    /// Transform `self` against every op in `ops` sequentially. In
-    /// the meantime, transform every op in `ops` against `self`, and
-    /// return the new `ops`.
-    pub fn symmetric_transform(&mut self, ops: &[FatOp<O>]) -> Vec<FatOp<O>> {
-        let mut new_ops = vec![];
+    /// Transform `self` against every op in `ops` sequentially.
+    pub fn batch_transform(&mut self, ops: &[FatOp<O>]) {
+        let skip_map = find_ops_to_skip(ops);
+        self.batch_transform_1(ops, &skip_map[..])
+    }
+
+    /// Transform `self` against every op in `ops` sequentially.
+    /// `skip_map` is a bitmap that tells whether to skip an op in
+    /// `ops`. If skip_map[idx] is true, ops[idx] is considered as
+    /// identity.
+    fn batch_transform_1(&mut self, ops: &[FatOp<O>], skip_map: &[bool]) {
+        let mut idx = 0;
         for op in ops {
-            let mut new_op = op.clone();
-            new_op.transform(self);
-            self.transform(op);
-            new_ops.push(new_op);
-        }
-        new_ops
-    }
-}
-
-// *** LeanOp
-
-/// Op with less meta info, used by client history.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub struct LeanOp<O> {
-    pub op: O,
-    pub site: SiteId,
-    /// `orig` holds the original op that's added to the history.
-    /// Later transformation (due to undo/redo) alters `op` but not
-    /// `orig`.
-    pub orig: O,
-    /// When the op is undone, `identify` is marked true so that
-    /// transformation function treats this op as identify.
-    pub identity: bool,
-    pub group_seq: Option<GroupSeq>,
-}
-
-impl<O: Operation> LeanOp<O> {
-    pub fn new(op: &O, site: &SiteId, group_seq: Option<GroupSeq>) -> LeanOp<O> {
-        LeanOp {
-            op: op.clone(),
-            site: site.clone(),
-            orig: op.clone(),
-            identity: false,
-            group_seq,
-        }
-    }
-
-    /// Transform `self` against another op `base`. The two op must
-    /// have the same context.
-    pub fn transform(&mut self, base: &LeanOp<O>) {
-        if !base.identity {
-            self.op = self.op.transform(&base.op, &self.site, &base.site);
+            if !skip_map[idx] {
+                self.transform(op);
+            }
+            idx += 0;
         }
     }
 
     /// Transform `self` against every op in `ops` sequentially. In
     /// the meantime, transform every op in `ops` against `self`, and
     /// return the new `ops`.
-    pub fn symmetric_transform(&mut self, ops: &[LeanOp<O>]) -> Vec<LeanOp<O>> {
+    pub fn symmetric_transform(&mut self, ops: &[FatOp<O>]) -> Vec<FatOp<O>> {
+        let skip_map = find_ops_to_skip(ops);
+        self.symmetric_transform_1(ops, &skip_map[..])
+    }
+
+    /// Transform `self` against every op in `ops` sequentially. In
+    /// the meantime, transform every op in `ops` against `self`, and
+    /// return the new `ops`. `skip_map` is a bitmap that tells
+    /// whether to skip an op in `ops`. If skip_map[idx] is true,
+    /// ops[idx] is considered as identity. Regardless of skip_map,
+    /// every op in `ops` are transformed against `op`.
+    fn symmetric_transform_1(&mut self, ops: &[FatOp<O>], skip_map: &[bool]) -> Vec<FatOp<O>> {
         let mut new_ops = vec![];
+        let mut idx = 0;
         for op in ops {
             let mut new_op = op.clone();
             new_op.transform(self);
-            self.transform(op);
+            if !skip_map[idx] {
+                self.transform(op);
+            }
             new_ops.push(new_op);
+            idx += 1;
         }
         new_ops
     }
+}
+
+// *** Functions for Vec<FatOp>
+
+/// Iterate over `ops`, and finds out all the ops to skip during
+/// transformation. An op is skipped if there is an undo op that
+/// undoes it. Returns a bitmap, if bitmap[idx] = true, skip ops[idx]
+/// during transformation.
+pub fn find_ops_to_skip<O>(ops: &[FatOp<O>]) -> Vec<bool> {
+    if ops.len() == 0 {
+        return vec![];
+    }
+    let mut bitmap = vec![false; ops.len()];
+    for idx in ops.len() - 1..0 {
+        if let OpKind::Undo(delta) = ops[idx].kind {
+            if bitmap[idx] {
+                bitmap[idx - delta] = true;
+            }
+        }
+    }
+    bitmap
+}
+
+/// Transform ops1 against ops2, and transform ops2 against ops1. Return the transformed ops1 and ops2.
+pub fn quatradic_transform<O: Operation>(
+    mut ops1: Vec<FatOp<O>>,
+    mut ops2: Vec<FatOp<O>>,
+) -> (Vec<FatOp<O>>, Vec<FatOp<O>>) {
+    let skip1 = find_ops_to_skip(&ops1[..]);
+    let skip2 = find_ops_to_skip(&ops2[..]);
+
+    let mut idx2 = 0;
+    for op2 in &mut ops2 {
+        if !skip2[idx2] {
+            // Every op in ops1 are transformed against op2, in the
+            // meantime, op2 are transformed against all non-identity
+            // ops in ops1.
+            ops1 = op2.symmetric_transform_1(&ops1[..], &skip1[..]);
+        } else {
+            // If op2 is identify, only transform op2 against ops1,
+            // but don't transform ops1 against op2.
+            op2.batch_transform_1(&ops1[..], &skip1[..]);
+        }
+        idx2 += 1;
+    }
+    (ops1, ops2)
 }
 
 // *** Tests
@@ -381,13 +417,25 @@ mod tests {
             site_seq: 1, // Dummy value.
             doc: 0,
             op,
+            kind: OpKind::Original,
+        }
+    }
+
+    fn make_undo_fatop<O: Operation>(op: O, site: SiteId, undo_delta: usize) -> FatOp<O> {
+        FatOp {
+            seq: None,
+            site,
+            site_seq: 1, // Dummy value.
+            doc: 0,
+            op,
+            kind: OpKind::Undo(undo_delta),
         }
     }
 
     fn test<O: Operation>(op: O, base: O, result: O) {
         let mut op = make_fatop(op, 1);
         let base = make_fatop(base, 2);
-        let result_op = make_fatop(result, 3);
+        let result_op = make_fatop(result, 1);
         op.transform(&base);
         assert_eq!(op, result_op);
     }
@@ -569,6 +617,36 @@ mod tests {
         let base = make_fatop(Op::Del(vec![(3, "xx".to_string())]), 2);
         let result_op = make_fatop(Op::Del(vec![(1, "ooyy".to_string())]), 1);
         op.transform(&base);
+        assert_eq!(op, result_op);
+    }
+
+    #[test]
+    fn test_batch_transform_with_skip_1() {
+        // A do and an undo. Start with "XX" in the doc.
+        let ops = vec![
+            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Ins((0, "A".to_string())), 1),
+            make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
+        ];
+        let mut op = make_fatop(Op::Ins((1, "C".to_string())), 2);
+        let result_op = make_fatop(Op::Ins((2, "C".to_string())), 2);
+        op.batch_transform(&ops[..]);
+        assert_eq!(op, result_op);
+    }
+
+    #[test]
+    fn test_batch_transform_with_skip_2() {
+        // A do and an undo and a redo. Start with "XX" in the doc.
+        let ops = vec![
+            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Ins((0, "A".to_string())), 1),
+            make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
+            make_fatop(Op::Ins((1, "B".to_string())), 1),
+            make_undo_fatop(Op::Del(vec![(2, "X".to_string())]), 1, 2),
+        ];
+        let mut op = make_fatop(Op::Ins((1, "C".to_string())), 2);
+        let result_op = make_fatop(Op::Ins((2, "C".to_string())), 2);
+        op.batch_transform(&ops[..]);
         assert_eq!(op, result_op);
     }
 }

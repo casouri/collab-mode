@@ -31,154 +31,6 @@ impl ContextOps {
     }
 }
 
-/// The history buffer that reflects the history seen by the editor.
-#[derive(Debug, Clone)]
-struct EditorHistory {
-    /// History buffer.
-    history: Vec<LeanOp>,
-    // /// The index of the last local-turned global op in the history.
-    // /// Any local op is after this index.
-    // last_sequenced_idx: usize,
-    /// Indexes of local, original ops in `history`: the ops to undo.
-    /// Since this is a linear history, some original ops might be
-    /// skipped when the user undo and then generates fresh edits.
-    orig_history: Vec<usize>,
-    /// Index into `orig_history`. It points to the original op we
-    /// just undone when it's not None.
-    undo_tip: Option<usize>,
-}
-
-impl EditorHistory {
-    /// Mark the identity flag of the op at `tip` as `identify`. Note
-    /// that `tip` is an index of the `orig_history` field, not
-    /// `history` field!! After marking the identify flag, transform
-    /// ops after the marked op in `history` such that the effect of
-    /// the op is removed/added (depending on the value of `identity`).
-    fn mark_undo_tip(&mut self, tip: usize, identity: bool) -> EngineResult<()> {
-        let idx = self.orig_history[tip];
-        {
-            let op = &mut self.history[idx];
-            if op.identity == identity {
-                if op.identity {
-                    return Err(EngineError::UndoError(
-                        "Undoing an op that's already undone".to_string(),
-                    ));
-                } else {
-                    return Err(EngineError::UndoError(
-                        "Redoing an op that's already redone".to_string(),
-                    ));
-                }
-            }
-            op.identity = identity;
-        }
-        let mut new_op = self.history[idx].clone();
-        if identity {
-            new_op.op = new_op.op.inverse();
-            new_op.identity = false;
-        }
-        let ops = &self.history[idx + 1..];
-        let new_ops = new_op.symmetric_transform(ops);
-        self.history.splice(idx + 1.., new_ops);
-        Ok(())
-    }
-
-    /// Process the new local `op`.
-    fn process_local_op(
-        &mut self,
-        op: &FatOp,
-        group_seq: Option<GroupSeq>,
-        kind: OpKind,
-    ) -> EngineResult<()> {
-        match kind {
-            OpKind::Original => {
-                if group_seq.is_none() {
-                    return Err(EngineError::GroupSeqMissing(op.clone()));
-                }
-                self.history.push(LeanOp::new(&op.op, &op.site, group_seq));
-                let index = self.history.len() - 1;
-
-                // Trim off the undone ops: now that the user have
-                // made an original op, those undone ops can never be
-                // redone.
-                if let Some(tip) = self.undo_tip {
-                    self.orig_history.truncate(tip);
-                }
-                self.orig_history.push(index);
-                self.undo_tip = None;
-            }
-            OpKind::Undo => {
-                if let Some(tip) = self.undo_tip {
-                    if tip == 0 {
-                        return Err(EngineError::UndoError("No more to undo".to_string()));
-                    }
-                    self.undo_tip = Some(tip - 1);
-                } else {
-                    self.undo_tip = Some(self.orig_history.len() - 1)
-                }
-                self.mark_undo_tip(self.undo_tip.unwrap(), true)?;
-            }
-            OpKind::Redo => {
-                if self.undo_tip.is_none() {
-                    return Err(EngineError::UndoError("No more to redo".to_string()));
-                }
-                let tip = self.undo_tip.unwrap();
-                self.mark_undo_tip(tip, false)?;
-                self.undo_tip = if tip + 1 == self.orig_history.len() {
-                    None
-                } else {
-                    Some(tip + 1)
-                };
-            }
-        }
-        Ok(())
-    }
-
-    fn process_remote_op(&mut self, op: &FatOp) {
-        self.history.push(LeanOp::new(&op.op, &op.site, None));
-    }
-
-    /// Generate an undo op from the current undo tip. Return None if
-    /// there are no more ops to undo.
-    fn generate_undo_op(&mut self) -> Option<Op> {
-        let orig_ops = &self.orig_history;
-        let ops = &self.history;
-        if orig_ops.len() == 0 {
-            return None;
-        }
-        let mut idxidx = self.undo_tip.or_else(|| Some(orig_ops.len())).unwrap();
-        if idxidx == 0 {
-            None
-        } else {
-            idxidx -= 1;
-            let mut op = ops[orig_ops[idxidx]].clone();
-            op.op = op.op.inverse();
-            let _ = op.symmetric_transform(&ops[orig_ops[idxidx] + 1..]);
-            Some(op.op)
-        }
-    }
-
-    /// Generate a redo op from the current undo tip. Return None if
-    /// there are no more ops to redo.
-    fn generate_redo_op(&mut self) -> Option<Op> {
-        if self.undo_tip.is_none() {
-            return None;
-        }
-        let orig_ops = &self.orig_history;
-        let ops = &self.history;
-        let idxidx = self.undo_tip.unwrap();
-        let mut op = ops[orig_ops[idxidx]].clone();
-        // Use the original op rather than the transformed op. If
-        // everything goes right, there is no undone op before this op
-        // in the editor history, so using the original op is ok.
-        // Inversing the op doesn't work, transformation could have
-        // transformed this op into identity, such that inversing it
-        // doesn't get the original op back.
-        op.op = op.orig.clone();
-        let _ = op.symmetric_transform(&ops[orig_ops[idxidx] + 1..]);
-        return Some(op.op);
-    }
-}
-
 /// Global history buffer. The whole buffer is made of global_buffer +
 /// local_buffer.
 #[derive(Debug, Clone)]
@@ -196,6 +48,11 @@ impl GlobalHistory {
             vec![]
         }
     }
+
+    /// Return the original op of `undo_op`.
+    fn orig_op(&self, undo_op: &FatOp) -> &FatOp {
+        todo!()
+    }
 }
 
 /// OT control algorithm engine for client. Used by
@@ -204,8 +61,6 @@ impl GlobalHistory {
 pub struct ClientEngine {
     /// History storing the global timeline (seen by the server).
     gh: GlobalHistory,
-    /// History storing the editor's timeline (seen by the editor).
-    eh: EditorHistory,
     /// The id of this site.
     site: SiteId,
     /// The largest global sequence number we've seen. Any remote op
@@ -262,8 +117,6 @@ pub enum EngineError {
     SiteSeqMismatch(LocalSeq, FatOp),
     #[error("Op {0:?} should have a global seq number, but doesn't")]
     SeqMissing(FatOp),
-    #[error("Operation doesn't have a group sequence: {0:?}")]
-    GroupSeqMissing(FatOp),
     #[error("Undo error: {0}")]
     UndoError(String),
 }
@@ -278,12 +131,6 @@ impl ClientEngine {
             gh: GlobalHistory {
                 global: vec![],
                 local: vec![],
-            },
-            eh: EditorHistory {
-                history: vec![],
-                // last_sequenced_idx: 0,
-                orig_history: vec![],
-                undo_tip: None,
             },
             site,
             current_seq: 0,
@@ -339,12 +186,7 @@ impl ClientEngine {
     }
 
     /// Process local op, possibly transform it and add it to history.
-    pub fn process_local_op(
-        &mut self,
-        op: FatOp,
-        group_seq: Option<GroupSeq>,
-        kind: OpKind,
-    ) -> EngineResult<()> {
+    pub fn process_local_op(&mut self, op: FatOp, group_seq: GroupSeq) -> EngineResult<()> {
         log::debug!(
             "process_local_op({:?}) current_site_seq: {}",
             &op,
@@ -355,7 +197,6 @@ impl ClientEngine {
             return Err(EngineError::SiteSeqMismatch(self.current_site_seq + 1, op));
         }
         self.current_site_seq = op.site_seq;
-        self.eh.process_local_op(&op, group_seq, kind)?;
         self.gh.local.push(op);
         Ok(())
     }
@@ -394,7 +235,6 @@ impl ClientEngine {
             self.current_seq = seq;
             self.gh.local = new_local_ops;
             self.gh.global.push(op.clone());
-            self.eh.process_remote_op(&op);
             Ok(Some(op))
         }
     }
@@ -402,13 +242,13 @@ impl ClientEngine {
     /// Generate an undo op from the current undo tip. Return None if
     /// there are no more ops to undo.
     pub fn generate_undo_op(&mut self) -> Option<Op> {
-        self.eh.generate_undo_op()
+        todo!()
     }
 
     /// Generate a redo op from the current undo tip. Return None if
     /// there are no more ops to redo.
     pub fn generate_redo_op(&mut self) -> Option<Op> {
-        self.eh.generate_redo_op()
+        todo!()
     }
 }
 
@@ -431,7 +271,7 @@ impl ServerEngine {
     ) -> EngineResult<Vec<FatOp>> {
         let l1 = self.gh.ops_after(context);
         // Transform ops against L1, then we can append ops to global
-        // history.
+        // history. TODO: special handling for undo ops.
         for mut l1_op in l1 {
             ops = l1_op.symmetric_transform(&ops);
         }
@@ -451,8 +291,6 @@ impl ServerEngine {
 mod tests {
     use super::*;
     use crate::op::Op;
-    use rand::prelude::*;
-    use std::sync::mpsc;
 
     fn apply(doc: &mut String, op: &Op) {
         match op {
@@ -474,6 +312,7 @@ mod tests {
             site_seq,
             doc: 1,
             op,
+            kind: OpKind::Original,
         }
     }
 
@@ -498,19 +337,19 @@ mod tests {
         let op_a2 = make_fatop(Op::Ins((2, "x".to_string())), &site_a, 2);
         let op_b1 = make_fatop(Op::Del(vec![(2, "c".to_string())]), &site_b, 1);
 
-        let kind = OpKind::Original;
+        let group_seq = 1; // Dummy value.
 
         // Local edits.
         apply(&mut doc_a, &op_a1.op);
-        client_a.process_local_op(op_a1.clone(), kind).unwrap();
+        client_a.process_local_op(op_a1.clone(), group_seq).unwrap();
         assert_eq!(doc_a, "bcd");
 
         apply(&mut doc_a, &op_a2.op);
-        client_a.process_local_op(op_a2.clone(), kind).unwrap();
+        client_a.process_local_op(op_a2.clone(), group_seq).unwrap();
         assert_eq!(doc_a, "bcxd");
 
         apply(&mut doc_b, &op_b1.op);
-        client_b.process_local_op(op_b1.clone(), kind).unwrap();
+        client_b.process_local_op(op_b1.clone(), group_seq).unwrap();
         assert_eq!(doc_b, "abd");
 
         // Server processing.
@@ -576,19 +415,19 @@ mod tests {
         let op_b1 = make_fatop(Op::Ins((1, "2".to_string())), &site_b, 1);
         let op_c1 = make_fatop(Op::Del(vec![(1, "b".to_string())]), &site_c, 1);
 
-        let kind = OpKind::Original;
+        let group_seq = 1; // Dummy value.
 
         // Local edits.
         apply(&mut doc_a, &op_a1.op);
-        client_a.process_local_op(op_a1.clone(), kind).unwrap();
+        client_a.process_local_op(op_a1.clone(), group_seq).unwrap();
         assert_eq!(doc_a, "ab1c");
 
         apply(&mut doc_b, &op_b1.op);
-        client_b.process_local_op(op_b1.clone(), kind).unwrap();
+        client_b.process_local_op(op_b1.clone(), group_seq).unwrap();
         assert_eq!(doc_b, "a2bc");
 
         apply(&mut doc_c, &op_c1.op);
-        client_c.process_local_op(op_c1.clone(), kind).unwrap();
+        client_c.process_local_op(op_c1.clone(), group_seq).unwrap();
         assert_eq!(doc_c, "ac");
 
         // Server processing.
@@ -656,117 +495,5 @@ mod tests {
         assert_eq!(doc_c, "a2c");
         apply(&mut doc_c, &a1_at_c.op);
         assert_eq!(doc_c, "a21c");
-    }
-
-    // **** Simulation
-
-    struct Simulator {
-        /// N documents.
-        docs: Vec<String>,
-        /// N clients.
-        clients: Vec<ClientEngine>,
-        /// N site sequences,
-        site_seqs: Vec<LocalSeq>,
-        /// The server.
-        server: ServerEngine,
-        /// N connections from server to client.
-        conn_to_client: Vec<(mpsc::Sender<FatOp>, mpsc::Receiver<FatOp>)>,
-        /// N connections from client to server. N tx and one rx.
-        conn_to_server: Vec<(mpsc::Sender<ContextOps>, mpsc::Receiver<ContextOps>)>,
-    }
-
-    enum SimAction {
-        // Client n makes an edit.
-        Edit(usize, Op),
-        // Server receives one op from client n and processes it.
-        ServerReceive(usize),
-        // Client n receives an op from server.
-        ClientReceive(usize),
-    }
-
-    impl Simulator {
-        /// Return a new simulator with `clients` clients that will
-        /// make `n_edits` edits uniformly across all clients.
-        fn new(n_clients: usize) -> Simulator {
-            let docs = (0..n_clients).map(|_| String::new()).collect();
-            let clients = (0..n_clients)
-                .map(|n| ClientEngine::new(n as SiteId))
-                .collect();
-            let site_seqs = (0..n_clients).map(|_n| 0).collect();
-            let server = ServerEngine::new();
-            let conn_to_client = (0..n_clients).map(|_| mpsc::channel()).collect();
-            let conn_to_server = (0..n_clients).map(|_| mpsc::channel()).collect();
-            Simulator {
-                docs,
-                clients,
-                site_seqs,
-                server,
-                conn_to_client,
-                conn_to_server,
-            }
-        }
-    }
-
-    /// Run a simulation that will generate `n_edits` edits.
-    /// `edit_Frequency` is the ratio between generating edits and
-    /// processing them, a value larger than 1 means edits are
-    /// generated faster than being processed.
-    fn run_simulation(n_edits: usize, edit_frequency: f64) {
-        let n_clients = 3;
-        let mut sim = Simulator::new(n_clients);
-        let edit_ratio: f64 = edit_frequency * (1f64 / ((1f64 + n_clients as f64) * 2f64 + 1f64));
-        let mut rng = rand::thread_rng();
-        let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
-
-        loop {
-            let draw: f64 = rand::random();
-            if draw < edit_ratio {
-                // Client generates an edit, processes it, and sends
-                // it to server.
-                let client_idx = rand::random::<usize>() % n_clients;
-                let client = &mut sim.clients[client_idx];
-                let doc = &sim.docs[client_idx];
-                let op = if rand::random::<f64>() < 0.5 {
-                    let pos = rand::random::<usize>() % doc.len();
-                    Op::Ins((pos as u64, alphabet.choose(&mut rng).unwrap().to_string()))
-                } else {
-                    let pos = rand::random::<usize>() % (doc.len() - 1);
-                    Op::Del(vec![(
-                        pos as u64,
-                        doc.chars().nth(pos).unwrap().to_string(),
-                    )])
-                };
-                sim.site_seqs[client_idx] += 1;
-                let fatop = make_fatop(op, &(client_idx as SiteId), sim.site_seqs[client_idx]);
-                client.process_local_op(fatop, OpKind::Original).unwrap();
-
-                if client.prev_op_acked() {
-                    // TODO: unwrap?
-                    let ops = client.package_local_ops().unwrap();
-                    sim.conn_to_server[client_idx].0.send(ops).unwrap();
-                }
-            } else if draw < (1f64 - edit_ratio) / 2f64 {
-                // Server receives an op from a random client.
-                let mut pool: Vec<usize> = vec![];
-                for idx in 0..n_clients {
-                    if sim.conn_to_server[idx].1.try_iter().next().is_some() {
-                        pool.push(idx);
-                    }
-                }
-                let idx = *pool.choose(&mut rng).unwrap();
-                let received_ops = sim.conn_to_server[idx].1.recv().unwrap();
-                let processed_ops = sim
-                    .server
-                    .process_ops(received_ops.ops, received_ops.context)
-                    .unwrap();
-                for (tx, _) in &sim.conn_to_client {
-                    for op in &processed_ops {
-                        tx.send(op.clone()).unwrap();
-                    }
-                }
-            } else {
-                todo!()
-            }
-        }
     }
 }

@@ -169,10 +169,17 @@ impl Doc {
         self.new_ops_rx.clone()
     }
 
+    fn editor_opkind_to_opkind(&self, kind: EditorOpKind) -> OpKind {
+        match kind {
+            EditorOpKind::Original => OpKind::Original,
+            EditorOpKind::Undo => todo!(),
+        }
+    }
+
     /// Send local `ops` and retrieve remote ops. `ops` can be empty,
     /// in which case the purpose is solely retrieving accumulated
     /// remote ops.
-    pub async fn send_op(&mut self, ops: Vec<GroupedOp>, kind: OpKind) -> CollabResult<Vec<Op>> {
+    pub async fn send_op(&mut self, ops: Vec<EditorOp>) -> CollabResult<Vec<Op>> {
         self.check_async_errors()?;
 
         // Get remote ops before locking engine.
@@ -191,8 +198,9 @@ impl Doc {
                 site: engine.site_id(),
                 op: op.op,
                 site_seq: self.site_seq,
+                kind: self.editor_opkind_to_opkind(op.kind),
             };
-            engine.process_local_op(fatop, op.group_seq, kind)?;
+            engine.process_local_op(fatop, op.group_seq)?;
         }
 
         // 2. Process pending remote ops.

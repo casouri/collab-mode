@@ -345,7 +345,7 @@ impl JSONRPCServer {
         params: SendOpParams,
     ) -> CollabResult<SendOpResp> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
-        let res = doc.send_op(params.ops, params.kind).await;
+        let res = doc.send_op(params.ops).await;
         if res.is_err() {
             self.remove_doc(&params.doc_id, &params.server_id);
         }

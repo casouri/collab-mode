@@ -12,15 +12,19 @@ pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
 pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
-pub type LeanOp = crate::op::LeanOp<Op>;
+
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]
+pub enum EditorOpKind {
+    Original,
+    Undo,
+}
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GroupedOp {
+pub struct EditorOp {
     pub op: Op,
-    // Allow the field to be absent.
-    #[serde(default)]
-    pub group_seq: Option<GroupSeq>,
+    pub group_seq: GroupSeq,
+    pub kind: EditorOpKind,
 }
 
 /// Basically (Doc, Server). Uniquely identifies a document.

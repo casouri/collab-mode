@@ -51,10 +51,9 @@ pub struct ShareFileResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendOpParams {
-    pub ops: Vec<GroupedOp>,
+    pub ops: Vec<EditorOp>,
     pub doc_id: DocId,
     pub server_id: ServerId,
-    pub kind: OpKind,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
