@@ -169,13 +169,6 @@ impl Doc {
         self.new_ops_rx.clone()
     }
 
-    fn editor_opkind_to_opkind(&self, kind: EditorOpKind) -> OpKind {
-        match kind {
-            EditorOpKind::Original => OpKind::Original,
-            EditorOpKind::Undo => todo!(),
-        }
-    }
-
     /// Send local `ops` and retrieve remote ops. `ops` can be empty,
     /// in which case the purpose is solely retrieving accumulated
     /// remote ops.
@@ -198,9 +191,10 @@ impl Doc {
                 site: engine.site_id(),
                 op: op.op,
                 site_seq: self.site_seq,
-                kind: self.editor_opkind_to_opkind(op.kind),
+                kind: OpKind::Original, // Use a dummy value.
+                group_seq: op.group_seq,
             };
-            engine.process_local_op(fatop, op.group_seq)?;
+            engine.process_local_op(fatop, op.kind)?;
         }
 
         // 2. Process pending remote ops.

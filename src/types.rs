@@ -17,6 +17,7 @@ pub type FatOp = crate::op::FatOp<Op>;
 pub enum EditorOpKind {
     Original,
     Undo,
+    Redo,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

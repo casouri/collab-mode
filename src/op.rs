@@ -300,6 +300,8 @@ pub struct FatOp<O> {
     pub site_seq: LocalSeq,
     /// The kind of this op.
     pub kind: OpKind,
+    /// The group sequence.
+    pub group_seq: GroupSeq,
 }
 
 impl<O: Operation> FatOp<O> {
@@ -370,9 +372,13 @@ pub fn find_ops_to_skip<O>(ops: &[FatOp<O>]) -> Vec<bool> {
         return vec![];
     }
     let mut bitmap = vec![false; ops.len()];
-    for idx in ops.len() - 1..0 {
+    for idx in (0..ops.len()).rev() {
         if let OpKind::Undo(delta) = ops[idx].kind {
-            if bitmap[idx] {
+            if !bitmap[idx] && idx >= delta {
+                // It's possible for delta to be greater than idx, in
+                // that case the inverse is in `ops` but the original
+                // isn't, and we don't need to skip the inverse.
+                bitmap[idx] = true;
                 bitmap[idx - delta] = true;
             }
         }
@@ -387,6 +393,9 @@ pub fn quatradic_transform<O: Operation>(
 ) -> (Vec<FatOp<O>>, Vec<FatOp<O>>) {
     let skip1 = find_ops_to_skip(&ops1[..]);
     let skip2 = find_ops_to_skip(&ops2[..]);
+
+    println!("skips: {:?}, {:?}", &skip1, &skip2);
+    println!("ops: {:?}, {:?}", &ops1, &ops2);
 
     let mut idx2 = 0;
     for op2 in &mut ops2 {
@@ -418,6 +427,7 @@ mod tests {
             doc: 0,
             op,
             kind: OpKind::Original,
+            group_seq: 1, // Dummy value.
         }
     }
 
@@ -429,6 +439,7 @@ mod tests {
             doc: 0,
             op,
             kind: OpKind::Undo(undo_delta),
+            group_seq: 1, // Dummy value.
         }
     }
 
@@ -620,6 +631,7 @@ mod tests {
         assert_eq!(op, result_op);
     }
 
+    // TODO: Better and more tricky tests.
     #[test]
     fn test_batch_transform_with_skip_1() {
         // A do and an undo. Start with "XX" in the doc.
@@ -629,7 +641,8 @@ mod tests {
             make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
         ];
         let mut op = make_fatop(Op::Ins((1, "C".to_string())), 2);
-        let result_op = make_fatop(Op::Ins((2, "C".to_string())), 2);
+        let result_op = make_fatop(Op::Ins((1, "C".to_string())), 2);
+        // We expect "ACX".
         op.batch_transform(&ops[..]);
         assert_eq!(op, result_op);
     }
@@ -646,7 +659,33 @@ mod tests {
         ];
         let mut op = make_fatop(Op::Ins((1, "C".to_string())), 2);
         let result_op = make_fatop(Op::Ins((2, "C".to_string())), 2);
+        // We expect "ABCX".
         op.batch_transform(&ops[..]);
         assert_eq!(op, result_op);
+    }
+
+    #[test]
+    fn test_find_ops_to_skip_1() {
+        let ops = vec![
+            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Ins((0, "A".to_string())), 1),
+            make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
+            make_fatop(Op::Ins((1, "B".to_string())), 1),
+            make_undo_fatop(Op::Del(vec![(2, "X".to_string())]), 1, 2),
+        ];
+        let bitmap = find_ops_to_skip(&ops[..]);
+        assert_eq!(bitmap, vec![false, false, true, false, true]);
+    }
+
+    #[test]
+    fn test_find_ops_to_skip_2() {
+        let ops = vec![
+            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Ins((0, "A".to_string())), 1),
+            make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 3),
+            //                                                ^
+        ];
+        let bitmap = find_ops_to_skip(&ops[..]);
+        assert_eq!(bitmap, vec![false, false, false]);
     }
 }
