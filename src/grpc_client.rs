@@ -112,15 +112,15 @@ impl DocServer for GrpcClient {
         })
     }
 
-    async fn send_op(&mut self, ops: Vec<ContextOps>) -> CollabResult<()> {
+    async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()> {
+        let context = ops.context;
         let ops = ops
+            .ops
             .iter()
             .map(|op| bincode::serialize(op).unwrap())
             .collect();
         self.client
-            .send_op(Request::new(rpc::VecContextOps {
-                vec_context_ops: ops,
-            }))
+            .send_op(Request::new(rpc::ContextOps { context, ops }))
             .await?;
         Ok(())
     }

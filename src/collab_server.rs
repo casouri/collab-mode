@@ -51,7 +51,7 @@ impl DocServer for LocalServer {
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
         self.delete_file_1(doc_id).await
     }
-    async fn send_op(&mut self, ops: Vec<ContextOps>) -> CollabResult<()> {
+    async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()> {
         self.send_op_1(ops).await
     }
     async fn recv_op(
@@ -207,16 +207,14 @@ impl LocalServer {
     }
 
     /// Send local ops to the server. TODO: access control.
-    pub async fn send_op_1(&self, vec_ops: Vec<ContextOps>) -> CollabResult<()> {
-        let doc_id = vec_ops[0].doc();
+    pub async fn send_op_1(&self, ops: ContextOps) -> CollabResult<()> {
+        let doc_id = ops.doc();
         if let Some(doc) = self.docs.read().await.get(&doc_id) {
             let mut doc = doc.lock().await;
 
-            log::debug!(
-                "send_op() Local server receive ops, processing: {:?}",
-                &vec_ops
-            );
-            let ops = doc.engine.process_ops(vec_ops)?;
+            log::debug!("send_op() Local server receive ops, processing: {:?}", &ops);
+            let ops = doc.engine.process_ops(ops.ops, ops.context)?;
+
             for op in ops {
                 doc.apply_op(op.op)?;
             }
@@ -337,19 +335,19 @@ impl doc_server_server::DocServer for LocalServer {
         Ok(Response::new(rpc::DocId { doc_id }))
     }
 
-    async fn send_op(&self, request: Request<rpc::VecContextOps>) -> TResult<Response<rpc::Empty>> {
+    async fn send_op(&self, request: Request<rpc::ContextOps>) -> TResult<Response<rpc::Empty>> {
         let inner = request.into_inner();
-        let context_ops: Vec<ContextOps> = inner
-            .vec_context_ops
+        let context = inner.context;
+        let ops: Vec<FatOp> = inner
+            .ops
             .into_iter()
-            .map(|context_ops| bincode::deserialize(&context_ops[..]).unwrap())
+            .map(|op| bincode::deserialize(&op[..]).unwrap())
             .collect();
-
         log::debug!(
             "send_op() gRPC server receives ops, passing to local server to process: {:?}",
-            &context_ops
+            &ops
         );
-        self.send_op_1(context_ops).await?;
+        self.send_op_1(ContextOps { context, ops }).await?;
         Ok(Response::new(rpc::Empty {}))
     }
 

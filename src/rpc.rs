@@ -17,9 +17,11 @@ pub struct FatOp {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct VecContextOps {
+pub struct ContextOps {
+    #[prost(uint32, tag = "1")]
+    pub context: u32,
     #[prost(bytes = "vec", repeated, tag = "2")]
-    pub vec_context_ops: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    pub ops: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -202,7 +204,7 @@ pub mod doc_server_client {
         }
         pub async fn send_op(
             &mut self,
-            request: impl tonic::IntoRequest<super::VecContextOps>,
+            request: impl tonic::IntoRequest<super::ContextOps>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status> {
             self.inner
                 .ready()
@@ -322,7 +324,7 @@ pub mod doc_server_server {
         ) -> std::result::Result<tonic::Response<super::FileList>, tonic::Status>;
         async fn send_op(
             &self,
-            request: tonic::Request<super::VecContextOps>,
+            request: tonic::Request<super::ContextOps>,
         ) -> std::result::Result<tonic::Response<super::Empty>, tonic::Status>;
         /// Server streaming response type for the RecvOp method.
         type RecvOpStream: futures_core::Stream<
@@ -522,7 +524,7 @@ pub mod doc_server_server {
                 "/rpc.DocServer/SendOp" => {
                     #[allow(non_camel_case_types)]
                     struct SendOpSvc<T: DocServer>(pub Arc<T>);
-                    impl<T: DocServer> tonic::server::UnaryService<super::VecContextOps>
+                    impl<T: DocServer> tonic::server::UnaryService<super::ContextOps>
                     for SendOpSvc<T> {
                         type Response = super::Empty;
                         type Future = BoxFuture<
@@ -531,7 +533,7 @@ pub mod doc_server_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::VecContextOps>,
+                            request: tonic::Request<super::ContextOps>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move { (*inner).send_op(request).await };

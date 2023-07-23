@@ -37,9 +37,8 @@ impl ContextOps {
 struct GlobalHistory {
     /// The global ops section.
     global: Vec<FatOp>,
-    /// The local ops section. The local part is made of many context
-    /// op groups.
-    local: Vec<ContextOps>,
+    /// The local ops section.
+    local: Vec<FatOp>,
     /// A vector of pointer to the locally generated ops in the
     /// history. These ops are what the editor can undo. We use global
     /// seq as pointers, but these pointers can also refer to ops in
@@ -52,27 +51,6 @@ struct GlobalHistory {
     undo_tip: Option<usize>,
 }
 
-/// Return the ops in `ops` whose global seq is greater than `seq`.
-/// Note that `ops` must be made of only globals ops.
-fn ops_after(ops: Vec<FatOp>, seq: GlobalSeq) -> EngineResult<Vec<FatOp>> {
-    let mut idx = 0;
-    for op in &ops {
-        if op.seq.is_none() {
-            return Err(EngineError::SeqMissing(op.clone()));
-        }
-        if op.seq.unwrap() <= seq {
-            idx += 1;
-        } else {
-            break;
-        }
-    }
-    if idx < ops.len() {
-        Ok(ops[idx..].to_vec())
-    } else {
-        Ok(vec![])
-    }
-}
-
 impl GlobalHistory {
     /// Get the global ops with sequence number larger than `seq`.
     fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
@@ -83,62 +61,13 @@ impl GlobalHistory {
         }
     }
 
-    /// Add a new local `op` to the local history.
-    /// Add it to the correct context group.
-    fn add_local_op(&mut self, op: FatOp) {
-        let current_global_seq = self.global.len() as u32;
-        if self.local.len() == 0 {
-            self.local.push(ContextOps {
-                context: current_global_seq,
-                ops: vec![op],
-            });
-        } else {
-            let last_context = self.local.last().unwrap().context;
-            if last_context == current_global_seq {
-                self.local.last_mut().unwrap().ops.push(op);
-            } else {
-                self.local.push(ContextOps {
-                    context: current_global_seq,
-                    ops: vec![op],
-                });
-            }
-        }
-    }
-
-    /// If there is at least one op in the local history, return a
-    /// reference to the first one.
-    fn peek_first_local_op(&self) -> Option<&FatOp> {
-        self.local.first().map(|context_ops| &context_ops.ops[0])
-    }
-
-    /// If there is at least one op in the local history, return a
-    /// reference to the last one.
-    fn peek_last_local_op(&self) -> Option<&FatOp> {
-        self.local
-            .last()
-            .map(|context_ops| &context_ops.ops[context_ops.ops.len() - 1])
-    }
-
     /// If there is at least one op in the local history, pop it and
     /// return it.
     fn pop_first_local_op(&mut self) -> Option<FatOp> {
         if self.local.len() == 0 {
             None
         } else {
-            // It's ok that we pop ops from local history one-by-one,
-            // rather than popping all the ops in the same context op
-            // together. Because when we send the ops to the server,
-            // we send ops in the same context together, when the
-            // server send them back, they must be still together. So
-            // what will happen is that all the ops in the same
-            // context are popped continuously one-by-one. No danger
-            // of funky things happening.
-            let ops = &mut self.local[0].ops;
-            let op = ops.remove(0);
-            if ops.len() == 0 {
-                self.local.remove(0);
-            }
-            Some(op)
+            Some(self.local.remove(0))
         }
     }
 
@@ -279,16 +208,24 @@ impl ClientEngine {
     /// Return whether the previous ops we sent to the server have
     /// been acked.
     fn prev_op_acked(&self) -> bool {
-        if let Some(op) = self.gh.peek_first_local_op() {
+        if let Some(op) = self.gh.local.first() {
             if op.site_seq == self.last_site_seq_sent_out + 1 {
-                true
-            } else {
-                false
+                return true;
             }
+        }
+        return false;
+    }
+
+    /// Return pending local ops.
+    fn package_local_ops(&self) -> Option<ContextOps> {
+        let ops: Vec<FatOp> = self.gh.local.clone();
+        if ops.len() > 0 {
+            Some(ContextOps {
+                context: self.current_seq,
+                ops,
+            })
         } else {
-            // This value doesn't matter, if local is empty, we are
-            // not sending out anything anyway.
-            false
+            None
         }
     }
 
@@ -297,17 +234,18 @@ impl ClientEngine {
     /// not time. (Client can only send out new local ops when
     /// previous in-flight local ops are acked by the server.) The
     /// returned ops must be sent to server for engine to work right.
-    pub fn maybe_package_local_ops(&mut self) -> Option<Vec<ContextOps>> {
-        if !self.prev_op_acked() {
-            return None;
+    pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps> {
+        if self.prev_op_acked() {
+            if let Some(context_ops) = self.package_local_ops() {
+                let op = context_ops.ops.last().unwrap();
+                self.last_site_seq_sent_out = op.site_seq;
+                Some(context_ops)
+            } else {
+                None
+            }
+        } else {
+            None
         }
-        let context_ops = self.gh.local.clone();
-        if context_ops.len() == 0 {
-            return None;
-        }
-        let op = self.gh.peek_last_local_op().unwrap();
-        self.last_site_seq_sent_out = op.site_seq;
-        Some(context_ops)
     }
 
     /// Process local op, possibly transform it and add it to history.
@@ -325,14 +263,12 @@ impl ClientEngine {
 
         op.kind = self.gh.process_opkind(kind)?;
 
-        self.gh.add_local_op(op);
+        self.gh.local.push(op);
         Ok(())
     }
 
     /// Process remote op, transform it and add it to history. Return
-    /// the ops for the editor to apply, if any. When calling this
-    /// function repeatedly to process a batch of ops that came from
-    /// the server, make sure you don't all other function in between.
+    /// the ops for the editor to apply, if any.
     pub fn process_remote_op(&mut self, mut op: FatOp) -> EngineResult<Option<FatOp>> {
         log::debug!(
             "process_remote_op({:?}) current_seq: {}",
@@ -348,11 +284,10 @@ impl ClientEngine {
         if op.site == self.site {
             // In global history, move the op from the local part to
             // the global part.
-            let local_op = self.gh.pop_first_local_op();
-            if local_op.is_none() {
+            if self.gh.local.len() == 0 {
                 return Err(EngineError::OpMissing(op.clone()));
             }
-            let local_op = local_op.unwrap();
+            let local_op = self.gh.local.remove(0);
             if local_op.site != op.site || local_op.site_seq != op.site_seq {
                 return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
             }
@@ -362,47 +297,21 @@ impl ClientEngine {
         } else {
             // We received an op generated at another site, transform
             // it, add it to history, and return it.
-            //
-            // Why do we transform each context group from scratch
-            // every time? This way we can properly skip over
-            // original-inverse pairs in the remote ops.
-            if self.gh.local.len() > 0 {
-                let first_context = self.gh.local[0].context;
-                let mut global_ops = self.gh.ops_after(first_context);
-                global_ops.push(op);
-
-                for context_ops in &self.gh.local {
-                    // Suppose global history is [1 2 A], op is B.
-                    // Suppose context_ops = [3 4], and context = 2,
-                    // meaning context set C(3) = [1 2].
-                    global_ops = ops_after(global_ops, context_ops.context)?;
-                    // Now global_ops is [A B]. Both context_ops and
-                    // global_ops has context = [1 2].
-                    (global_ops, _) = quatradic_transform(global_ops, context_ops.ops.clone());
-                    // Now global_ops = [A' B'] has context = [1 2 3
-                    // 4], and is suitable for transforming with the
-                    // next context group.
-                }
-
-                // Now op is properly transformed.
-                op = global_ops.remove(global_ops.len() - 1);
-            };
-
+            let new_local_ops = op.symmetric_transform(&self.gh.local[..]);
             self.current_seq = seq;
+            self.gh.local = new_local_ops;
             self.gh.global.push(op.clone());
 
             // Update undo delta in local history.
             let mut offset = 0;
-            for context_ops in &mut self.gh.local {
-                for op in &mut context_ops.ops {
-                    let kind = op.kind;
-                    if let OpKind::Undo(delta) = kind {
-                        if offset < delta {
-                            op.kind = OpKind::Undo(delta + 1);
-                        }
+            for op in &mut self.gh.local {
+                let kind = op.kind;
+                if let OpKind::Undo(delta) = kind {
+                    if offset < delta {
+                        op.kind = OpKind::Undo(delta + 1);
                     }
-                    offset += 1;
                 }
+                offset += 1;
             }
 
             // Update inferred global seq.
@@ -449,40 +358,27 @@ impl ServerEngine {
         }
     }
 
-    /// Process ops from a client, return the transformed ops.
-    pub fn process_ops(&mut self, vec_context_ops: Vec<ContextOps>) -> EngineResult<Vec<FatOp>> {
-        if vec_context_ops.len() == 0 {
-            return Ok(vec![]);
-        }
-        let first_context = vec_context_ops[0].context;
-        println!("first_context: {:?}", first_context);
-        let mut l1 = self.gh.ops_after(first_context);
-        println!("l1: {:?}", l1);
-        let mut result_ops = vec![];
-        // Suppose global ops is [1 2 A B C], and vec_context_ops =
-        // [[3 4] [5 6]], where [3 4]'s context is 2, meaning its
-        // context set is {1 2}, [5 6]'s context is B, meaning its
-        // context set is {1 2 A B 3 4}. Then l1 = [A B C].
-        for context_ops in vec_context_ops {
-            println!("context: {:?}", context_ops.context);
-            l1 = ops_after(l1, context_ops.context)?;
-            println!("l1: {:?}", l1);
-            let transformed_ops;
-            (l1, transformed_ops) = quatradic_transform(l1, context_ops.ops);
-            println!("l1': {:?} transformed_ops: {:?}", &l1, &transformed_ops);
-            // Now l1 is [A' B' C'] whose context is {1 2 3 4},
-            // meaning [C']'s context set is { 1 2 A B 3 4}, which is
-            // suitable for transforming with [5 6] in the next
-            // iteration.
-            result_ops.extend(transformed_ops)
-        }
+    /// Process `op` from a client, return the transformed `ops`.
+    pub fn process_ops(
+        &mut self,
+        mut ops: Vec<FatOp>,
+        context: GlobalSeq,
+    ) -> EngineResult<Vec<FatOp>> {
+        let l1 = self.gh.ops_after(context);
+        // Transform ops against L1, then we can append ops to global
+        // history. `quatradic_transform` can skip coupled
+        // original-inverse pairs but can't take care of decoupled
+        // ones. But we don't care. It's too expensive to handle
+        // decoupled original-inverse pairs.
+        (_, ops) = quatradic_transform(l1, ops);
+
         // Assign sequence number for each op in ops.
-        for mut op in &mut result_ops {
+        for mut op in &mut ops {
             op.seq = Some(self.current_seq + 1);
             self.current_seq += 1;
         }
-        self.gh.global.extend_from_slice(&result_ops[..]);
-        Ok(result_ops)
+        self.gh.global.extend_from_slice(&ops[..]);
+        Ok(ops)
     }
 }
 

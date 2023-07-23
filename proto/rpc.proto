@@ -13,8 +13,9 @@ message FatOp {
   bytes op = 1;
 }
 
-message VecContextOps {
-  repeated bytes vec_context_ops = 2;
+message ContextOps {
+  uint32 context = 1;
+  repeated bytes ops = 2;
 }
 
 message FileOps {
@@ -56,7 +57,7 @@ message FileToShare {
 service DocServer {
   rpc ShareFile(FileToShare) returns (DocId);
   rpc ListFiles(Empty) returns (FileList);
-  rpc SendOp(VecContextOps) returns (Empty);
+  rpc SendOp(ContextOps) returns (Empty);
   rpc RecvOp(FileOps) returns (stream FatOp);
   rpc RequestFile(DocId) returns (stream SnapshotChunk);
   rpc DeleteFile(DocId) returns (Empty);

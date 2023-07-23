@@ -296,7 +296,7 @@ pub struct FatOp<O> {
     pub op: O,
     /// Site uuid. The site that generated this op.
     pub site: SiteId,
-    /// Site-local sequence number. TODO: is this necessary?
+    /// Site-local sequence number.
     pub site_seq: LocalSeq,
     /// The kind of this op.
     pub kind: OpKind,
@@ -393,9 +393,6 @@ pub fn quatradic_transform<O: Operation>(
 ) -> (Vec<FatOp<O>>, Vec<FatOp<O>>) {
     let skip1 = find_ops_to_skip(&ops1[..]);
     let skip2 = find_ops_to_skip(&ops2[..]);
-
-    println!("skips: {:?}, {:?}", &skip1, &skip2);
-    println!("ops: {:?}, {:?}", &ops1, &ops2);
 
     let mut idx2 = 0;
     for op2 in &mut ops2 {
