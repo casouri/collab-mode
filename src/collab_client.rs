@@ -63,7 +63,7 @@ impl Doc {
         let (err_tx, err_rx) = mpsc::channel(2);
         let doc_id = server.share_file(file_name, file).await?;
 
-        let mut doc = make_doc(server.site_id(), doc_id.clone(), err_rx);
+        let mut doc = make_doc(server.site_id(), doc_id.clone(), 0, err_rx);
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
         let notifier_tx = Arc::clone(&doc.new_ops_tx);
@@ -109,19 +109,19 @@ impl Doc {
         doc_id: DocId,
         external_notifier: std::sync::mpsc::Sender<DocDesignator>,
     ) -> CollabResult<(Doc, String)> {
+        // Download file.
+        let snapshot = server.request_file(&doc_id).await?;
+        let stream = server.recv_op(&doc_id, snapshot.seq).await?;
+
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
         let site_id = server.site_id();
-        let mut doc = make_doc(site_id.clone(), doc_id.clone(), err_rx);
+        let mut doc = make_doc(site_id.clone(), doc_id.clone(), snapshot.seq, err_rx);
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
         let notifier_tx = Arc::clone(&doc.new_ops_tx);
         let notifier_rx = doc.new_ops_rx.clone();
         let engine = Arc::clone(&doc.engine);
-
-        // Download file.
-        let snapshot = server.request_file(&doc_id).await?;
-        let stream = server.recv_op(&doc_id, snapshot.seq).await?;
 
         // Spawn a thread that receives remote ops.
         let handle = spawn_thread_receive_remote_op(
@@ -212,13 +212,13 @@ impl Doc {
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.
-    pub async fn undo(&mut self) -> CollabResult<Option<Op>> {
+    pub async fn undo(&mut self) -> CollabResult<Vec<Op>> {
         self.check_async_errors()?;
         Ok(self.engine.lock().await.generate_undo_op())
     }
 
     /// Return `n` consecutive redo ops from the current undo tip.
-    pub async fn redo(&mut self) -> CollabResult<Option<Op>> {
+    pub async fn redo(&mut self) -> CollabResult<Vec<Op>> {
         self.check_async_errors()?;
         Ok(self.engine.lock().await.generate_redo_op())
     }
@@ -235,8 +235,13 @@ impl Doc {
 
 // *** Subroutines for Doc::new_share_file and new_connect_file
 
-fn make_doc(site_id: SiteId, doc_id: DocId, err_rx: mpsc::Receiver<CollabError>) -> Doc {
-    let engine = Arc::new(Mutex::new(ClientEngine::new(site_id.clone())));
+fn make_doc(
+    site_id: SiteId,
+    doc_id: DocId,
+    base_seq: GlobalSeq,
+    err_rx: mpsc::Receiver<CollabError>,
+) -> Doc {
+    let engine = Arc::new(Mutex::new(ClientEngine::new(site_id.clone(), base_seq)));
     let remote_op_buffer = Arc::new(Mutex::new(vec![]));
     let (notifier_tx, notifier_rx) = watch::channel(());
     let thread_handlers = vec![];

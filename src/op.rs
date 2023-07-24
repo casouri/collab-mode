@@ -35,6 +35,7 @@ pub enum OpKind {
 
 pub trait Operation: std::fmt::Debug + Clone + PartialEq + Eq {
     fn transform(&self, base: &Self, self_site: &SiteId, base_site: &SiteId) -> Self;
+    fn inverse(&mut self);
 }
 
 // *** Op and tranform functions
@@ -58,6 +59,10 @@ pub enum SimpleOp {
 }
 
 impl Operation for SimpleOp {
+    fn inverse(&mut self) {
+        todo!()
+    }
+
     fn transform(&self, base: &SimpleOp, self_site: &SiteId, base_site: &SiteId) -> SimpleOp {
         match (self, base) {
             (SimpleOp::Ins(pos1, char1), SimpleOp::Ins(pos2, _)) => {
@@ -234,6 +239,20 @@ fn transform_dd(
 }
 
 impl Operation for Op {
+    /// Create the inverse of self. If the op is a deletion with more
+    /// than one range, only the first range is reversed and the rest
+    /// are ignored. (As for now, we only need to reverse original
+    /// ops, and original delete op only have one range.)
+    fn inverse(&mut self) {
+        match self {
+            Op::Ins((pos, str)) => *self = Op::Del(vec![(*pos, str.clone())]),
+            Op::Del(ops) => {
+                assert!(ops.len() == 1);
+                *self = Op::Ins((ops[0].0, ops[0].1.clone()));
+            }
+        }
+    }
+
     fn transform(&self, base: &Op, self_site: &SiteId, base_site: &SiteId) -> Op {
         match (self, base) {
             (Op::Ins(op), Op::Ins(base)) => Op::Ins(transform_ii(op, base, self_site, base_site)),
@@ -259,22 +278,6 @@ impl Operation for Op {
                     }
                 }
                 Op::Del(new_ops)
-            }
-        }
-    }
-}
-
-impl Op {
-    /// Create the inverse of self. If the op is a deletion with more
-    /// than one range, only the first range is reversed and the rest
-    /// are ignored. (As for now, we only need to reverse original
-    /// ops, and original delete op only have one range.)
-    pub fn inverse(&self) -> Op {
-        match self {
-            Op::Ins((pos, str)) => Op::Del(vec![(*pos, str.clone())]),
-            Op::Del(ops) => {
-                assert!(ops.len() == 1);
-                Op::Ins((ops[0].0, ops[0].1.clone()))
             }
         }
     }
@@ -358,6 +361,11 @@ impl<O: Operation> FatOp<O> {
             idx += 1;
         }
         new_ops
+    }
+
+    /// Inverse the op.
+    pub fn inverse(&mut self) {
+        self.op.inverse();
     }
 }
 

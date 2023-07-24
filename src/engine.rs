@@ -61,6 +61,18 @@ impl GlobalHistory {
         }
     }
 
+    /// Return the global and local ops after `seq`.
+    pub fn all_ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
+        let mut ops = vec![];
+        if seq < self.global.len() as GlobalSeq {
+            ops.extend_from_slice(&self.global[(seq as usize)..]);
+            ops.extend_from_slice(&self.local[..]);
+        } else {
+            ops.extend_from_slice(&self.local[(seq as usize) - self.global.len()..]);
+        }
+        ops
+    }
+
     /// If there is at least one op in the local history, pop it and
     /// return it.
     fn pop_first_local_op(&mut self) -> Option<FatOp> {
@@ -71,7 +83,26 @@ impl GlobalHistory {
         }
     }
 
-    pub fn process_opkind(&mut self, kind: EditorOpKind) -> EngineResult<OpKind> {
+    /// Return the op referenced by the `idxidx`th pointer in the undo
+    /// queue.
+    fn nth_in_undo_queue(&self, idxidx: usize) -> &FatOp {
+        let seq = self.undo_queue[idxidx] as usize;
+        let idx = seq - 1;
+        if idx < self.global.len() {
+            &self.global[idx]
+        } else {
+            &self.local[idx - self.global.len()]
+        }
+    }
+
+    /// Process a local op according to its kind, return a suitable
+    /// OpKind for the op. `op_seq` is the inferred global seq for the
+    /// local op.
+    pub fn process_opkind(
+        &mut self,
+        kind: EditorOpKind,
+        op_seq: GlobalSeq,
+    ) -> EngineResult<OpKind> {
         let seq_of_new_op = self.global.len() as usize + self.local.len() + 1 + 1;
         match kind {
             EditorOpKind::Original => {
@@ -100,6 +131,8 @@ impl GlobalHistory {
                     seq_of_orig = *self.undo_queue.last().unwrap();
                     self.undo_tip = Some(self.undo_queue.len() - 1);
                 }
+                // Next redo will undo this undo op.
+                self.undo_queue[self.undo_tip.unwrap()] = op_seq;
                 Ok(OpKind::Undo(seq_of_new_op - seq_of_orig as usize))
             }
             EditorOpKind::Redo => {
@@ -110,6 +143,8 @@ impl GlobalHistory {
                     } else {
                         self.undo_tip = Some(idx + 1);
                     }
+                    // Next undo will undo this redo op.
+                    self.undo_queue[idx] = op_seq;
                     Ok(OpKind::Undo(seq_of_new_op - seq_of_inverse as usize))
                 } else {
                     Err(EngineError::UndoError("No ops to redo".to_string()))
@@ -190,7 +225,7 @@ type EngineResult<T> = Result<T, EngineError>;
 // *** Processing functions
 
 impl ClientEngine {
-    pub fn new(site: SiteId) -> ClientEngine {
+    pub fn new(site: SiteId, base_seq: GlobalSeq) -> ClientEngine {
         ClientEngine {
             gh: GlobalHistory {
                 global: vec![],
@@ -199,7 +234,7 @@ impl ClientEngine {
                 undo_tip: None,
             },
             site,
-            current_seq: 0,
+            current_seq: base_seq,
             current_site_seq: 0,
             last_site_seq_sent_out: 0,
         }
@@ -261,9 +296,16 @@ impl ClientEngine {
         }
         self.current_site_seq = op.site_seq;
 
-        op.kind = self.gh.process_opkind(kind)?;
+        let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
+        op.kind = self.gh.process_opkind(kind, inferred_seq)?;
+
+        match &op.kind {
+            OpKind::Original => self.gh.undo_queue.push(inferred_seq),
+            OpKind::Undo(_) => (),
+        }
 
         self.gh.local.push(op);
+
         Ok(())
     }
 
@@ -282,8 +324,7 @@ impl ClientEngine {
         }
 
         if op.site == self.site {
-            // In global history, move the op from the local part to
-            // the global part.
+            // Move the op from the local part to the global part.
             if self.gh.local.len() == 0 {
                 return Err(EngineError::OpMissing(op.clone()));
             }
@@ -296,7 +337,8 @@ impl ClientEngine {
             Ok(None)
         } else {
             // We received an op generated at another site, transform
-            // it, add it to history, and return it.
+            // the local history against it, add it to history, and
+            // return it.
             let new_local_ops = op.symmetric_transform(&self.gh.local[..]);
             self.current_seq = seq;
             self.gh.local = new_local_ops;
@@ -332,16 +374,73 @@ impl ClientEngine {
         }
     }
 
-    /// Generate an undo op from the current undo tip. Return None if
-    /// there are no more ops to undo.
-    pub fn generate_undo_op(&mut self) -> Option<Op> {
-        todo!()
+    /// Generate undo or redo op from the current undo tip.
+    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<Op> {
+        let mut idxidx;
+        if redo {
+            if self.gh.undo_tip.is_none() {
+                return vec![];
+            }
+            idxidx = self.gh.undo_tip.unwrap();
+        } else {
+            idxidx = self
+                .gh
+                .undo_tip
+                .or_else(|| Some(self.gh.undo_queue.len()))
+                .unwrap();
+            if idxidx == 0 {
+                return vec![];
+            }
+        }
+
+        let mut prev_group_seq = None;
+        let mut ops = vec![];
+        let condition = |idxidx| {
+            if redo {
+                idxidx < self.gh.undo_queue.len()
+            } else {
+                idxidx > 0
+            }
+        };
+
+        while condition(idxidx) {
+            if !redo {
+                idxidx -= 1;
+            }
+
+            let mut op = self.gh.nth_in_undo_queue(idxidx).clone();
+
+            if let Some(p_g_seq) = prev_group_seq {
+                if p_g_seq != op.group_seq {
+                    break;
+                }
+            }
+            prev_group_seq = Some(op.group_seq);
+
+            op.inverse();
+            let seq = self.gh.undo_queue[idxidx];
+            let mut transform_base = self.gh.all_ops_after(seq);
+            transform_base.extend_from_slice(&ops[..]);
+            op.batch_transform(&transform_base);
+            ops.push(op);
+
+            if redo {
+                idxidx += 1;
+            }
+        }
+        ops.into_iter().map(|op| op.op).collect()
     }
 
-    /// Generate a redo op from the current undo tip. Return None if
-    /// there are no more ops to redo.
-    pub fn generate_redo_op(&mut self) -> Option<Op> {
-        todo!()
+    /// Generate an undo op from the current undo tip. Return an empty
+    /// vector if there's no more op to undo.
+    pub fn generate_undo_op(&mut self) -> Vec<Op> {
+        self.generate_undo_op_1(false)
+    }
+
+    /// Generate a redo op from the current undo tip. Return en empty
+    /// vector if there's no more ops to redo.
+    pub fn generate_redo_op(&mut self) -> Vec<Op> {
+        self.generate_undo_op_1(true)
     }
 }
 

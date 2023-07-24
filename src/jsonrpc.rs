@@ -428,10 +428,8 @@ impl JSONRPCServer {
             UndoKind::Redo => doc.redo().await,
         };
         match res {
-            Ok(op) => {
-                let resp = SendOpResp {
-                    ops: if let Some(op) = op { vec![op] } else { vec![] },
-                };
+            Ok(ops) => {
+                let resp = SendOpResp { ops };
                 Ok(resp)
             }
             Err(err) => {
