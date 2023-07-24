@@ -58,48 +58,109 @@ ops from the server arrives. Then it process ops from the server, then
 it sends transformed remote ops to the editor.
 
 Let’s see what happens if we don’t buffer ops from server or don’t
-block user input. Imagine a remote op o\_r arrives, and the collab
+block user input. Imagine a remote op R arrives, and the collab
 process transforms it and put it in the history. In the meantime, the
-user makes an edit o₁ in the editor, and the editor sends o₁ to the
+user makes an edit A in the editor, and the editor sends A to the
 collab process. The collab process can’t append it to the end of L₂:
-Putting it to the end of L₂ implies that the o₁’s context is every op
-in L₁ and L₂, but clearly o\_r (which is at the end of L₁) is not in
-o₁’s context.
+Putting it to the end of L₂ implies that the A’s context is every op
+in L₁ and L₂, but clearly R (which is at the end of L₁) is not in A’s
+context.
 
-# Undo
+# Undo mechanism
+
+In the simplest term, to undo a op B in history [A B C], we compute
+the inverse of B, I(B), treat it as an op that comes after B but
+concurrent with all other ops after B in the history. So in this case
+we transform I(B) against C, and gets the undo op that can be applied
+to the document.
 
 According to the COT paper [3], there are two properties, IP2 and IP3,
 that the transform function need to satisfy in order to archive
-convergence with undo operations. They are like TP1 and TP2, namely,
-you can either use a transform function that satisfies them, or use a
-control algorithm that avoids them.
+convergence with undo operations. Like TP1 and TP2, you can either use
+a transform function that satisfies them, or use a control algorithm
+that avoids them.
 
 COT avoids both IP2 and IP3 in its control algorithm, and our
-algorithm does the same.
+algorithm does the same (mostly).
 
-IP2 says sequentially transforming an operation o against another
-operation o₁ and its inverse I(o₁) should end up giving you o back.
-This sounds trivially satisfiable but isn’t. A trivial example: let o
-= del(0, abc), o₁ = del(0, abc). With a normal transform function,
+IP2 says sequentially transforming an operation A against another
+operation B and its inverse I(B) should end up giving you o back.
+This sounds trivially satisfiable but isn’t. A trivial example: let A
+= del(0, abc), B = del(0, abc). With a normal transform function,
 you’ll end up with del(0, ""). To avoid IP2, you just need to make
 sure you never transform ops sequentially against an op and its
 inverse.
 
-IP3 is a bit more complicated. In essence, it says the transformed
-inverse of an op should be equal to the inverse of the transformed op.
-The formal definition is as follows: let o₁ and o₂ be two ops with the
-same context (so they can transform against each other), let o₁’ =
-IT(o₁, o₂), o₂’ = IT(o₂, o₁), then IT(I(o₁), o₂’) should equal to
-I(o₁’). Ie,
+Fortunately, avoiding IP2 is pretty easy. When you need to transform
+an op A against a series of ops, say, [1 2 3 I(1) 4], you just need to
+find out all the do-undo pairs and skip them. So in the example, you
+skip 1 and I(1), and only transform A against 2, 3, 4. This breaks my
+intuition for OT, because if you don't transform A against 1, A's
+context wouldn't contain 1, how do you safely transform A against 2,
+when 2's context contains 1? But apparently it works, and that's what
+COT do. If there is a do-undo-redo triple, you can either skip the
+do-undo pair, or skip the undo-redo pair, it doesn't seem to matter
+(the COT paper didn't say what to do in this case).
 
-IT(I(o₁), IT(o₂, o₁)) = I(IT(o₁, o₂))
+Unfortunately, skipping all do-undo pairs when transforming requires a
+much more complicated design. It's easy to skip do-undo pairs when you
+transform ops in one go, but what if you transform an op A first
+against an op B, then in a separate occasion transforms A against
+I(B)? This is called decoupled do-undo pair in the COT paper.
+
+For example, suppose in our history we have L₁ = [1 2], L₂ = [3]. Now
+we receives a remote op A, we transform 3 against A and get 3', now we
+have L₁ = [1 2 A], L₂ = [3']. Then shortly after we receives another
+remote op I(A), and transforms 3' against it. Do you see the problem?
+We've now transformed 3 against A and I(A). This can also happen at
+the server when we send 3' to the server. To solve the decoupled
+do-undo pair problem, we would need to do what POT and COT does: have
+separate transformation paths for each individual site and only
+transform an op once.
+
+For me, this is too expensive, so my solution is to just give up on
+this :-D And giving up on this is completely fine. Notice that a) we
+only transform an op against other ops when they are concurrent. And
+b) for the operations we support, only transforming del against del
+could violate IP2.
+
+What's the harm when we violate IP2 for concurrent del ops? Let's look
+at an example: document state is "X", alice deletes X (A=(del(0, X))),
+in the mean time, Bob delets X and undoes the op (B=(del(0, X),
+I(B)=ins(0, X))). If alice receives both of Bob's ops and transforms A
+against B and shortly after I(B), A becomes identity. What Alice will
+see is that she deletes the X but it soon comes back.
+
+In a completely correct system (POT or COT), Alice should see the X
+stay deleted. But I'd argue that the result of our imperfect system
+isn't too bad: Alice can just delete the X again. Users might not even
+consider this is unexpected behavior: Alice and Bob are editing on the
+same text concurrently, some conflict is expected. I consider this a
+acceptable price to pay for simplicity and efficiency.
+
+The good news is that transforming inverse ops don't have the
+decoupled do-undo pair problem, since we transform it only once,
+against all the ops after the original op in history.
+
+The other property, IP3 is a bit more complicated. In essence, it says
+the transformed inverse of an op should be equal to the inverse of the
+transformed op. The formal definition is as follows: let A and B be
+two ops with the same context (so they can transform against each
+other), let A’ = IT(A, B), B’ = IT(B, A), then IT(I(A), B’) should
+equal to I(A’). Ie,
+
+IT(I(A), IT(B, A)) = I(IT(A, B))
 
 To avoid IP3, you need to make sure you never transform an inverse op
-I(o₁) against an op o₂ where o₂ is concurrent (context-independent) to
-o₁. Ie, don’t mingle inverse with concurrent ops together.
+I(A) against an op B where B is concurrent (context-independent) to
+A. Ie, don’t mingle inverse with concurrent ops together.
 
-To keep things simple, we only allow undo and redo on a linear
-history. Basically, the default undo/redo behavior anyone would
+Again, I give up avoiding IP3 for concurrent ops.
+
+# Undo policy
+
+To keep the user interface simple, we only allow undo and redo on a
+linear history. Basically, the default undo/redo behavior anyone would
 expect. Users can undo some operations, and redo them; but once they
 make some original edit, the undone ops are “lost” and can’t be redone
 anymore.
@@ -107,44 +168,29 @@ anymore.
 We also restrict undo and redo to ops created by the user, ie,
 everyone can only undo their own edits.
 
-Alongside the global history, we keep track of a client history
-([crate::engine::ClientHistory]). Ops in the client history are
-ordered by the sequence at which they are applied on the editor. All
-the ops apply one after another, so there is no concurrent ops, and
-IP3 is avoided. (COT stores ops differently from us so IP3 isn’t as
-trivially satisfiable.)
+# Undo implementation
 
-We also keep track of the local edits in the client history, these are
-the ops the user can undo.
+To skip do-undo pairs, whenever we transform an op A against a series
+of ops OPS, we scan OPS end to front and marks all the do-undo pairs,
+and when transforming A against OPS, the marked ones are skipped.
 
-To undo/redo, the editor sends a Undo/Redo request, and if there are
-available ops to undo/redo, the collab process sends back an op that
-will perform the undo/redo (by generating the inverse of the op to
-undo/redo, and transform it against all the following ops in the
-client history). The editor should apply the op and send it back with
-a SendOp request, so that the collab process knows that the operation
-is actually applied.
+To chose the correct op to undo, and only undo the ops the user
+created, we maintain an "undo queue" (aka list of original ops made by
+the user), which points to each original op in the history, and we
+keep track of a "undo tip" that points into the undo queue, marking
+the current undo progress. Undo will move the undo tip backward, and
+redo will move it forward.
 
-And when the collab process receives that local undo op sent back from
-the editor, it finds the corresponding original op in the editor
-history, and marks that op as undone, and transforms ops after it as
-if this op has become an identity op. Since we modify the ops in-place
-rather than appending the inverse at the end, we avoids IP2.
+When the editor sends an Undo request, the collab process looks at the
+undo queue and undo tip, picks the original op to undo, transforms it,
+and sends it back to the editor. But at this point it doesn't modify
+the undo queue or undo tip. It is when the editor receives the op,
+applies it, and send it back, the collab process consider the undo
+operation complete, and moves the undo tip. It also replaces the
+pointer in the undo queue to point to the undo op just appended to the
+history; so that when the next time when the user redo the op, the
+redo op will be the inverse of this undo op.
 
-If the op is labeled redo, collab process finds the corresponding op,
-flip it back from identify to the original op, and transform the ops
-after it.
-
-Note that under our algorithm, we can’t freely redo any operation in
-any order, we have to redo in the reverse order in which we undone the
-ops. Because we want to ensure that when we redo an op and thus
-flipping it back to the original op, there is no ops before it that
-are undone. If there are, using the original op wouldn’t be correct.
-
-A more flexible undo system that allows any undo and redo order (like
-that of COT) is much more complicated to implement and computes more
-transformations. I consider the limitation to be quite a reasonable
-trade-off.
 
 [1] Conditions and Patterns for Achieving Convergence in OT-Based
 Co-Editors
