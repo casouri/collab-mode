@@ -525,8 +525,8 @@ mod tests {
 
         let site_a = 1;
         let site_b = 2;
-        let mut client_a = ClientEngine::new(site_a.clone());
-        let mut client_b = ClientEngine::new(site_b.clone());
+        let mut client_a = ClientEngine::new(site_a.clone(), 0);
+        let mut client_b = ClientEngine::new(site_b.clone(), 0);
 
         let mut server = ServerEngine::new();
 
@@ -553,8 +553,12 @@ mod tests {
         let ops_from_a = client_a.maybe_package_local_ops().unwrap();
         let ops_from_b = client_b.maybe_package_local_ops().unwrap();
         println!("ops_from_b: {:?}", &ops_from_b);
-        let a_ops = server.process_ops(ops_from_a).unwrap();
-        let b_ops = server.process_ops(ops_from_b).unwrap();
+        let a_ops = server
+            .process_ops(ops_from_a.ops, ops_from_a.context)
+            .unwrap();
+        let b_ops = server
+            .process_ops(ops_from_b.ops, ops_from_b.context)
+            .unwrap();
         println!("b_ops: {:?}", &b_ops);
 
         // Client A processing.
@@ -600,9 +604,9 @@ mod tests {
         let site_a = 1;
         let site_b = 2;
         let site_c = 3;
-        let mut client_a = ClientEngine::new(site_a.clone());
-        let mut client_b = ClientEngine::new(site_b.clone());
-        let mut client_c = ClientEngine::new(site_c.clone());
+        let mut client_a = ClientEngine::new(site_a.clone(), 0);
+        let mut client_b = ClientEngine::new(site_b.clone(), 0);
+        let mut client_c = ClientEngine::new(site_c.clone(), 0);
 
         let mut server = ServerEngine::new();
 
@@ -630,9 +634,15 @@ mod tests {
         let ops_from_b = client_b.maybe_package_local_ops().unwrap();
         let ops_from_c = client_c.maybe_package_local_ops().unwrap();
 
-        let b_ops = server.process_ops(ops_from_b).unwrap();
-        let c_ops = server.process_ops(ops_from_c).unwrap();
-        let a_ops = server.process_ops(ops_from_a).unwrap();
+        let b_ops = server
+            .process_ops(ops_from_b.ops, ops_from_b.context)
+            .unwrap();
+        let c_ops = server
+            .process_ops(ops_from_c.ops, ops_from_c.context)
+            .unwrap();
+        let a_ops = server
+            .process_ops(ops_from_a.ops, ops_from_a.context)
+            .unwrap();
 
         // Client A processing.
         let b1_at_a = client_a
