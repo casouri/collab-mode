@@ -17,12 +17,14 @@ pub mod server;
 pub type SDP = String;
 /// We treat ICE candidate as a black box too.
 pub type ICECandidate = String;
+/// Id of an endpoint, should be an UUID string.
 pub type EndpointId = String;
 
 pub type SignalingResult<T> = Result<T, SignalingError>;
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum SignalingError {
+    /// Allocated listening time is up.
     #[error("Allocated time of {0} seconds is up")]
     TimesUp(u16),
     /// The connection is closed normally.
@@ -34,10 +36,12 @@ pub enum SignalingError {
     /// Received an unexpected message.
     #[error("Expected: {0}, received: {1:?}")]
     UnexpectedMessage(String, SignalingMessage),
+    /// Couldn't parse the websocket message.
     #[error("Couldn't parse the message")]
     ParseError(String),
-    #[error("No collab server is listening on this id: {0}")]
-    NoServerForId(String),
+    /// Cannot find the endpoint with that id.
+    #[error("No endpoint is listening on this id: {0}")]
+    NoEndpointForId(EndpointId),
 }
 
 impl From<tung::tungstenite::Error> for SignalingError {

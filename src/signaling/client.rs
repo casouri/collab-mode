@@ -44,15 +44,17 @@ fn expect_text(msg: Message) -> SignalingResult<String> {
 
 /// A listener that can be used to either listen for connections from
 /// other endpoints or connect to other endpoints.
+#[derive(Debug)]
 pub struct Listener {
     /// Channel used to send messages out to the signal server.
     out_tx: mpsc::Sender<Message>,
     /// When the listener receives a `BindResponse(their_id,
     /// their_sdp)`, it sends `(their_id, their_sdp)` to this channel.
-    sock_rx: mpsc::UnboundedReceiver<Socket>,
+    sock_rx: mpsc::UnboundedReceiver<SignalingResult<Socket>>,
 }
 
 /// A socket that can be used to exchange ICE candidates.
+#[derive(Debug)]
 pub struct Socket {
     msg_rx: mpsc::UnboundedReceiver<ICECandidate>,
     msg_tx: mpsc::Sender<Message>,
@@ -112,15 +114,14 @@ impl Listener {
             .send(msg.into())
             .await
             .map_err(|_err| SignalingError::Closed)?;
-        let sock = self.accept().await?;
-        Ok(sock)
+        self.accept().await
     }
 
     /// Receive the next incoming connection invitation (as the result
     /// of [Listener::bind]).
     pub async fn accept(&mut self) -> SignalingResult<Socket> {
         if let Some(sock) = self.sock_rx.recv().await {
-            Ok(sock)
+            sock
         } else {
             Err(SignalingError::Closed)
         }
@@ -154,7 +155,7 @@ impl Socket {
 async fn listener_process_message(
     msg: Result<Message, tung::tungstenite::Error>,
     out_tx: mpsc::Sender<Message>,
-    sock_tx: mpsc::UnboundedSender<Socket>,
+    sock_tx: mpsc::UnboundedSender<SignalingResult<Socket>>,
     endpoint_map: &mut HashMap<EndpointId, mpsc::UnboundedSender<ICECandidate>>,
 ) -> SignalingResult<()> {
     let msg = expect_text(msg?)?;
@@ -170,7 +171,13 @@ async fn listener_process_message(
                 msg_rx,
                 msg_tx: out_tx.clone(),
             };
-            sock_tx.send(sock).map_err(|_err| SignalingError::Closed)?;
+            sock_tx.send(Ok(sock)).unwrap(); // Receiver is never dropped.
+            Ok(())
+        }
+        SignalingMessage::NoEndpointForId(id) => {
+            sock_tx
+                .send(Err(SignalingError::NoEndpointForId(id)))
+                .unwrap(); // Receiver is never dropped.
             Ok(())
         }
         SignalingMessage::CandidateFrom(their_id, their_candidate) => {
