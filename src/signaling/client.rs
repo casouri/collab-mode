@@ -128,6 +128,7 @@ impl Listener {
 }
 
 impl Socket {
+    /// Send `candidate` to the other endpoint.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> SignalingResult<()> {
         let msg = SignalingMessage::SendCandidateTo(self.their_id.clone(), candidate);
         self.msg_tx
@@ -137,10 +138,12 @@ impl Socket {
         Ok(())
     }
 
+    /// Receive candidate from the other endpoint.
     pub async fn recv_candidate(&mut self) -> Option<ICECandidate> {
         self.msg_rx.recv().await
     }
 
+    /// Return the SDP of the other endpoint.
     pub fn sdp(&self) -> SDP {
         self.their_sdp.clone()
     }
