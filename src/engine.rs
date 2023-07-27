@@ -73,16 +73,6 @@ impl GlobalHistory {
         ops
     }
 
-    /// If there is at least one op in the local history, pop it and
-    /// return it.
-    fn pop_first_local_op(&mut self) -> Option<FatOp> {
-        if self.local.len() == 0 {
-            None
-        } else {
-            Some(self.local.remove(0))
-        }
-    }
-
     /// Return the op referenced by the `idxidx`th pointer in the undo
     /// queue.
     fn nth_in_undo_queue(&self, idxidx: usize) -> &FatOp {
