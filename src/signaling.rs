@@ -1,10 +1,23 @@
 //! This module contains a signaling server and a client that can be
 //! used for establishing a webrtc connection. The signaling server
 //! and clients treat SDP and ICE candidates as raw strings. Signaling
-//! server and clients communicate using websockets. (HTTP over TCP
-//! would be the same, but I wanted to get familiar with websockets.)
+//! server and clients communicate using websockets.
 //! [SignalingMessage] contains different messages server and client
 //! exchange.
+//!
+//! A typical session looks like this:
+//!
+//! ```
+//! endpoint            signal server            endpoint
+//! | -----BindRequest------> |                         |
+//! |                         | <---ConnectRequest----- |
+//! | <-ConnectionInvitation- |                         |
+//! | ----ConnectResponse---> |                         |
+//! |                         | -ConnectionInvitation-> |
+//! |                         |                         |
+//! | -----SendCandidateTo--> | <----SendCandidateTo--- |
+//! | <----CandidateFrom----- | -----CandidateFrom----> |
+//! ```
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -58,13 +71,20 @@ impl From<tung::tungstenite::Error> for SignalingError {
 pub enum SignalingMessage {
     /// An endpoint sends this message to bind to the id on the
     /// signaling server.
-    BindRequest(EndpointId, SDP),
+    BindRequest(EndpointId),
     /// An endpoint sends this message to connect to a binded
-    /// endpoint. (`my_id`, `their_id`), in that order.
+    /// endpoint. The message contains (`my_id`, `their_id`), in that
+    /// order.
     ConnectRequest(EndpointId, EndpointId, SDP),
-    /// After a `BindRequest` or a `ConnectRequest`, the endpoint will
-    /// receive one or more of this message as the response.
+    /// After a `BindRequest`, the endpoint receives a stream of this
+    /// message as other endpoints sends `ConnectRequest` targeted at
+    /// it. After a `ConnectRequest`, the endpoint will receive one
+    /// of this message coming from the target endpoint.
     ConnectionInvitation(EndpointId, SDP),
+    /// An endpoint responds to a `ConnectionInvitation` with this
+    /// message. The message contains (`my_id`, `their_id`), in that
+    /// order.
+    ConnectResponse(EndpointId, EndpointId, SDP),
     /// Endpoints sends this message to send their candidate to
     /// another endpoint.
     SendCandidateTo(EndpointId, ICECandidate),
@@ -118,11 +138,17 @@ mod tests {
 
         // Server
         let handle = runtime.spawn(async move {
-            let mut listener = client::Listener::new("ws://127.0.0.1:9000").await.unwrap();
-            listener.bind("1".to_string(), sdp_server).await.unwrap();
+            let mut listener = client::Listener::new("ws://127.0.0.1:9000", "1".to_string())
+                .await
+                .unwrap();
+            listener.bind().await.unwrap();
             println!("Server binded to id = 1");
             if let Ok(mut sock) = listener.accept().await {
                 assert!(sock.sdp() == "client sdp");
+                println!("Server received clien sdp: {}", sock.sdp());
+                sock.send_sdp(sdp_server).await.unwrap();
+                println!("Server sent sdp answer");
+
                 for candidate in candidate_server {
                     sock.send_candidate(candidate).await.unwrap();
                     println!("Sent server candidate");
@@ -140,7 +166,9 @@ mod tests {
 
         runtime.block_on(async move {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let mut listener = client::Listener::new("ws://127.0.0.1:9000").await.unwrap();
+            let mut listener = client::Listener::new("ws://127.0.0.1:9000", "2".to_string())
+                .await
+                .unwrap();
             let mut sock = listener.connect("1".to_string(), sdp_client).await.unwrap();
             assert!(sock.sdp() == "server sdp");
             for candidate in candidate_client {

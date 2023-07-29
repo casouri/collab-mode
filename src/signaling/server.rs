@@ -53,7 +53,6 @@ pub async fn run_signaling_server(addr: &str) -> anyhow::Result<()> {
 #[derive(Debug, Clone)]
 struct EndpointInfo {
     public: bool,
-    sdp: SDP,
     /// Connection request and client candidate are sent to this
     /// channel.
     msg_tx: mpsc::Sender<Message>,
@@ -73,18 +72,8 @@ impl Server {
         }
     }
     /// Bind a collab server to `id`, return the allocated id.
-    async fn bind_endpoint(
-        &self,
-        public: bool,
-        id: EndpointId,
-        sdp: SDP,
-        msg_tx: mpsc::Sender<Message>,
-    ) {
-        let server_info = EndpointInfo {
-            public,
-            sdp,
-            msg_tx,
-        };
+    async fn bind_endpoint(&self, public: bool, id: EndpointId, msg_tx: mpsc::Sender<Message>) {
+        let server_info = EndpointInfo { public, msg_tx };
         self.endpoint_map.write().await.insert(id, server_info);
     }
     /// Remove binding for serser with `id`.
@@ -121,7 +110,7 @@ async fn handle_connection(
             Message::Text(msg) => {
                 let msg: SignalingMessage = serde_json::from_str(&msg)?;
                 match msg {
-                    SignalingMessage::BindRequest(id, sdp) => {
+                    SignalingMessage::BindRequest(id) => {
                         // Remove the previous allocation before
                         // allocating a new id.
                         if let Some(existing_id) = endpoint_id {
@@ -129,7 +118,7 @@ async fn handle_connection(
                         }
                         // Allocate a new id.
                         server
-                            .bind_endpoint(true, id.clone(), sdp, resp_tx.clone())
+                            .bind_endpoint(true, id.clone(), resp_tx.clone())
                             .await;
                         *endpoint_id = Some(id.clone());
                     }
@@ -154,23 +143,23 @@ async fn handle_connection(
 
                         // Bind connection initializer.
                         server
-                            .bind_endpoint(false, my_id.clone(), my_sdp.clone(), resp_tx.clone())
+                            .bind_endpoint(false, my_id.clone(), resp_tx.clone())
                             .await;
                         *endpoint_id = Some(my_id.clone());
 
-                        // Response to connection initializer.
-                        let resp = SignalingMessage::ConnectionInvitation(
-                            their_id,
-                            endpoint_info.sdp.clone(),
-                        );
-                        resp_tx.send(resp.into()).await?;
-
                         // Notify connection listener.
                         let connect_req = SignalingMessage::ConnectionInvitation(my_id, my_sdp);
-                        endpoint_info
-                            .msg_tx
-                            .send(Message::Text(serde_json::to_string(&connect_req).unwrap()))
-                            .await?;
+                        endpoint_info.msg_tx.send(connect_req.into()).await?;
+                    }
+                    SignalingMessage::ConnectResponse(my_id, their_id, sdp) => {
+                        if let Some(endpoint_info) = server.get_endpoint_info(&their_id).await {
+                            let msg = SignalingMessage::ConnectionInvitation(my_id, sdp);
+                            endpoint_info.msg_tx.send(msg.into()).await?;
+                        } else {
+                            let resp = SignalingMessage::NoEndpointForId(their_id);
+                            resp_tx.send(resp.into()).await?;
+                            resp_tx.send(Message::Close(None)).await?;
+                        }
                     }
                     SignalingMessage::SendCandidateTo(their_id, candidate) => {
                         if let Some(my_id) = endpoint_id {

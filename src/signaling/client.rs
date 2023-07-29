@@ -7,18 +7,19 @@
 //! connection to the collab server.
 
 //! Specifically, a collab server creates a [Listener], and uses the
-//! [Listener::bind] method to send its id and SDP to the signaling
-//! server. Then it calls [Listener::accept] in a loop to accept
-//! connection requests from collab clients, in the form of a
-//! [Socket].
+//! [Listener::bind] method to bind to an id on the signaling server.
+//! Then it calls [Listener::accept] in a loop to accept connection
+//! requests from collab clients, in the form of a [Socket]. When
+//! [Listener::accept] returns a socket, the collab servers gets the
+//! client's sdp by [Socket::sdp], and send back its sdp with
+//! [Socket::send_sdp].
 
 //! A collab client creates a [Listener], and uses the
 //! [Listener::connect] method to connect to the collab server
-//! associated with the id, and gets the [Socket] connected to the
-//! collab server.
+//! associated with the id and send its sdp to the server, and gets
+//! back a [Socket]. I can get the server's sdp by [Socket::sdp].
 
-//! On both sides, the collab server and client can get each other's
-//! SDP by [Socket::sdp], and send and receive ICE candidates through
+//! Then, both sides send and receive ICE candidates through
 //! [Socket::send_candidate] and [Socket::recv_candidate], until the
 //! webrtc connection is established.
 
@@ -46,6 +47,8 @@ fn expect_text(msg: Message) -> SignalingResult<String> {
 /// other endpoints or connect to other endpoints.
 #[derive(Debug)]
 pub struct Listener {
+    /// The id for this endpoint.
+    my_id: EndpointId,
     /// Channel used to send messages out to the signal server.
     out_tx: mpsc::Sender<Message>,
     /// When the listener receives a `BindResponse(their_id,
@@ -60,11 +63,18 @@ pub struct Socket {
     msg_tx: mpsc::Sender<Message>,
     their_sdp: SDP,
     their_id: EndpointId,
+    my_id: EndpointId,
+}
+
+#[derive(Debug, Clone)]
+pub struct CandidateSender {
+    msg_tx: mpsc::Sender<Message>,
+    their_id: EndpointId,
 }
 
 impl Listener {
     /// Connect to the signaling server at `addr`.
-    pub async fn new(addr: &str) -> SignalingResult<Listener> {
+    pub async fn new(addr: &str, id: EndpointId) -> SignalingResult<Listener> {
         let (stream, _addr) = tung::connect_async(addr).await?;
 
         let (in_tx, mut in_rx) = mpsc::channel(1);
@@ -74,6 +84,7 @@ impl Listener {
         let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx));
 
         let listener = Listener {
+            my_id: id.clone(),
             sock_rx,
             out_tx: out_tx.clone(),
         };
@@ -83,6 +94,7 @@ impl Listener {
             while let Some(msg) = in_rx.recv().await {
                 // Ignore errors as long as in_rx hasn't closed.
                 let _todo = listener_process_message(
+                    id.clone(),
                     msg,
                     out_tx.clone(),
                     sock_tx.clone(),
@@ -96,8 +108,8 @@ impl Listener {
 
     /// Share `sdp` on the signal server under `id`, and start
     /// listening for incoming connections.
-    pub async fn bind(&mut self, id: EndpointId, sdp: SDP) -> SignalingResult<()> {
-        let msg = SignalingMessage::BindRequest(id, sdp);
+    pub async fn bind(&mut self) -> SignalingResult<()> {
+        let msg = SignalingMessage::BindRequest(self.my_id.clone());
         self.out_tx
             .send(msg.into())
             .await
@@ -129,6 +141,17 @@ impl Listener {
 }
 
 impl Socket {
+    /// Send the answer SDP to the other endpoint. This should happend
+    /// immediately after accepting a connection request.
+    pub async fn send_sdp(&self, sdp: SDP) -> SignalingResult<()> {
+        let msg = SignalingMessage::ConnectResponse(self.my_id.clone(), self.their_id.clone(), sdp);
+        self.msg_tx
+            .send(msg.into())
+            .await
+            .map_err(|_err| SignalingError::Closed)?;
+        Ok(())
+    }
+
     /// Send `candidate` to the other endpoint.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> SignalingResult<()> {
         let msg = SignalingMessage::SendCandidateTo(self.their_id.clone(), candidate);
@@ -137,6 +160,15 @@ impl Socket {
             .await
             .map_err(|_err| SignalingError::Closed)?;
         Ok(())
+    }
+
+    /// Return a candidate sender that can do what `send_candidate`
+    /// does, but without holding reference to the socket.
+    pub fn candidate_sender(&self) -> CandidateSender {
+        CandidateSender {
+            msg_tx: self.msg_tx.clone(),
+            their_id: self.their_id.clone(),
+        }
     }
 
     /// Receive candidate from the other endpoint.
@@ -150,9 +182,22 @@ impl Socket {
     }
 }
 
+impl CandidateSender {
+    /// Send `candidate` to the other endpoint.
+    pub async fn send_candidate(&self, candidate: ICECandidate) -> SignalingResult<()> {
+        let msg = SignalingMessage::SendCandidateTo(self.their_id.clone(), candidate);
+        self.msg_tx
+            .send(msg.into())
+            .await
+            .map_err(|_err| SignalingError::Closed)?;
+        Ok(())
+    }
+}
+
 // *** Subroutines
 
 async fn listener_process_message(
+    my_id: EndpointId,
     msg: Result<Message, tung::tungstenite::Error>,
     out_tx: mpsc::Sender<Message>,
     sock_tx: mpsc::UnboundedSender<SignalingResult<Socket>>,
@@ -166,6 +211,7 @@ async fn listener_process_message(
             let (msg_tx, msg_rx) = mpsc::unbounded_channel();
             endpoint_map.insert(their_id.clone(), msg_tx);
             let sock = Socket {
+                my_id: my_id.clone(),
                 their_id,
                 their_sdp,
                 msg_rx,
@@ -192,10 +238,7 @@ async fn listener_process_message(
             }
             Ok(())
         }
-        msg => Err(SignalingError::UnexpectedMessage(
-            "BindResponse".to_string(),
-            msg,
-        )),
+        msg => Err(SignalingError::UnexpectedMessage("".to_string(), msg)),
     }
 }
 
