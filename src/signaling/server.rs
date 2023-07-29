@@ -113,10 +113,11 @@ async fn handle_connection(
                 let msg: SignalingMessage = serde_json::from_str(&msg)?;
                 match msg {
                     SignalingMessage::Bind(id) => {
-                        // Remove the previous allocation before
-                        // allocating a new id.
+                        // Check if the id is already taken.
                         if let Some(existing_id) = endpoint_id {
-                            server.remove_endpoint(existing_id).await;
+                            let resp = SignalingMessage::IdTaken(existing_id.clone());
+                            resp_tx.send(resp.into()).await?;
+                            return Ok(());
                         }
                         // Allocate a new id.
                         server
@@ -136,16 +137,7 @@ async fn handle_connection(
                         }
                         let endpoint_info = endpoint_info.unwrap();
 
-                        if let Some(endpoint_id) = endpoint_id {
-                            if *endpoint_id != sender_id {
-                                // Are they trying to do something nasty?
-                                let resp = resp_unsupported(
-                                    "You are using a endpoint id different from the one recorded",
-                                );
-                                resp_tx.send(resp).await?;
-                                return Ok(());
-                            }
-                        }
+                        check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                         // Bind connection initializer.
                         server
@@ -158,22 +150,22 @@ async fn handle_connection(
                         endpoint_info.msg_tx.send(connect_req.into()).await?;
                     }
                     SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
-                        if let Some(my_id) = endpoint_id {
-                            if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
-                                let msg = SignalingMessage::Candidate(
-                                    sender_id.clone(),
-                                    receiver_id.clone(),
-                                    candidate,
-                                );
-                                their_info.msg_tx.send(msg.into()).await?;
-                            } else {
-                                let msg = SignalingMessage::NoEndpointForId(receiver_id);
-                                resp_tx.send(msg.into()).await?;
-                            }
-                        } else {
-                            let resp = resp_unsupported("You should send a ConnectRequest or BindRequest before sending SendCandidate");
+                        if endpoint_id.is_none() {
+                            let resp = resp_unsupported("You should send a Connect or Bind message before sending Candidate message");
                             resp_tx.send(resp).await?;
-                            continue;
+                            return Ok(());
+                        }
+                        check_id(&sender_id, endpoint_id, &resp_tx).await?;
+                        if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
+                            let msg = SignalingMessage::Candidate(
+                                sender_id.clone(),
+                                receiver_id.clone(),
+                                candidate,
+                            );
+                            their_info.msg_tx.send(msg.into()).await?;
+                        } else {
+                            let msg = SignalingMessage::NoEndpointForId(receiver_id);
+                            resp_tx.send(msg.into()).await?;
                         }
                     }
                     _ => {
@@ -249,4 +241,23 @@ fn resp_unsupported(msg: &str) -> Message {
         code: CloseCode::Unsupported,
         reason: Cow::Owned(msg.to_string()),
     }))
+}
+
+/// If `provided_id` doesn't match `recorded_id`, return an error.
+async fn check_id(
+    provided_id: &EndpointId,
+    recorded_id: &Option<EndpointId>,
+    resp_tx: &mpsc::Sender<Message>,
+) -> anyhow::Result<()> {
+    if let Some(endpoint_id) = recorded_id {
+        if endpoint_id != provided_id {
+            let resp =
+                resp_unsupported("You are using a endpoint id different from the one recorded");
+            resp_tx.send(resp).await?;
+            return Err(anyhow::Error::msg(
+                "Endpoint tries to use a different endpoint as previously used",
+            ));
+        }
+    }
+    Ok(())
 }

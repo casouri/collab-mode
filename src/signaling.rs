@@ -55,6 +55,8 @@ pub enum SignalingError {
     /// Cannot find the endpoint with that id.
     #[error("No endpoint is listening on this id: {0}")]
     NoEndpointForId(EndpointId),
+    #[error("This id is already binded: {0}")]
+    IdTaken(EndpointId),
 }
 
 impl From<tung::tungstenite::Error> for SignalingError {
@@ -78,6 +80,8 @@ pub enum SignalingMessage {
     Candidate(EndpointId, EndpointId, ICECandidate),
     /// Cannot find the corresponding endpoint for the provided id.
     NoEndpointForId(String),
+    /// Id is already binded.
+    IdTaken(EndpointId),
 }
 
 impl Into<tung::tungstenite::Message> for SignalingMessage {
