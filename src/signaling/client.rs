@@ -68,6 +68,7 @@ pub struct Socket {
 
 #[derive(Debug, Clone)]
 pub struct CandidateSender {
+    my_id: EndpointId,
     msg_tx: mpsc::Sender<Message>,
     their_id: EndpointId,
 }
@@ -109,7 +110,7 @@ impl Listener {
     /// Share `sdp` on the signal server under `id`, and start
     /// listening for incoming connections.
     pub async fn bind(&mut self) -> SignalingResult<()> {
-        let msg = SignalingMessage::BindRequest(self.my_id.clone());
+        let msg = SignalingMessage::Bind(self.my_id.clone());
         self.out_tx
             .send(msg.into())
             .await
@@ -121,7 +122,7 @@ impl Listener {
     /// `their_id`.
     pub async fn connect(&mut self, their_id: EndpointId, sdp: SDP) -> SignalingResult<Socket> {
         let my_id = uuid::Uuid::new_v4().to_string();
-        let msg = SignalingMessage::ConnectRequest(my_id, their_id, sdp);
+        let msg = SignalingMessage::Connect(my_id, their_id, sdp);
         self.out_tx
             .send(msg.into())
             .await
@@ -144,7 +145,7 @@ impl Socket {
     /// Send the answer SDP to the other endpoint. This should happend
     /// immediately after accepting a connection request.
     pub async fn send_sdp(&self, sdp: SDP) -> SignalingResult<()> {
-        let msg = SignalingMessage::ConnectResponse(self.my_id.clone(), self.their_id.clone(), sdp);
+        let msg = SignalingMessage::Connect(self.my_id.clone(), self.their_id.clone(), sdp);
         self.msg_tx
             .send(msg.into())
             .await
@@ -154,7 +155,7 @@ impl Socket {
 
     /// Send `candidate` to the other endpoint.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> SignalingResult<()> {
-        let msg = SignalingMessage::SendCandidateTo(self.their_id.clone(), candidate);
+        let msg = SignalingMessage::Candidate(self.my_id.clone(), self.their_id.clone(), candidate);
         self.msg_tx
             .send(msg.into())
             .await
@@ -166,6 +167,7 @@ impl Socket {
     /// does, but without holding reference to the socket.
     pub fn candidate_sender(&self) -> CandidateSender {
         CandidateSender {
+            my_id: self.my_id.clone(),
             msg_tx: self.msg_tx.clone(),
             their_id: self.their_id.clone(),
         }
@@ -185,7 +187,7 @@ impl Socket {
 impl CandidateSender {
     /// Send `candidate` to the other endpoint.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> SignalingResult<()> {
-        let msg = SignalingMessage::SendCandidateTo(self.their_id.clone(), candidate);
+        let msg = SignalingMessage::Candidate(self.my_id.clone(), self.their_id.clone(), candidate);
         self.msg_tx
             .send(msg.into())
             .await
@@ -207,7 +209,7 @@ async fn listener_process_message(
     let msg: SignalingMessage =
         serde_json::from_str(&msg).map_err(|err| SignalingError::ParseError(err.to_string()))?;
     match msg {
-        SignalingMessage::ConnectionInvitation(their_id, their_sdp) => {
+        SignalingMessage::Connect(their_id, my_id, their_sdp) => {
             let (msg_tx, msg_rx) = mpsc::unbounded_channel();
             endpoint_map.insert(their_id.clone(), msg_tx);
             let sock = Socket {
@@ -226,7 +228,7 @@ async fn listener_process_message(
                 .unwrap(); // Receiver is never dropped.
             Ok(())
         }
-        SignalingMessage::CandidateFrom(their_id, their_candidate) => {
+        SignalingMessage::Candidate(their_id, my_id, their_candidate) => {
             let tx = endpoint_map.get(&their_id).map(|tx| tx.clone());
             if let Some(tx) = tx {
                 let _todo = tx.send(their_candidate);

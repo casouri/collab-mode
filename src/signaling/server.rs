@@ -106,11 +106,13 @@ async fn handle_connection(
     let _ = tokio::spawn(send_receive_stream(stream, req_tx, resp_rx));
 
     while let Some(msg) = req_rx.recv().await {
-        match msg? {
+        let msg = msg?;
+        log::debug!("Received message {:?}", &msg);
+        match msg {
             Message::Text(msg) => {
                 let msg: SignalingMessage = serde_json::from_str(&msg)?;
                 match msg {
-                    SignalingMessage::BindRequest(id) => {
+                    SignalingMessage::Bind(id) => {
                         // Remove the previous allocation before
                         // allocating a new id.
                         if let Some(existing_id) = endpoint_id {
@@ -122,52 +124,50 @@ async fn handle_connection(
                             .await;
                         *endpoint_id = Some(id.clone());
                     }
-                    SignalingMessage::ConnectRequest(my_id, their_id, my_sdp) => {
+                    SignalingMessage::Connect(sender_id, receiver_id, sdp) => {
                         // Look for the endpoint corresponds to the id.
-                        let endpoint_info = server.get_endpoint_info(&their_id).await;
-                        // Found a server, send server's SDP to client
-                        // and client's SDP to server.
-                        let is_public = if let Some(info) = &endpoint_info {
-                            info.public
-                        } else {
-                            false
-                        };
-                        if endpoint_info.is_none() || !is_public {
+                        let endpoint_info = server.get_endpoint_info(&receiver_id).await;
+                        if endpoint_info.is_none() {
                             // Didn't find the endpoint with this id.
-                            let resp = SignalingMessage::NoEndpointForId(their_id);
+                            let resp = SignalingMessage::NoEndpointForId(receiver_id);
                             resp_tx.send(resp.into()).await?;
                             resp_tx.send(Message::Close(None)).await?;
                             return Ok(());
                         }
                         let endpoint_info = endpoint_info.unwrap();
 
+                        if let Some(endpoint_id) = endpoint_id {
+                            if *endpoint_id != sender_id {
+                                // Are they trying to do something nasty?
+                                let resp = resp_unsupported(
+                                    "You are using a endpoint id different from the one recorded",
+                                );
+                                resp_tx.send(resp).await?;
+                                return Ok(());
+                            }
+                        }
+
                         // Bind connection initializer.
                         server
-                            .bind_endpoint(false, my_id.clone(), resp_tx.clone())
+                            .bind_endpoint(false, sender_id.clone(), resp_tx.clone())
                             .await;
-                        *endpoint_id = Some(my_id.clone());
+                        *endpoint_id = Some(sender_id.clone());
 
                         // Notify connection listener.
-                        let connect_req = SignalingMessage::ConnectionInvitation(my_id, my_sdp);
+                        let connect_req = SignalingMessage::Connect(sender_id, receiver_id, sdp);
                         endpoint_info.msg_tx.send(connect_req.into()).await?;
                     }
-                    SignalingMessage::ConnectResponse(my_id, their_id, sdp) => {
-                        if let Some(endpoint_info) = server.get_endpoint_info(&their_id).await {
-                            let msg = SignalingMessage::ConnectionInvitation(my_id, sdp);
-                            endpoint_info.msg_tx.send(msg.into()).await?;
-                        } else {
-                            let resp = SignalingMessage::NoEndpointForId(their_id);
-                            resp_tx.send(resp.into()).await?;
-                            resp_tx.send(Message::Close(None)).await?;
-                        }
-                    }
-                    SignalingMessage::SendCandidateTo(their_id, candidate) => {
+                    SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
                         if let Some(my_id) = endpoint_id {
-                            if let Some(their_info) = server.get_endpoint_info(&their_id).await {
-                                let msg = SignalingMessage::CandidateFrom(my_id.clone(), candidate);
+                            if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
+                                let msg = SignalingMessage::Candidate(
+                                    sender_id.clone(),
+                                    receiver_id.clone(),
+                                    candidate,
+                                );
                                 their_info.msg_tx.send(msg.into()).await?;
                             } else {
-                                let msg = SignalingMessage::NoEndpointForId(their_id);
+                                let msg = SignalingMessage::NoEndpointForId(receiver_id);
                                 resp_tx.send(msg.into()).await?;
                             }
                         } else {
@@ -177,7 +177,9 @@ async fn handle_connection(
                         }
                     }
                     _ => {
-                        let resp = resp_unsupported("You should only send BindRequest or ConnectRequest to the signal server");
+                        let resp = resp_unsupported(
+                            "You should only send Bind, Connect, or Candidate message to the signal server",
+                        );
                         resp_tx.send(resp).await?;
                     }
                 }

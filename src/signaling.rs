@@ -8,15 +8,15 @@
 //! A typical session looks like this:
 //!
 //! ```
-//! endpoint            signal server            endpoint
-//! | -----BindRequest------> |                         |
-//! |                         | <---ConnectRequest----- |
-//! | <-ConnectionInvitation- |                         |
-//! | ----ConnectResponse---> |                         |
-//! |                         | -ConnectionInvitation-> |
-//! |                         |                         |
-//! | -----SendCandidateTo--> | <----SendCandidateTo--- |
-//! | <----CandidateFrom----- | -----CandidateFrom----> |
+//! endpoint      signal server      endpoint
+//! | -------Bind-----> |                   |
+//! |                   | <----Connect----- |
+//! | <----Connect----- |                   |
+//! | -----Connect----> |                   |
+//! |                   | -----Connect----> |
+//! |                   |                   |
+//! | -----Candidate--> | <---Candidate---- |
+//! | <----Candidate--- | ----Candidate---> |
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -71,26 +71,11 @@ impl From<tung::tungstenite::Error> for SignalingError {
 pub enum SignalingMessage {
     /// An endpoint sends this message to bind to the id on the
     /// signaling server.
-    BindRequest(EndpointId),
-    /// An endpoint sends this message to connect to a binded
-    /// endpoint. The message contains (`my_id`, `their_id`), in that
-    /// order.
-    ConnectRequest(EndpointId, EndpointId, SDP),
-    /// After a `BindRequest`, the endpoint receives a stream of this
-    /// message as other endpoints sends `ConnectRequest` targeted at
-    /// it. After a `ConnectRequest`, the endpoint will receive one
-    /// of this message coming from the target endpoint.
-    ConnectionInvitation(EndpointId, SDP),
-    /// An endpoint responds to a `ConnectionInvitation` with this
-    /// message. The message contains (`my_id`, `their_id`), in that
-    /// order.
-    ConnectResponse(EndpointId, EndpointId, SDP),
-    /// Endpoints sends this message to send their candidate to
-    /// another endpoint.
-    SendCandidateTo(EndpointId, ICECandidate),
-    /// Signaling server sends this message to an endpoint when some
-    /// other endpoints sends their candidate to this endpoint.
-    CandidateFrom(EndpointId, ICECandidate),
+    Bind(EndpointId),
+    /// Connect request. (sender_id, receiver_id, sender_sdp).
+    Connect(EndpointId, EndpointId, SDP),
+    /// Send candidate. (sender_id, receiver_id, sender_candidate).
+    Candidate(EndpointId, EndpointId, ICECandidate),
     /// Cannot find the corresponding endpoint for the provided id.
     NoEndpointForId(String),
 }
@@ -104,27 +89,6 @@ impl Into<tung::tungstenite::Message> for SignalingMessage {
 #[cfg(test)]
 mod tests {
     use crate::signaling::{client, server};
-    use std::sync::Arc;
-
-    use webrtc::ice_transport::ice_server::RTCIceServer;
-    use webrtc::peer_connection::configuration::RTCConfiguration;
-
-    async fn test() -> anyhow::Result<()> {
-        let api = webrtc::api::APIBuilder::new().build();
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let conn = Arc::new(api.new_peer_connection(config).await?);
-        let offer = conn.create_offer(None).await?;
-        conn.set_local_description(offer).await?;
-        let sdp = conn.local_description().await.unwrap();
-
-        Ok(())
-    }
 
     #[test]
     #[ignore]
@@ -145,7 +109,7 @@ mod tests {
             println!("Server binded to id = 1");
             if let Ok(mut sock) = listener.accept().await {
                 assert!(sock.sdp() == "client sdp");
-                println!("Server received clien sdp: {}", sock.sdp());
+                println!("Server received client sdp: {}", sock.sdp());
                 sock.send_sdp(sdp_server).await.unwrap();
                 println!("Server sent sdp answer");
 
