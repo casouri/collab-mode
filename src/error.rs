@@ -58,3 +58,40 @@ impl From<serde_json::Error> for CollabError {
         CollabError::ParseError(format!("{:#}", value))
     }
 }
+
+pub type WebrpcResult<T> = Result<T, WebrpcError>;
+
+#[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
+pub enum WebrpcError {
+    #[error("Signaling error {err:?}")]
+    SignalingError {
+        #[from]
+        err: crate::signaling::SignalingError,
+    },
+    #[error("ICE error {0}")]
+    ICEError(String),
+    #[error("SCTP error {0}")]
+    SCTPError(String),
+    #[error("Can't parse message: {0}")]
+    ParseError(String),
+    #[error("Data channel error {0}")]
+    DataChannelError(String),
+}
+
+impl From<webrtc_ice::Error> for WebrpcError {
+    fn from(value: webrtc_ice::Error) -> Self {
+        Self::ICEError(value.to_string())
+    }
+}
+
+impl From<webrtc_sctp::Error> for WebrpcError {
+    fn from(value: webrtc_sctp::Error) -> Self {
+        Self::SCTPError(value.to_string())
+    }
+}
+
+impl From<webrtc_data::Error> for WebrpcError {
+    fn from(value: webrtc_data::Error) -> Self {
+        Self::DataChannelError(value.to_string())
+    }
+}

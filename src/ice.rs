@@ -1,3 +1,4 @@
+use crate::error::{WebrpcError, WebrpcResult};
 use crate::signaling::{
     client::{Listener, Socket as SignalSocket},
     EndpointId, SignalingError,
@@ -16,34 +17,23 @@ use webrtc_ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc_ice::url::Url;
 use webrtc_util::Conn;
 
-pub type WebrpcResult<T> = Result<T, WebrpcError>;
-
-#[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
-pub enum WebrpcError {
-    #[error("Signaling error {err:?}")]
-    SignalingError {
-        #[from]
-        err: SignalingError,
-    },
-    #[error("ICE error {0}")]
-    ICEError(String),
-    #[error("Can't parse message: {0}")]
-    ParseError(String),
-}
-
-impl From<webrtc_ice::Error> for WebrpcError {
-    fn from(value: webrtc_ice::Error) -> Self {
-        Self::ICEError(value.to_string())
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ICECredential {
     ufrag: String,
     pwd: String,
 }
 
-async fn ice_accept(
+/// Bind to `id` on the signaling server at `signaling_addr`.
+/// `signaling_addr` should be a valid websocket url.
+pub async fn ice_bind(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Listener> {
+    let mut listener = Listener::new(signaling_addr, id).await?;
+    listener.bind().await?;
+    Ok(listener)
+}
+
+/// Accept connections from `sock`. If `progress_tx` isn't None,
+/// report progress to it while establishing connection.
+pub async fn ice_accept(
     mut sock: SignalSocket,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
 ) -> WebrpcResult<Arc<impl Conn + Send + Sync>> {
@@ -73,7 +63,11 @@ async fn ice_accept(
     }
 }
 
-async fn ice_connect(
+/// Connect to the endpoint with `id` on the signaling server at
+/// signaling_addr`. `signaling_addr` should be a valid websocket url.
+/// If `progress_tx` isn't None, report progress to it while
+/// establishing connection.
+pub async fn ice_connect(
     id: EndpointId,
     signaling_addr: &str,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
