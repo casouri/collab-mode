@@ -34,7 +34,9 @@ futures = "0.3"
 futures-util = "0.3"
 
 tokio-tungstenite = "0.20.0"
-webrtc = "0.8.0"
+webrtc-ice = "0.9.1"
+webrtc-data = "0.7.0"
+webrtc-util = "0.7.0"
 
 [build-dependencies]
 tonic-build = "0.9.2"
