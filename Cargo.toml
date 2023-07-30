@@ -37,6 +37,8 @@ tokio-tungstenite = "0.20.0"
 webrtc-ice = "0.9.1"
 webrtc-data = "0.7.0"
 webrtc-util = "0.7.0"
+webrtc-sctp = "0.8.0"
+bytes = "1.4.0"
 
 [build-dependencies]
 tonic-build = "0.9.2"
