@@ -228,6 +228,10 @@ async fn listener_process_message(
                 .unwrap(); // Receiver is never dropped.
             Ok(())
         }
+        SignalingMessage::IdTaken(id) => {
+            sock_tx.send(Err(SignalingError::IdTaken(id))).unwrap();
+            Ok(())
+        }
         SignalingMessage::Candidate(their_id, my_id, their_candidate) => {
             let tx = endpoint_map.get(&their_id).map(|tx| tx.clone());
             if let Some(tx) = tx {
