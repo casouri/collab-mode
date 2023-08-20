@@ -63,11 +63,8 @@ pub type WebrpcResult<T> = Result<T, WebrpcError>;
 
 #[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
 pub enum WebrpcError {
-    #[error("Signaling error {err:?}")]
-    SignalingError {
-        #[from]
-        err: crate::signaling::SignalingError,
-    },
+    #[error("Signaling error {0}")]
+    SignalingError(String),
     #[error("ICE error {0}")]
     ICEError(String),
     #[error("SCTP error {0}")]
@@ -78,6 +75,12 @@ pub enum WebrpcError {
     DataChannelError(String),
     #[error("The other end stopped listening for responses for this request")]
     RequestClosed(),
+}
+
+impl From<crate::signaling::SignalingError> for WebrpcError {
+    fn from(value: crate::signaling::SignalingError) -> Self {
+        WebrpcError::SignalingError(value.to_string())
+    }
 }
 
 impl From<webrtc_ice::Error> for WebrpcError {
