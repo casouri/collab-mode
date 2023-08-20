@@ -76,6 +76,8 @@ pub enum WebrpcError {
     ParseError(String),
     #[error("Data channel error {0}")]
     DataChannelError(String),
+    #[error("The other end stopped listening for responses for this request")]
+    RequestClosed(),
 }
 
 impl From<webrtc_ice::Error> for WebrpcError {

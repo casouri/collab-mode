@@ -182,6 +182,11 @@ impl Socket {
     pub fn sdp(&self) -> SDP {
         self.their_sdp.clone()
     }
+
+    /// Return the id of the other end.
+    pub fn id(&self) -> String {
+        self.their_id.clone()
+    }
 }
 
 impl CandidateSender {

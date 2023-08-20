@@ -132,11 +132,16 @@ against B and shortly after I(B), A becomes identity. What Alice will
 see is that she deletes the X but it soon comes back.
 
 In a completely correct system (POT or COT), Alice should see the X
-stay deleted. But I'd argue that the result of our imperfect system
-isn't too bad: Alice can just delete the X again. Users might not even
-consider this is unexpected behavior: Alice and Bob are editing on the
-same text concurrently, some conflict is expected. I consider this a
-acceptable price to pay for simplicity and efficiency.
+stay deleted. But I’d say that our system is still correct. Since the
+ops are concurrent, there aren’t causal relationship between them. We
+know Alice’s op arrives at the server before Bob’s op does, but
+nothing stops us from pretending that Bob’s op arrives first. (The
+only nice thing of distributed systems, eh?)
+
+From user’s view, Alice can just delete the X again. Users might not
+even consider this is unexpected behavior: Alice and Bob are editing
+on the same text concurrently, some conflict is expected. I consider
+this a acceptable price to pay for simplicity and efficiency.
 
 The good news is that transforming inverse ops don't have the
 decoupled do-undo pair problem, since we transform it only once,
