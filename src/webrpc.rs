@@ -32,15 +32,18 @@
 //! responses of a request, the server eventually learns it, and
 //! sending further responses will return a `RequestClosed` error.
 
-use crate::data::{data_accept, data_bind};
+use crate::data::{data_accept, data_bind, data_connect};
 use crate::error::{WebrpcError, WebrpcResult};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use webrtc_data::data_channel::{DataChannel, PollDataChannel};
+
+pub use crate::signaling::EndpointId;
 
 /// Max size of a webrpc frame body in bytes.
 const MAX_FRAME_BODY_SIZE: usize = 64 * 1024 * 1024;
@@ -49,8 +52,6 @@ const MAX_FRAME_HEADER_LINE_SIZE: usize = 1024;
 
 type RequestId = u32;
 type MessageId = u32;
-
-type RawMessage = Vec<u8>;
 
 type ResponseChannelMap = RwLock<HashMap<RequestId, mpsc::UnboundedSender<WebrpcResult<Message>>>>;
 type LiveRequestMap = RwLock<HashMap<RequestId, ()>>;
@@ -91,8 +92,8 @@ pub struct Endpoint {
     /// their corresponding channel.
     resp_channel_map: Arc<ResponseChannelMap>,
     /// As long as a request is live, it has a value in this map. When
-    /// the other stops listening for responses of a request, the
-    /// value is removed from this map.
+    /// the other endpoint stops listening for responses of a request,
+    /// the value is removed from this map.
     live_request_map: Arc<LiveRequestMap>,
 }
 
@@ -108,8 +109,16 @@ enum MessageKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     kind: MessageKind,
-    pub id: RequestId,
-    pub body: RawMessage,
+    pub req_id: RequestId,
+    pub body: Vec<u8>,
+}
+
+impl Message {
+    /// Unpack the message into a `T`.
+    pub fn unpack<T: DeserializeOwned>(&self) -> WebrpcResult<T> {
+        let res = bincode::deserialize::<T>(&self.body)?;
+        Ok(res)
+    }
 }
 
 /// A frame. One or more frames make up a message.
@@ -120,6 +129,15 @@ struct Frame<'a> {
 }
 
 impl Endpoint {
+    /// Connect to the endpoint with `id` registered on the signaling server.
+    pub async fn connect(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Endpoint> {
+        let data_channel = data_connect(id.clone(), signaling_addr, None).await?;
+        Ok(Endpoint::new(
+            format!("Connection to {id}"),
+            Arc::new(data_channel),
+        ))
+    }
+
     pub fn new(name: String, data_channel: Arc<DataChannel>) -> Endpoint {
         let channel_map = Arc::new(RwLock::new(HashMap::new()));
         let live_map = Arc::new(RwLock::new(HashMap::new()));
@@ -136,33 +154,37 @@ impl Endpoint {
     /// Send a message as a request over the data channel, returns a
     /// channel for response message(s). Close the channel to end the
     /// request. Use this on a client endpoint.
-    pub async fn send_request(
+    pub async fn send_request<T: Serialize>(
         &self,
-        message: RawMessage,
+        message: &T,
     ) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        let id = self.current_msg_id.fetch_add(1, Ordering::SeqCst) + 1;
-        self.resp_channel_map.write().unwrap().insert(id, tx);
+        let req_id = self.current_req_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.resp_channel_map.write().unwrap().insert(req_id, tx);
 
         let msg = Message {
             kind: MessageKind::Request,
-            body: message,
-            id,
+            body: bincode::serialize(message).unwrap(),
+            req_id,
         };
         write_message(&self.data_channel, &self.current_msg_id, msg).await?;
         Ok(rx)
     }
 
     /// Send a response `message` for the request with `id`.
-    pub async fn send_response(&self, id: RequestId, message: RawMessage) -> WebrpcResult<()> {
-        if self.live_request_map.read().unwrap().get(&id).is_none() {
+    pub async fn send_response<T: Serialize>(
+        &self,
+        req_id: RequestId,
+        message: &T,
+    ) -> WebrpcResult<()> {
+        if self.live_request_map.read().unwrap().get(&req_id).is_none() {
             return Err(WebrpcError::RequestClosed());
         }
         let msg = Message {
             kind: MessageKind::Response,
-            body: message,
-            id,
+            body: bincode::serialize(message).unwrap(),
+            req_id,
         };
         write_message(&self.data_channel, &self.current_msg_id, msg).await
     }
@@ -312,7 +334,7 @@ async fn read_messages(
     // messages, and send messages to their corresponding channels in
     // `resp_channel_map`.
     let mut reader = tokio::io::BufReader::new(PollDataChannel::new(data_channel.clone()));
-    let mut msg_map: HashMap<RequestId, Vec<u8>> = HashMap::new();
+    let mut msg_map: HashMap<MessageId, Vec<u8>> = HashMap::new();
     let mut header_buf = vec![0u8; MAX_FRAME_HEADER_LINE_SIZE];
     let mut body_buf = vec![0u8; MAX_FRAME_BODY_SIZE];
 
@@ -332,12 +354,7 @@ async fn read_messages(
         }
         // If this is the last frame, remove from `msg_map`
         // and send to the corresponding channel.
-        let msg = msg_map.remove(&frame.message_id).ok_or_else(|| {
-            WebrpcError::DataChannelError(format!(
-                "Cannot find partial message with id {}",
-                frame.message_id,
-            ))
-        })?;
+        let msg = msg_map.remove(&frame.message_id).unwrap();
         let msg = bincode::deserialize::<Message>(&msg).map_err(|err| {
             WebrpcError::ParseError(format!(
                 "Cannot parse message #{} from data channel [{}]: {:?}",
@@ -371,11 +388,11 @@ async fn handle_new_message(
     match msg.kind {
         // Server gets closed message from client.
         MessageKind::Close => {
-            live_request_map.write().unwrap().remove(&msg.id);
+            live_request_map.write().unwrap().remove(&msg.req_id);
         }
         // Server gets request message from client.
         MessageKind::Request => {
-            live_request_map.write().unwrap().insert(msg.id, ());
+            live_request_map.write().unwrap().insert(msg.req_id, ());
             let _ = req_tx.send(Ok(msg));
         }
         // Client gets response message from server.
@@ -383,11 +400,11 @@ async fn handle_new_message(
             let tx = resp_channel_map
                 .read()
                 .unwrap()
-                .get(&msg.id)
+                .get(&msg.req_id)
                 .map(|tx| tx.clone());
 
             let mut channel_unavailable = false;
-            let request_id = msg.id;
+            let request_id = msg.req_id;
 
             if let Some(tx) = tx {
                 let res = tx.send(Ok(msg));
@@ -414,7 +431,7 @@ async fn handle_new_message(
             if channel_unavailable {
                 let close_msg = Message {
                     kind: MessageKind::Close,
-                    id: request_id,
+                    req_id: request_id,
                     body: vec![],
                 };
                 let res = write_message(data_channel, current_msg_id, close_msg).await;
@@ -446,7 +463,7 @@ async fn write_message(
         let last = if chunk_end == total_len {
             format!("L:\n")
         } else {
-            format!("\n")
+            "".to_string()
         };
         let header = format!("CL:{body_len}\nMI:{message_id}\n{last}\n")
             .as_bytes()
@@ -485,37 +502,30 @@ mod tests {
         let mut rx = endpoint.read_messages().unwrap();
 
         let req1 = rx.recv().await.unwrap().unwrap();
-        let msg = std::str::from_utf8(&req1.body[..]).unwrap();
-        println!("Server got request: {msg}");
-        assert!(msg == "req1");
+        let msg1: String = req1.unpack().unwrap();
+        println!("Server got request: {msg1}");
+        assert!(msg1 == "req1");
 
         let req2 = rx.recv().await.unwrap().unwrap();
-        let msg = std::str::from_utf8(&req2.body[..]).unwrap();
-        println!("Server got request: {msg}");
-        assert!(msg == "req2");
+        let msg2: String = req2.unpack().unwrap();
+        println!("Server got request: {msg2}");
+        assert!(msg2 == "req2");
 
-        endpoint.send_response(req1.id, req1.body).await.unwrap();
-        endpoint
-            .send_response(req2.id, req2.body.clone())
-            .await
-            .unwrap();
-        endpoint
-            .send_response(req2.id, req2.body.clone())
-            .await
-            .unwrap();
-        endpoint
-            .send_response(req2.id, req2.body.clone())
-            .await
-            .unwrap();
+        endpoint.send_response(req1.req_id, &msg1).await.unwrap();
+        endpoint.send_response(req2.req_id, &msg2).await.unwrap();
+        endpoint.send_response(req2.req_id, &msg2).await.unwrap();
+        endpoint.send_response(req2.req_id, &msg2).await.unwrap();
 
         // This response should trigger a closed message on client.
         endpoint
-            .send_response(req2.id, req2.body.clone())
+            .send_response(req2.req_id, &String::from_utf8(req2.body.clone()).unwrap())
             .await
             .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         // This response should fail to send out.
-        let res = endpoint.send_response(req2.id, req2.body).await;
+        let res = endpoint
+            .send_response(req2.req_id, &String::from_utf8(req2.body.clone()).unwrap())
+            .await;
         assert!(res.is_err());
 
         Ok(())
@@ -527,26 +537,26 @@ mod tests {
 
         endpoint.read_messages().unwrap();
 
-        let mut rx1 = endpoint.send_request("req1".as_bytes().to_vec()).await?;
-        let mut rx2 = endpoint.send_request("req2".as_bytes().to_vec()).await?;
+        let mut rx1 = endpoint.send_request(&"req1".to_string()).await?;
+        let mut rx2 = endpoint.send_request(&"req2".to_string()).await?;
 
         let resp1 = rx1.recv().await.unwrap().unwrap();
-        let msg1 = std::str::from_utf8(&resp1.body[..]).unwrap();
-        println!("Client got resp: {msg1}");
+        let msg1: String = resp1.unpack().unwrap();
+        println!("Client got resp: {:?}", msg1);
         assert!(msg1 == "req1");
 
         let resp2 = rx2.recv().await.unwrap().unwrap();
-        let msg2 = std::str::from_utf8(&resp2.body[..]).unwrap();
+        let msg2: String = resp2.unpack().unwrap();
         println!("Client got resp: {msg2}");
         assert!(msg2 == "req2");
 
         let resp2 = rx2.recv().await.unwrap().unwrap();
-        let msg2 = std::str::from_utf8(&resp2.body[..]).unwrap();
+        let msg2: String = resp2.unpack().unwrap();
         println!("Client got resp: {msg2}");
         assert!(msg2 == "req2");
 
         let resp2 = rx2.recv().await.unwrap().unwrap();
-        let msg2 = std::str::from_utf8(&resp2.body[..]).unwrap();
+        let msg2: String = resp2.unpack().unwrap();
         println!("Client got resp: {msg2}");
         assert!(msg2 == "req2");
 

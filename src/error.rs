@@ -77,6 +77,12 @@ pub enum WebrpcError {
     RequestClosed(),
 }
 
+impl From<bincode::Error> for WebrpcError {
+    fn from(value: bincode::Error) -> Self {
+        WebrpcError::ParseError(value.to_string())
+    }
+}
+
 impl From<crate::signaling::SignalingError> for WebrpcError {
     fn from(value: crate::signaling::SignalingError) -> Self {
         WebrpcError::SignalingError(value.to_string())
