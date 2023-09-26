@@ -24,13 +24,19 @@
 
 //! Each request-response session is made of messages flying both
 //! ways, a message can be either a request or a response, and they
-//! carry an id to tell which request session it belongs to. A message
-//! doesn't have a size limit. Each message are chunked into frames,
-//! which has a max size, before sending over the data channel.
+//! carry an request id to tell which request session it belongs to. A
+//! message doesn't have a size limit. Each message are chunked into
+//! frames, which has a max size, before sending over the data
+//! channel.
 
-//! We don't have acks for messages. When a client stops listening for
-//! responses of a request, the server eventually learns it, and
-//! sending further responses will return a `RequestClosed` error.
+//! We don't have synchronous acks for messages. When a client stops
+//! listening for responses of a request, the server eventually learns
+//! it, and sending further responses will return a `RequestClosed`
+//! error.
+
+//! Right now there's no recovery, any error (except
+//! [WebrpcError::RequestClosed]) is a fatal error. The user should
+//! reconnect and start over the work from a checkpoint.
 
 use crate::data::{data_accept, data_bind, data_connect};
 use crate::error::{WebrpcError, WebrpcResult};
@@ -159,9 +165,30 @@ impl Endpoint {
         message: &T,
     ) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let tx_1 = tx.clone();
 
         let req_id = self.current_req_id.fetch_add(1, Ordering::SeqCst) + 1;
         self.resp_channel_map.write().unwrap().insert(req_id, tx);
+
+        // Send close message to the other end when the caller drops
+        // the receiver.
+        let data_channel = self.data_channel.clone();
+        let msg_id = self.current_msg_id.clone();
+        tokio::spawn(async move {
+            tx_1.closed().await;
+            let msg = Message {
+                kind: MessageKind::Close,
+                body: vec![],
+                req_id,
+            };
+            // Don't need to check if the request is still live.
+            // Spurious close message won't hurt. Don't care about
+            // error either, if it errors, oh well.
+            let res = write_message(&data_channel, &msg_id, msg).await;
+            if let Err(err) = res {
+                log::warn!("Cannot send close message to the other endpoint: {:?}", err);
+            }
+        });
 
         let msg = Message {
             kind: MessageKind::Request,
@@ -189,7 +216,8 @@ impl Endpoint {
         write_message(&self.data_channel, &self.current_msg_id, msg).await
     }
 
-    fn read_messages(&self) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
+    // Return a channel that receives requests.
+    fn read_requests(&self) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let data_channel = self.data_channel.clone();
         let current_msg_id = self.current_msg_id.clone();
@@ -320,8 +348,7 @@ async fn read_frame<'a>(
 }
 
 // Read incoming messages and send them to corresponding receiving
-// channels. Use this function on a client endpoint. If an error
-// occurs, stop and return the error.
+// channels. If an error occurs, stop and return the error.
 async fn read_messages(
     data_channel: Arc<DataChannel>,
     resp_channel_map: &ResponseChannelMap,
@@ -427,7 +454,10 @@ async fn handle_new_message(
             }
 
             // If the channel is closed or nonexistent, inform the
-            // other end.
+            // other end. This might result in duplicate close
+            // messages since we send close messages on closed
+            // receiving channels too, but duplicate close message is
+            // better than no close message.
             if channel_unavailable {
                 let close_msg = Message {
                     kind: MessageKind::Close,
@@ -435,10 +465,11 @@ async fn handle_new_message(
                     body: vec![],
                 };
                 let res = write_message(data_channel, current_msg_id, close_msg).await;
-                if res.is_err() {
+                if let Err(err) = res {
                     log::warn!(
-                        "Cannot send close message in data channel [{}]",
-                        channel_name
+                        "Cannot send close message in data channel [{}]: {:?}",
+                        channel_name,
+                        err
                     );
                 }
             }
@@ -499,7 +530,7 @@ mod tests {
         let data_channel = data_accept(sock, None).await?;
         let endpoint = Endpoint::new("server endpoint".to_string(), Arc::new(data_channel));
 
-        let mut rx = endpoint.read_messages().unwrap();
+        let mut rx = endpoint.read_requests().unwrap();
 
         let req1 = rx.recv().await.unwrap().unwrap();
         let msg1: String = req1.unpack().unwrap();
@@ -535,7 +566,7 @@ mod tests {
         let data_channel = data_connect(id, "ws://127.0.0.1:9000", None).await?;
         let endpoint = Endpoint::new("client endpoint".to_string(), Arc::new(data_channel));
 
-        endpoint.read_messages().unwrap();
+        endpoint.read_requests().unwrap();
 
         let mut rx1 = endpoint.send_request(&"req1".to_string()).await?;
         let mut rx2 = endpoint.send_request(&"req2".to_string()).await?;
@@ -560,8 +591,6 @@ mod tests {
         println!("Client got resp: {msg2}");
         assert!(msg2 == "req2");
 
-        // Now we drop rx, new responses from server will trigger a
-        // "closed" message.
         drop(rx2);
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         Ok(())
