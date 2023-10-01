@@ -5,7 +5,6 @@ use crate::engine::EngineError;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tonic::Status;
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum CollabError {
@@ -41,23 +40,6 @@ pub enum CollabError {
 }
 
 pub type CollabResult<T> = Result<T, CollabError>;
-
-impl From<Status> for CollabError {
-    fn from(value: Status) -> Self {
-        if let tonic::Code::Internal = value.code() {
-            serde_json::from_str::<CollabError>(&value.message()).unwrap()
-        } else {
-            CollabError::TransportErr(value.to_string())
-        }
-    }
-}
-
-impl From<CollabError> for Status {
-    fn from(value: CollabError) -> Self {
-        let str = serde_json::to_string(&value).unwrap();
-        Status::internal(str)
-    }
-}
 
 impl From<serde_json::Error> for CollabError {
     fn from(value: serde_json::Error) -> Self {

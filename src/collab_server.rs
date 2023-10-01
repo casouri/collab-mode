@@ -10,27 +10,19 @@
 use crate::abstract_server::DocServer;
 use crate::error::{CollabError, CollabResult};
 use crate::op::{DocId, GlobalSeq, Op, SiteId};
-use crate::rpc::doc_server_server::DocServerServer;
 use crate::types::*;
 use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
 use jumprope::JumpRope;
-use std::cmp::min;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::sync::{Mutex, RwLock};
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::rpc::{self, doc_server_server};
-use tonic::{Request, Response};
-
 // *** Types
-
-type TResult<T> = tonic::Result<T>;
 
 #[async_trait]
 impl DocServer for LocalServer {
@@ -153,38 +145,6 @@ impl LocalServer {
         }
     }
 
-    pub async fn start_grpc_server(
-        self,
-        port: u16,
-        error_channel: mpsc::Sender<CollabError>,
-    ) -> CollabResult<()> {
-        let service = DocServerServer::new(self);
-        let server = tonic::transport::Server::builder().add_service(service);
-
-        let addr4 = format!("0.0.0.0:{}", port);
-        let addr6 = format!("[::1]:{}", port);
-
-        let listener4 = TcpListener::bind(addr4)
-            .await
-            .map_err(|err| CollabError::IOErr(err.to_string()))?;
-        let listener6 = TcpListener::bind(addr6)
-            .await
-            .map_err(|err| CollabError::IOErr(err.to_string()))?;
-        let incoming4 = TcpListenerStream::new(listener4);
-        let incoming6 = TcpListenerStream::new(listener6);
-        let incoming46 = tokio_stream::StreamExt::merge(incoming4, incoming6);
-
-        let _ = tokio::spawn(async move {
-            if let Err(err) = server.serve_with_incoming(incoming46).await {
-                error_channel
-                    .send(CollabError::ServerDied(err.to_string()))
-                    .await
-                    .unwrap();
-            }
-        });
-        Ok(())
-    }
-
     pub async fn share_file_1(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
         // TODO permission check.
         let doc_id: DocId = rand::random();
@@ -291,126 +251,6 @@ impl LocalServer {
         let mut docs = self.docs.write().await;
         docs.remove(doc_id);
         Ok(())
-    }
-}
-
-// *** RPC
-
-#[async_trait]
-impl doc_server_server::DocServer for LocalServer {
-    type RecvOpStream = Pin<Box<dyn Stream<Item = TResult<rpc::FatOp>> + Send>>;
-    type RequestFileStream = ReceiverStream<TResult<rpc::SnapshotChunk>>;
-
-    async fn login(&self, request: Request<rpc::Credential>) -> TResult<Response<rpc::SiteId>> {
-        let cred = request.into_inner().cred;
-
-        let mut user_list = self.user_list.lock().await;
-        let site_id = if let Some(site_id) = user_list.get(&cred) {
-            site_id.clone()
-        } else {
-            let mut next_site_id = self.next_site_id.lock().await;
-            let site_id = next_site_id.clone();
-            *next_site_id += 1;
-            user_list.insert(cred.clone(), site_id);
-            site_id
-        };
-        Ok(Response::new(rpc::SiteId { id: site_id }))
-    }
-
-    async fn share_file(
-        &self,
-        request: Request<rpc::FileToShare>,
-    ) -> TResult<Response<rpc::DocId>> {
-        let file = request.into_inner();
-        let doc_id = self.share_file_1(&file.file_name, &file.content).await?;
-        Ok(Response::new(rpc::DocId { doc_id }))
-    }
-
-    async fn send_op(&self, request: Request<rpc::ContextOps>) -> TResult<Response<rpc::Empty>> {
-        let inner = request.into_inner();
-        let context = inner.context;
-        let ops: Vec<FatOp> = inner
-            .ops
-            .into_iter()
-            .map(|op| bincode::deserialize(&op[..]).unwrap())
-            .collect();
-        log::debug!(
-            "send_op() gRPC server receives ops, passing to local server to process: {:?}",
-            &ops
-        );
-        self.send_op_1(ContextOps { context, ops }).await?;
-        Ok(Response::new(rpc::Empty {}))
-    }
-
-    async fn recv_op(
-        &self,
-        request: Request<rpc::FileOps>,
-    ) -> TResult<Response<Self::RecvOpStream>> {
-        let inner = request.into_inner();
-        let stream = self.recv_op_1(&inner.doc_id, inner.after).await?;
-
-        let stream = stream.map(|op| {
-            let op = rpc::FatOp {
-                op: bincode::serialize(&op).unwrap(),
-            };
-            Ok(op)
-        });
-        Ok(Response::new(Box::pin(stream)))
-    }
-
-    async fn list_files(&self, _request: Request<rpc::Empty>) -> TResult<Response<rpc::FileList>> {
-        let files = self.list_files_1().await;
-        let files = files
-            .into_iter()
-            .map(|info| rpc::DocInfo {
-                doc_id: info.doc_id,
-                file_name: info.file_name,
-            })
-            .collect();
-        log::debug!("gRPC list_files request -> {:?}", &files);
-        Ok(Response::new(rpc::FileList { files }))
-    }
-
-    async fn request_file(
-        &self,
-        request: Request<rpc::DocId>,
-    ) -> TResult<Response<Self::RequestFileStream>> {
-        let snapshot = self.request_file_1(&request.into_inner().doc_id).await?;
-        let buffer = snapshot.buffer;
-        let seq = snapshot.seq;
-
-        let (tx, rx) = mpsc::channel(1);
-
-        tokio::spawn(async move {
-            let len = 32 * 1024 * 1024;
-            let mut start = 0;
-            loop {
-                if start >= buffer.len() {
-                    break;
-                }
-                let buf = &buffer[start..(min(start + len, buffer.len()))];
-                if let Err(err) = tx
-                    .send(Ok(rpc::SnapshotChunk {
-                        seq,
-                        content: buf.to_string(),
-                    }))
-                    .await
-                {
-                    log::warn!(
-                        "request_file() Can't send snapshot chunk to grpc channel: {:#}",
-                        err
-                    );
-                    return;
-                }
-                start += len;
-            }
-        });
-        Ok(Response::new(ReceiverStream::from(rx)))
-    }
-
-    async fn delete_file(&self, request: Request<rpc::DocId>) -> TResult<Response<rpc::Empty>> {
-        self.delete_file_1(&request.into_inner().doc_id).await?;
-        Ok(Response::new(rpc::Empty {}))
     }
 }
 

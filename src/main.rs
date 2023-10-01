@@ -15,10 +15,6 @@ enum Commands {
         /// editor and collab process.
         #[arg(long)]
         socket: bool,
-        /// Use this flag to start a file server that allows the user
-        /// to share files and allow other people to connect.
-        #[arg(long)]
-        server: bool,
         /// Port used by the socket.
         #[arg(long)]
         #[arg(default_value_t = 7701)]
@@ -38,24 +34,11 @@ fn main() -> anyhow::Result<()> {
     match &cli.command {
         Some(Commands::Run {
             socket,
-            server,
             socket_port,
         }) => {
             let collab_server = collab_server::LocalServer::new();
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
-
-            // if server {
-            //     let future = collab_server
-            //         .clone()
-            //         .start_grpc_server(*server_port, err_tx);
-            //     runtime.spawn(async {
-            //         let res = future.await;
-            //         if let Err(err) = res {
-            //             log::error!("Error starting gRPC server: {:#}", err);
-            //         }
-            //     });
-            // }
 
             if !socket {
                 return jsonrpc::run_stdio(collab_server, runtime);

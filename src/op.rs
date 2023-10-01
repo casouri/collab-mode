@@ -1,7 +1,6 @@
 //! This module defines OT operations and various types. [Op] is the
 //! one we actually use, [SimpleOp] was used for prototyping.
 
-use prost::encoding::bool;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
