@@ -24,6 +24,7 @@
 //! webrtc connection is established.
 
 use super::{EndpointId, ICECandidate, SignalingError, SignalingMessage, SignalingResult, SDP};
+use futures::stream::FusedStream;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
@@ -54,6 +55,8 @@ pub struct Listener {
     /// When the listener receives a `BindResponse(their_id,
     /// their_sdp)`, it sends `(their_id, their_sdp)` to this channel.
     sock_rx: mpsc::UnboundedReceiver<SignalingResult<Socket>>,
+    /// Use for cleaning up.
+    shutdown_rx: mpsc::Receiver<()>,
 }
 
 /// A socket that can be used to exchange ICE candidates.
@@ -73,6 +76,12 @@ pub struct CandidateSender {
     their_id: EndpointId,
 }
 
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.shutdown_rx.close();
+    }
+}
+
 impl Listener {
     /// Connect to the signaling server at `addr`.
     pub async fn new(addr: &str, id: EndpointId) -> SignalingResult<Listener> {
@@ -81,13 +90,15 @@ impl Listener {
         let (in_tx, mut in_rx) = mpsc::channel(1);
         let (out_tx, out_rx) = mpsc::channel(1);
         let (sock_tx, sock_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
-        let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx));
+        let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx, shutdown_tx));
 
         let listener = Listener {
             my_id: id.clone(),
             sock_rx,
             out_tx: out_tx.clone(),
+            shutdown_rx,
         };
 
         let _ = tokio::spawn(async move {
@@ -95,7 +106,6 @@ impl Listener {
             while let Some(msg) = in_rx.recv().await {
                 // Ignore errors as long as in_rx hasn't closed.
                 let _todo = listener_process_message(
-                    id.clone(),
                     msg,
                     out_tx.clone(),
                     sock_tx.clone(),
@@ -204,7 +214,6 @@ impl CandidateSender {
 // *** Subroutines
 
 async fn listener_process_message(
-    my_id: EndpointId,
     msg: Result<Message, tung::tungstenite::Error>,
     out_tx: mpsc::Sender<Message>,
     sock_tx: mpsc::UnboundedSender<SignalingResult<Socket>>,
@@ -237,7 +246,11 @@ async fn listener_process_message(
             sock_tx.send(Err(SignalingError::IdTaken(id))).unwrap();
             Ok(())
         }
-        SignalingMessage::Candidate(their_id, my_id, their_candidate) => {
+        SignalingMessage::TimesUp(time) => {
+            sock_tx.send(Err(SignalingError::TimesUp(time))).unwrap();
+            Ok(())
+        }
+        SignalingMessage::Candidate(their_id, _my_id, their_candidate) => {
             let tx = endpoint_map.get(&their_id).map(|tx| tx.clone());
             if let Some(tx) = tx {
                 let _todo = tx.send(their_candidate);
@@ -258,9 +271,19 @@ async fn send_receive_stream(
     mut stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     req_tx: mpsc::Sender<Result<Message, tung::tungstenite::Error>>,
     mut resp_rx: mpsc::Receiver<Message>,
+    shutdown_tx: mpsc::Sender<()>,
 ) {
     loop {
         tokio::select! {
+            _ = shutdown_tx.closed() => {
+                if !stream.is_terminated() {
+                    let res = stream.close(None).await;
+                    if let Err(err) = res {
+                        log::warn!("Error closing connection to the signaling server: {:?}", err);
+                    }
+                }
+                return;
+            }
             msg = stream.next() => {
                 if let Some(msg) = msg {
                     if req_tx.send(msg).await.is_err() {

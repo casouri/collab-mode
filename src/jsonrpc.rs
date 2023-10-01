@@ -16,10 +16,11 @@
 
 use crate::abstract_server::{ClientEnum, DocServer};
 use crate::collab_client::Doc;
-use crate::collab_server::LocalServer;
+use crate::collab_server::{run_webrpc_server, LocalServer};
 use crate::error::{CollabError, CollabResult};
-use crate::grpc_client::GrpcClient;
+// use crate::grpc_client::GrpcClient;
 use crate::types::*;
+use crate::webrpc_client::WebrpcClient;
 use lsp_server::{Connection, Message, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -47,13 +48,9 @@ pub struct JSONRPCServer {
 // *** Entry functions
 
 /// Run the JSONRPC server on stdio.
-pub fn run_stdio(
-    server: LocalServer,
-    server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
-    runtime: tokio::runtime::Runtime,
-) -> anyhow::Result<()> {
+pub fn run_stdio(server: LocalServer, runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::stdio();
-    main_loop(connection, server, server_err_rx, runtime);
+    main_loop(connection, server, runtime);
     io_threads.join()?;
     Ok(())
 }
@@ -62,26 +59,21 @@ pub fn run_stdio(
 pub fn run_socket(
     addr: &str,
     server: LocalServer,
-    server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
     runtime: tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::listen(addr)?;
-    main_loop(connection, server, server_err_rx, runtime);
+    main_loop(connection, server, runtime);
     io_threads.join()?;
     Ok(())
 }
 
 // Handles JSONRPC requests, blocks.
-fn main_loop(
-    connection: Connection,
-    server: LocalServer,
-    mut server_err_rx: tokio::sync::mpsc::Receiver<CollabError>,
-    runtime: tokio::runtime::Runtime,
-) {
+fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::runtime::Runtime) {
     let (notifier_tx, notifier_rx) = std::sync::mpsc::channel();
     let (req_tx, mut req_rx) = tokio::sync::mpsc::channel(1);
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel(1);
-    let mut server = JSONRPCServer::new(server, notifier_tx);
+    let (async_err_tx, mut async_err_rx) = tokio::sync::mpsc::channel(1);
+    let mut jsonrpc_server = JSONRPCServer::new(doc_server.clone(), notifier_tx);
 
     let connection = std::sync::Arc::new(connection);
     let connection_1 = std::sync::Arc::clone(&connection);
@@ -99,7 +91,7 @@ fn main_loop(
                 server_id: doc.server,
             };
             let msg = lsp_server::Notification {
-                method: "RemoteOpArrived".to_string(),
+                method: NotificationCode::RemoteOpArrived.into(),
                 params: serde_json::to_value(params).unwrap(),
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
@@ -111,14 +103,24 @@ fn main_loop(
 
     // 2. Send fatal server errors.
     std::thread::spawn(move || loop {
-        let err = server_err_rx.blocking_recv();
+        let err: Option<CollabError> = async_err_rx.blocking_recv();
         if err.is_none() {
             log::error!("JSONRPC server error channel broke");
             panic!();
         }
-        let msg = lsp_server::Notification {
-            method: "ServerDied".to_string(),
-            params: serde_json::to_value(err.unwrap().to_string()).unwrap(),
+        let msg = match err.unwrap() {
+            CollabError::SignalingTimesUp(time) => lsp_server::Notification {
+                method: NotificationCode::SignalingTimesUp.into(),
+                params: serde_json::to_value(time).unwrap(),
+            },
+            CollabError::AcceptConnectionErr(err) => lsp_server::Notification {
+                method: NotificationCode::AcceptConnectionErr.into(),
+                params: serde_json::to_value(err).unwrap(),
+            },
+            err => lsp_server::Notification {
+                method: NotificationCode::ServerError.into(),
+                params: serde_json::to_value(err.to_string()).unwrap(),
+            },
         };
         connection_3
             .sender
@@ -158,7 +160,9 @@ fn main_loop(
             match msg.unwrap() {
                 Message::Request(req) => {
                     let id = req.id.clone();
-                    let res = server.handle_request(req).await;
+                    let res = jsonrpc_server
+                        .handle_request(req, doc_server.clone(), async_err_tx.clone())
+                        .await;
                     let msg = match res {
                         Ok(msg) => msg,
                         Err(err) => {
@@ -211,9 +215,12 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::ServerNotConnected(_) => ErrorCode::ConnectionBroke,
         CollabError::ChannelClosed(_) => ErrorCode::InternalError,
         CollabError::TransportErr(_) => ErrorCode::ConnectionBroke,
+        CollabError::RemoteErr(_) => ErrorCode::InternalError,
         CollabError::IOErr(_) => ErrorCode::InternalError,
         // This shouldn't be ever needed.
         CollabError::ServerDied(_) => ErrorCode::InternalError,
+        CollabError::SignalingTimesUp(_) => ErrorCode::ConnectionBroke,
+        CollabError::AcceptConnectionErr(_) => ErrorCode::ConnectionBroke,
     }
 }
 
@@ -234,7 +241,12 @@ impl JSONRPCServer {
     }
 
     /// Handle `request`, return response message.
-    async fn handle_request(&mut self, request: Request) -> CollabResult<Message> {
+    async fn handle_request(
+        &mut self,
+        request: Request,
+        server: LocalServer,
+        async_err_tx: tokio::sync::mpsc::Sender<CollabError>,
+    ) -> CollabResult<Message> {
         let msg = if request.method == "ShareFile" {
             let params: ShareFileParams = serde_json::from_value(request.params)?;
             let resp = self.handle_share_file_request(params).await?;
@@ -262,6 +274,12 @@ impl JSONRPCServer {
         } else if request.method == "Undo" {
             let params: UndoParams = serde_json::from_value(request.params)?;
             let resp = self.handle_undo_request(params).await?;
+            make_resp(request.id, resp)
+        } else if request.method == "AcceptConnection" {
+            let params: AcceptConnectionParams = serde_json::from_value(request.params)?;
+            let resp = self
+                .handle_accept_connection_request(params, server, async_err_tx)
+                .await?;
             make_resp(request.id, resp)
         } else {
             todo!()
@@ -361,7 +379,13 @@ impl JSONRPCServer {
         let res = if let Ok(client) = self.get_client(&params.server_id) {
             client.list_files().await
         } else {
-            let client = GrpcClient::new(params.server_id.clone(), params.credential).await?;
+            // let client = GrpcClient::new(params.server_id.clone(), params.credential).await?;
+            let client = WebrpcClient::new(
+                params.server_id.clone(),
+                &params.signaling_addr,
+                params.credential,
+            )
+            .await?;
             self.client_map
                 .insert(params.server_id.clone(), client.into());
             let client = self.client_map.get_mut(&params.server_id).unwrap();
@@ -437,5 +461,24 @@ impl JSONRPCServer {
                 Err(err)
             }
         }
+    }
+
+    pub async fn handle_accept_connection_request(
+        &mut self,
+        params: AcceptConnectionParams,
+        server: LocalServer,
+        async_err_tx: tokio::sync::mpsc::Sender<CollabError>,
+    ) -> CollabResult<()> {
+        let _ = tokio::spawn(async move {
+            let res = run_webrpc_server(params.server_id, params.signaling_addr, server).await;
+            if let Err(err) = res {
+                let err = match err {
+                    CollabError::SignalingTimesUp(time) => CollabError::SignalingTimesUp(time),
+                    err => CollabError::AcceptConnectionErr(err.to_string()),
+                };
+                async_err_tx.send(err).await.unwrap();
+            }
+        });
+        Ok(())
     }
 }

@@ -1,10 +1,11 @@
 //! This module exposes the [DocServer] trait that abstracts over a
 //!local and remote server.
 
-use crate::collab_server::{LocalServer, Snapshot};
+use crate::collab_server::LocalServer;
 use crate::error::CollabResult;
-use crate::grpc_client::GrpcClient;
+// use crate::grpc_client::GrpcClient;
 use crate::types::*;
+use crate::webrpc_client::WebrpcClient;
 use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use std::pin::Pin;
@@ -35,5 +36,6 @@ pub trait DocServer: Send {
 #[derive(Debug, Clone)]
 pub enum ClientEnum {
     LocalServer,
-    GrpcClient,
+    // GrpcClient,
+    WebrpcClient,
 }

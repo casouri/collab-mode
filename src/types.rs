@@ -9,6 +9,7 @@ pub const SITE_ID_SELF: &str = "self";
 pub type Credential = String;
 
 pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
+use crate::error::CollabError;
 pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
@@ -51,4 +52,39 @@ impl DocDesignator {
 pub struct DocInfo {
     pub doc_id: DocId,
     pub file_name: String,
+}
+
+/// A snapshot of a document. Returned by the server when a site
+/// requests a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    /// The file content.
+    pub buffer: String,
+    /// Sequence number of the last op.
+    pub seq: GlobalSeq,
+}
+
+/// Requests sent to webrpc server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DocServerReq {
+    ShareFile { file_name: String, content: String },
+    ListFiles,
+    SendOp(ContextOps),
+    RecvOp { doc_id: DocId, after: GlobalSeq },
+    RequestFile(DocId),
+    DeleteFile(DocId),
+    Login(Credential),
+}
+
+/// Reponses sent to webrpc client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DocServerResp {
+    ShareFile(DocId),
+    ListFiles(Vec<DocInfo>),
+    SendOp,
+    RecvOp(FatOp),
+    RequestFile(Snapshot),
+    DeleteFile,
+    Login(SiteId),
+    Err(CollabError),
 }

@@ -1,7 +1,7 @@
 use crate::error::{WebrpcError, WebrpcResult};
 use crate::signaling::{
     client::{Listener, Socket as SignalSocket},
-    EndpointId, SignalingError,
+    EndpointId,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -208,6 +208,7 @@ fn ice_exchange_candidates(
     Ok(())
 }
 
+#[cfg(test)]
 mod tests {
     use super::{ice_accept, ice_connect};
     use crate::signaling::{client::Listener, server::run_signaling_server};

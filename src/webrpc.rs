@@ -4,23 +4,25 @@
 //! more response; you can also use [Endpoint] as a server to listen
 //! for incoming requests and send back responses.
 
-//! To send a request, use [Endpoint::send_request]. It returns a
-//! channel on which you can receive responses to the request. Closing
-//! the channel terminates the request for both ends.
+//! To create a client, run [Endpoint::connect]. To create a server,
+//! first create a [Listener] using [Listener::bind], then accept
+//! incoming connections (in the form of [Endpoint]s) with
+//! [Listener::accept].
+
+//! For a client, to send a request, use [Endpoint::send_request]. It
+//! returns a channel on which you can receive responses to the
+//! request. Closing the channel terminates the request for both ends.
+
+//! For a server, you need to run [Endpoint::read_requests] to receive
+//! requests after you accepts an endpoint. This function runs in the
+//! background and reads incoming requests and responses and
+//! multiplexes them into corresponding channels. It returns a channel
+//! from which you can read requests.
 
 //! To send a response, use [Endpoint::send_response]. To send a
 //! series of responses, just call [Endpoint::send_response] multiple
 //! times until there's an error, which means either the client closes
 //! their end, or an error occurs.
-
-//! You need to run [Endpoint::read_messages] before sending requests.
-//! This function runs in the background and reads incoming requests
-//! and responses and multiplexes them into corresponding channels. It
-//! returns a channel from which you can read requests. If you are not
-//! interested in incoming requests (eg, you are a client), just drop
-//! the channel. Fatal background errors in [Endpoint::read_messages]
-//! are sent to the request channel. If the request channel is closed,
-//! errors are sent to every response channel.
 
 //! Each request-response session is made of messages flying both
 //! ways, a message can be either a request or a response, and they
@@ -37,6 +39,9 @@
 //! Right now there's no recovery, any error (except
 //! [WebrpcError::RequestClosed]) is a fatal error. The user should
 //! reconnect and start over the work from a checkpoint.
+
+//! For a server, fatal errors are sent to the request channel; for a client
+//! fatal errors are sent to every response channel.
 
 use crate::data::{data_accept, data_bind, data_connect};
 use crate::error::{WebrpcError, WebrpcResult};
@@ -93,7 +98,7 @@ pub struct Endpoint {
     /// The data channel.
     data_channel: Arc<DataChannel>,
     /// Name of the data channel, used for logging.
-    name: String,
+    pub name: String,
     /// Map of channel senders, used for sending received messages to
     /// their corresponding channel.
     resp_channel_map: Arc<ResponseChannelMap>,
@@ -138,10 +143,11 @@ impl Endpoint {
     /// Connect to the endpoint with `id` registered on the signaling server.
     pub async fn connect(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Endpoint> {
         let data_channel = data_connect(id.clone(), signaling_addr, None).await?;
-        Ok(Endpoint::new(
-            format!("Connection to {id}"),
-            Arc::new(data_channel),
-        ))
+        let endpoint = Endpoint::new(format!("Connection to {id}"), Arc::new(data_channel));
+
+        let mut rx = endpoint.read_requests()?;
+        rx.close();
+        Ok(endpoint)
     }
 
     pub fn new(name: String, data_channel: Arc<DataChannel>) -> Endpoint {
@@ -155,6 +161,17 @@ impl Endpoint {
             resp_channel_map: channel_map,
             live_request_map: live_map,
         }
+    }
+
+    /// Like `send_request` but expects only one response.
+    pub async fn send_request_oneshot<T: Serialize>(&self, message: &T) -> WebrpcResult<Message> {
+        let mut rx = self.send_request(message).await?;
+        let resp = rx.recv().await.unwrap_or_else(|| {
+            Err(WebrpcError::DataChannelError(
+                "Unexpected channel close when waiting for response".to_string(),
+            ))
+        })?;
+        Ok(resp)
     }
 
     /// Send a message as a request over the data channel, returns a
@@ -217,7 +234,7 @@ impl Endpoint {
     }
 
     // Return a channel that receives requests.
-    fn read_requests(&self) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
+    pub fn read_requests(&self) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let data_channel = self.data_channel.clone();
         let current_msg_id = self.current_msg_id.clone();
@@ -340,6 +357,7 @@ async fn read_frame<'a>(
             WebrpcError::DataChannelError(format!("Error reading RPC frame: {:?}", err))
         })?;
 
+    log::debug!("read_frame() body={:02X?}", &body_buf[..body_len]);
     Ok(Frame {
         message_id,
         body: &body_buf[..body_len],
@@ -388,6 +406,11 @@ async fn read_messages(
                 frame.message_id, channel_name, err
             ))
         })?;
+        log::debug!(
+            "read_message(): msg.kind={:?} msg.req_id={}",
+            &msg.kind,
+            &msg.req_id
+        );
         handle_new_message(
             msg,
             &data_channel,
@@ -484,7 +507,7 @@ async fn write_message(
     message: Message,
 ) -> WebrpcResult<()> {
     let message_id = current_msg_id.fetch_add(1, Ordering::SeqCst) + 1;
-    let message_bytes = bincode::serialize(&message).unwrap();
+    let mut message_bytes = bincode::serialize(&message).unwrap();
     let total_len = message_bytes.len();
     let mut start = 0;
 
@@ -496,20 +519,21 @@ async fn write_message(
         } else {
             "".to_string()
         };
-        let header = format!("CL:{body_len}\nMI:{message_id}\n{last}\n")
-            .as_bytes()
-            .to_vec();
-        data_channel.write(&bytes::Bytes::from(header)).await?;
+        let header_str = format!("CL:{body_len}\nMI:{message_id}\n{last}\n");
+        log::debug!("write_message(): header=\n{}", &header_str);
+        let mut buf = header_str.as_bytes().to_vec();
 
         if total_len == body_len {
+            log::debug!("write_message(): body={:02X?}", &message_bytes);
+            buf.append(&mut message_bytes);
             // Sending the whole message in one go.
-            data_channel
-                .write(&bytes::Bytes::from(message_bytes))
-                .await?;
+            data_channel.write(&bytes::Bytes::from(buf)).await?;
             return Ok(());
         } else {
             // Sending chunks.
-            let chunk = message_bytes[start..chunk_end].to_vec();
+            let mut chunk = message_bytes[start..chunk_end].to_vec();
+            buf.append(&mut chunk);
+            log::debug!("write_message(): chunk={:02X?}", &buf);
             data_channel.write(&bytes::Bytes::from(chunk)).await?;
             start += body_len;
         };

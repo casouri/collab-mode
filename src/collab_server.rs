@@ -12,6 +12,7 @@ use crate::error::{CollabError, CollabResult};
 use crate::op::{DocId, GlobalSeq, Op, SiteId};
 use crate::rpc::doc_server_server::DocServerServer;
 use crate::types::*;
+use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
 use jumprope::JumpRope;
 use std::cmp::min;
@@ -65,16 +66,6 @@ impl DocServer for LocalServer {
 }
 
 // *** Structs
-
-/// A snapshot of a document. Returned by the server when a site
-/// requests a file.
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    /// The file content.
-    pub buffer: String,
-    /// Sequence number of the last op.
-    pub seq: GlobalSeq,
-}
 
 /// The server object.
 #[derive(Debug, Clone)]
@@ -420,5 +411,121 @@ impl doc_server_server::DocServer for LocalServer {
     async fn delete_file(&self, request: Request<rpc::DocId>) -> TResult<Response<rpc::Empty>> {
         self.delete_file_1(&request.into_inner().doc_id).await?;
         Ok(Response::new(rpc::Empty {}))
+    }
+}
+
+// *** Webrpc
+
+pub async fn run_webrpc_server(
+    server_id: ServerId,
+    signaling_addr: String,
+    server: LocalServer,
+) -> CollabResult<()> {
+    let mut listener = Listener::bind(server_id.clone(), &signaling_addr).await?;
+    log::info!(
+        "Registered as {} at signaling server {}",
+        server_id,
+        signaling_addr
+    );
+    loop {
+        let endpoint = listener.accept().await?;
+        log::info!("Received connection, endpoint.name={}", &endpoint.name);
+        let server_1 = server.clone();
+        let _ = tokio::spawn(async move {
+            let res = handle_connection(endpoint.clone(), server_1).await;
+            if let Err(err) = res {
+                log::warn!(
+                    "Error occurred when handling remote client: {:?} endpoint.name={}",
+                    err,
+                    endpoint.name
+                )
+            } else {
+                log::info!(
+                    "Remote client closed connection, endpoint.name={}",
+                    endpoint.name
+                );
+            }
+        });
+    }
+}
+
+async fn handle_connection(mut endpoint: Endpoint, mut server: LocalServer) -> CollabResult<()> {
+    let mut rx = endpoint.read_requests()?;
+    while let Some(msg) = rx.recv().await {
+        let msg = msg?;
+        let req_id = msg.req_id;
+        let res = handle_request(msg, &mut server, &mut endpoint).await;
+        match res {
+            Err(err) => {
+                endpoint
+                    .send_response(req_id, &DocServerResp::Err(err))
+                    .await?;
+            }
+            Ok(Some(resp)) => {
+                endpoint.send_response(req_id, &resp).await?;
+            }
+            Ok(None) => (),
+        }
+    }
+    Ok(())
+}
+
+async fn handle_request(
+    msg: webrpc::Message,
+    server: &mut LocalServer,
+    endpoint: &mut Endpoint,
+) -> CollabResult<Option<DocServerResp>> {
+    let req = msg.unpack()?;
+    match req {
+        DocServerReq::ShareFile { file_name, content } => {
+            let doc_id = server.share_file_1(&file_name, &content).await?;
+            Ok(Some(DocServerResp::ShareFile(doc_id)))
+        }
+        DocServerReq::ListFiles => {
+            let doc_info = server.list_files_1().await;
+            Ok(Some(DocServerResp::ListFiles(doc_info)))
+        }
+        DocServerReq::SendOp(ops) => {
+            server.send_op_1(ops).await?;
+            Ok(Some(DocServerResp::SendOp))
+        }
+        DocServerReq::RecvOp { doc_id, after } => {
+            let mut stream = server.recv_op_1(&doc_id, after).await?;
+            let endpoint_1 = endpoint.clone();
+            let req_id = msg.req_id;
+            let _ = tokio::spawn(async move {
+                while let Some(op) = stream.next().await {
+                    let res = endpoint_1
+                        .send_response(req_id, &DocServerResp::RecvOp(op))
+                        .await;
+                    if let Err(err) = res {
+                        log::warn!("Error sending ops to remote client: {:?}", err);
+                        return;
+                    }
+                }
+            });
+            Ok(None)
+        }
+        DocServerReq::RequestFile(doc_id) => {
+            let snapshot = server.request_file_1(&doc_id).await?;
+            Ok(Some(DocServerResp::RequestFile(snapshot)))
+        }
+        DocServerReq::DeleteFile(doc_id) => {
+            server.delete_file_1(&doc_id).await?;
+            Ok(Some(DocServerResp::DeleteFile))
+        }
+        DocServerReq::Login(credential) => {
+            let mut user_list = server.user_list.lock().await;
+            let site_id = if let Some(site_id) = user_list.get(&credential) {
+                site_id.clone()
+            } else {
+                let mut next_site_id = server.next_site_id.lock().await;
+                let site_id = next_site_id.clone();
+                *next_site_id += 1;
+                user_list.insert(credential.clone(), site_id);
+                site_id
+            };
+            Ok(Some(DocServerResp::Login(site_id)))
+        }
     }
 }

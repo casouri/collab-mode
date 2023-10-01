@@ -82,6 +82,8 @@ pub enum SignalingMessage {
     NoEndpointForId(String),
     /// Id is already binded.
     IdTaken(EndpointId),
+    /// Allocated time (3min) is up.
+    TimesUp(u16),
 }
 
 impl Into<tung::tungstenite::Message> for SignalingMessage {

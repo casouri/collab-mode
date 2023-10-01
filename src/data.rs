@@ -1,4 +1,4 @@
-use crate::error::{WebrpcError, WebrpcResult};
+use crate::error::WebrpcResult;
 use crate::{ice, signaling};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -78,6 +78,7 @@ pub async fn data_connect(
     Ok(channel)
 }
 
+#[cfg(test)]
 mod tests {
     use super::{data_accept, data_bind, data_connect};
     use crate::signaling::server::run_signaling_server;

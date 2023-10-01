@@ -30,6 +30,12 @@ pub enum CollabError {
     OpOutOfBound(Op, usize),
     #[error("gRPC transport error: {0}")]
     TransportErr(String),
+    #[error("Allocated time ({0}s) on the signaling server is up")]
+    SignalingTimesUp(u16),
+    #[error("Error accepting remote connections: {0}")]
+    AcceptConnectionErr(String),
+    #[error("Error returned from remote server: {0}")]
+    RemoteErr(Box<CollabError>),
     #[error("IO error: {0}")]
     IOErr(String),
 }
@@ -59,12 +65,23 @@ impl From<serde_json::Error> for CollabError {
     }
 }
 
+impl From<WebrpcError> for CollabError {
+    fn from(value: WebrpcError) -> Self {
+        match value {
+            WebrpcError::SignalingTimesUp(time) => CollabError::SignalingTimesUp(time),
+            value => CollabError::TransportErr(format!("{:#}", value)),
+        }
+    }
+}
+
 pub type WebrpcResult<T> = Result<T, WebrpcError>;
 
 #[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
 pub enum WebrpcError {
     #[error("Signaling error {0}")]
     SignalingError(String),
+    #[error("Allocated time ({0}s) on the signaling server is up")]
+    SignalingTimesUp(u16),
     #[error("ICE error {0}")]
     ICEError(String),
     #[error("SCTP error {0}")]
@@ -85,7 +102,10 @@ impl From<bincode::Error> for WebrpcError {
 
 impl From<crate::signaling::SignalingError> for WebrpcError {
     fn from(value: crate::signaling::SignalingError) -> Self {
-        WebrpcError::SignalingError(value.to_string())
+        match value {
+            crate::signaling::SignalingError::TimesUp(time) => WebrpcError::SignalingTimesUp(time),
+            value => WebrpcError::SignalingError(value.to_string()),
+        }
     }
 }
 

@@ -3,7 +3,6 @@
 //! servers with this client.
 
 use crate::abstract_server::DocServer;
-use crate::collab_server::Snapshot;
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
 use async_trait::async_trait;

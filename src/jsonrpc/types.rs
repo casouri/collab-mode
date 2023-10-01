@@ -22,6 +22,26 @@ pub enum ErrorCode {
     DocAlreadyExists = -31004,
 }
 
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum NotificationCode {
+    RemoteOpArrived,
+    ServerError,
+    SignalingTimesUp,
+    AcceptConnectionErr,
+}
+
+impl Into<String> for NotificationCode {
+    fn into(self) -> String {
+        match self {
+            NotificationCode::RemoteOpArrived => "RemoteOpArrived".to_string(),
+            NotificationCode::ServerError => "ServerError".to_string(),
+            NotificationCode::SignalingTimesUp => "SignalingTimesUp".to_string(),
+            NotificationCode::AcceptConnectionErr => "AcceptConnectionErr".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloParams {
@@ -66,6 +86,7 @@ pub struct SendOpResp {
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
     pub server_id: ServerId,
+    pub signaling_addr: String,
     pub credential: Credential,
 }
 
@@ -100,4 +121,11 @@ pub struct UndoParams {
     pub doc_id: DocId,
     pub server_id: ServerId,
     pub kind: UndoKind,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptConnectionParams {
+    pub server_id: ServerId,
+    pub signaling_addr: String,
 }

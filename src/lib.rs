@@ -12,6 +12,7 @@ mod ice;
 pub mod jsonrpc;
 pub mod op;
 mod rpc;
-mod signaling;
+pub mod signaling;
 pub mod types;
 mod webrpc;
+mod webrpc_client;

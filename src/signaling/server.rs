@@ -8,7 +8,7 @@
 //! Serving requests mostly consists of adding entries to the map, and
 //! relaying messages to the endpoint with the target id.
 
-use crate::signaling::{EndpointId, SignalingMessage, SDP};
+use crate::signaling::{EndpointId, SignalingMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -31,6 +31,7 @@ pub async fn run_signaling_server(addr: &str) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let server = Server::new();
     while let Ok((stream, client_addr)) = listener.accept().await {
+        log::info!("Accepted a connection from {}", &client_addr);
         let server = server.clone();
         let _ = tokio::spawn(async move {
             let mut endpoint_id = None;
@@ -92,7 +93,7 @@ impl Server {
 
 /// Handle a connection from a collab server or client. If the
 /// connected endpoint is a collab server and requested for listen,
-/// `id` is set to the allocated id.
+/// `endpoint_id` is set to the allocated id.
 async fn handle_connection(
     server: &Server,
     stream: TcpStream,
@@ -107,7 +108,11 @@ async fn handle_connection(
 
     while let Some(msg) = req_rx.recv().await {
         let msg = msg?;
-        log::debug!("Received message {:?}", &msg);
+        if let Ok(txt) = &msg.to_text() {
+            log::debug!("Received message: {txt}",);
+        } else {
+            log::debug!("Received message: {:?}", &msg);
+        }
         match msg {
             Message::Text(msg) => {
                 let msg: SignalingMessage = serde_json::from_str(&msg)?;
@@ -208,6 +213,7 @@ async fn send_receive_stream(
     loop {
         tokio::select! {
             _ = time_rx.recv() => {
+                stream.send(SignalingMessage::TimesUp(180).into()).await.unwrap();
                 stream.send(Message::Close(Some(CloseFrame {
                     code: CloseCode::Policy,
                     reason: Cow::Owned("It's been 3 min, time is up".to_string())
