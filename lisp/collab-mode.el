@@ -517,6 +517,7 @@ file is of the form (:docId DOC-ID :fileName FILE-NAME)."
          (resp (jsonrpc-request
                 conn 'ListFiles
                 `( :serverId ,server
+                   :signalingAddr ,signaling-server
                    :credential ,credential))))
     (seq-map #'identity (plist-get resp :files))))
 
