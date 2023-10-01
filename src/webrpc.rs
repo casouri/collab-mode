@@ -43,8 +43,8 @@
 //! For a server, fatal errors are sent to the request channel; for a client
 //! fatal errors are sent to every response channel.
 
-use crate::data::{data_accept, data_bind, data_connect};
 use crate::error::{WebrpcError, WebrpcResult};
+use data::{data_accept, data_bind, data_connect};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -55,6 +55,9 @@ use tokio::sync::mpsc;
 use webrtc_data::data_channel::{DataChannel, PollDataChannel};
 
 pub use crate::signaling::EndpointId;
+
+mod data;
+mod ice;
 
 /// Max size of a webrpc frame body in bytes.
 const MAX_FRAME_BODY_SIZE: usize = 64 * 1024 * 1024;
