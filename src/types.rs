@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 pub type ServerId = String;
 pub const SERVER_ID_SELF: &str = "self";
-pub const SITE_ID_SELF: &str = "self";
 pub type Credential = String;
 
 pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
