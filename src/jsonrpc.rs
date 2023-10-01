@@ -48,7 +48,8 @@ pub struct JSONRPCServer {
 // *** Entry functions
 
 /// Run the JSONRPC server on stdio.
-pub fn run_stdio(server: LocalServer, runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
+pub fn run_stdio(runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
+    let server = LocalServer::new();
     let (connection, io_threads) = Connection::stdio();
     main_loop(connection, server, runtime);
     io_threads.join()?;
@@ -56,11 +57,8 @@ pub fn run_stdio(server: LocalServer, runtime: tokio::runtime::Runtime) -> anyho
 }
 
 /// Run the JSONRPC server on a socket listening on `addr` (host:port).
-pub fn run_socket(
-    addr: &str,
-    server: LocalServer,
-    runtime: tokio::runtime::Runtime,
-) -> anyhow::Result<()> {
+pub fn run_socket(addr: &str, runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
+    let server = LocalServer::new();
     let (connection, io_threads) = Connection::listen(addr)?;
     main_loop(connection, server, runtime);
     io_threads.join()?;

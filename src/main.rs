@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use collab_mode::{collab_server, jsonrpc};
+use collab_mode::jsonrpc;
 
 #[derive(Parser)]
 struct Cli {
@@ -36,18 +36,12 @@ fn main() -> anyhow::Result<()> {
             socket,
             socket_port,
         }) => {
-            let collab_server = collab_server::LocalServer::new();
-
             let runtime = tokio::runtime::Runtime::new().unwrap();
 
             if !socket {
-                return jsonrpc::run_stdio(collab_server, runtime);
+                return jsonrpc::run_stdio(runtime);
             } else {
-                return jsonrpc::run_socket(
-                    &format!("localhost:{}", socket_port),
-                    collab_server,
-                    runtime,
-                );
+                return jsonrpc::run_socket(&format!("localhost:{}", socket_port), runtime);
             }
         }
         _ => {

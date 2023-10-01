@@ -3,7 +3,7 @@
 mod abstract_server;
 mod auth;
 mod collab_client;
-pub mod collab_server;
+mod collab_server;
 mod engine;
 mod error;
 pub mod jsonrpc;
