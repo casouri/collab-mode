@@ -1,0 +1,19 @@
+
+* gRPC testing
+
+Session 1:
+#+begin_src shell
+RUST_BACKTRACE=1 RUST_LOG=collab_mode cargo run --bin collab-mode -- run --socket --server
+#+end_src
+
+Session 2:
+#+begin_src shell
+RUST_BACKTRACE=1 RUST_LOG=collab_mode cargo run --bin collab-mode -- run --socket --server --socket-port 7703 --server-port 7704
+#+end_src
+
+Emacs:
+#+begin_src elisp
+(setq collab-mode-server-alist '(("#1" . ("" "blah"))))
+(setq collab-mode-local-server-config '("#2" ""))
+(setq collab-mode-connection-type '(socket 7702))
+#+end_src
