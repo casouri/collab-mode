@@ -41,6 +41,6 @@ bytes = "1.4.0"
 
 # https://github.com/johnthagen/min-sized-rust
 [profile.release]
-strip = true  # Strip symbols from the binary.
+# strip = true  # Strip symbols from the binary.
 lto = true # Link Time Optimization.
 opt-level = "z"  # Optimize for size.
