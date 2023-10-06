@@ -110,7 +110,7 @@ impl Doc {
                     Ok(())
                 }
             }
-            Op::Del(ops) => {
+            Op::Del(ops, _) => {
                 for dop in ops {
                     let start = dop.0 as usize;
                     let end = dop.0 as usize + dop.1.len();

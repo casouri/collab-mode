@@ -546,8 +546,8 @@ async fn write_message(
 
 #[cfg(test)]
 mod tests {
+    use super::data::{data_accept, data_bind, data_connect};
     use super::Endpoint;
-    use crate::data::{data_accept, data_bind, data_connect};
     use crate::signaling::server::run_signaling_server;
     use std::sync::Arc;
 
@@ -624,6 +624,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn webrpc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000"));

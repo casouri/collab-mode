@@ -275,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn webrtc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000"));

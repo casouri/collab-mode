@@ -364,7 +364,7 @@ impl ClientEngine {
         }
     }
 
-    /// Generate undo or redo op from the current undo tip.
+    /// Generate undo or redo ops from the current undo tip.
     fn generate_undo_op_1(&mut self, redo: bool) -> Vec<Op> {
         let mut idxidx;
         if redo {
@@ -393,6 +393,7 @@ impl ClientEngine {
             }
         };
 
+        // Undo/redo ops in the group.
         while condition(idxidx) {
             if !redo {
                 idxidx -= 1;
@@ -483,7 +484,7 @@ mod tests {
             Op::Ins((pos, str)) => {
                 doc.insert_str(*pos as usize, &str);
             }
-            Op::Del(edits) => {
+            Op::Del(edits, _) => {
                 for (pos, str) in edits.iter().rev() {
                     doc.replace_range((*pos as usize)..(*pos as usize + str.len()), "");
                 }
@@ -520,9 +521,9 @@ mod tests {
 
         let mut server = ServerEngine::new();
 
-        let op_a1 = make_fatop(Op::Del(vec![(0, "a".to_string())]), &site_a, 1);
+        let op_a1 = make_fatop(Op::Del(vec![(0, "a".to_string())], vec![]), &site_a, 1);
         let op_a2 = make_fatop(Op::Ins((2, "x".to_string())), &site_a, 2);
-        let op_b1 = make_fatop(Op::Del(vec![(2, "c".to_string())]), &site_b, 1);
+        let op_b1 = make_fatop(Op::Del(vec![(2, "c".to_string())], vec![]), &site_b, 1);
 
         let kind = EditorOpKind::Original;
 
@@ -602,7 +603,7 @@ mod tests {
 
         let op_a1 = make_fatop(Op::Ins((2, "1".to_string())), &site_a, 1);
         let op_b1 = make_fatop(Op::Ins((1, "2".to_string())), &site_b, 1);
-        let op_c1 = make_fatop(Op::Del(vec![(1, "b".to_string())]), &site_c, 1);
+        let op_c1 = make_fatop(Op::Del(vec![(1, "b".to_string())], vec![]), &site_c, 1);
 
         let kind = EditorOpKind::Original;
 
@@ -684,5 +685,42 @@ mod tests {
         assert_eq!(doc_c, "a2c");
         apply(&mut doc_c, &a1_at_c.op);
         assert_eq!(doc_c, "a21c");
+    }
+
+    /// This is what happens when you insert "{" in Emacs.
+    #[test]
+    fn undo() {
+        let site_id = 1;
+        let mut client_engine = ClientEngine::new(site_id, 1);
+        // op1: original edit.
+        let op1 = make_fatop(Op::Ins((0, "{".to_string())), &site_id, 1);
+        // Auto-insert parenthesis. I don't know why it deletes the
+        // inserted bracket first, but that's what it does.
+        let op2 = make_fatop(Op::Del(vec![(0, "{".to_string())], vec![]), &site_id, 2);
+        let op3 = make_fatop(Op::Ins((0, "{".to_string())), &site_id, 3);
+        let op4 = make_fatop(Op::Ins((1, "}".to_string())), &site_id, 4);
+        // All four ops have the same group, which is what we want.
+
+        client_engine
+            .process_local_op(op1, EditorOpKind::Original)
+            .unwrap();
+        client_engine
+            .process_local_op(op2, EditorOpKind::Original)
+            .unwrap();
+        client_engine
+            .process_local_op(op3, EditorOpKind::Original)
+            .unwrap();
+        client_engine
+            .process_local_op(op4, EditorOpKind::Original)
+            .unwrap();
+
+        let undo_ops = client_engine.generate_undo_op();
+
+        println!("undo_ops: {:?}", undo_ops);
+
+        assert!(undo_ops[0] == Op::Del(vec![(1, "}".to_string())], vec![]));
+        assert!(undo_ops[1] == Op::Del(vec![(0, "{".to_string())], vec![]));
+        assert!(undo_ops[2] == Op::Ins((0, "{".to_string())));
+        assert!(undo_ops[3] == Op::Del(vec![(0, "{".to_string())], vec![]));
     }
 }

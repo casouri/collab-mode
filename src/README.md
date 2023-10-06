@@ -81,15 +81,14 @@ a transform function that satisfies them, or use a control algorithm
 that avoids them.
 
 COT avoids both IP2 and IP3 in its control algorithm, and our
-algorithm does the same (mostly).
+algorithm (almost) does the same.
 
 IP2 says sequentially transforming an operation A against another
-operation B and its inverse I(B) should end up giving you o back.
-This sounds trivially satisfiable but isn’t. A trivial example: let A
-= del(0, abc), B = del(0, abc). With a normal transform function,
-you’ll end up with del(0, ""). To avoid IP2, you just need to make
-sure you never transform ops sequentially against an op and its
-inverse.
+operation B and its inverse I(B) should end up giving you o back. This
+sounds trivially satisfiable but isn’t. An example: let A = del(0,
+abc), B = del(0, abc). With a normal transform function, you’ll end up
+with del(0, ""). To avoid IP2, you just need to make sure you never
+transform ops sequentially against an op and then its inverse.
 
 Fortunately, avoiding IP2 is pretty easy. When you need to transform
 an op A against a series of ops, say, [1 2 3 I(1) 4], you just need to
@@ -132,16 +131,17 @@ against B and shortly after I(B), A becomes identity. What Alice will
 see is that she deletes the X but it soon comes back.
 
 In a completely correct system (POT or COT), Alice should see the X
-stay deleted. But I’d say that our system is still correct. Since the
-ops are concurrent, there aren’t causal relationship between them. We
-know Alice’s op arrives at the server before Bob’s op does, but
-nothing stops us from pretending that Bob’s op arrives first. (The
-only nice thing of distributed systems, eh?)
+stay deleted. But I’d say that our system is still correct (under a
+different definition of correctness). Since the ops are concurrent,
+there aren’t causal relationship between them. We know Alice’s op
+arrives at the server before Bob’s op does, but nothing stops us from
+pretending that Bob’s op arrives first. (The only saving grace of
+distributed systems, eh?)
 
 From user’s view, Alice can just delete the X again. Users might not
-even consider this is unexpected behavior: Alice and Bob are editing
-on the same text concurrently, some conflict is expected. I consider
-this a acceptable price to pay for simplicity and efficiency.
+even consider this unexpected behavior: Alice and Bob are editing on
+the same text concurrently, some conflict is expected. I consider this
+an acceptable price to pay for simplicity and efficiency.
 
 The good news is that transforming inverse ops don't have the
 decoupled do-undo pair problem, since we transform it only once,
@@ -164,7 +164,7 @@ Again, I give up avoiding IP3 for concurrent ops.
 
 # Undo policy
 
-To keep the user interface simple, we only allow undo and redo on a
+To keep the user interface simple, we only allow undo and redo in a
 linear history. Basically, the default undo/redo behavior anyone would
 expect. Users can undo some operations, and redo them; but once they
 make some original edit, the undone ops are “lost” and can’t be redone

@@ -46,8 +46,8 @@ pub enum Op {
     //   pos  content
     Ins((u64, String)),
     /// Deletion.
-    //       pos  content
-    Del(Vec<(u64, String)>),
+    //       pos  content   Recover list
+    Del(Vec<(u64, String)>, Vec<(u64, String)>),
 }
 
 /// Simple char-based op used for testing.
@@ -185,12 +185,85 @@ fn transform_di(
     }
 }
 
-fn transform_dd(
+/// Merge `segment` into `ops`. (They shouldn't overlap.) `ops` can
+/// either be the segments in the del op, or the recover list.
+fn merge_in(mut segment: (u64, String), ops: &mut Vec<(u64, String)>) {
+    for idx in 0..ops.len() {
+        let op_start = ops[idx].0;
+        let op_end = op_start + ops[idx].1.len() as u64;
+        let segment_start = segment.0;
+        let segment_end = segment_start + segment.1.len() as u64;
+        // Verify no overlap.
+        assert!(op_end <= segment_start || segment_end <= op_start);
+        if segment_start == op_end {
+            ops[idx].1.push_str(&segment.1);
+            return;
+        }
+        if segment_end == op_start {
+            segment.1.push_str(&ops[idx].1);
+            ops[idx].1 = segment.1;
+            return;
+        }
+    }
+    ops.push(segment);
+}
+
+fn transform_di_with_recover(
+    ops: &[(u64, String)],
+    base: &(u64, String),
+    op_site: &SiteId,
+    base_site: &SiteId,
+    recover_list: &[(u64, String)],
+) -> (Vec<(u64, String)>, Vec<(u64, String)>) {
+    let mut new_ops = vec![];
+    for op in ops {
+        if op.1.len() > 0 {
+            new_ops.extend(transform_di(op, base, op_site, base_site));
+        }
+    }
+
+    // Anything that we can recover?
+    let base_start = base.0;
+    let base_end = base_start + base.1.len() as u64;
+    let mut new_recover_list = vec![];
+    for recover_op in recover_list {
+        let recover_op_start = recover_op.0;
+        let recover_op_end = recover_op_start + recover_op.1.len() as u64;
+        //      |  recover_op  |
+        // |  base  |
+        if recover_op_start < base_end && recover_op_end > base_start {
+            let mid = (base_end - recover_op_start) as usize;
+            let recover_op_merge = (recover_op_start, recover_op.1[..mid].to_string());
+            let recover_op_stay = (base_end, recover_op.1[mid..].to_string());
+            merge_in(recover_op_merge, &mut new_ops);
+            if recover_op_stay.1.len() > 0 {
+                new_recover_list.push(recover_op_stay);
+            }
+        }
+        // |  recover_op  |
+        //           |  base  |
+        else if recover_op_end > base_start && recover_op_start < base_end {
+            let mid = (base_start - recover_op_start) as usize;
+            let recover_op_stay = (recover_op_start, recover_op.1[..mid].to_string());
+            let recover_op_merge = (base_start, recover_op.1[mid..].to_string());
+            merge_in(recover_op_merge, &mut new_ops);
+            if recover_op_stay.1.len() > 0 {
+                new_recover_list.push(recover_op_stay);
+            }
+        } else {
+            new_recover_list.push(recover_op.clone());
+        }
+    }
+    (new_ops, new_recover_list)
+}
+
+/// Returns (transformed_op, recover_op)
+fn transform_dd_with_recover(
     op: &(u64, String),
     base: &(u64, String),
     op_site: &SiteId,
     base_site: &SiteId,
-) -> (u64, String) {
+) -> ((u64, String), Option<(u64, String)>) {
     let pos1 = op.0;
     let pos2 = base.0;
     let content1 = &op.1;
@@ -201,14 +274,20 @@ fn transform_dd(
     if pos_less_than(end1, pos2, op_site, base_site) {
         // op completely in front of base.
         // | op |   | base |
-        (pos1, content1.clone())
+        ((pos1, content1.clone()), None)
     } else if pos_less_than(pos1, pos2, op_site, base_site)
         && pos_less_than(end1, end2, op_site, base_site)
     {
         // op partially in front of base.
         // | op |
         //   | base |
-        (pos1, content1[0..((pos2 - pos1) as usize)].to_string())
+        let mid = (pos2 - pos1) as usize;
+        let recover_op = if end1 == pos2 {
+            None
+        } else {
+            Some((pos2, content1[mid..].to_string()))
+        };
+        ((pos1, content1[..mid].to_string()), recover_op)
     } else if pos_less_than(pos1, pos2, op_site, base_site)
         && pos_less_than(end2, end1, base_site, op_site)
     {
@@ -217,23 +296,29 @@ fn transform_dd(
         //   |base|
         let mut new_content = content1[..((pos2 - pos1) as usize)].to_string();
         new_content.push_str(&content1[((end2 - pos1) as usize)..]);
-        (pos1, new_content)
+        ((pos1, new_content), Some((pos2, content2.to_string())))
     } else if pos_less_than(end2, pos1, base_site, op_site) {
         // op completely after base.
         // | base |   | op |
-        (pos1 - (end2 - pos2), content1.clone())
+        ((pos1 - (end2 - pos2), content1.clone()), None)
     } else if pos_less_than(end2, end1, base_site, op_site)
         && pos_less_than(pos2, pos1, base_site, op_site)
     {
         // op partially after base.
         // | base |
         //   |  op  |
-        (pos2, content1[((end2 - pos1) as usize)..].to_string())
+        let mid = (end2 - pos1) as usize;
+        let recover_op = if end2 == pos1 {
+            None
+        } else {
+            Some((pos1, content1[..mid].to_string()))
+        };
+        ((pos2, content1[mid..].to_string()), recover_op)
     } else {
         // op completely inside base.
         // | base |
         //  | op |
-        (pos2, "".to_string())
+        ((pos2, "".to_string()), Some((pos1, content1.to_string())))
     }
 }
 
@@ -244,8 +329,8 @@ impl Operation for Op {
     /// ops, and original delete op only have one range.)
     fn inverse(&mut self) {
         match self {
-            Op::Ins((pos, str)) => *self = Op::Del(vec![(*pos, str.clone())]),
-            Op::Del(ops) => {
+            Op::Ins((pos, str)) => *self = Op::Del(vec![(*pos, str.clone())], vec![]),
+            Op::Del(ops, _) => {
                 assert!(ops.len() == 1);
                 *self = Op::Ins((ops[0].0, ops[0].1.clone()));
             }
@@ -255,28 +340,32 @@ impl Operation for Op {
     fn transform(&self, base: &Op, self_site: &SiteId, base_site: &SiteId) -> Op {
         match (self, base) {
             (Op::Ins(op), Op::Ins(base)) => Op::Ins(transform_ii(op, base, self_site, base_site)),
-            (Op::Ins(op), Op::Del(bases)) => {
+            (Op::Ins(op), Op::Del(bases, _)) => {
                 let mut new_op = op.clone();
                 for base in bases {
                     new_op = transform_id(&new_op, base, self_site, base_site);
                 }
                 Op::Ins(new_op)
             }
-            (Op::Del(ops), Op::Ins(base)) => {
-                let mut new_ops = vec![];
-                for op in ops {
-                    new_ops.extend(transform_di(op, base, self_site, base_site));
-                }
-                Op::Del(new_ops)
+            (Op::Del(ops, recover_list), Op::Ins(base)) => {
+                let (ops, recover_list) =
+                    transform_di_with_recover(ops, base, self_site, base_site, &recover_list);
+                Op::Del(ops, recover_list)
             }
-            (Op::Del(ops), Op::Del(bases)) => {
+            (Op::Del(ops, recover_list), Op::Del(bases, _)) => {
                 let mut new_ops = ops.clone();
+                let mut new_recover_list = recover_list.clone();
                 for op in &mut new_ops {
                     for base in bases {
-                        *op = transform_dd(&op, base, self_site, base_site);
+                        let (new_op, recover_op) =
+                            transform_dd_with_recover(&op, base, self_site, base_site);
+                        *op = new_op;
+                        if let Some(rec_op) = recover_op {
+                            merge_in(rec_op, &mut new_recover_list);
+                        }
                     }
                 }
-                Op::Del(new_ops)
+                Op::Del(new_ops, new_recover_list)
             }
         }
     }
@@ -372,7 +461,7 @@ impl<O: Operation> FatOp<O> {
 
 /// Iterate over `ops`, and finds out all the ops to skip during
 /// transformation. An op is skipped if there is an undo op that
-/// undoes it. Returns a bitmap, if bitmap[idx] = true, skip ops[idx]
+/// undoes it. Returns a bitmap, if bitmap[i] = true, skip ops[i]
 /// during transformation.
 pub fn find_ops_to_skip<O>(ops: &[FatOp<O>]) -> Vec<bool> {
     if ops.len() == 0 {
@@ -543,21 +632,21 @@ mod tests {
         println!("Ins Del, op < base.");
         test(
             Op::Ins((1, "x".to_string())),
-            Op::Del(vec![(2, "y".to_string())]),
+            Op::Del(vec![(2, "y".to_string())], vec![]),
             Op::Ins((1, "x".to_string())),
         );
 
         println!("Ins Del, op > base.");
         test(
             Op::Ins((2, "x".to_string())),
-            Op::Del(vec![(0, "y".to_string())]),
+            Op::Del(vec![(0, "y".to_string())], vec![]),
             Op::Ins((1, "x".to_string())),
         );
 
         println!("Ins Del, op inside base.");
         test(
             Op::Ins((1, "x".to_string())),
-            Op::Del(vec![(0, "yyy".to_string())]),
+            Op::Del(vec![(0, "yyy".to_string())], vec![]),
             Op::Ins((0, "x".to_string())),
         );
     }
@@ -566,26 +655,26 @@ mod tests {
     #[test]
     fn test_transform_di() {
         println!("Del Ins, op < base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())], vec![]), 1);
         let base = make_fatop(Op::Ins((4, "y".to_string())), 2);
-        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())], vec![]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Ins, base inside op.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())], vec![]), 1);
         let base = make_fatop(Op::Ins((2, "y".to_string())), 2);
         let result_op = make_fatop(
-            Op::Del(vec![(1, "x".to_string()), (3, "xx".to_string())]),
+            Op::Del(vec![(1, "x".to_string()), (3, "xx".to_string())], vec![]),
             1,
         );
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Ins, op > base");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())], vec![]), 1);
         let base = make_fatop(Op::Ins((0, "y".to_string())), 2);
-        let result_op = make_fatop(Op::Del(vec![(2, "xxx".to_string())]), 1);
+        let result_op = make_fatop(Op::Del(vec![(2, "xxx".to_string())], vec![]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
     }
@@ -593,44 +682,56 @@ mod tests {
     #[test]
     fn test_transform_dd() {
         println!("Del Del, op completely before base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
-        let base = make_fatop(Op::Del(vec![(4, "y".to_string())]), 2);
-        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "xxx".to_string())], vec![]), 1);
+        let base = make_fatop(Op::Del(vec![(4, "y".to_string())], vec![]), 2);
+        let result_op = make_fatop(Op::Del(vec![(1, "xxx".to_string())], vec![]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op partially before base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "oxx".to_string())]), 1);
-        let base = make_fatop(Op::Del(vec![(2, "xxy".to_string())]), 2);
-        let result_op = make_fatop(Op::Del(vec![(1, "o".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "oxx".to_string())], vec![]), 1);
+        let base = make_fatop(Op::Del(vec![(2, "xxy".to_string())], vec![]), 2);
+        let result_op = make_fatop(
+            Op::Del(vec![(1, "o".to_string())], vec![(2, "xx".to_string())]),
+            1,
+        );
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op completely inside base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "xx".to_string())]), 1);
-        let base = make_fatop(Op::Del(vec![(0, "ooxxy".to_string())]), 2);
-        let result_op = make_fatop(Op::Del(vec![(0, "".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "xx".to_string())], vec![]), 1);
+        let base = make_fatop(Op::Del(vec![(0, "ooxxy".to_string())], vec![]), 2);
+        let result_op = make_fatop(
+            Op::Del(vec![(0, "".to_string())], vec![(1, "xx".to_string())]),
+            1,
+        );
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op completely after base.");
-        let mut op = make_fatop(Op::Del(vec![(4, "xx".to_string())]), 1);
-        let base = make_fatop(Op::Del(vec![(1, "yy".to_string())]), 2);
-        let result_op = make_fatop(Op::Del(vec![(2, "xx".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(4, "xx".to_string())], vec![]), 1);
+        let base = make_fatop(Op::Del(vec![(1, "yy".to_string())], vec![]), 2);
+        let result_op = make_fatop(Op::Del(vec![(2, "xx".to_string())], vec![]), 1);
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op partially after base.");
-        let mut op = make_fatop(Op::Del(vec![(2, "xxyy".to_string())]), 1);
-        let base = make_fatop(Op::Del(vec![(1, "oxx".to_string())]), 2);
-        let result_op = make_fatop(Op::Del(vec![(1, "yy".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(2, "xxyy".to_string())], vec![]), 1);
+        let base = make_fatop(Op::Del(vec![(1, "oxx".to_string())], vec![]), 2);
+        let result_op = make_fatop(
+            Op::Del(vec![(1, "yy".to_string())], vec![(2, "xx".to_string())]),
+            1,
+        );
         op.transform(&base);
         assert_eq!(op, result_op);
 
         println!("Del Del, op completely covers base.");
-        let mut op = make_fatop(Op::Del(vec![(1, "ooxxyy".to_string())]), 1);
-        let base = make_fatop(Op::Del(vec![(3, "xx".to_string())]), 2);
-        let result_op = make_fatop(Op::Del(vec![(1, "ooyy".to_string())]), 1);
+        let mut op = make_fatop(Op::Del(vec![(1, "ooxxyy".to_string())], vec![]), 1);
+        let base = make_fatop(Op::Del(vec![(3, "xx".to_string())], vec![]), 2);
+        let result_op = make_fatop(
+            Op::Del(vec![(1, "ooyy".to_string())], vec![(3, "xx".to_string())]),
+            1,
+        );
         op.transform(&base);
         assert_eq!(op, result_op);
     }
@@ -640,7 +741,7 @@ mod tests {
     fn test_batch_transform_with_skip_1() {
         // A do and an undo. Start with "XX" in the doc.
         let ops = vec![
-            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Del(vec![(0, "X".to_string())], vec![]), 1),
             make_fatop(Op::Ins((0, "A".to_string())), 1),
             make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
         ];
@@ -655,11 +756,11 @@ mod tests {
     fn test_batch_transform_with_skip_2() {
         // A do and an undo and a redo. Start with "XX" in the doc.
         let ops = vec![
-            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Del(vec![(0, "X".to_string())], vec![]), 1),
             make_fatop(Op::Ins((0, "A".to_string())), 1),
             make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
             make_fatop(Op::Ins((1, "B".to_string())), 1),
-            make_undo_fatop(Op::Del(vec![(2, "X".to_string())]), 1, 2),
+            make_undo_fatop(Op::Del(vec![(2, "X".to_string())], vec![]), 1, 2),
         ];
         let mut op = make_fatop(Op::Ins((1, "C".to_string())), 2);
         let result_op = make_fatop(Op::Ins((2, "C".to_string())), 2);
@@ -671,11 +772,11 @@ mod tests {
     #[test]
     fn test_find_ops_to_skip_1() {
         let ops = vec![
-            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Del(vec![(0, "X".to_string())], vec![]), 1),
             make_fatop(Op::Ins((0, "A".to_string())), 1),
             make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 2),
             make_fatop(Op::Ins((1, "B".to_string())), 1),
-            make_undo_fatop(Op::Del(vec![(2, "X".to_string())]), 1, 2),
+            make_undo_fatop(Op::Del(vec![(2, "X".to_string())], vec![]), 1, 2),
         ];
         let bitmap = find_ops_to_skip(&ops[..]);
         assert_eq!(bitmap, vec![false, false, true, false, true]);
@@ -684,7 +785,7 @@ mod tests {
     #[test]
     fn test_find_ops_to_skip_2() {
         let ops = vec![
-            make_fatop(Op::Del(vec![(0, "X".to_string())]), 1),
+            make_fatop(Op::Del(vec![(0, "X".to_string())], vec![]), 1),
             make_fatop(Op::Ins((0, "A".to_string())), 1),
             make_undo_fatop(Op::Ins((1, "X".to_string())), 1, 3),
             //                                                ^
