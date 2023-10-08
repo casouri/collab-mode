@@ -142,6 +142,52 @@ impl GlobalHistory {
             }
         }
     }
+
+    /// Print debugging history.
+    pub fn print_history(&self) -> String {
+        fn print_kind(kind: OpKind) -> &'static str {
+            match kind {
+                OpKind::Original => "O",
+                OpKind::Undo(_) => "U",
+            }
+        }
+
+        let mut output = String::new();
+        output += "SEQ\tGROUP\tKIND\tOP\n\n";
+        output += "ACKED:\n\n";
+        for op in &self.global {
+            output += format!(
+                "{}\t{}\t{\t}\t{}\n",
+                op.seq.unwrap(),
+                op.group_seq,
+                print_kind(op.kind),
+                op.op
+            )
+            .as_str();
+        }
+        output += "\nUNACKED:\n\n";
+        for op in &self.local {
+            output += format!(
+                " \t{}\t{\t}\t{}\n",
+                op.group_seq,
+                print_kind(op.kind),
+                op.op
+            )
+            .as_str();
+        }
+        output += "\nUNDO QUEUE:\n\n";
+        for idx in 0..self.undo_queue.len() {
+            let op = self.nth_in_undo_queue(idx);
+            output += format!("{}\t{}\n", self.undo_queue[idx], op.op).as_str();
+        }
+        if let Some(tip) = self.undo_tip {
+            output += format!("\nUNDO TIP: {}", self.undo_queue[tip]).as_str();
+        } else {
+            output += "\nUNDO TIP: EMPTY";
+        }
+
+        output
+    }
 }
 
 /// OT control algorithm engine for client. Used by
@@ -432,6 +478,11 @@ impl ClientEngine {
     /// vector if there's no more ops to redo.
     pub fn generate_redo_op(&mut self) -> Vec<Op> {
         self.generate_undo_op_1(true)
+    }
+
+    /// Print debugging history.
+    pub fn print_history(&self) -> String {
+        self.gh.print_history()
     }
 }
 

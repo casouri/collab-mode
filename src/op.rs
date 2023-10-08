@@ -18,7 +18,8 @@ pub type DocId = u32;
 /// SiteId is a monotonically increasing integer.
 pub type SiteId = u32;
 /// Group sequence number. Consecutive ops with the same group seq
-/// number are undone together.
+/// number are undone together. Group seqs don't have to be
+/// continuous.
 pub type GroupSeq = u32;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]
@@ -366,6 +367,26 @@ impl Operation for Op {
                     }
                 }
                 Op::Del(new_ops, new_recover_list)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::Ins((pos, content)) => {
+                let mut content = content.to_string();
+                content = content.replace("\t", "⭾");
+                content = content.replace("\n", "⮐");
+                write!(f, "ins({pos}, {content})")
+            }
+            Op::Del(ops, _) => {
+                let mut out = String::new();
+                for op in ops {
+                    out += format!("del({}, {}) ", op.0, op.1).as_str();
+                }
+                write!(f, "{}", out)
             }
         }
     }

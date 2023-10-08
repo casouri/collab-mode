@@ -609,6 +609,14 @@ Return the file content as a string."
                         :signalingAddr ,signaling-addr)
                      :timeout collab-mode-rpc-timeout)))
 
+(defun collab-mode--print-history-req (doc server)
+  "Print debugging history for (DOC SERVER)."
+  (let ((conn (collab-mode--connect)))
+    (jsonrpc-request conn 'PrintHistory
+                     `( :docId ,doc
+                        :serverId ,server)
+                     :timeout collab-mode-rpc-timeout)))
+
 (defsubst collab-mode--encode-op (op)
   "Encode Elisp OP into JSONRPC format."
   (pcase op
@@ -949,7 +957,7 @@ immediately."
                        collab-mode--buffer-table)))
     (if (and buf (buffer-live-p buf))
         (pop-to-buffer buf)
-      (collab-mode--catch-error (concat "can’t connect to " doc-id)
+      (collab-mode--catch-error (format "can’t connect to Doc(%s)" doc-id)
         (let ((content (collab-mode--connect-to-file-req doc-id server-id))
               (inhibit-read-only t))
           (end-of-line)
@@ -971,7 +979,7 @@ immediately."
   (interactive)
   (let ((doc-id (get-text-property (point) 'collab-mode-doc-id))
         (server-id (get-text-property (point) 'collab-mode-server-id)))
-    (collab-mode--catch-error (concat "can’t disconnect from " doc-id)
+    (collab-mode--catch-error (format "can’t disconnect from Doc(%s)" doc-id)
       (collab-mode--disconnect-from-file-req doc-id server-id))
     (let ((buf (gethash (cons doc-id server-id)
                         collab-mode--buffer-table))
@@ -989,7 +997,7 @@ immediately."
   (interactive)
   (let ((doc-id (get-text-property (point) 'collab-mode-doc-id))
         (server-id (get-text-property (point) 'collab-mode-server-id)))
-    (collab-mode--catch-error (concat "can’t delete " doc-id)
+    (collab-mode--catch-error (format "can’t delete Doc(%s)" doc-id)
       (collab-mode--delete-file-req doc-id server-id))
     (collab-mode--refresh)))
 
@@ -1040,7 +1048,7 @@ its name rather than doc id) to connect."
                       "Server: "
                       (mapcar #'car (collab-mode--server-alist)))
                      'interactive))
-  (collab-mode--catch-error "can’t connect to file"
+  (collab-mode--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
     (let* ((info (alist-get server (collab-mode--server-alist)
                             nil nil #'equal))
            (file-list (collab-mode--list-files-req
@@ -1090,9 +1098,33 @@ its name rather than doc id) to connect."
   (collab-mode--check-precondition)
   (let ((doc-id (car collab-mode--doc-server))
         (server-id (cdr collab-mode--doc-server)))
-    (collab-mode--catch-error (concat "can’t disconnect from " doc-id)
+    (collab-mode--catch-error (format "can’t disconnect from Doc(%s)" doc-id)
       (collab-mode--disconnect-from-file-req doc-id server-id)))
   (collab-monitored-mode -1))
+
+(defun collab-mode--print-history ()
+  "Print debugging history for the current buffer."
+  (interactive)
+  (let ((doc-id (car collab-mode--doc-server))
+        (server-id (cdr collab-mode--doc-server)))
+    (collab-mode--catch-error (format "can’t print history of Doc(%s)" doc-id)
+      (let ((text (collab-mode--print-history-req doc-id server-id))
+            undo-tip)
+        (pop-to-buffer (format "*collab history for %s*"
+                               (buffer-name)))
+        (erase-buffer)
+        (insert text)
+        (goto-char (point-min))
+        (re-search-forward
+         (rx bol "UNDO TIP: " (group (+ anychar)) eol))
+        (setq undo-tip (match-string 1))
+        (unless (equal undo-tip "EMPTY")
+          (goto-char (point-min))
+          (search-forward "UNDO QUEUE")
+          (re-search-forward
+           (rx-to-string `(group bol ,undo-tip)))
+          (end-of-line)
+          (insert (propertize "  <--- UNDO TIP" 'face 'error)))))))
 
 (defun collab-mode ()
   "The main entry point of collab-mode, select an operation to perform."

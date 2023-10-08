@@ -240,6 +240,14 @@ impl Doc {
             return Ok(());
         }
     }
+
+    /// Display a log of the local history for debugging purpose.
+    pub async fn print_history(&self) -> String {
+        // self.check_async_errors()?;
+        let mut output = String::new();
+        output += self.engine.lock().await.print_history().as_str();
+        output
+    }
 }
 
 // *** Subroutines for Doc::new_share_file and new_connect_file
