@@ -57,7 +57,7 @@ impl Doc {
         mut server: ClientEnum,
         file_name: &str,
         file: &str,
-        external_notifier: std::sync::mpsc::Sender<DocDesignator>,
+        external_notifier: std::sync::mpsc::Sender<NewOpNotification>,
     ) -> CollabResult<Doc> {
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
@@ -107,7 +107,7 @@ impl Doc {
     pub async fn new_connect_file(
         mut server: ClientEnum,
         doc_id: DocId,
-        external_notifier: std::sync::mpsc::Sender<DocDesignator>,
+        external_notifier: std::sync::mpsc::Sender<NewOpNotification>,
     ) -> CollabResult<(Doc, String)> {
         // Download file.
         let snapshot = server.request_file(&doc_id).await?;
@@ -171,8 +171,10 @@ impl Doc {
 
     /// Send local `ops` and retrieve remote ops. `ops` can be empty,
     /// in which case the purpose is solely retrieving accumulated
-    /// remote ops.
-    pub async fn send_op(&mut self, ops: Vec<EditorFatOp>) -> CollabResult<Vec<Op>> {
+    /// remote ops. Return the transformed remote ops that editor can
+    /// apply to its document, plus the last seq number among the ops
+    /// returned.
+    pub async fn send_op(&mut self, ops: Vec<EditorFatOp>) -> CollabResult<(Vec<Op>, GlobalSeq)> {
         self.check_async_errors()?;
 
         // Get remote ops before locking engine.
@@ -205,10 +207,17 @@ impl Doc {
             }
         }
 
-        // Try sending the new local ops.
+        // Try sending the new local ops. `spawn_thread_send_local_op`
+        // will be waked by this signal and try to send the new local
+        // ops.
         self.new_ops_tx.send(()).unwrap();
 
-        Ok(transformed_remote_ops.into_iter().map(|op| op.op).collect())
+        let last_op = get_last_global_seq(&transformed_remote_ops)?.unwrap_or(0);
+
+        Ok((
+            transformed_remote_ops.into_iter().map(|op| op.op).collect(),
+            last_op,
+        ))
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.
@@ -268,12 +277,8 @@ fn spawn_thread_receive_remote_op(
     remote_op_buffer: Arc<Mutex<Vec<FatOp>>>,
     notifier_tx: Arc<watch::Sender<()>>,
     error_channel: mpsc::Sender<CollabError>,
-    external_notifier: std::sync::mpsc::Sender<DocDesignator>,
+    external_notifier: std::sync::mpsc::Sender<NewOpNotification>,
 ) -> tokio::task::JoinHandle<()> {
-    let msg = DocDesignator {
-        doc: doc_id.clone(),
-        server: server_id,
-    };
     // Draining remote_op_stream and storing ops into a buffer seems
     // redundant, but is easier to write and understand in the big
     // picture.
@@ -302,8 +307,26 @@ fn spawn_thread_receive_remote_op(
             let truly_remote_op_arrived = ops
                 .iter()
                 .map(|op| op.site != site_id)
-                .reduce(|acc, flag| acc || flag)
-                .unwrap();
+                .reduce(|acc, flag| acc || flag);
+            if truly_remote_op_arrived.is_none() {
+                continue;
+            }
+            let truly_remote_op_arrived = truly_remote_op_arrived.unwrap();
+
+            let mut last_global_seq = 0;
+            match get_last_global_seq(&ops) {
+                Err(err) => {
+                    error_channel.send(err).await.unwrap();
+                }
+                Ok(seq) => {
+                    if let Some(seq) = seq {
+                        last_global_seq = seq;
+                    } else {
+                        continue;
+                    }
+                }
+            };
+
             remote_op_buffer.lock().await.extend(ops);
 
             // Got some op from server, maybe we can send
@@ -312,7 +335,11 @@ fn spawn_thread_receive_remote_op(
 
             // Notify JSONRPC server to notify the editor.
             if truly_remote_op_arrived {
-                let res = external_notifier.send(msg.clone());
+                let res = external_notifier.send(NewOpNotification {
+                    doc_id: doc_id.clone(),
+                    server_id: server_id.clone(),
+                    last_seq: last_global_seq,
+                });
                 if let Err(err) = res {
                     let err = CollabError::ChannelClosed(format!(
                     "Doc({}) Internal notification channel (Doc --(doc,server)--> jsonrpc) broke: {:#}",
@@ -353,4 +380,20 @@ fn spawn_thread_send_local_op(
             }
         }
     })
+}
+
+fn get_last_global_seq(ops: &[FatOp]) -> CollabResult<Option<GlobalSeq>> {
+    if let Some(last_op) = ops.last() {
+        if let Some(last_global_seq) = last_op.seq {
+            Ok(Some(last_global_seq))
+        } else {
+            let err = CollabError::TransportErr(format!(
+                "Remote op doesn't have a global seq {:?}",
+                last_op
+            ));
+            Err(err)
+        }
+    } else {
+        Ok(None)
+    }
 }

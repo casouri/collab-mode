@@ -42,7 +42,7 @@ pub struct JSONRPCServer {
     /// Doc when we create one, and the Doc will send remote op
     /// notification to the notification channel, which JSONRPCServer
     /// will receive and send notification to the editor.
-    notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
+    notifier_tx: std::sync::mpsc::Sender<NewOpNotification>,
 }
 
 // *** Entry functions
@@ -83,14 +83,10 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
     // 1. Send remote op notifications. TODO: Maybe we should
     // throttle-control notifications?
     std::thread::spawn(move || {
-        for doc in notifier_rx.iter() {
-            let params = DocIdParams {
-                doc_id: doc.doc,
-                server_id: doc.server,
-            };
+        for notif in notifier_rx.iter() {
             let msg = lsp_server::Notification {
                 method: NotificationCode::RemoteOpArrived.into(),
-                params: serde_json::to_value(params).unwrap(),
+                params: serde_json::to_value(notif).unwrap(),
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
                 log::error!("Error sending jsonrpc notification to editor: {:#}", err);
@@ -227,7 +223,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
 impl JSONRPCServer {
     pub fn new(
         server: LocalServer,
-        notifier_tx: std::sync::mpsc::Sender<DocDesignator>,
+        notifier_tx: std::sync::mpsc::Sender<NewOpNotification>,
     ) -> JSONRPCServer {
         let mut client_map = HashMap::new();
         client_map.insert(SERVER_ID_SELF.to_string(), server.into());
@@ -365,9 +361,10 @@ impl JSONRPCServer {
         if res.is_err() {
             self.remove_doc(&params.doc_id, &params.server_id);
         }
-        let remote_ops = res?;
+        let (remote_ops, last_seq) = res?;
         let resp = SendOpResp {
             ops: remote_ops.into_iter().map(|x| x.into()).collect(),
+            last_seq,
         };
         Ok(resp)
     }
@@ -455,6 +452,7 @@ impl JSONRPCServer {
             Ok(ops) => {
                 let resp = SendOpResp {
                     ops: ops.into_iter().map(|x| x.into()).collect(),
+                    last_seq: 0,
                 };
                 Ok(resp)
             }

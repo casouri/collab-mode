@@ -79,6 +79,7 @@ pub struct SendOpParams {
 #[serde(rename_all = "camelCase")]
 pub struct SendOpResp {
     pub ops: Vec<EditorOp>,
+    pub last_seq: GlobalSeq,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

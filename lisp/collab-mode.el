@@ -18,6 +18,9 @@
   "Collaboration mode."
   :group 'editting)
 
+(defvar collab-mode-rpc-timeout 3
+  "Timeout in seconds to wait for connection to collab process.")
+
 (defvar collab-mode-command "~/p/collab-mode/target/debug/collab-mode"
   "Path to the collab server executable.")
 
@@ -47,7 +50,7 @@ CREDENTIAL).")
 
 (define-icon collab-status-on nil
   `((image ,(concat collab-mode--load-directory "/dot_medium_16.svg")
-           :face 'success
+           :face success
            :height (0.9 . em)
            :ascent 83)
     (symbol "•")
@@ -58,7 +61,7 @@ CREDENTIAL).")
 
 (define-icon collab-status-off nil
   `((image ,(concat collab-mode--load-directory "/dot_medium_16.svg")
-           :face 'error
+           :face error
            :height (0.9 . em)
            :ascent 83)
     (symbol "•")
@@ -170,8 +173,8 @@ command that acts on a collab-monitored buffer."
 (defvar-local collab-mode--most-recent-error nil
   "Most recent error message.")
 
-(defvar collab-mode--buffer-plist nil
-  "A plist that maps (DOC . SERVER) to their corresponding buffer.")
+(defvar collab-mode--buffer-table (make-hash-table :test #'equal)
+  "A has table that maps (DOC . SERVER) to their corresponding buffer.")
 
 (defvar-local collab-mode--inhibit-hooks nil
   "When non-nil, post command hooks don’t run.")
@@ -390,11 +393,8 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
     (remove-hook 'post-command-hook #'collab-mode--post-command t)
     (remove-hook 'post-command-hook #'collab-mode--post-command-hasty t)
 
-    (setq collab-mode--buffer-plist
-          (plist-put collab-mode--buffer-plist
-                     collab-mode--doc-server
-                     nil
-                     #'equal))
+    (remhash collab-mode--doc-server
+             collab-mode--buffer-table)
 
     (setq-local buffer-undo-list nil)))
 
@@ -402,11 +402,9 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
   "Enable ‘collab-monitored-mode’ in the current buffer.
 DOC-ID and SERVER-ID are associated with the current buffer."
   (setq collab-mode--doc-server (cons doc-id server-id))
-  (setq collab-mode--buffer-plist
-        (plist-put collab-mode--buffer-plist
-                   collab-mode--doc-server
-                   (current-buffer)
-                   #'equal))
+  (puthash collab-mode--doc-server
+           (current-buffer)
+           collab-mode--buffer-table)
   (collab-monitored-mode))
 
 (defvar collab-mode--stashed-state-plist nil
@@ -427,8 +425,8 @@ DOC-ID and SERVER-ID are associated with the current buffer."
 
 (defun collab-mode--doc-connected (doc server)
   "Return non-nil if DOC at SERVER is connected."
-  (let ((buf (plist-get collab-mode--buffer-plist (cons doc server)
-                        #'equal)))
+  (let ((buf (gethash (cons doc server)
+                      collab-mode--buffer-table)))
     (and buf (buffer-live-p buf))))
 
 ;;; JSON-RPC
@@ -466,8 +464,30 @@ DOC-ID and SERVER-ID are associated with the current buffer."
 
 ;;;; Dispatcher
 
-(defvar collab-mode--dispatcher-timer-plist nil
-  "Plist mapping (doc-id . server-id) to dispatcher timers.")
+(defvar collab-mode--dispatcher-timer-table
+  (make-hash-table :test #'equal)
+  "Hash table mapping (doc-id . server-id) to dispatcher timers.")
+
+
+(defun collab-mode--request-remote-ops-before-seq (doc server buffer seq)
+  "Request for remote ops for (DOC SERVER) in BUFFER.
+Keep requesting for ops until we get all the ops before and
+including SEQ."
+  (let ((received-largest-seq nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq received-largest-seq (collab-mode--send-ops nil)))
+      (let ((timer (if (or (null received-largest-seq)
+                           (>= received-largest-seq seq))
+                       nil
+                     ;; If we didn’t get enough ops that we expect,
+                     ;; schedule another fetch.
+                     (run-with-timer
+                      0 nil
+                      #'collab-mode--request-remote-ops-before-seq
+                      doc server buffer seq))))
+        (puthash (cons doc server) timer
+                 collab-mode--dispatcher-timer-table)))))
 
 (defun collab-mode--dispatch-notification (_conn method params)
   "Dispatch JSONRPC notifications.
@@ -487,31 +507,20 @@ If we receive a ServerError notification, just display a warning."
   (pcase method
     ('RemoteOpArrived
      (let ((doc (plist-get params :docId))
-           (server (plist-get params :serverId)))
-       (let ((buffer (plist-get collab-mode--buffer-plist
-                                (cons doc server)
-                                #'equal))
-             (timer (plist-get collab-mode--dispatcher-timer-plist
-                               (cons doc server)
-                               #'equal)))
-         (if (and buffer (buffer-live-p buffer) (null timer))
-             (let ((timer (run-with-timer
-                           0 nil
-                           (lambda ()
-                             (unwind-protect
-                                 (with-current-buffer buffer
-                                   (collab-mode--send-ops nil))
-                               (setq collab-mode--dispatcher-timer-plist
-                                     (plist-put
-                                      collab-mode--dispatcher-timer-plist
-                                      (cons doc server)
-                                      nil
-                                      #'equal)))))))
-               (setq collab-mode--dispatcher-timer-plist
-                     (plist-put collab-mode--dispatcher-timer-plist
-                                (cons doc server)
-                                timer
-                                #'equal)))))))
+           (server (plist-get params :serverId))
+           (last-seq (plist-get params :lastSeq)))
+       (let ((buffer (gethash (cons doc server)
+                              collab-mode--buffer-table))
+             (timer (gethash (cons doc server)
+                             collab-mode--dispatcher-timer-table)))
+         (when timer (cancel-timer timer))
+         (when (buffer-live-p buffer)
+           (setq timer (run-with-timer
+                        0 nil
+                        #'collab-mode--request-remote-ops-before-seq
+                        doc server buffer last-seq))
+           (puthash (cons doc server) timer
+                    collab-mode--dispatcher-timer-table)))))
     ('ServerError
      (display-warning
       'collab-mode
@@ -547,7 +556,8 @@ file is of the form (:docId DOC-ID :fileName FILE-NAME)."
                 conn 'ListFiles
                 `( :serverId ,server
                    :signalingAddr ,signaling-server
-                   :credential ,credential))))
+                   :credential ,credential)
+                :timeout collab-mode-rpc-timeout)))
     (seq-map #'identity (plist-get resp :files))))
 
 (defun collab-mode--share-file-req (server filename content)
@@ -560,7 +570,8 @@ override existing files."
                 conn 'ShareFile
                 `( :serverId ,server
                    :fileName ,filename
-                   :content ,content))))
+                   :content ,content)
+                :timeout collab-mode-rpc-timeout)))
     (plist-get resp :docId)))
 
 (defun collab-mode--connect-to-file-req (doc server)
@@ -570,7 +581,8 @@ Return the file content as a string."
          (resp (jsonrpc-request
                 conn 'ConnectToFile
                 `( :serverId ,server
-                   :docId ,doc))))
+                   :docId ,doc)
+                :timeout collab-mode-rpc-timeout)))
     (plist-get resp :content)))
 
 (defun collab-mode--disconnect-from-file-req (doc server)
@@ -578,21 +590,24 @@ Return the file content as a string."
   (let ((conn (collab-mode--connect)))
     (jsonrpc-request conn 'DisconnectFromFile
                      `( :serverId ,server
-                        :docId ,doc))))
+                        :docId ,doc)
+                     :timeout collab-mode-rpc-timeout)))
 
 (defun collab-mode--delete-file-req (doc server)
   "Delete DOC on SERVER."
   (let ((conn (collab-mode--connect)))
     (jsonrpc-request conn 'DeleteFile
                      `( :serverId ,server
-                        :docId ,doc))))
+                        :docId ,doc)
+                     :timeout collab-mode-rpc-timeout)))
 
 (defun collab-mode--accept-connection-req (server-id signaling-addr)
   "Accept connections as SERVER-ID on SIGNALING-ADDR."
   (let ((conn (collab-mode--connect)))
     (jsonrpc-request conn 'AcceptConnection
                      `( :serverId ,server-id
-                        :signalingAddr ,signaling-addr))))
+                        :signalingAddr ,signaling-addr)
+                     :timeout collab-mode-rpc-timeout)))
 
 (defsubst collab-mode--encode-op (op)
   "Encode Elisp OP into JSONRPC format."
@@ -629,9 +644,13 @@ If MOVE-POINT non-nil, move point as the edit would."
 
 (defun collab-mode--send-ops (ops &optional encoded)
   "Send OPS to the collab server and apply returned remote ops.
+
 If ENCODED is non-nil, OPS should be already in sexp JSON
 format (a list of EditorOp), and this function will skip encoding
-it."
+it.
+
+Return the largest global seq of all the ops received from the
+collab process."
   (collab-mode--check-precondition)
   (let ((conn collab-mode--jsonrpc-connection)
         resp)
@@ -646,11 +665,16 @@ it."
                               (vconcat (mapcar #'collab-mode--encode-op
                                                ops))
                             [])
-                        ops))))
+                        ops))
+             :timeout collab-mode-rpc-timeout))
       ;; Only ‘seq-map’ can map over vector.
-      (seq-map (lambda (op)
-                 (collab-mode--apply-jrpc-op op))
-               (plist-get resp :ops)))))
+      (let ((remote-ops (plist-get resp :ops))
+            (last-seq (plist-get resp :lastSeq)))
+        (seq-map (lambda (op)
+                   (collab-mode--apply-jrpc-op op))
+                 remote-ops)
+        ;; Return the largest global seq received from collab process.
+        last-seq))))
 
 (defun collab-mode--undo (&optional redo)
   "Undo the most recent local edit.
@@ -667,7 +691,8 @@ If REDO is non-nil, redo the most recent undo instead."
             (jsonrpc-request conn 'Undo
                              `( :serverId ,(cdr collab-mode--doc-server)
                                 :docId ,(car collab-mode--doc-server)
-                                :kind ,(if redo "Redo" "Undo"))))
+                                :kind ,(if redo "Redo" "Undo"))
+                             :timeout collab-mode-rpc-timeout))
       (if-let ((json-ops (plist-get resp :ops)))
           (if (eq (length json-ops) 0)
               (message "No more operations to %s" (if redo "redo" "undo"))
@@ -920,8 +945,8 @@ immediately."
   (let* ((doc-id (get-text-property (point) 'collab-mode-doc-id))
          (file-name (get-text-property (point) 'collab-mode-file-name))
          (server-id (get-text-property (point) 'collab-mode-server-id))
-         (buf (plist-get collab-mode--buffer-plist (cons doc-id server-id)
-                         #'equal)))
+         (buf (gethash (cons doc-id server-id)
+                       collab-mode--buffer-table)))
     (if (and buf (buffer-live-p buf))
         (pop-to-buffer buf)
       (collab-mode--catch-error (concat "can’t connect to " doc-id)
@@ -948,11 +973,12 @@ immediately."
         (server-id (get-text-property (point) 'collab-mode-server-id)))
     (collab-mode--catch-error (concat "can’t disconnect from " doc-id)
       (collab-mode--disconnect-from-file-req doc-id server-id))
-    (let ((buf (plist-get collab-mode--buffer-plist
-                          (cons doc-id server-id) #'equal))
+    (let ((buf (gethash (cons doc-id server-id)
+                        collab-mode--buffer-table))
           (inhibit-read-only t))
-      (with-current-buffer buf
-        (collab-monitored-mode -1))
+      (when buf
+        (with-current-buffer buf
+          (collab-monitored-mode -1)))
       (save-excursion
         (end-of-line)
         (when (looking-back " •" 2)

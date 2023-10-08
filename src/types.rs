@@ -59,6 +59,16 @@ pub struct DocInfo {
     pub file_name: String,
 }
 
+/// Meaning: editor needs to keep trying to get ops until they got
+/// every op before and including `last_seq`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewOpNotification {
+    pub doc_id: DocId,
+    pub server_id: ServerId,
+    pub last_seq: GlobalSeq,
+}
+
 /// A snapshot of a document. Returned by the server when a site
 /// requests a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
