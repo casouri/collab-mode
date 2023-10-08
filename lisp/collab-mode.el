@@ -811,9 +811,9 @@ If INSERT-STATUS, insert a red DOWN symbol."
           (setq connection-up t))
       (error
        (insert (propertize "DOWN" 'face 'error) "\n")
-       (display-warning 'collab-mode
-                        (format "Cannot connect to collab process: %s"
-                                (error-message-string err)))))
+       (setq collab-mode--most-recent-error
+             (format "Cannot connect to collab process: %s"
+                     (error-message-string err)))))
     (insert (format "Connection type: %s\n" collab-mode-connection-type))
     (insert "Accepting remote peer connections: "
             (if collab-mode--accepting-connection
@@ -908,10 +908,11 @@ immediately."
   "Refresh collab buffer."
   (interactive)
   (let ((inhibit-read-only t)
-        (pos (point)))
+        (line (line-number-at-pos)))
     (erase-buffer)
     (collab-mode--render)
-    (goto-char pos)))
+    (goto-char (point-min))
+    (forward-line (1- line))))
 
 (defun collab-mode--open-file ()
   "Open the file at point."
