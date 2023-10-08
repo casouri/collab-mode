@@ -87,7 +87,7 @@ pub enum DocServerResp {
     ShareFile(DocId),
     ListFiles(Vec<DocInfo>),
     SendOp,
-    RecvOp(FatOp),
+    RecvOp(Vec<FatOp>),
     RequestFile(Snapshot),
     DeleteFile,
     Login(SiteId),

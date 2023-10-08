@@ -24,6 +24,8 @@ use tokio_stream::{Stream, StreamExt};
 
 // *** Types
 
+type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
+
 #[async_trait]
 impl DocServer for LocalServer {
     fn site_id(&self) -> SiteId {
@@ -47,13 +49,9 @@ impl DocServer for LocalServer {
     async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()> {
         self.send_op_1(ops).await
     }
-    async fn recv_op(
-        &mut self,
-        doc_id: &DocId,
-        after: GlobalSeq,
-    ) -> CollabResult<Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>> {
+    async fn recv_op(&mut self, doc_id: &DocId, after: GlobalSeq) -> CollabResult<OpStream> {
         let stream = self.recv_op_1(doc_id, after).await?;
-        Ok(Box::pin(stream.map(|op| Ok(op))))
+        Ok(Box::pin(stream.map(|ops| Ok(ops))))
     }
 }
 
@@ -186,7 +184,7 @@ impl LocalServer {
         &self,
         doc_id: &DocId,
         mut after: GlobalSeq,
-    ) -> CollabResult<ReceiverStream<FatOp>> {
+    ) -> CollabResult<ReceiverStream<Vec<FatOp>>> {
         let (tx, rx) = mpsc::channel(1);
         // Clone a notification channel and a reference to the doc,
         // listen for notification and get new ops from the doc, and
@@ -208,19 +206,17 @@ impl LocalServer {
                     );
                     let ops = doc.engine.global_ops_after(after);
                     after += ops.len() as GlobalSeq;
-                    for op in ops {
-                        log::debug!(
-                            "recv_op() Local server sends op to gRPC server or local client: {:?}",
-                            &op
-                        );
-                        if let Err(_) = tx.send(op).await {
-                            // When the local or remote
-                            // [crate::collab_client::Doc] is dropped,
-                            // its connection to us is dropped. This
-                            // is not an error.
-                            log::info!("Internal channel (local server --op--> local client or grpc server) closed.");
-                            return;
-                        }
+                    log::debug!(
+                        "recv_op() Local server sends op to gRPC server or local client: {:?}",
+                        &ops
+                    );
+                    if let Err(_) = tx.send(ops).await {
+                        // When the local or remote
+                        // [crate::collab_client::Doc] is dropped,
+                        // its connection to us is dropped. This
+                        // is not an error.
+                        log::info!("Internal channel (local server --op--> local client or grpc server) closed.");
+                        return;
                     }
                 }
             }

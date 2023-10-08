@@ -27,7 +27,7 @@ use tokio_stream::StreamExt;
 
 // *** Types
 
-type OpStream = Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>;
+type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
 
 // *** Structs
 
@@ -279,8 +279,8 @@ fn spawn_thread_receive_remote_op(
     // picture.
     tokio::spawn(async move {
         loop {
-            let new_remote_op = remote_op_stream.next().await;
-            if new_remote_op.is_none() {
+            let new_remote_ops = remote_op_stream.next().await;
+            if new_remote_ops.is_none() {
                 let err = CollabError::ChannelClosed(format!(
                     "Doc({}) Internal channel (local server --op--> local client) broke",
                     &doc_id
@@ -288,16 +288,23 @@ fn spawn_thread_receive_remote_op(
                 error_channel.send(err).await.unwrap();
                 return;
             };
-            let new_remote_op = new_remote_op.unwrap();
-            if let Err(err) = new_remote_op {
+            let new_remote_ops = new_remote_ops.unwrap();
+            if let Err(err) = new_remote_ops {
                 error_channel.send(err).await.unwrap();
                 return;
             }
-            let op = new_remote_op.unwrap();
-            log::debug!("Doc({}) Received op from local server: {:?}", &doc_id, &op);
-
-            let truly_remote_op_arrived = op.site != site_id;
-            remote_op_buffer.lock().await.push(op);
+            let ops = new_remote_ops.unwrap();
+            log::debug!(
+                "Doc({}) Received ops from local server: {:?}",
+                &doc_id,
+                &ops
+            );
+            let truly_remote_op_arrived = ops
+                .iter()
+                .map(|op| op.site != site_id)
+                .reduce(|acc, flag| acc || flag)
+                .unwrap();
+            remote_op_buffer.lock().await.extend(ops);
 
             // Got some op from server, maybe we can send
             // new local ops now?

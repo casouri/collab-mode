@@ -14,7 +14,7 @@ use tokio_stream::Stream;
 
 // *** Types
 
-type OpStream = Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>;
+type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
 
 // *** Structs
 
@@ -139,7 +139,7 @@ impl DocServer for WebrpcClient {
             })
             .await?;
 
-        let (tx_ret, rx_ret) = mpsc::channel::<CollabResult<FatOp>>(1);
+        let (tx_ret, rx_ret) = mpsc::channel::<CollabResult<Vec<FatOp>>>(1);
         let doc_id = doc_id.clone();
         let _ = tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
@@ -159,8 +159,8 @@ impl DocServer for WebrpcClient {
                                 &resp
                             );
                             match resp {
-                                DocServerResp::RecvOp(op) => {
-                                    tx_ret.send(Ok(op)).await.unwrap();
+                                DocServerResp::RecvOp(ops) => {
+                                    tx_ret.send(Ok(ops)).await.unwrap();
                                 }
                                 resp => {
                                     tx_ret

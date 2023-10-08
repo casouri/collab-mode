@@ -11,6 +11,8 @@ use enum_dispatch::enum_dispatch;
 use std::pin::Pin;
 use tokio_stream::Stream;
 
+type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
+
 /// Functions one can expect from a server, implemented by both
 /// [crate::collab_server::LocalServer] and
 /// [crate::grpc_client::GrpcClient].
@@ -24,11 +26,7 @@ pub trait DocServer: Send {
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot>;
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()>;
     async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()>;
-    async fn recv_op(
-        &mut self,
-        doc_id: &DocId,
-        mut after: GlobalSeq,
-    ) -> CollabResult<Pin<Box<dyn Stream<Item = CollabResult<FatOp>> + Send>>>;
+    async fn recv_op(&mut self, doc_id: &DocId, mut after: GlobalSeq) -> CollabResult<OpStream>;
 }
 
 /// Either a local server or a gRPC client connect to a remote server.
