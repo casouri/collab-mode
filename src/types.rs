@@ -13,6 +13,12 @@ pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+pub enum EditorOp {
+    Ins((u64, String)),
+    Del(Vec<(u64, String)>),
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]
 pub enum EditorOpKind {
     Original,
@@ -22,8 +28,8 @@ pub enum EditorOpKind {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EditorOp {
-    pub op: Op,
+pub struct EditorFatOp {
+    pub op: EditorOp,
     pub group_seq: GroupSeq,
     pub kind: EditorOpKind,
 }
@@ -86,4 +92,22 @@ pub enum DocServerResp {
     DeleteFile,
     Login(SiteId),
     Err(CollabError),
+}
+
+impl Into<Op> for EditorOp {
+    fn into(self) -> Op {
+        match self {
+            Self::Ins(op) => Op::Ins(op),
+            Self::Del(ops) => Op::Del(ops, vec![]),
+        }
+    }
+}
+
+impl From<Op> for EditorOp {
+    fn from(value: Op) -> Self {
+        match value {
+            Op::Ins(op) => Self::Ins(op),
+            Op::Del(ops, _) => Self::Del(ops),
+        }
+    }
 }

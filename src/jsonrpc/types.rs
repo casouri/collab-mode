@@ -1,4 +1,3 @@
-use crate::op::{DocId, Op, SiteId};
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +70,7 @@ pub struct ShareFileResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendOpParams {
-    pub ops: Vec<EditorOp>,
+    pub ops: Vec<EditorFatOp>,
     pub doc_id: DocId,
     pub server_id: ServerId,
 }
@@ -79,7 +78,7 @@ pub struct SendOpParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendOpResp {
-    pub ops: Vec<Op>,
+    pub ops: Vec<EditorOp>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

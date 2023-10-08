@@ -7,7 +7,7 @@
 //!
 //! A typical session looks like this:
 //!
-//! ```ignore
+//! ```text
 //! endpoint      signal server      endpoint
 //! | -------Bind-----> |                   |
 //! |                   | <----Connect----- |

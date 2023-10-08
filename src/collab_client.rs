@@ -172,7 +172,7 @@ impl Doc {
     /// Send local `ops` and retrieve remote ops. `ops` can be empty,
     /// in which case the purpose is solely retrieving accumulated
     /// remote ops.
-    pub async fn send_op(&mut self, ops: Vec<EditorOp>) -> CollabResult<Vec<Op>> {
+    pub async fn send_op(&mut self, ops: Vec<EditorFatOp>) -> CollabResult<Vec<Op>> {
         self.check_async_errors()?;
 
         // Get remote ops before locking engine.
@@ -189,7 +189,7 @@ impl Doc {
                 seq: None,
                 doc: self.doc_id.clone(),
                 site: engine.site_id(),
-                op: op.op,
+                op: op.op.into(),
                 site_seq: self.site_seq,
                 kind: OpKind::Original, // Use a dummy value.
                 group_seq: op.group_seq,

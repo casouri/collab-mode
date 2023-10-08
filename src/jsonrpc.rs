@@ -366,7 +366,9 @@ impl JSONRPCServer {
             self.remove_doc(&params.doc_id, &params.server_id);
         }
         let remote_ops = res?;
-        let resp = SendOpResp { ops: remote_ops };
+        let resp = SendOpResp {
+            ops: remote_ops.into_iter().map(|x| x.into()).collect(),
+        };
         Ok(resp)
     }
 
@@ -451,7 +453,9 @@ impl JSONRPCServer {
         };
         match res {
             Ok(ops) => {
-                let resp = SendOpResp { ops };
+                let resp = SendOpResp {
+                    ops: ops.into_iter().map(|x| x.into()).collect(),
+                };
                 Ok(resp)
             }
             Err(err) => {
