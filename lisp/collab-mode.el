@@ -11,6 +11,7 @@
 (require 'jsonrpc)
 (require 'text-property-search)
 (require 'rmc)
+(require 'icons)
 
 (defgroup collab-mode
   ()
@@ -37,6 +38,34 @@ CREDENTIAL).")
 
 (defvar collab-mode-hasty-p t
   "If non-nil, buffer changes are sent to collab process immediately.")
+
+;;; Icons
+
+(defvar collab-mode--load-directory
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Directory in which collab-mode.el resides.")
+
+(define-icon collab-status-on nil
+  `((image ,(concat collab-mode--load-directory "/dot_medium_16.svg")
+           :face 'success
+           :height (0.9 . em)
+           :ascent 83)
+    (symbol "•")
+    (text "*"))
+  "Icon for collab-mode on status indicator."
+  :version "30.1"
+  :help-echo "ON")
+
+(define-icon collab-status-off nil
+  `((image ,(concat collab-mode--load-directory "/dot_medium_16.svg")
+           :face 'error
+           :height (0.9 . em)
+           :ascent 83)
+    (symbol "•")
+    (text "*"))
+  "Icon for collab-mode off status indicator."
+  :version "30.1"
+  :help-echo "OFF")
 
 ;;; Error handling
 
@@ -700,7 +729,8 @@ SERVER is its server id."
      beg (point) `( collab-mode-doc-id ,doc-id
                     collab-mode-file-name ,file-name))
     (when (collab-mode--doc-connected doc-id server)
-      (insert (propertize " •" 'face 'success)))))
+      (insert " " (propertize (icon-string 'collab-status-on)
+                              'collab-mode-status t)))))
 
 (defun collab-mode--insert-server (server signaling-server credential)
   "Insert SERVER (server id) on SIGNALING-SERVER and its files.
@@ -897,8 +927,9 @@ immediately."
         (let ((content (collab-mode--connect-to-file-req doc-id server-id))
               (inhibit-read-only t))
           (end-of-line)
-          (unless (looking-back " •" 2)
-            (insert (propertize " •" 'face 'success)))
+          (unless (get-text-property (1- (point)) 'collab-mode-status)
+            (insert " " (propertize (icon-string 'collab-status-on)
+                                    'collab-mode-status t)))
           (pop-to-buffer
            (generate-new-buffer (concat "*collab: " file-name "*")))
           (collab-monitored-mode -1)
