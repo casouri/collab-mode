@@ -609,12 +609,14 @@ Return the file content as a string."
                         :signalingAddr ,signaling-addr)
                      :timeout collab-mode-rpc-timeout)))
 
-(defun collab-mode--print-history-req (doc server)
-  "Print debugging history for (DOC SERVER)."
+(defun collab-mode--print-history-req (doc server debug)
+  "Print debugging history for (DOC SERVER).
+If DEBUG non-nil, print debug version."
   (let ((conn (collab-mode--connect)))
     (jsonrpc-request conn 'PrintHistory
                      `( :docId ,doc
-                        :serverId ,server)
+                        :serverId ,server
+                        :debug ,(if debug t :json-false))
                      :timeout collab-mode-rpc-timeout)))
 
 (defsubst collab-mode--encode-op (op)
@@ -1102,13 +1104,16 @@ its name rather than doc id) to connect."
       (collab-mode--disconnect-from-file-req doc-id server-id)))
   (collab-monitored-mode -1))
 
-(defun collab-mode--print-history ()
-  "Print debugging history for the current buffer."
-  (interactive)
+(defun collab-mode--print-history (&optional debug)
+  "Print debugging history for the current buffer.
+If called with an interactive argument (DEBUG), print more
+detailed history."
+  (interactive "p")
   (let ((doc-id (car collab-mode--doc-server))
-        (server-id (cdr collab-mode--doc-server)))
+        (server-id (cdr collab-mode--doc-server))
+        (debug (eq debug 4)))
     (collab-mode--catch-error (format "can’t print history of Doc(%s)" doc-id)
-      (let ((text (collab-mode--print-history-req doc-id server-id))
+      (let ((text (collab-mode--print-history-req doc-id server-id debug))
             undo-tip)
         (pop-to-buffer (format "*collab history for %s*"
                                (buffer-name)))

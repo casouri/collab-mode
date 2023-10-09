@@ -129,3 +129,11 @@ pub struct AcceptConnectionParams {
     pub server_id: ServerId,
     pub signaling_addr: String,
 }
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintHistoryParams {
+    pub doc_id: DocId,
+    pub server_id: ServerId,
+    pub debug: bool,
+}

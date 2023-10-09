@@ -276,7 +276,7 @@ impl JSONRPCServer {
                 .await?;
             make_resp(request.id, resp)
         } else if request.method == "PrintHistory" {
-            let params: DocIdParams = serde_json::from_value(request.params)?;
+            let params: PrintHistoryParams = serde_json::from_value(request.params)?;
             let resp = self.handle_print_history_request(params).await?;
             make_resp(request.id, resp)
         } else {
@@ -488,9 +488,9 @@ impl JSONRPCServer {
 
     pub async fn handle_print_history_request(
         &mut self,
-        params: DocIdParams,
+        params: PrintHistoryParams,
     ) -> CollabResult<String> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
-        Ok(doc.print_history().await)
+        Ok(doc.print_history(params.debug).await)
     }
 }

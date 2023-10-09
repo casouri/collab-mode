@@ -241,11 +241,13 @@ impl Doc {
         }
     }
 
-    /// Display a log of the local history for debugging purpose.
-    pub async fn print_history(&self) -> String {
+    /// Display a log of the local history for debugging purpose. If
+    /// `debug` is true, print more detailed (but more verbose)
+    /// information.
+    pub async fn print_history(&self, debug: bool) -> String {
         // self.check_async_errors()?;
         let mut output = String::new();
-        output += self.engine.lock().await.print_history().as_str();
+        output += self.engine.lock().await.print_history(debug).as_str();
         output
     }
 }

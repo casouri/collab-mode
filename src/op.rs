@@ -13,7 +13,7 @@ pub type GlobalSeq = u32;
 /// A DocId is a randomly generated integer. I'd really like to use
 /// u64, but JSON can't encode u64. u32 allows about 10k documents on
 /// a single server with reasonable collision. I intend collab-mode to
-/// be a small, personal tool, so 10k should be enough TM.
+/// be a small, personal tool, so 10k should be enough(TM).
 pub type DocId = u32;
 /// SiteId is a monotonically increasing integer.
 pub type SiteId = u32;
@@ -41,7 +41,7 @@ pub trait Operation: std::fmt::Debug + Clone + PartialEq + Eq {
 // *** Op and tranform functions
 
 /// An string-wise operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     /// Insertion.
     //   pos  content
@@ -385,6 +385,27 @@ impl std::fmt::Display for Op {
                 let mut out = String::new();
                 for op in ops {
                     out += format!("del({}, {}) ", op.0, op.1).as_str();
+                }
+                write!(f, "{}", out)
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::Ins((pos, content)) => {
+                let mut content = content.to_string();
+                write!(f, "ins({pos}, {:?})", content)
+            }
+            Op::Del(ops, recover_list) => {
+                let mut out = String::new();
+                for op in ops {
+                    out += format!("del({}, {:?}) ", op.0, op.1).as_str();
+                }
+                for op in recover_list {
+                    out += format!("rec({}, {:?}) ", op.0, op.1).as_str();
                 }
                 write!(f, "{}", out)
             }
