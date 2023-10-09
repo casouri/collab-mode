@@ -1113,6 +1113,7 @@ detailed history."
         (server-id (cdr collab-mode--doc-server))
         (debug (eq debug 4)))
     (collab-mode--catch-error (format "can’t print history of Doc(%s)" doc-id)
+      (collab-mode--send-ops-now)
       (let ((text (collab-mode--print-history-req doc-id server-id debug))
             undo-tip)
         (pop-to-buffer (format "*collab history for %s*"

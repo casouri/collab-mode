@@ -102,32 +102,34 @@ impl GlobalHistory {
                 if let Some(idx) = self.undo_tip {
                     self.undo_queue.drain(idx..);
                 }
+                self.undo_tip = None;
                 Ok(OpKind::Original)
             }
             EditorOpKind::Undo => {
                 // If this op is an undo op, find the original op it's
                 // supposed to undo, and calculate the delta.
-                let seq_of_orig;
+                let idx_of_orig;
                 if let Some(idx) = self.undo_tip {
                     if idx == 0 {
                         return Err(EngineError::UndoError("No more op to undo".to_string()));
                     }
-                    seq_of_orig = self.undo_queue[idx - 1];
+                    idx_of_orig = self.undo_queue[idx - 1];
                     self.undo_tip = Some(idx - 1);
                 } else {
                     if self.undo_queue.len() == 0 {
                         return Err(EngineError::UndoError("No more op to undo".to_string()));
                     }
-                    seq_of_orig = *self.undo_queue.last().unwrap();
+                    idx_of_orig = *self.undo_queue.last().unwrap();
                     self.undo_tip = Some(self.undo_queue.len() - 1);
                 }
                 // Next redo will undo this undo op.
                 self.undo_queue[self.undo_tip.unwrap()] = op_seq;
+                let seq_of_orig = idx_of_orig + 1;
                 Ok(OpKind::Undo(seq_of_new_op - seq_of_orig as usize))
             }
             EditorOpKind::Redo => {
                 if let Some(idx) = self.undo_tip {
-                    let seq_of_inverse = self.undo_queue[idx];
+                    let idx_of_inverse = self.undo_queue[idx];
                     if idx == self.undo_queue.len() - 1 {
                         self.undo_tip = None;
                     } else {
@@ -135,6 +137,7 @@ impl GlobalHistory {
                     }
                     // Next undo will undo this redo op.
                     self.undo_queue[idx] = op_seq;
+                    let seq_of_inverse = idx_of_inverse + 1;
                     Ok(OpKind::Undo(seq_of_new_op - seq_of_inverse as usize))
                 } else {
                     Err(EngineError::UndoError("No ops to redo".to_string()))
@@ -190,10 +193,10 @@ impl GlobalHistory {
     }
 
     pub fn print_history_debug(&self) -> String {
-        fn print_kind(kind: OpKind) -> String {
+        fn print_kind(kind: OpKind, seq: GlobalSeq) -> String {
             match kind {
                 OpKind::Original => "O".to_string(),
-                OpKind::Undo(delta) => format!("U(-{delta})"),
+                OpKind::Undo(delta) => format!("U({})", seq - delta as u32),
             }
         }
 
@@ -205,20 +208,22 @@ impl GlobalHistory {
                 "{}\t{}\t{\t}\t{:?}\n",
                 op.seq.unwrap(),
                 op.group_seq,
-                print_kind(op.kind),
+                print_kind(op.kind, op.seq.unwrap()),
                 op.op
             )
             .as_str();
         }
         output += "\nUNACKED:\n\n";
+        let mut seq = self.global.len();
         for op in &self.local {
             output += format!(
                 " \t{}\t{\t}\t{:?}\n",
                 op.group_seq,
-                print_kind(op.kind),
+                print_kind(op.kind, seq as GlobalSeq),
                 op.op
             )
             .as_str();
+            seq += 1;
         }
         output += "\nUNDO QUEUE:\n\n";
         for idx in 0..self.undo_queue.len() {
