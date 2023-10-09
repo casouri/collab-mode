@@ -228,7 +228,7 @@ impl GlobalHistory {
         output += "\nUNDO QUEUE:\n\n";
         for idx in 0..self.undo_queue.len() {
             let op = self.nth_in_undo_queue(idx);
-            output += format!("{}\t{}\n", self.undo_queue[idx], op.op).as_str();
+            output += format!("{}\t{:?}\n", self.undo_queue[idx], op.op).as_str();
         }
         if let Some(tip) = self.undo_tip {
             output += format!("\nUNDO TIP: {}", self.undo_queue[tip]).as_str();
