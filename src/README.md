@@ -80,8 +80,15 @@ convergence with undo operations. Like TP1 and TP2, you can either use
 a transform function that satisfies them, or use a control algorithm
 that avoids them.
 
-COT avoids both IP2 and IP3 in its control algorithm, and our
-algorithm (almost) does the same.
+COT avoids both IP2 and IP3 in its control algorithm at the cost of
+having abysmal asymptotic complexity, our algorithm does a couple
+ad-hoc patchwork that are a lot cheaper and very simple. The downside
+is that the result isn’t always intuitive. The documents are still
+consistent with each other, just the order might change if two user
+undo and redo at the same position. I think that’s reasonable since a)
+usually people tend to stay out of the way of each other and don’t
+edit at the exact same position, and b) as long as the consistency is
+guaranteed, small ordering issues can be easily fixed by the user.
 
 IP2 says sequentially transforming an operation A against another
 operation B and its inverse I(B) should end up giving you o back. This
@@ -89,63 +96,6 @@ sounds trivially satisfiable but isn’t. An example: let A = del(0,
 abc), B = del(0, abc). With a normal transform function, you’ll end up
 with del(0, ""). To avoid IP2, you just need to make sure you never
 transform ops sequentially against an op and then its inverse.
-
-Fortunately, avoiding IP2 is pretty easy. When you need to transform
-an op A against a series of ops, say, [1 2 3 I(1) 4], you just need to
-find out all the do-undo pairs and skip them. So in the example, you
-skip 1 and I(1), and only transform A against 2, 3, 4. This breaks my
-intuition for OT, because if you don't transform A against 1, A's
-context wouldn't contain 1, how do you safely transform A against 2,
-when 2's context contains 1? But apparently it works, and that's what
-COT do. If there is a do-undo-redo triple, you can either skip the
-do-undo pair, or skip the undo-redo pair, it doesn't seem to matter
-(the COT paper didn't say what to do in this case).
-
-Unfortunately, skipping all do-undo pairs when transforming requires a
-much more complicated design. It's easy to skip do-undo pairs when you
-transform ops in one go, but what if you transform an op A first
-against an op B, then in a separate occasion transforms A against
-I(B)? This is called decoupled do-undo pair in the COT paper.
-
-For example, suppose in our history we have L₁ = [1 2], L₂ = [3]. Now
-we receives a remote op A, we transform 3 against A and get 3', now we
-have L₁ = [1 2 A], L₂ = [3']. Then shortly after we receives another
-remote op I(A), and transforms 3' against it. Do you see the problem?
-We've now transformed 3 against A and I(A). This can also happen at
-the server when we send 3' to the server. To solve the decoupled
-do-undo pair problem, we would need to do what POT and COT does: have
-separate transformation paths for each individual site and only
-transform an op once.
-
-For me, this is too expensive, so my solution is to just give up on
-this :-D And giving up on this is completely fine. Notice that a) we
-only transform an op against other ops when they are concurrent. And
-b) for the operations we support, only transforming del against del
-could violate IP2.
-
-What's the harm when we violate IP2 for concurrent del ops? Let's look
-at an example: document state is "X", alice deletes X (A=(del(0, X))),
-in the mean time, Bob delets X and undoes the op (B=(del(0, X),
-I(B)=ins(0, X))). If alice receives both of Bob's ops and transforms A
-against B and shortly after I(B), A becomes identity. What Alice will
-see is that she deletes the X but it soon comes back.
-
-In a completely correct system (POT or COT), Alice should see the X
-stay deleted. But I’d say that our system is still correct (under a
-different definition of correctness). Since the ops are concurrent,
-there aren’t causal relationship between them. We know Alice’s op
-arrives at the server before Bob’s op does, but nothing stops us from
-pretending that Bob’s op arrives first. (The only saving grace of
-distributed systems, eh?)
-
-From user’s view, Alice can just delete the X again. Users might not
-even consider this unexpected behavior: Alice and Bob are editing on
-the same text concurrently, some conflict is expected. I consider this
-an acceptable price to pay for simplicity and efficiency.
-
-The good news is that transforming inverse ops don't have the
-decoupled do-undo pair problem, since we transform it only once,
-against all the ops after the original op in history.
 
 The other property, IP3 is a bit more complicated. In essence, it says
 the transformed inverse of an op should be equal to the inverse of the
@@ -160,7 +110,36 @@ To avoid IP3, you need to make sure you never transform an inverse op
 I(A) against an op B where B is concurrent (context-independent) to
 A. Ie, don’t mingle inverse with concurrent ops together.
 
-Again, I give up avoiding IP3 for concurrent ops.
+My patch works are two-fold. First, when a delete op is canceled by
+another delete op when transforming, it saves the canceled part of the
+edit; when it later transforms against an insert op that redoes that
+edit, the edit is restored in the delete op. Example: del(0, "A")
+transforms against del(0, "A"), ins(0, "A"). Normally we’ll end up
+with del(0, ""), but with the restoration trick, we end up with del(0,
+"A"). This is fairly important for maintaining intuitive undo
+behavior.
+
+A real-world example: when you type "{" in Emacs with bracket
+completion on, Emacs first deletes the "{", then inserts "{}". So the
+series of ops is
+
+``` text
+ins(0, {)
+del(0, {)
+ins(0, {)
+ins(1, })
+```
+
+Without the restoration trick, the user wouldn’t be able to undo all
+the operations, because the very first op, ins(0, {), will be inversed
+to del(0, {), and will be canceled by later ops.
+
+The second patchwork that I did is to skip inverse-pairs when
+transforming operations, like COT does. But we can only skip those
+pairs when transforming in the local history. It is still possible for
+an op to be transformed with an op, then later to that op’s inverse.
+This is called the decoupled-pair in the COT paper. Avoiding that is
+too expensive, so we just don’t do it.
 
 # Undo policy
 
