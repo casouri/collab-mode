@@ -12,6 +12,7 @@
 (require 'text-property-search)
 (require 'rmc)
 (require 'icons)
+(require 'pulse)
 
 (defgroup collab-mode
   ()
@@ -405,7 +406,13 @@ DOC-ID and SERVER-ID are associated with the current buffer."
   (puthash collab-mode--doc-server
            (current-buffer)
            collab-mode--buffer-table)
-  (collab-monitored-mode))
+  (collab-monitored-mode)
+  (pulse-momentary-highlight-region (point-min) (point-max) 'diff-added))
+
+(defun collab-mode--disable ()
+  "Disable ‘collab-mode’ for the current buffer and flash red."
+  (pulse-momentary-highlight-region (point-min) (point-max) 'diff-removed)
+  (collab-monitored-mode -1))
 
 (defvar collab-mode--stashed-state-plist nil
   "Used for stashing local state when major mode changes.")
@@ -981,14 +988,15 @@ immediately."
   (interactive)
   (let ((doc-id (get-text-property (point) 'collab-mode-doc-id))
         (server-id (get-text-property (point) 'collab-mode-server-id)))
-    (collab-mode--catch-error (format "can’t disconnect from Doc(%s)" doc-id)
+    (collab-mode--catch-error
+        (format "can’t disconnect from Doc(%s)" doc-id)
       (collab-mode--disconnect-from-file-req doc-id server-id))
     (let ((buf (gethash (cons doc-id server-id)
                         collab-mode--buffer-table))
           (inhibit-read-only t))
       (when buf
         (with-current-buffer buf
-          (collab-monitored-mode -1)))
+          (collab-mode--disable)))
       (save-excursion
         (end-of-line)
         (when (looking-back " •" 2)
@@ -1100,9 +1108,11 @@ its name rather than doc id) to connect."
   (collab-mode--check-precondition)
   (let ((doc-id (car collab-mode--doc-server))
         (server-id (cdr collab-mode--doc-server)))
-    (collab-mode--catch-error (format "can’t disconnect from Doc(%s)" doc-id)
+    (collab-mode--catch-error
+        (format "can’t disconnect from Doc(%s)" doc-id)
       (collab-mode--disconnect-from-file-req doc-id server-id)))
-  (collab-monitored-mode -1))
+  (collab-mode--disable)
+  (message "Disconnected"))
 
 (defun collab-mode--print-history (&optional debug)
   "Print debugging history for the current buffer.
@@ -1112,7 +1122,8 @@ detailed history."
   (let ((doc-id (car collab-mode--doc-server))
         (server-id (cdr collab-mode--doc-server))
         (debug (eq debug 4)))
-    (collab-mode--catch-error (format "can’t print history of Doc(%s)" doc-id)
+    (collab-mode--catch-error
+        (format "can’t print history of Doc(%s)" doc-id)
       (collab-mode--send-ops-now)
       (let ((text (collab-mode--print-history-req doc-id server-id debug))
             undo-tip)
