@@ -65,6 +65,7 @@ pub struct ShareFileParams {
 #[serde(rename_all = "camelCase")]
 pub struct ShareFileResp {
     pub doc_id: DocId,
+    pub site_id: SiteId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -78,8 +79,14 @@ pub struct SendOpParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendOpResp {
-    pub ops: Vec<EditorOp>,
+    pub ops: Vec<EditorLeanOp>,
     pub last_seq: GlobalSeq,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoResp {
+    pub ops: Vec<Op>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -107,6 +114,7 @@ pub struct DocIdParams {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectToFileResp {
     pub content: String,
+    pub site_id: SiteId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

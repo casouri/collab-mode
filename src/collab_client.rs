@@ -174,7 +174,10 @@ impl Doc {
     /// remote ops. Return the transformed remote ops that editor can
     /// apply to its document, plus the last seq number among the ops
     /// returned.
-    pub async fn send_op(&mut self, ops: Vec<EditorFatOp>) -> CollabResult<(Vec<Op>, GlobalSeq)> {
+    pub async fn send_op(
+        &mut self,
+        ops: Vec<EditorFatOp>,
+    ) -> CollabResult<(Vec<EditorLeanOp>, GlobalSeq)> {
         self.check_async_errors()?;
 
         // Get remote ops before locking engine.
@@ -215,7 +218,10 @@ impl Doc {
         let last_op = get_last_global_seq(&transformed_remote_ops)?.unwrap_or(0);
 
         Ok((
-            transformed_remote_ops.into_iter().map(|op| op.op).collect(),
+            transformed_remote_ops
+                .into_iter()
+                .map(|op| op.into())
+                .collect(),
             last_op,
         ))
     }

@@ -34,6 +34,13 @@ pub struct EditorFatOp {
     pub kind: EditorOpKind,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLeanOp {
+    pub op: EditorOp,
+    pub site_id: SiteId,
+}
+
 /// Basically (Doc, Server). Uniquely identifies a document.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocDesignator {
@@ -118,6 +125,15 @@ impl From<Op> for EditorOp {
         match value {
             Op::Ins(op) => Self::Ins(op),
             Op::Del(ops, _) => Self::Del(ops),
+        }
+    }
+}
+
+impl From<FatOp> for EditorLeanOp {
+    fn from(value: FatOp) -> Self {
+        EditorLeanOp {
+            op: value.op.into(),
+            site_id: value.site,
         }
     }
 }

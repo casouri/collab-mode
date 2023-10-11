@@ -336,6 +336,7 @@ impl JSONRPCServer {
         params: ShareFileParams,
     ) -> CollabResult<ShareFileResp> {
         let client = self.get_client(&params.server_id)?;
+        let site_id = client.site_id();
         let doc = Doc::new_share_file(
             client.clone(),
             &params.file_name,
@@ -346,6 +347,7 @@ impl JSONRPCServer {
 
         let resp = ShareFileResp {
             doc_id: doc.doc_id(),
+            site_id,
         };
         let key = DocDesignator {
             server: params.server_id,
@@ -367,7 +369,7 @@ impl JSONRPCServer {
         }
         let (remote_ops, last_seq) = res?;
         let resp = SendOpResp {
-            ops: remote_ops.into_iter().map(|x| x.into()).collect(),
+            ops: remote_ops,
             last_seq,
         };
         Ok(resp)
@@ -411,6 +413,7 @@ impl JSONRPCServer {
             self.remove_doc(&params.doc_id, &params.server_id)
         }
         let client = self.get_client(&params.server_id)?;
+        let site_id = client.site_id();
         let (doc, content) = Doc::new_connect_file(
             client.clone(),
             params.doc_id.clone(),
@@ -419,7 +422,7 @@ impl JSONRPCServer {
         .await?;
         self.doc_map
             .insert(DocDesignator::new(&params.doc_id, &params.server_id), doc);
-        let resp = ConnectToFileResp { content };
+        let resp = ConnectToFileResp { content, site_id };
         Ok(resp)
     }
 
@@ -446,7 +449,7 @@ impl JSONRPCServer {
         Ok(params)
     }
 
-    pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<SendOpResp> {
+    pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<UndoResp> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
         let res = match params.kind {
             UndoKind::Undo => doc.undo().await,
@@ -454,10 +457,7 @@ impl JSONRPCServer {
         };
         match res {
             Ok(ops) => {
-                let resp = SendOpResp {
-                    ops: ops.into_iter().map(|x| x.into()).collect(),
-                    last_seq: 0,
-                };
+                let resp = UndoResp { ops };
                 Ok(resp)
             }
             Err(err) => {

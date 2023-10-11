@@ -19,7 +19,7 @@
   "Collaboration mode."
   :group 'editting)
 
-(defvar collab-mode-rpc-timeout 3
+(defvar collab-mode-rpc-timeout 1
   "Timeout in seconds to wait for connection to collab process.")
 
 (defvar collab-mode-command "~/p/collab-mode/target/debug/collab-mode"
@@ -42,6 +42,12 @@ CREDENTIAL).")
 
 (defvar collab-mode-hasty-p t
   "If non-nil, buffer changes are sent to collab process immediately.")
+
+;; Generated with seaborn.color_palette("colorblind").as_hex()
+(defvar collab-mode-cursor-colors
+  '( "#0173b2" "#de8f05" "#029e73" "#d55e00" "#cc78bc" "#ca9161"
+     "#fbafe4" "#949494" "#ece133" "#56b4e9")
+  "Cursor color ring.")
 
 ;;; Icons
 
@@ -101,7 +107,7 @@ MSG should be something like “can’t do xxx”."
            ,@body)
        (error
         (when collab-monitored-mode
-          (collab-monitored-mode -1))
+          (collab-mode--disable))
         (display-warning 'collab-mode
                          (format "Collab-mode %s: %s" ,msg ,err))))))
 
@@ -120,6 +126,39 @@ command that acts on a collab-monitored buffer."
     (collab-monitored-mode -1)
     (display-warning
      'collab-mode "Current buffer doesn’t have a doc id or server id")))
+
+
+;;; Cursor
+
+(defvar-local collab-mode--cursor-ov-alist nil
+  "An alist mapping user’s site id to cursor overlays.")
+
+(defvar-local collab-mode--my-site-id nil
+  "My site-id.")
+
+(defun collab-mode--move-cursor (site-id pos)
+  "Move user (SITE-ID)’s cursor overlay to POS."
+  (when (and (not (eq site-id collab-mode--my-site-id))
+             (<= (point-min) pos (point-max)))
+    (let* ((idx (mod site-id
+                     (length collab-mode-cursor-colors)))
+           (face `(:background
+                   ,(nth idx collab-mode-cursor-colors)))
+           (ov (or (alist-get site-id collab-mode--cursor-ov-alist)
+                   (let ((ov (make-overlay (min (1+ pos) (point-max))
+                                           (min (+ pos 2) (point-max))
+                                           nil nil nil)))
+                     (overlay-put ov 'face face)
+                     (push (cons site-id ov) collab-mode--cursor-ov-alist)
+                     ov))))
+
+      (if (eq pos (point-max))
+          (progn
+            (overlay-put ov 'after-string (propertize " " 'face face))
+            (move-overlay ov pos (min (1+ pos) (point-max))))
+        (overlay-put ov 'after-string nil)
+        (move-overlay ov pos (1+ pos))))))
+
 
 ;;; Edit tracking
 ;;
@@ -348,7 +387,7 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
-(defvar collab-mode--dispatcher-timer-plist)
+(defvar collab-mode--dispatcher-timer-table)
 (define-minor-mode collab-monitored-mode
   "Collaborative monitor mode."
   :global nil
@@ -382,11 +421,8 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
         (setq-local collab-mode--group-seq 1))
 
     ;; Disable.
-    (setq collab-mode--dispatcher-timer-plist
-          (plist-put collab-mode--dispatcher-timer-plist
-                     collab-mode--doc-server
-                     nil
-                     #'equal))
+    (remhash collab-mode--doc-server
+             collab-mode--dispatcher-timer-table)
 
     (remove-hook 'before-change-functions #'collab-mode--before-change t)
     (remove-hook 'after-change-functions #'collab-mode--after-change t)
@@ -397,21 +433,33 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
     (remhash collab-mode--doc-server
              collab-mode--buffer-table)
 
+    (dolist (ov collab-mode--cursor-ov-alist)
+      (delete-overlay (cdr ov)))
+    (setq-local collab-mode--cursor-ov-alist nil)
+
+    (setq-local collab-mode--doc-server nil)
+    (setq-local collab-mode--my-site-id nil)
     (setq-local buffer-undo-list nil)))
 
-(defun collab-mode--enable (doc-id server-id)
+(defun collab-mode--enable (doc-id server-id my-site-id)
   "Enable ‘collab-monitored-mode’ in the current buffer.
-DOC-ID and SERVER-ID are associated with the current buffer."
+DOC-ID and SERVER-ID are associated with the current buffer.
+MY-SITE-ID is the site if of this editor."
   (setq collab-mode--doc-server (cons doc-id server-id))
+  (setq collab-mode--my-site-id my-site-id)
   (puthash collab-mode--doc-server
            (current-buffer)
            collab-mode--buffer-table)
   (collab-monitored-mode)
-  (pulse-momentary-highlight-region (point-min) (point-max) 'diff-added))
+  (let ((pulse-delay 0.1))
+    (pulse-momentary-highlight-region
+     (point-min) (point-max) 'diff-refine-added)))
 
 (defun collab-mode--disable ()
   "Disable ‘collab-mode’ for the current buffer and flash red."
-  (pulse-momentary-highlight-region (point-min) (point-max) 'diff-removed)
+  (let ((pulse-delay 0.1))
+    (pulse-momentary-highlight-region
+     (point-min) (point-max) 'diff-refine-removed))
   (collab-monitored-mode -1))
 
 (defvar collab-mode--stashed-state-plist nil
@@ -570,8 +618,8 @@ file is of the form (:docId DOC-ID :fileName FILE-NAME)."
 (defun collab-mode--share-file-req (server filename content)
   "Share the file with SERVER (address).
 FILENAME is filename, CONTENT is just the content of the file in
-a string. Return the server-assigned doc id. If FORCE is non-nil,
-override existing files."
+a string. Return (:docId DOC-ID :siteId SITE-ID). If FORCE is
+non-nil, override existing files."
   (let* ((conn (collab-mode--connect))
          (resp (jsonrpc-request
                 conn 'ShareFile
@@ -579,18 +627,18 @@ override existing files."
                    :fileName ,filename
                    :content ,content)
                 :timeout collab-mode-rpc-timeout)))
-    (plist-get resp :docId)))
+    resp))
 
 (defun collab-mode--connect-to-file-req (doc server)
   "Connect to DOC (doc id) on SERVER (server address).
-Return the file content as a string."
+Return (:siteId SITE-ID :content CONTENT)."
   (let* ((conn (collab-mode--connect))
          (resp (jsonrpc-request
                 conn 'ConnectToFile
                 `( :serverId ,server
                    :docId ,doc)
                 :timeout collab-mode-rpc-timeout)))
-    (plist-get resp :content)))
+    resp))
 
 (defun collab-mode--disconnect-from-file-req (doc server)
   "Disconnect from DOC on SERVER."
@@ -645,7 +693,7 @@ If MOVE-POINT non-nil, move point as the edit would."
   (let ((inhibit-modification-hooks t)
         (collab-mode--inhibit-hooks t)
         (start (point-marker)))
-    (pcase op
+    (pcase (plist-get op :op)
       (`(:Ins [,pos ,str])
        (goto-char (1+ pos))
        (insert str))
@@ -672,6 +720,8 @@ collab process."
   (let ((conn collab-mode--jsonrpc-connection)
         resp)
     (collab-mode--catch-error "can’t send local edits to remote"
+      ;; RESP := (:op LEAN-OP :siteId SITE-ID)
+      ;; LEAN-OP := (:Ins [POS STR]) | (:Del [[POS STR]])
       (setq resp
             (jsonrpc-request
              conn 'SendOp
@@ -686,10 +736,19 @@ collab process."
              :timeout collab-mode-rpc-timeout))
       ;; Only ‘seq-map’ can map over vector.
       (let ((remote-ops (plist-get resp :ops))
-            (last-seq (plist-get resp :lastSeq)))
+            (last-seq (plist-get resp :lastSeq))
+            last-op)
         (seq-map (lambda (op)
-                   (collab-mode--apply-jrpc-op op))
+                   (collab-mode--apply-jrpc-op op)
+                   (setq last-op op))
                  remote-ops)
+        (pcase last-op
+          (`(:op (:Ins [,pos ,str]) :siteId ,site-id)
+           (collab-mode--move-cursor site-id (+ 1 pos (length str))))
+          (`(:op (:Del ,edits) :siteId ,site-id)
+           (when (> (length edits) 0)
+             (collab-mode--move-cursor
+              site-id (1+ (aref (aref edits 0) 0))))))
         ;; Return the largest global seq received from collab process.
         last-seq))))
 
@@ -967,8 +1026,10 @@ immediately."
     (if (and buf (buffer-live-p buf))
         (pop-to-buffer buf)
       (collab-mode--catch-error (format "can’t connect to Doc(%s)" doc-id)
-        (let ((content (collab-mode--connect-to-file-req doc-id server-id))
-              (inhibit-read-only t))
+        (let* ((resp (collab-mode--connect-to-file-req doc-id server-id))
+               (site-id (plist-get resp :siteId))
+               (content (plist-get resp :content))
+               (inhibit-read-only t))
           (end-of-line)
           (unless (get-text-property (1- (point)) 'collab-mode-status)
             (insert " " (propertize (icon-string 'collab-status-on)
@@ -981,7 +1042,7 @@ immediately."
           (goto-char (point-min))
           (let ((buffer-file-name file-name))
             (set-auto-mode))
-          (collab-mode--enable doc-id server-id))))))
+          (collab-mode--enable doc-id server-id site-id))))))
 
 (defun collab-mode--disconnect-from-file ()
   "Disconnect from the file at point."
@@ -1024,7 +1085,7 @@ immediately."
 (defun collab-hub ()
   "Pop up the collab hub interface."
   (interactive)
-  (pop-to-buffer (get-buffer-create collab-mode--hub-buffer))
+  (switch-to-buffer (get-buffer-create collab-mode--hub-buffer))
   (collab--hub-mode)
   (collab-mode--refresh))
 
@@ -1040,11 +1101,12 @@ When called interactively, prompt for the server."
                                (file-name-nondirectory buffer-file-name))
                           (buffer-name)))))
   (collab-mode--catch-error "can’t share the current buffer"
-    (let ((doc-id
-           (collab-mode--share-file-req
-            server file-name
-            (buffer-substring-no-properties (point-min) (point-max)))))
-      (collab-mode--enable doc-id server))))
+    (let* ((resp (collab-mode--share-file-req
+                  server file-name
+                  (buffer-substring-no-properties (point-min) (point-max))))
+           (doc-id (plist-get resp :docId))
+           (site-id (plist-get resp :siteId)))
+      (collab-mode--enable doc-id server site-id))))
 
 (defun collab-mode-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
@@ -1086,8 +1148,10 @@ its name rather than doc id) to connect."
                                  return (plist-get elm :fileName))))
 
       ;; Replace buffer content with document content.
-      (let ((content (collab-mode--connect-to-file-req doc-id server))
-            (inhibit-read-only t))
+      (let* ((resp (collab-mode--connect-to-file-req doc-id server))
+             (content (plist-get resp :content))
+             (site-id (plist-get resp :siteId))
+             (inhibit-read-only t))
 
         (when (buffer-modified-p)
           (when (y-or-n-p "Save buffer before merging?")
@@ -1100,7 +1164,7 @@ its name rather than doc id) to connect."
         (goto-char (point-min))
         (let ((buffer-file-name file-name))
           (set-auto-mode))
-        (collab-mode--enable doc-id server)))))
+        (collab-mode--enable doc-id server site-id)))))
 
 (defun collab-mode-disconnect-buffer ()
   "Disconnect current buffer, returning it to a regular buffer."
@@ -1119,6 +1183,7 @@ its name rather than doc id) to connect."
 If called with an interactive argument (DEBUG), print more
 detailed history."
   (interactive "p")
+  (collab-mode--check-precondition)
   (let ((doc-id (car collab-mode--doc-server))
         (server-id (cdr collab-mode--doc-server))
         (debug (eq debug 4)))
