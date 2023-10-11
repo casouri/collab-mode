@@ -470,13 +470,16 @@ MY-SITE-ID is the site if of this editor."
   (setq collab-mode--stashed-state-plist
         (plist-put collab-mode--stashed-state-plist
                    (current-buffer)
-                   collab-mode--doc-server)))
+                   `( :doc-server ,collab-mode--doc-server
+                      :site-id ,collab-mode--my-site-id))))
 
 (defun collab-mode--maybe-recover ()
   "Maybe reenable ‘collab-mode’ after major mode change."
-  (when-let ((doc-server (plist-get collab-mode--stashed-state-plist
-                                    (current-buffer))))
-    (collab-mode--enable (car doc-server) (cdr doc-server))))
+  (when-let* ((state (plist-get collab-mode--stashed-state-plist
+                                (current-buffer)))
+              (doc-server (plist-get state :doc-server))
+              (site-id (plist-get state :site-id)))
+    (collab-mode--enable (car doc-server) (cdr doc-server) site-id)))
 
 (defun collab-mode--doc-connected (doc server)
   "Return non-nil if DOC at SERVER is connected."
@@ -544,6 +547,7 @@ including SEQ."
         (puthash (cons doc server) timer
                  collab-mode--dispatcher-timer-table)))))
 
+(defvar collab-mode--hub-buffer)
 (defun collab-mode--dispatch-notification (_conn method params)
   "Dispatch JSONRPC notifications.
 
