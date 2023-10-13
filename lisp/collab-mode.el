@@ -1045,10 +1045,15 @@ If INSERT-STATUS, insert a red DOWN symbol."
                      (error-message-string err)))))
     (insert (format "Connection type: %s\n" collab-connection-type))
     (insert "Accepting remote peer connections: "
-            (if collab--accepting-connection
+            (if (and connection-up collab--accepting-connection)
                 (propertize "YES" 'face 'success)
               (propertize "NO" 'face 'shadow))
             "\n")
+    (when (and connection-up collab--accepting-connection)
+      (insert (format "Server at: %s/%s"
+                      (nth 1 collab-local-server-config)
+                      (car collab-local-server-config))
+              "\n"))
     (insert "Errors: ")
     (insert "0" "\n")
     (insert "\n")
@@ -1231,7 +1236,8 @@ When called interactively, prompt for the server."
   (collab--catch-error "can’t share the current buffer"
     (let* ((resp (collab--share-file-req
                   server file-name
-                  (buffer-substring-no-properties (point-min) (point-max))))
+                  (buffer-substring-no-properties
+                   (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
            (site-id (plist-get resp :siteId)))
       (collab--enable doc-id server site-id))))
@@ -1340,13 +1346,15 @@ detailed history."
   "The main entry point of collab-mode, select an operation to perform."
   (interactive)
   (let ((resp (read-multiple-choice
-               "Heya! What do you want to do? "
+               "🧚 Heya! What do you want to do? "
                '((?s "share this buffer" "Share this buffer to a server")
                  (?r "reconnect to doc" "Reconnect to a document")
                  (?d "disconnect" "Disconnect and stop collaboration")
                  (?h "hub" "Open collab hub")))))
     (pcase (car resp)
-      (?s (call-interactively #'collab-share-buffer))
+      (?s (when (or (null collab-monitored-mode)
+                    (y-or-n-p "This buffer is already in collab-mode, are you sure you want to share it as a new doc? "))
+            (call-interactively #'collab-share-buffer)))
       (?r (call-interactively #'collab-reconnect-buffer))
       (?d (collab-disconnect-buffer))
       (?h (collab)))))
