@@ -461,7 +461,7 @@ impl ClientEngine {
     }
 
     /// Generate undo or redo ops from the current undo tip.
-    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<Op> {
+    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<EditorOp> {
         let mut idxidx;
         if redo {
             if self.gh.undo_tip.is_none() {
@@ -515,18 +515,18 @@ impl ClientEngine {
                 idxidx += 1;
             }
         }
-        ops.into_iter().map(|op| op.op).collect()
+        ops.into_iter().map(|op| op.op.into()).collect()
     }
 
     /// Generate an undo op from the current undo tip. Return an empty
     /// vector if there's no more op to undo.
-    pub fn generate_undo_op(&mut self) -> Vec<Op> {
+    pub fn generate_undo_op(&mut self) -> Vec<EditorOp> {
         self.generate_undo_op_1(false)
     }
 
     /// Generate a redo op from the current undo tip. Return en empty
     /// vector if there's no more ops to redo.
-    pub fn generate_redo_op(&mut self) -> Vec<Op> {
+    pub fn generate_redo_op(&mut self) -> Vec<EditorOp> {
         self.generate_undo_op_1(true)
     }
 

@@ -223,13 +223,13 @@ impl Doc {
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.
-    pub async fn undo(&mut self) -> CollabResult<Vec<Op>> {
+    pub async fn undo(&mut self) -> CollabResult<Vec<EditorOp>> {
         self.check_async_errors()?;
         Ok(self.engine.lock().await.generate_undo_op())
     }
 
     /// Return `n` consecutive redo ops from the current undo tip.
-    pub async fn redo(&mut self) -> CollabResult<Vec<Op>> {
+    pub async fn redo(&mut self) -> CollabResult<Vec<EditorOp>> {
         self.check_async_errors()?;
         Ok(self.engine.lock().await.generate_redo_op())
     }
