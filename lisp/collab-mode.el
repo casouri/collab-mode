@@ -14,37 +14,37 @@
 (require 'icons)
 (require 'pulse)
 
-(defgroup collab-mode
+(defgroup collab
   ()
   "Collaboration mode."
   :group 'editting)
 
-(defvar collab-mode-rpc-timeout 1
+(defvar collab-rpc-timeout 1
   "Timeout in seconds to wait for connection to collab process.")
 
-(defvar collab-mode-command "~/p/collab-mode/target/debug/collab-mode"
+(defvar collab-command "~/p/collab/target/debug/collab"
   "Path to the collab server executable.")
 
-(defvar collab-mode-connection-type '(socket 7701)
+(defvar collab-connection-type '(socket 7701)
   "How to connect to the collab process.
 The value can be ‘pipe’, meaning use stdio for connection,
 or (socket PORT), meaning using a socket connection, and PORT
 should be the port number.")
 
-(defvar collab-mode-local-server-config '("#1" "ws://127.0.0.1:8822")
+(defvar collab-local-server-config '("#1" "ws://127.0.0.1:8822")
   "A list storing configuration for the local server.
 The list should be (SERVER-ID SIGNALING-SERVER-ADDR).")
 
-(defvar collab-mode-server-alist '(("#2" . ("ws://127.0.0.1:8822" "#2")))
+(defvar collab-server-alist '(("#2" . ("ws://127.0.0.1:8822" "")))
   "An alist of server configurations.
 Each key is SERVER-ID, each value is (SIGNALING-SERVER-ADDR
 CREDENTIAL).")
 
-(defvar collab-mode-hasty-p t
+(defvar collab-hasty-p t
   "If non-nil, buffer changes are sent to collab process immediately.")
 
 ;; Generated with seaborn.color_palette("colorblind").as_hex()
-(defvar collab-mode-cursor-colors
+(defvar collab-cursor-colors
   '( "#0173b2" "#de8f05" "#029e73" "#d55e00" "#cc78bc" "#ca9161"
      "#fbafe4" "#949494" "#ece133" "#56b4e9")
   "Cursor color ring.")
@@ -52,7 +52,7 @@ CREDENTIAL).")
 ;;; Generic helpers
 
 ;; https://nullprogram.com/blog/2010/05/11/
-(defun collab-mode--uuid ()
+(defun collab--uuid ()
   "Return a newly generated UUID."
   (let ((str (md5 (format "%s%s%s%s%s%s%s%s%s%s"
                           (user-uid)
@@ -72,62 +72,62 @@ CREDENTIAL).")
             (substring str 16 20)
             (substring str 20 32))))
 
-(defun collab-mode--decode-color (color)
+(defun collab--decode-color (color)
   "Convert COLOR in ”#RRGGBB” format to (R G B)."
   (list (string-to-number (substring color 1 3) 16)
         (string-to-number (substring color 3 5) 16)
         (string-to-number (substring color 5 7) 16)))
 
-(defun collab-mode--encode-color (color)
+(defun collab--encode-color (color)
   "Convert COLOR in (R G B) format to ”#RRGGBB”."
   (format "#%.2x%.2x%.2x" (nth 0 color) (nth 1 color) (nth 2 color)))
 
-(defun collab-mode--blend-color (base above alpha)
+(defun collab--blend-color (base above alpha)
   "Return a color made of ABOVE with alpha ALPHA placed above BASE.
 Both COLOR’S are like ”#RRGGBB”, ALPHA is a float between 0 and 1."
-  (collab-mode--encode-color
+  (collab--encode-color
    (cl-labels ((comp (base above alpha)
                  (+ (* base (- 1 alpha)) (* above alpha)))
                (bound (color) (cond ((> color 255) 255)
                                     ((< color 0) 0)
                                     (t color))))
-     (let* ((color-base (collab-mode--decode-color base))
-            (color-above (collab-mode--decode-color above)))
+     (let* ((color-base (collab--decode-color base))
+            (color-above (collab--decode-color above)))
        (cl-loop for base in color-base
                 for above in color-above
                 collect (bound (comp base above alpha)))))))
 
 ;;; Icons
 
-(defvar collab-mode--load-directory
+(defvar collab--load-directory
   (file-name-directory (or load-file-name buffer-file-name))
-  "Directory in which collab-mode.el resides.")
+  "Directory in which collab.el resides.")
 
 (define-icon collab-status-on nil
-  `((image ,(concat collab-mode--load-directory "/dot_medium_16.svg")
+  `((image ,(concat collab--load-directory "/dot_medium_16.svg")
            :face success
            :height (0.9 . em)
            :ascent 83)
     (symbol "•")
     (text "*"))
-  "Icon for collab-mode on status indicator."
+  "Icon for collab on status indicator."
   :version "30.1"
   :help-echo "ON")
 
 (define-icon collab-status-off nil
-  `((image ,(concat collab-mode--load-directory "/dot_medium_16.svg")
+  `((image ,(concat collab--load-directory "/dot_medium_16.svg")
            :face error
            :height (0.9 . em)
            :ascent 83)
     (symbol "•")
     (text "*"))
-  "Icon for collab-mode off status indicator."
+  "Icon for collab off status indicator."
   :version "30.1"
   :help-echo "OFF")
 
 ;;; Error handling
 
-(defvar collab-mode--error-code-alist
+(defvar collab--error-code-alist
   '((-32700 . ParseError)
     (-32600 . InvalidRequest)
     (-32601 . MethodNotFound)
@@ -143,9 +143,9 @@ Both COLOR’S are like ”#RRGGBB”, ALPHA is a float between 0 and 1."
     (-30004 . DocAlreadyExists))
   "An alist of JSONRPC error codes.")
 
-(defmacro collab-mode--catch-error (msg &rest body)
+(defmacro collab--catch-error (msg &rest body)
   "Execute BODY, catch jsonrpc errors.
-If there’s an error, print “Collab-mode MSG: ERROR-DESCRIPTION”,
+If there’s an error, print “collab MSG: ERROR-DESCRIPTION”,
 and append the error to collab error buffer (*collab errors*).
 MSG should be something like “can’t do xxx”."
   (declare (indent 1) (debug (sexp &rest form)))
@@ -155,58 +155,58 @@ MSG should be something like “can’t do xxx”."
            ,@body)
        (error
         (when collab-monitored-mode
-          (collab-mode--disable))
-        (display-warning 'collab-mode
-                         (format "Collab-mode %s: %s" ,msg ,err))))))
+          (collab--disable))
+        (display-warning 'collab
+                         (format "collab %s: %s" ,msg ,err))))))
 
-(defvar collab-mode--jsonrpc-connection)
-(defvar collab-mode--doc-server)
-(defun collab-mode--check-precondition ()
-  "Check ‘collab-mode--jsonrpc-connection’ and ‘collab-mode--doc-server’.
+(defvar collab--jsonrpc-connection)
+(defvar collab--doc-server)
+(defun collab--check-precondition ()
+  "Check ‘collab--jsonrpc-connection’ and ‘collab--doc-server’.
 
 If they are invalid, turn off ‘collab-monitored-mode’ and raise
 an error. This function should be called before any interactive
 command that acts on a collab-monitored buffer."
-  (unless collab-mode--jsonrpc-connection
+  (unless collab--jsonrpc-connection
     (collab-monitored-mode -1)
-    (display-warning 'collab-mode "Connection to collab server broke"))
-  (unless collab-mode--doc-server
+    (display-warning 'collab "Connection to collab server broke"))
+  (unless collab--doc-server
     (collab-monitored-mode -1)
     (display-warning
-     'collab-mode "Current buffer doesn’t have a doc id or server id")))
+     'collab "Current buffer doesn’t have a doc id or server id")))
 
 
 ;;; Cursor tracking
 
-(defvar-local collab-mode--cursor-ov-alist nil
+(defvar-local collab--cursor-ov-alist nil
   "An alist mapping user’s site id to cursor overlays.")
 
-(defvar-local collab-mode--my-site-id nil
+(defvar-local collab--my-site-id nil
   "My site-id.")
 
-(defvar collab-mode--sync-cursor-timer-table
+(defvar collab--sync-cursor-timer-table
   (make-hash-table :test #'equal)
   "Hash table mapping (doc-id . server-id) to sync cursor timers.")
 
-(defun collab-mode--move-cursor (site-id pos &optional mark)
+(defun collab--move-cursor (site-id pos &optional mark)
   "Move user (SITE-ID)’s cursor overlay to POS.
 If MARK non-nil, show active region."
-  (when (and (not (eq site-id collab-mode--my-site-id))
+  (when (and (not (eq site-id collab--my-site-id))
              (<= (point-min) pos (point-max)))
     (let* ((idx (mod site-id
-                     (length collab-mode-cursor-colors)))
-           (color (nth idx collab-mode-cursor-colors))
-           (region-color (collab-mode--blend-color
+                     (length collab-cursor-colors)))
+           (color (nth idx collab-cursor-colors))
+           (region-color (collab--blend-color
                           (face-attribute 'default :background)
                           color 0.2))
            (face `(:background ,color))
            (region-face `(:background ,region-color))
-           (ov (or (alist-get site-id collab-mode--cursor-ov-alist)
+           (ov (or (alist-get site-id collab--cursor-ov-alist)
                    (let ((ov (make-overlay (min (1+ pos) (point-max))
                                            (min (+ pos 2) (point-max))
                                            nil nil nil)))
                      (overlay-put ov 'face face)
-                     (push (cons site-id ov) collab-mode--cursor-ov-alist)
+                     (push (cons site-id ov) collab--cursor-ov-alist)
                      ov))))
 
       (if (not mark)
@@ -224,35 +224,35 @@ If MARK non-nil, show active region."
         (overlay-put ov 'after-string nil)))))
 
 (defvar collab-monitored-mode)
-(defun collab-mode--send-cursor-pos-1 (buffer)
+(defun collab--send-cursor-pos-1 (buffer)
   "Send cursor position of BUFFER to the collab process."
   (when (equal buffer (current-buffer))
-    (collab-mode--check-precondition)
-    (collab-mode--catch-error "can’t send cursor position to remote"
-      (let* ((doc-id (car collab-mode--doc-server))
-             (server-id (cdr collab-mode--doc-server))
-             (site-id collab-mode--my-site-id))
-        (collab-mode--send-info-req
+    (collab--check-precondition)
+    (collab--catch-error "can’t send cursor position to remote"
+      (let* ((doc-id (car collab--doc-server))
+             (server-id (cdr collab--doc-server))
+             (site-id collab--my-site-id))
+        (collab--send-info-req
          doc-id server-id
          (if (region-active-p)
              `( :type "_pos" :point ,(point)
                 :mark ,(mark) :siteId ,site-id)
            `(:type "_pos" :point ,(point) :siteId ,site-id)))))
 
-    (remhash collab-mode--doc-server
-             collab-mode--sync-cursor-timer-table)))
+    (remhash collab--doc-server
+             collab--sync-cursor-timer-table)))
 
-(defun collab-mode--send-cursor-pos ()
+(defun collab--send-cursor-pos ()
   "Move user (SITE-ID)’s cursor overlay to POS."
-  (collab-mode--check-precondition)
-  (when (null (gethash collab-mode--doc-server
-                       collab-mode--sync-cursor-timer-table))
+  (collab--check-precondition)
+  (when (null (gethash collab--doc-server
+                       collab--sync-cursor-timer-table))
     ;; Run with an idle timer to we don’t interrupt scrolling, etc.
     (let ((timer (run-with-idle-timer
-                  0.5 nil #'collab-mode--send-cursor-pos-1
+                  0.5 nil #'collab--send-cursor-pos-1
                   (current-buffer))))
-      (puthash collab-mode--doc-server timer
-               collab-mode--sync-cursor-timer-table))))
+      (puthash collab--doc-server timer
+               collab--sync-cursor-timer-table))))
 
 
 ;;; Edit tracking
@@ -299,65 +299,65 @@ If MARK non-nil, show active region."
 ;; future; or b) 1s passed, in which case we send the op regardless.
 ;; Case b) uses an idle timer.
 
-(defvar-local collab-mode--doc-server nil
+(defvar-local collab--doc-server nil
   "(DOC-ID . SERVER-ID) for the current buffer.")
 
-(defvar-local collab-mode--accepting-connection nil
+(defvar-local collab--accepting-connection nil
   "If non-nil, our collab process is accepting remote connections.")
 
-(defvar-local collab-mode--most-recent-error nil
+(defvar-local collab--most-recent-error nil
   "Most recent error message.")
 
-(defvar collab-mode--buffer-table (make-hash-table :test #'equal)
+(defvar collab--buffer-table (make-hash-table :test #'equal)
   "A has table that maps (DOC . SERVER) to their corresponding buffer.")
 
-(defvar-local collab-mode--inhibit-hooks nil
+(defvar-local collab--inhibit-hooks nil
   "When non-nil, post command hooks don’t run.")
 
-(defvar-local collab-mode--changing-region nil
+(defvar-local collab--changing-region nil
   "Records information of the region to be changed.
 The shape is (beg end content), where CONTENT is the buffer
 content between BEG and END.")
 
-(defvar-local collab-mode--pending-ops nil
+(defvar-local collab--pending-ops nil
   "Ops waiting to be sent out. In reverse order.")
 
-(defvar-local collab-mode--ops-current-command nil
+(defvar-local collab--ops-current-command nil
   "Ops created in the current command. In reverse order.")
 
-(defvar-local collab-mode--group-seq nil
+(defvar-local collab--group-seq nil
   "Group sequence number.
 Group sequence is used to mark undo groups. consecutive ops with
 the same group sequence are undone together.")
 
-(defvar collab-mode--edit-tracking-timer nil
+(defvar collab--edit-tracking-timer nil
   "An idle timer that sends pending ops to collab process.")
 
-(defvar collab-mode--idle-timer-registered-buffer nil
+(defvar collab--idle-timer-registered-buffer nil
   "If a buffer has pending ops, it adds itself to this list.
 So that the idle timer can send its pending ops.")
 
-(defun collab-mode--server-alist ()
-  "Return ‘collab-mode--server-alist’ plus “self”."
+(defun collab--server-alist ()
+  "Return ‘collab--server-alist’ plus “self”."
   (cons '("self" . ("" ""))
-        collab-mode-server-alist))
+        collab-server-alist))
 
-(defun collab-mode--before-change (beg end)
+(defun collab--before-change (beg end)
   "Records the region (BEG . END) to be changed."
   (when (not (eq beg end))
-    (setq collab-mode--changing-region
+    (setq collab--changing-region
           (list beg end (buffer-substring-no-properties beg end)))))
 
-(defun collab-mode--after-change (beg end len)
+(defun collab--after-change (beg end len)
   "Record the changed region (BEG END LEN)."
   (let ((error-fn (lambda ()
                     (display-warning
-                     'collab-mode
+                     'collab
                      "Buffer change not correctly recorded (exceeds recorded region: %s)"
-                     collab-mode--changing-region)
+                     collab--changing-region)
                     (collab-monitored-mode -1)
                     (throw 'term nil)))
-        (group-seq collab-mode--group-seq)
+        (group-seq collab--group-seq)
         ops)
     (catch 'term
       (if (eq len 0)
@@ -366,7 +366,7 @@ So that the idle timer can send its pending ops.")
                       group-seq)
                 ops)
         ;; Not insert.
-        (pcase collab-mode--changing-region
+        (pcase collab--changing-region
           (`(,rbeg ,rend ,content)
            (if (<= rbeg beg end rend)
 
@@ -385,75 +385,75 @@ So that the idle timer can send its pending ops.")
              (funcall error-fn)))
           (_ (funcall error-fn))))
 
-      (setq collab-mode--changing-region nil)
-      (setq collab-mode--ops-current-command
-            (nconc ops collab-mode--ops-current-command)))))
+      (setq collab--changing-region nil)
+      (setq collab--ops-current-command
+            (nconc ops collab--ops-current-command)))))
 
-(defun collab-mode--pre-command ()
-  "Increment ‘collab-mode--group-seq’."
-  (when (numberp collab-mode--group-seq)
-    (cl-incf collab-mode--group-seq)))
+(defun collab--pre-command ()
+  "Increment ‘collab--group-seq’."
+  (when (numberp collab--group-seq)
+    (cl-incf collab--group-seq)))
 
-(defun collab-mode--post-command-hasty ()
-  "Like ‘collab-mode--post-command’ but just send ops out."
-  (when (not collab-mode--inhibit-hooks)
-    (if (not collab-mode--ops-current-command)
-        (collab-mode--send-cursor-pos)
-      (collab-mode--send-ops (nreverse collab-mode--ops-current-command))
-      (setq collab-mode--ops-current-command nil))))
+(defun collab--post-command-hasty ()
+  "Like ‘collab--post-command’ but just send ops out."
+  (when (not collab--inhibit-hooks)
+    (if (not collab--ops-current-command)
+        (collab--send-cursor-pos)
+      (collab--send-ops (nreverse collab--ops-current-command))
+      (setq collab--ops-current-command nil))))
 
-(defun collab-mode--post-command ()
+(defun collab--post-command ()
   "Convert ops in the buffer and send them to the collab process.
 Then apply the returned remote ops."
-  (when (not collab-mode--inhibit-hooks)
-    (if (not collab-mode--ops-current-command)
-        (collab-mode--send-cursor-pos)
+  (when (not collab--inhibit-hooks)
+    (if (not collab--ops-current-command)
+        (collab--send-cursor-pos)
       (if-let ((amalgamated-op
-                (and (eq 1 (length collab-mode--ops-current-command))
+                (and (eq 1 (length collab--ops-current-command))
                      (let ((this-op
-                            (car collab-mode--ops-current-command))
-                           (last-op (car collab-mode--pending-ops)))
+                            (car collab--ops-current-command))
+                           (last-op (car collab--pending-ops)))
                        (and last-op
-                            (collab-mode--maybe-amalgamate
+                            (collab--maybe-amalgamate
                              last-op this-op))))))
           ;; Amalgamated, don’t send ops yet.
           (progn
-            (setcar collab-mode--pending-ops amalgamated-op)
-            (message "Amalgamate, %s" collab-mode--pending-ops))
+            (setcar collab--pending-ops amalgamated-op)
+            (message "Amalgamate, %s" collab--pending-ops))
         ;; Didn’t amalgamate, send ops.
         (message "No amalgamate, %s %s"
-                 collab-mode--pending-ops
-                 collab-mode--ops-current-command)
+                 collab--pending-ops
+                 collab--ops-current-command)
 
-        (collab-mode--send-ops (nreverse collab-mode--pending-ops))
-        (setq collab-mode--pending-ops collab-mode--ops-current-command))
+        (collab--send-ops (nreverse collab--pending-ops))
+        (setq collab--pending-ops collab--ops-current-command))
 
-      (setq collab-mode--ops-current-command nil)
+      (setq collab--ops-current-command nil)
 
       ;; Register this buffer so the idle timer will send pending ops.
       (when (not (memq (current-buffer)
-                       collab-mode--idle-timer-registered-buffer))
+                       collab--idle-timer-registered-buffer))
         (push (current-buffer)
-              collab-mode--idle-timer-registered-buffer)))))
+              collab--idle-timer-registered-buffer)))))
 
-(defun collab-mode--send-ops-now ()
+(defun collab--send-ops-now ()
   "Immediately send any pending ops to the collab process."
-  (cl-assert (null collab-mode--ops-current-command))
-  (message "Sending pending ops: %s" collab-mode--pending-ops)
-  (let ((ops (nreverse collab-mode--pending-ops)))
-    (collab-mode--send-ops ops)
-    (setq collab-mode--pending-ops nil)))
+  (cl-assert (null collab--ops-current-command))
+  (message "Sending pending ops: %s" collab--pending-ops)
+  (let ((ops (nreverse collab--pending-ops)))
+    (collab--send-ops ops)
+    (setq collab--pending-ops nil)))
 
-(defun collab-mode--timer-send-ops ()
+(defun collab--timer-send-ops ()
   "Send all pending ops to collab process."
-  (dolist (buffer collab-mode--idle-timer-registered-buffer)
+  (dolist (buffer collab--idle-timer-registered-buffer)
     (with-current-buffer buffer
-      (collab-mode--send-ops-now)))
-  (setq collab-mode--idle-timer-registered-buffer nil))
+      (collab--send-ops-now)))
+  (setq collab--idle-timer-registered-buffer nil))
 
 ;; https://stackoverflow.com/questions/6590889
 ;; TODO: Support for overwrite-mode, abbrev-mode, auto-fill.
-(defun collab-mode--maybe-amalgamate (op1 op2)
+(defun collab--maybe-amalgamate (op1 op2)
   "Maybe amalgamate OP2 into OP1.
 Return the new op if amalgamated, return nil if didn’t amalgamate."
   (pcase (cons op1 op2)
@@ -474,7 +474,7 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
          (list 'del pos2 (concat str2 str1) seq1)
        nil))))
 
-(defvar collab-mode--mode-line
+(defvar collab--mode-line
   `(collab-monitored-mode
     ,(propertize "CONNECTED " 'face
                  '(:inherit (bold success))))
@@ -482,159 +482,159 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
 
 (defvar collab-monitored-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [remap undo-only] #'collab-mode-undo)
-    (define-key map [remap undo-redo] #'collab-mode-redo)
+    (define-key map [remap undo-only] #'collab-undo)
+    (define-key map [remap undo-redo] #'collab-redo)
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
-(defvar collab-mode--dispatcher-timer-table)
+(defvar collab--dispatcher-timer-table)
 (define-minor-mode collab-monitored-mode
   "Collaborative monitor mode."
   :global nil
   :keymap collab-monitored-mode-map
   (if collab-monitored-mode
       (progn
-        (add-hook 'change-major-mode-hook #'collab-mode--rescue-state 0 t)
+        (add-hook 'change-major-mode-hook #'collab--rescue-state 0 t)
         (add-hook 'after-change-major-mode-hook
-                  #'collab-mode--maybe-recover 0)
+                  #'collab--maybe-recover 0)
         (add-hook 'before-change-functions
-                  #'collab-mode--before-change 0 t)
-        (add-hook 'after-change-functions #'collab-mode--after-change 0 t)
-        (add-hook 'pre-command-hook #'collab-mode--pre-command 0 t)
-        (if collab-mode-hasty-p
+                  #'collab--before-change 0 t)
+        (add-hook 'after-change-functions #'collab--after-change 0 t)
+        (add-hook 'pre-command-hook #'collab--pre-command 0 t)
+        (if collab-hasty-p
             (add-hook 'post-command-hook
-                      #'collab-mode--post-command-hasty 0 t)
-          (add-hook 'post-command-hook #'collab-mode--post-command 0 t))
+                      #'collab--post-command-hasty 0 t)
+          (add-hook 'post-command-hook #'collab--post-command 0 t))
 
-        (unless collab-mode--edit-tracking-timer
-          (setq collab-mode--edit-tracking-timer
-                (run-with-idle-timer 1 t #'collab-mode--timer-send-ops)))
+        (unless collab--edit-tracking-timer
+          (setq collab--edit-tracking-timer
+                (run-with-idle-timer 1 t #'collab--timer-send-ops)))
 
-        (unless (member collab-mode--mode-line mode-line-misc-info)
+        (unless (member collab--mode-line mode-line-misc-info)
           (setq-local mode-line-misc-info
-                      (cons collab-mode--mode-line mode-line-misc-info)))
+                      (cons collab--mode-line mode-line-misc-info)))
 
         (setq-local buffer-undo-list t)
 
-        (setq-local collab-mode--pending-ops nil)
-        (setq-local collab-mode--ops-current-command nil)
-        (setq-local collab-mode--group-seq 1))
+        (setq-local collab--pending-ops nil)
+        (setq-local collab--ops-current-command nil)
+        (setq-local collab--group-seq 1))
 
     ;; Disable.
-    (remhash collab-mode--doc-server
-             collab-mode--dispatcher-timer-table)
+    (remhash collab--doc-server
+             collab--dispatcher-timer-table)
 
-    (remove-hook 'before-change-functions #'collab-mode--before-change t)
-    (remove-hook 'after-change-functions #'collab-mode--after-change t)
-    (remove-hook 'pre-command-hook #'collab-mode--pre-command t)
-    (remove-hook 'post-command-hook #'collab-mode--post-command t)
-    (remove-hook 'post-command-hook #'collab-mode--post-command-hasty t)
+    (remove-hook 'before-change-functions #'collab--before-change t)
+    (remove-hook 'after-change-functions #'collab--after-change t)
+    (remove-hook 'pre-command-hook #'collab--pre-command t)
+    (remove-hook 'post-command-hook #'collab--post-command t)
+    (remove-hook 'post-command-hook #'collab--post-command-hasty t)
 
-    (remhash collab-mode--doc-server
-             collab-mode--buffer-table)
+    (remhash collab--doc-server
+             collab--buffer-table)
 
-    (dolist (ov collab-mode--cursor-ov-alist)
+    (dolist (ov collab--cursor-ov-alist)
       (delete-overlay (cdr ov)))
-    (setq-local collab-mode--cursor-ov-alist nil)
+    (setq-local collab--cursor-ov-alist nil)
 
-    (setq-local collab-mode--doc-server nil)
-    (setq-local collab-mode--my-site-id nil)
+    (setq-local collab--doc-server nil)
+    (setq-local collab--my-site-id nil)
     (setq-local buffer-undo-list nil)))
 
-(defun collab-mode--enable (doc-id server-id my-site-id)
+(defun collab--enable (doc-id server-id my-site-id)
   "Enable ‘collab-monitored-mode’ in the current buffer.
 DOC-ID and SERVER-ID are associated with the current buffer.
 MY-SITE-ID is the site if of this editor."
-  (setq collab-mode--doc-server (cons doc-id server-id))
-  (setq collab-mode--my-site-id my-site-id)
-  (puthash collab-mode--doc-server
+  (setq collab--doc-server (cons doc-id server-id))
+  (setq collab--my-site-id my-site-id)
+  (puthash collab--doc-server
            (current-buffer)
-           collab-mode--buffer-table)
+           collab--buffer-table)
   (collab-monitored-mode)
   (let ((pulse-delay 0.1))
     (pulse-momentary-highlight-region
      (point-min) (point-max) 'diff-refine-added)))
 
-(defun collab-mode--disable ()
-  "Disable ‘collab-mode’ for the current buffer and flash red."
+(defun collab--disable ()
+  "Disable ‘collab’ for the current buffer and flash red."
   (let ((pulse-delay 0.1))
     (pulse-momentary-highlight-region
      (point-min) (point-max) 'diff-refine-removed))
   (collab-monitored-mode -1))
 
-(defvar collab-mode--stashed-state-plist nil
+(defvar collab--stashed-state-plist nil
   "Used for stashing local state when major mode changes.")
 
-(defun collab-mode--rescue-state ()
+(defun collab--rescue-state ()
   "Stash local variable elsewhere before major mode changes."
-  (setq collab-mode--stashed-state-plist
-        (plist-put collab-mode--stashed-state-plist
+  (setq collab--stashed-state-plist
+        (plist-put collab--stashed-state-plist
                    (current-buffer)
-                   `( :doc-server ,collab-mode--doc-server
-                      :site-id ,collab-mode--my-site-id))))
+                   `( :doc-server ,collab--doc-server
+                      :site-id ,collab--my-site-id))))
 
-(defun collab-mode--maybe-recover ()
-  "Maybe reenable ‘collab-mode’ after major mode change."
-  (when-let* ((state (plist-get collab-mode--stashed-state-plist
+(defun collab--maybe-recover ()
+  "Maybe reenable ‘collab’ after major mode change."
+  (when-let* ((state (plist-get collab--stashed-state-plist
                                 (current-buffer)))
               (doc-server (plist-get state :doc-server))
               (site-id (plist-get state :site-id)))
-    (collab-mode--enable (car doc-server) (cdr doc-server) site-id)))
+    (collab--enable (car doc-server) (cdr doc-server) site-id)))
 
-(defun collab-mode--doc-connected (doc server)
+(defun collab--doc-connected (doc server)
   "Return non-nil if DOC at SERVER is connected."
   (let ((buf (gethash (cons doc server)
-                      collab-mode--buffer-table)))
+                      collab--buffer-table)))
     (and buf (buffer-live-p buf))))
 
 ;;; JSON-RPC
 
 ;;;; Connection
 
-(defvar collab-mode--jsonrpc-connection nil
+(defvar collab--jsonrpc-connection nil
   "The JSONRPC connection to the collab server.")
 
-(defun collab-mode--connect ()
+(defun collab--connect ()
   "Get existing JSONRPC connection or create one."
-  (or (and collab-mode--jsonrpc-connection
-           (jsonrpc-running-p collab-mode--jsonrpc-connection)
-           collab-mode--jsonrpc-connection)
+  (or (and collab--jsonrpc-connection
+           (jsonrpc-running-p collab--jsonrpc-connection)
+           collab--jsonrpc-connection)
 
-      (let* ((process (pcase collab-mode-connection-type
+      (let* ((process (pcase collab-connection-type
                         (`(socket ,port)
                          (open-network-stream
                           "collab" nil "localhost" port))
                         ('pipe
                          (make-process
                           :name "collab"
-                          :command (list collab-mode-command)
+                          :command (list collab-command)
                           :connection-type 'pipe)))))
 
         (let ((conn (make-instance 'jsonrpc-process-connection
                                    :name "collab"
                                    :process process
                                    :notification-dispatcher
-                                   #'collab-mode--dispatch-notification)))
+                                   #'collab--dispatch-notification)))
 
-          (when collab-mode--jsonrpc-connection
-            (jsonrpc-shutdown collab-mode--jsonrpc-connection))
-          (setq collab-mode--jsonrpc-connection conn)))))
+          (when collab--jsonrpc-connection
+            (jsonrpc-shutdown collab--jsonrpc-connection))
+          (setq collab--jsonrpc-connection conn)))))
 
 ;;;; Dispatcher
 
-(defvar collab-mode--dispatcher-timer-table
+(defvar collab--dispatcher-timer-table
   (make-hash-table :test #'equal)
   "Hash table mapping (doc-id . server-id) to dispatcher timers.")
 
 
-(defun collab-mode--request-remote-ops-before-seq (doc server buffer seq)
+(defun collab--request-remote-ops-before-seq (doc server buffer seq)
   "Request for remote ops for (DOC SERVER) in BUFFER.
 Keep requesting for ops until we get all the ops before and
 including SEQ."
   (let ((received-largest-seq nil))
     (unwind-protect
         (with-current-buffer buffer
-          (setq received-largest-seq (collab-mode--send-ops nil)))
+          (setq received-largest-seq (collab--send-ops nil)))
       (let ((timer (if (or (null received-largest-seq)
                            (>= received-largest-seq seq))
                        nil
@@ -642,13 +642,13 @@ including SEQ."
                      ;; schedule another fetch.
                      (run-with-timer
                       0 nil
-                      #'collab-mode--request-remote-ops-before-seq
+                      #'collab--request-remote-ops-before-seq
                       doc server buffer seq))))
         (puthash (cons doc server) timer
-                 collab-mode--dispatcher-timer-table)))))
+                 collab--dispatcher-timer-table)))))
 
-(defvar collab-mode--hub-buffer)
-(defun collab-mode--dispatch-notification (_conn method params)
+(defvar collab--hub-buffer)
+(defun collab--dispatch-notification (_conn method params)
   "Dispatch JSONRPC notifications.
 
 CONN is the connection object; METHOD is a symbol naming the
@@ -669,17 +669,17 @@ If we receive a ServerError notification, just display a warning."
            (server (plist-get params :serverId))
            (last-seq (plist-get params :lastSeq)))
        (let ((buffer (gethash (cons doc server)
-                              collab-mode--buffer-table))
+                              collab--buffer-table))
              (timer (gethash (cons doc server)
-                             collab-mode--dispatcher-timer-table)))
+                             collab--dispatcher-timer-table)))
          (when timer (cancel-timer timer))
          (when (buffer-live-p buffer)
            (setq timer (run-with-timer
                         0 nil
-                        #'collab-mode--request-remote-ops-before-seq
+                        #'collab--request-remote-ops-before-seq
                         doc server buffer last-seq))
            (puthash (cons doc server) timer
-                    collab-mode--dispatcher-timer-table)))))
+                    collab--dispatcher-timer-table)))))
     ('Info
      (let* ((doc-id (plist-get params :docId))
             (server-id (plist-get params :serverId))
@@ -690,119 +690,119 @@ If we receive a ServerError notification, just display a warning."
                         (mark (plist-get value :mark))
                         (site-id (plist-get value :siteId))
                         (buf (gethash (cons doc-id server-id)
-                                      collab-mode--buffer-table)))
+                                      collab--buffer-table)))
                    (when (buffer-live-p buf)
                      (with-current-buffer buf
-                       (collab-mode--move-cursor site-id pos mark)))))))
+                       (collab--move-cursor site-id pos mark)))))))
      )
     ('ServerError
      (display-warning
-      'collab-mode
+      'collab
       (format "Local server errored, you might want to restart collab process. Cause: %s"
               params)))
     ('SignalingTimesUp
      (run-with-timer
       0 nil
       (lambda ()
-        (with-current-buffer collab-mode--hub-buffer
-          (setq collab-mode--accepting-connection nil)
-          (collab-mode--refresh)
+        (with-current-buffer collab--hub-buffer
+          (setq collab--accepting-connection nil)
+          (collab--refresh)
           (message "Collab process stopped accepting connections")))))
     ('AcceptConnectionErr
      (run-with-timer
       0 nil
       (lambda ()
-        (with-current-buffer collab-mode--hub-buffer
-          (setq collab-mode--accepting-connection nil)
-          (collab-mode--refresh)
+        (with-current-buffer collab--hub-buffer
+          (setq collab--accepting-connection nil)
+          (collab--refresh)
           (display-warning
-           'collab-mode
+           'collab
            (format "Error accepting remote peer connections: %s" params))))))))
 
 ;;;; Requests
 
-(defun collab-mode--list-files-req (server signaling-server credential)
+(defun collab--list-files-req (server signaling-server credential)
   "Return a list of files on SERVER (address) with CREDENTIAL.
 SIGNALING-SERVER is the address of the signaling server. Each
 file is of the form (:docId DOC-ID :fileName FILE-NAME)."
-  (let* ((conn (collab-mode--connect))
+  (let* ((conn (collab--connect))
          (resp (jsonrpc-request
                 conn 'ListFiles
                 `( :serverId ,server
                    :signalingAddr ,signaling-server
                    :credential ,credential)
-                :timeout collab-mode-rpc-timeout)))
+                :timeout collab-rpc-timeout)))
     (seq-map #'identity (plist-get resp :files))))
 
-(defun collab-mode--share-file-req (server filename content)
+(defun collab--share-file-req (server filename content)
   "Share the file with SERVER (address).
 FILENAME is filename, CONTENT is just the content of the file in
 a string. Return (:docId DOC-ID :siteId SITE-ID). If FORCE is
 non-nil, override existing files."
-  (let* ((conn (collab-mode--connect))
+  (let* ((conn (collab--connect))
          (resp (jsonrpc-request
                 conn 'ShareFile
                 `( :serverId ,server
                    :fileName ,filename
                    :content ,content)
-                :timeout collab-mode-rpc-timeout)))
+                :timeout collab-rpc-timeout)))
     resp))
 
-(defun collab-mode--connect-to-file-req (doc server)
+(defun collab--connect-to-file-req (doc server)
   "Connect to DOC (doc id) on SERVER (server address).
 Return (:siteId SITE-ID :content CONTENT)."
-  (let* ((conn (collab-mode--connect))
+  (let* ((conn (collab--connect))
          (resp (jsonrpc-request
                 conn 'ConnectToFile
                 `( :serverId ,server
                    :docId ,doc)
-                :timeout collab-mode-rpc-timeout)))
+                :timeout collab-rpc-timeout)))
     resp))
 
-(defun collab-mode--disconnect-from-file-req (doc server)
+(defun collab--disconnect-from-file-req (doc server)
   "Disconnect from DOC on SERVER."
-  (let ((conn (collab-mode--connect)))
+  (let ((conn (collab--connect)))
     (jsonrpc-request conn 'DisconnectFromFile
                      `( :serverId ,server
                         :docId ,doc)
-                     :timeout collab-mode-rpc-timeout)))
+                     :timeout collab-rpc-timeout)))
 
-(defun collab-mode--delete-file-req (doc server)
+(defun collab--delete-file-req (doc server)
   "Delete DOC on SERVER."
-  (let ((conn (collab-mode--connect)))
+  (let ((conn (collab--connect)))
     (jsonrpc-request conn 'DeleteFile
                      `( :serverId ,server
                         :docId ,doc)
-                     :timeout collab-mode-rpc-timeout)))
+                     :timeout collab-rpc-timeout)))
 
-(defun collab-mode--accept-connection-req (server-id signaling-addr)
+(defun collab--accept-connection-req (server-id signaling-addr)
   "Accept connections as SERVER-ID on SIGNALING-ADDR."
-  (let ((conn (collab-mode--connect)))
+  (let ((conn (collab--connect)))
     (jsonrpc-request conn 'AcceptConnection
                      `( :serverId ,server-id
                         :signalingAddr ,signaling-addr)
-                     :timeout collab-mode-rpc-timeout)))
+                     :timeout collab-rpc-timeout)))
 
-(defun collab-mode--print-history-req (doc server debug)
+(defun collab--print-history-req (doc server debug)
   "Print debugging history for (DOC SERVER).
 If DEBUG non-nil, print debug version."
-  (let ((conn (collab-mode--connect)))
+  (let ((conn (collab--connect)))
     (jsonrpc-request conn 'PrintHistory
                      `( :docId ,doc
                         :serverId ,server
                         :debug ,(if debug t :json-false))
-                     :timeout collab-mode-rpc-timeout)))
+                     :timeout collab-rpc-timeout)))
 
-(defun collab-mode--send-info-req (doc server info)
+(defun collab--send-info-req (doc server info)
   "Send INFO to DOC on SERVER.
 INFO should be a plist JSON object. This request is async."
-  (let ((conn (collab-mode--connect)))
+  (let ((conn (collab--connect)))
     (jsonrpc-notify conn 'SendInfo
                     `( :serverId ,server
                        :docId ,doc
                        :info ,info))))
 
-(defsubst collab-mode--encode-op (op)
+(defsubst collab--encode-op (op)
   "Encode Elisp OP into JSONRPC format."
   (pcase op
     (`(ins ,pos ,str ,group-seq)
@@ -815,11 +815,11 @@ INFO should be a plist JSON object. This request is async."
         :groupSeq ,group-seq
         :kind "Original"))))
 
-(defsubst collab-mode--apply-jrpc-op (op &optional move-point)
+(defsubst collab--apply-jrpc-op (op &optional move-point)
   "Decode JSPNRPC OP into Elisp format.
 If MOVE-POINT non-nil, move point as the edit would."
   (let ((inhibit-modification-hooks t)
-        (collab-mode--inhibit-hooks t)
+        (collab--inhibit-hooks t)
         (start (point-marker)))
     (pcase (plist-get op :op)
       (`(:Ins [,pos ,str])
@@ -835,7 +835,7 @@ If MOVE-POINT non-nil, move point as the edit would."
     (unless move-point
       (goto-char start))))
 
-(defun collab-mode--send-ops (ops &optional encoded)
+(defun collab--send-ops (ops &optional encoded)
   "Send OPS to the collab server and apply returned remote ops.
 
 If ENCODED is non-nil, OPS should be already in sexp JSON
@@ -844,149 +844,149 @@ it.
 
 Return the largest global seq of all the ops received from the
 collab process."
-  (collab-mode--check-precondition)
-  (let ((conn collab-mode--jsonrpc-connection)
+  (collab--check-precondition)
+  (let ((conn collab--jsonrpc-connection)
         resp)
-    (collab-mode--catch-error "can’t send local edits to remote"
+    (collab--catch-error "can’t send local edits to remote"
       ;; RESP := (:op LEAN-OP :siteId SITE-ID)
       ;; LEAN-OP := (:Ins [POS STR]) | (:Del [[POS STR]])
       (setq resp
             (jsonrpc-request
              conn 'SendOp
-             `( :docId ,(car collab-mode--doc-server)
-                :serverId ,(cdr collab-mode--doc-server)
+             `( :docId ,(car collab--doc-server)
+                :serverId ,(cdr collab--doc-server)
                 :ops ,(if (not encoded)
                           (if ops
-                              (vconcat (mapcar #'collab-mode--encode-op
+                              (vconcat (mapcar #'collab--encode-op
                                                ops))
                             [])
                         ops))
-             :timeout collab-mode-rpc-timeout))
+             :timeout collab-rpc-timeout))
       ;; Only ‘seq-map’ can map over vector.
       (let ((remote-ops (plist-get resp :ops))
             (last-seq (plist-get resp :lastSeq))
             last-op)
         (seq-map (lambda (op)
-                   (collab-mode--apply-jrpc-op op)
+                   (collab--apply-jrpc-op op)
                    (setq last-op op))
                  remote-ops)
         (pcase last-op
           (`(:op (:Ins [,pos ,str]) :siteId ,site-id)
-           (collab-mode--move-cursor site-id (+ 1 pos (length str))))
+           (collab--move-cursor site-id (+ 1 pos (length str))))
           (`(:op (:Del ,edits) :siteId ,site-id)
            (when (> (length edits) 0)
-             (collab-mode--move-cursor
+             (collab--move-cursor
               site-id (1+ (aref (aref edits 0) 0))))))
         ;; Return the largest global seq received from collab process.
         last-seq))))
 
-(defun collab-mode--undo (&optional redo)
+(defun collab--undo (&optional redo)
   "Undo the most recent local edit.
 If REDO is non-nil, redo the most recent undo instead."
   (interactive)
-  (collab-mode--check-precondition)
-  (let ((conn collab-mode--jsonrpc-connection)
+  (collab--check-precondition)
+  (let ((conn collab--jsonrpc-connection)
         resp)
 
-    (collab-mode--send-ops-now)
+    (collab--send-ops-now)
 
-    (collab-mode--catch-error "can’t undo/redo"
+    (collab--catch-error "can’t undo/redo"
       (setq resp
             (jsonrpc-request conn 'Undo
-                             `( :serverId ,(cdr collab-mode--doc-server)
-                                :docId ,(car collab-mode--doc-server)
+                             `( :serverId ,(cdr collab--doc-server)
+                                :docId ,(car collab--doc-server)
                                 :kind ,(if redo "Redo" "Undo"))
-                             :timeout collab-mode-rpc-timeout))
+                             :timeout collab-rpc-timeout))
       (if-let ((json-ops (plist-get resp :ops)))
           (if (eq (length json-ops) 0)
               (message "No more operations to %s" (if redo "redo" "undo"))
             ;; Only ‘seq-map’ can map over vector. TODO: if the op is
             ;; identify, undo one more step.
             (seq-map (lambda (json-op)
-                       (collab-mode--apply-jrpc-op json-op t))
+                       (collab--apply-jrpc-op json-op t))
                      json-ops)
-            (collab-mode--send-ops
+            (collab--send-ops
              (vconcat (seq-map (lambda (json-op)
                                  `( :op ,json-op
-                                    :groupSeq ,collab-mode--group-seq
+                                    :groupSeq ,collab--group-seq
                                     :kind ,(if redo "Redo" "Undo")))
                                json-ops))
              t))
         (user-error "No more operations to %s"
                     (if redo "redo" "undo"))))))
 
-(defun collab-mode-undo ()
+(defun collab-undo ()
   "Undo the most recent local edit."
   (interactive)
-  (collab-mode--undo))
+  (collab--undo))
 
-(defun collab-mode-redo ()
+(defun collab-redo ()
   "Redo the most recent undo operation."
   (interactive)
-  (collab-mode--undo t))
+  (collab--undo t))
 
 ;;; UI
 
-(defvar collab-mode--hub-buffer "*collab*"
+(defvar collab--hub-buffer "*collab*"
   "Buffer name for the hub buffer.")
 
-(defmacro collab-mode--save-excursion (&rest body)
+(defmacro collab--save-excursion (&rest body)
   "Save position, execute BODY, and restore point.
 Point is not restored in the face of non-local exit."
   `(let ((pos (point-marker)))
      ,@body
      (goto-char pos)))
 
-(defface collab-mode-dynamic-highlight
+(defface collab-dynamic-highlight
   '((t . (:background "gray90" :extend t)))
   "Face used for the dynamic highlight in the collab buffer.")
 
-(defface collab-mode-server '((t . (:inherit bold)))
+(defface collab-server '((t . (:inherit bold)))
   "Face used for the server line in the collab buffer.")
 
-(defface collab-mode-file '((t . (:inherit default)))
+(defface collab-file '((t . (:inherit default)))
   "Face used for files in the collab buffer.")
 
 ;;;; Drawing the hub UI
 
-(defun collab-mode--insert-file (doc-id file-name server)
+(defun collab--insert-file (doc-id file-name server)
   "Insert file that has DOC-ID and FILE-NAME.
 SERVER is its server id."
   (let ((beg (point)))
     (insert file-name)
     (add-text-properties
-     beg (point) `( collab-mode-doc-id ,doc-id
-                    collab-mode-file-name ,file-name))
-    (when (collab-mode--doc-connected doc-id server)
+     beg (point) `( collab-doc-id ,doc-id
+                    collab-file-name ,file-name))
+    (when (collab--doc-connected doc-id server)
       (insert " " (propertize (icon-string 'collab-status-on)
-                              'collab-mode-status t)))))
+                              'collab-status t)))))
 
-(defun collab-mode--insert-server (server signaling-server credential)
+(defun collab--insert-server (server signaling-server credential)
   "Insert SERVER (server id) on SIGNALING-SERVER and its files.
 Server has CREDENTIAL. SIGNALING-SERVER is the address of the
 signaling server."
   (let ((beg (point)))
     ;; 1. Insert server line.
     (insert (propertize server 'face 'bold
-                        'collab-mode-server-line t))
+                        'collab-server-line t))
     (unless (equal server "self")
       (insert (propertize " UP" 'face 'success)))
     (insert (propertize "\n" 'line-spacing 0.4))
-    (let ((files (collab-mode--list-files-req
+    (let ((files (collab--list-files-req
                   server signaling-server credential)))
       ;; 2. Insert files.
       (if files
           (dolist (file files)
             (let ((doc-id (plist-get file :docId))
                   (file-name (plist-get file :fileName)))
-              (collab-mode--insert-file doc-id file-name server)
+              (collab--insert-file doc-id file-name server)
               (insert "\n")))
         (insert (propertize "(empty)\n" 'face 'shadow)))
       ;; 4. Mark server section.
       (add-text-properties beg (point)
-                           `(collab-mode-server-id ,server)))))
+                           `(collab-server-id ,server)))))
 
-(defun collab-mode--insert-disconnected-server
+(defun collab--insert-disconnected-server
     (server &optional insert-status)
   "Insert a disconnected SERVER.
 If INSERT-STATUS, insert a red DOWN symbol."
@@ -997,9 +997,9 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (insert (propertize "\n" 'line-spacing 0.4))
     (insert "...\n")
     (add-text-properties beg (point)
-                         `(collab-mode-server-id ,server))))
+                         `(collab-server-id ,server))))
 
-(defun collab-mode--prop-section (prop)
+(defun collab--prop-section (prop)
   "Return the (BEG . END) of the range that has PROP."
   (save-excursion
     (let ((forward-prop (text-property-search-forward prop))
@@ -1009,11 +1009,11 @@ If INSERT-STATUS, insert a red DOWN symbol."
 
 (defvar collab--hub-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab-mode--open-file)
-    (define-key map (kbd "x") #'collab-mode--delete-file)
-    (define-key map (kbd "k") #'collab-mode--disconnect-from-file)
-    (define-key map (kbd "g") #'collab-mode--refresh)
-    (define-key map (kbd "A") #'collab-mode--accept-connection)
+    (define-key map (kbd "RET") #'collab--open-file)
+    (define-key map (kbd "x") #'collab--delete-file)
+    (define-key map (kbd "k") #'collab--disconnect-from-file)
+    (define-key map (kbd "g") #'collab--refresh)
+    (define-key map (kbd "A") #'collab--accept-connection)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1024,28 +1024,28 @@ If INSERT-STATUS, insert a red DOWN symbol."
   "Collaboration mode."
   (setq-local line-spacing 0.2
               eldoc-idle-delay 0.8)
-  (add-hook 'eldoc-documentation-functions #'collab-mode--eldoc 0 t)
-  (add-hook 'post-command-hook #'collab-mode--dynamic-highlight)
+  (add-hook 'eldoc-documentation-functions #'collab--eldoc 0 t)
+  (add-hook 'post-command-hook #'collab--dynamic-highlight)
   (eldoc-mode))
 
-(defun collab-mode--render ()
+(defun collab--render ()
   "Render collab mode buffer."
   (let ((connection-up nil))
     ;; Insert headers.
     (insert "Connection: ")
     (condition-case err
         (progn
-          (collab-mode--connect)
+          (collab--connect)
           (insert (propertize "UP" 'face 'success) "\n")
           (setq connection-up t))
       (error
        (insert (propertize "DOWN" 'face 'error) "\n")
-       (setq collab-mode--most-recent-error
+       (setq collab--most-recent-error
              (format "Cannot connect to collab process: %s"
                      (error-message-string err)))))
-    (insert (format "Connection type: %s\n" collab-mode-connection-type))
+    (insert (format "Connection type: %s\n" collab-connection-type))
     (insert "Accepting remote peer connections: "
-            (if collab-mode--accepting-connection
+            (if collab--accepting-connection
                 (propertize "YES" 'face 'success)
               (propertize "NO" 'face 'shadow))
             "\n")
@@ -1054,52 +1054,52 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (insert "\n")
 
     ;; Insert each server and files.
-    (dolist (entry (collab-mode--server-alist))
+    (dolist (entry (collab--server-alist))
       (let ((beg (point)))
         (condition-case err
             (if connection-up
-                (collab-mode--insert-server
+                (collab--insert-server
                  (car entry) (nth 0 (cdr entry)) (nth 1 (cdr entry)))
-              (collab-mode--insert-disconnected-server (car entry)))
+              (collab--insert-disconnected-server (car entry)))
           (jsonrpc-error
            (delete-region beg (point))
-           (collab-mode--insert-disconnected-server (car entry) t)
-           (setq collab-mode--most-recent-error
+           (collab--insert-disconnected-server (car entry) t)
+           (setq collab--most-recent-error
                  (format "Error connecting to remote peer: %s" err)))))
       ;; Insert an empty line after a server section.
       (insert "\n"))
 
     (insert "PRESS + TO CONNECT to REMOTE SERVER\n")
     (insert "PRESS A TO ACCEPT REMOTE CONNECTIONS (for 180s)\n")
-    (when collab-mode--most-recent-error
+    (when collab--most-recent-error
       (insert
        (propertize (concat "\n\nMost recent error:\n\n"
-                           collab-mode--most-recent-error
+                           collab--most-recent-error
                            "\n")
                    'face 'shadow))
-      (setq collab-mode--most-recent-error nil))))
+      (setq collab--most-recent-error nil))))
 
 ;;;; Dynamic highlight
 
-(defvar-local collab-mode--hl-ov-1 nil
+(defvar-local collab--hl-ov-1 nil
   "Overlay used for 1st level highlight.")
 
-(defvar-local collab-mode--hl-ov-2 nil
+(defvar-local collab--hl-ov-2 nil
   "Overlay used for 2nd level highlight.")
 
-(defun collab-mode--dynamic-highlight ()
+(defun collab--dynamic-highlight ()
   "Highlight server and file at point."
-  (let ((ov (or collab-mode--hl-ov-1
+  (let ((ov (or collab--hl-ov-1
                 (let ((ov (make-overlay 1 1)))
-                  (overlay-put ov 'face 'collab-mode-dynamic-highlight)
-                  (setq collab-mode--hl-ov-1 ov)))))
+                  (overlay-put ov 'face 'collab-dynamic-highlight)
+                  (setq collab--hl-ov-1 ov)))))
     (cond
-     ((get-text-property (point) 'collab-mode-doc-id)
-      (let ((range (collab-mode--prop-section 'collab-mode-doc-id)))
+     ((get-text-property (point) 'collab-doc-id)
+      (let ((range (collab--prop-section 'collab-doc-id)))
         (move-overlay ov (car range) (cdr range)))
       (setq-local cursor-type nil))
-     ((get-text-property (point) 'collab-mode-server-line)
-      (let ((range (collab-mode--prop-section 'collab-mode-server-id)))
+     ((get-text-property (point) 'collab-server-line)
+      (let ((range (collab--prop-section 'collab-server-id)))
         (move-overlay ov (car range) (cdr range)))
       (setq-local cursor-type nil))
      (t
@@ -1109,12 +1109,12 @@ If INSERT-STATUS, insert a red DOWN symbol."
 
 ;;;; Eldoc
 
-(defun collab-mode--eldoc (callback)
+(defun collab--eldoc (callback)
   "Displays help information at point.
 Used for ‘eldoc-documentation-functions’, calls CALLBACK
 immediately."
-  (let ((doc-id (get-text-property (point) 'collab-mode-doc-id))
-        (server-id (get-text-property (point) 'collab-mode-server-id)))
+  (let ((doc-id (get-text-property (point) 'collab-doc-id))
+        (server-id (get-text-property (point) 'collab-server-id)))
     (cond
      (doc-id
       (funcall callback
@@ -1126,42 +1126,42 @@ immediately."
 
 ;;;; Interactive commands
 
-(defun collab-mode-shutdown ()
+(defun collab-shutdown ()
   "Shutdown the connection to the collab process."
   (interactive)
-  (when collab-mode--jsonrpc-connection
-    (jsonrpc-shutdown collab-mode--jsonrpc-connection)
-    (setq collab-mode--jsonrpc-connection nil)))
+  (when collab--jsonrpc-connection
+    (jsonrpc-shutdown collab--jsonrpc-connection)
+    (setq collab--jsonrpc-connection nil)))
 
-(defun collab-mode--refresh ()
+(defun collab--refresh ()
   "Refresh collab buffer."
   (interactive)
   (let ((inhibit-read-only t)
         (line (line-number-at-pos)))
     (erase-buffer)
-    (collab-mode--render)
+    (collab--render)
     (goto-char (point-min))
     (forward-line (1- line))))
 
-(defun collab-mode--open-file ()
+(defun collab--open-file ()
   "Open the file at point."
   (interactive)
-  (let* ((doc-id (get-text-property (point) 'collab-mode-doc-id))
-         (file-name (get-text-property (point) 'collab-mode-file-name))
-         (server-id (get-text-property (point) 'collab-mode-server-id))
+  (let* ((doc-id (get-text-property (point) 'collab-doc-id))
+         (file-name (get-text-property (point) 'collab-file-name))
+         (server-id (get-text-property (point) 'collab-server-id))
          (buf (gethash (cons doc-id server-id)
-                       collab-mode--buffer-table)))
+                       collab--buffer-table)))
     (if (and buf (buffer-live-p buf))
         (pop-to-buffer buf)
-      (collab-mode--catch-error (format "can’t connect to Doc(%s)" doc-id)
-        (let* ((resp (collab-mode--connect-to-file-req doc-id server-id))
+      (collab--catch-error (format "can’t connect to Doc(%s)" doc-id)
+        (let* ((resp (collab--connect-to-file-req doc-id server-id))
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
                (inhibit-read-only t))
           (end-of-line)
-          (unless (get-text-property (1- (point)) 'collab-mode-status)
+          (unless (get-text-property (1- (point)) 'collab-status)
             (insert " " (propertize (icon-string 'collab-status-on)
-                                    'collab-mode-status t)))
+                                    'collab-status t)))
           (pop-to-buffer
            (generate-new-buffer (concat "*collab: " file-name "*")))
           (collab-monitored-mode -1)
@@ -1170,73 +1170,73 @@ immediately."
           (goto-char (point-min))
           (let ((buffer-file-name file-name))
             (set-auto-mode))
-          (collab-mode--enable doc-id server-id site-id))))))
+          (collab--enable doc-id server-id site-id))))))
 
-(defun collab-mode--disconnect-from-file ()
+(defun collab--disconnect-from-file ()
   "Disconnect from the file at point."
   (interactive)
-  (let ((doc-id (get-text-property (point) 'collab-mode-doc-id))
-        (server-id (get-text-property (point) 'collab-mode-server-id)))
-    (collab-mode--catch-error
+  (let ((doc-id (get-text-property (point) 'collab-doc-id))
+        (server-id (get-text-property (point) 'collab-server-id)))
+    (collab--catch-error
         (format "can’t disconnect from Doc(%s)" doc-id)
-      (collab-mode--disconnect-from-file-req doc-id server-id))
+      (collab--disconnect-from-file-req doc-id server-id))
     (let ((buf (gethash (cons doc-id server-id)
-                        collab-mode--buffer-table))
+                        collab--buffer-table))
           (inhibit-read-only t))
       (when buf
         (with-current-buffer buf
-          (collab-mode--disable)))
+          (collab--disable)))
       (save-excursion
         (end-of-line)
         (when (looking-back " •" 2)
           (delete-char -2))))))
 
-(defun collab-mode--delete-file ()
+(defun collab--delete-file ()
   "Delete the file at point."
   (interactive)
-  (let ((doc-id (get-text-property (point) 'collab-mode-doc-id))
-        (server-id (get-text-property (point) 'collab-mode-server-id)))
-    (collab-mode--catch-error (format "can’t delete Doc(%s)" doc-id)
-      (collab-mode--delete-file-req doc-id server-id))
-    (collab-mode--refresh)))
+  (let ((doc-id (get-text-property (point) 'collab-doc-id))
+        (server-id (get-text-property (point) 'collab-server-id)))
+    (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
+      (collab--delete-file-req doc-id server-id))
+    (collab--refresh)))
 
-(defun collab-mode--accept-connection ()
+(defun collab--accept-connection ()
   "Start accepting connections."
   (interactive)
-  (let ((server-id (nth 0 collab-mode-local-server-config))
-        (signaling-addr (nth 1 collab-mode-local-server-config)))
-    (collab-mode--catch-error "can’t accept connection "
-      (collab-mode--accept-connection-req server-id signaling-addr))
-    (setq-local collab-mode--accepting-connection t)
-    (collab-mode--refresh)))
+  (let ((server-id (nth 0 collab-local-server-config))
+        (signaling-addr (nth 1 collab-local-server-config)))
+    (collab--catch-error "can’t accept connection "
+      (collab--accept-connection-req server-id signaling-addr))
+    (setq-local collab--accepting-connection t)
+    (collab--refresh)))
 
-(defun collab-hub ()
+(defun collab ()
   "Pop up the collab hub interface."
   (interactive)
-  (switch-to-buffer (get-buffer-create collab-mode--hub-buffer))
+  (switch-to-buffer (get-buffer-create collab--hub-buffer))
   (collab--hub-mode)
-  (collab-mode--refresh))
+  (collab--refresh))
 
-(defun collab-mode-share-buffer (server file-name)
+(defun collab-share-buffer (server file-name)
   "Share the current buffer to SERVER under FILE-NAME.
 When called interactively, prompt for the server."
   (interactive (list (completing-read
                       "Server: "
-                      (mapcar #'car (collab-mode--server-alist)))
+                      (mapcar #'car (collab--server-alist)))
                      (read-string
                       "File name: "
                       (or (and buffer-file-name
                                (file-name-nondirectory buffer-file-name))
                           (buffer-name)))))
-  (collab-mode--catch-error "can’t share the current buffer"
-    (let* ((resp (collab-mode--share-file-req
+  (collab--catch-error "can’t share the current buffer"
+    (let* ((resp (collab--share-file-req
                   server file-name
                   (buffer-substring-no-properties (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
            (site-id (plist-get resp :siteId)))
-      (collab-mode--enable doc-id server site-id))))
+      (collab--enable doc-id server site-id))))
 
-(defun collab-mode-reconnect-buffer (server doc-id)
+(defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
 
 Reconnecting will override the current content of the buffer.
@@ -1246,12 +1246,12 @@ called interactively, prompt the user to select a document (by
 its name rather than doc id) to connect."
   (interactive (list (completing-read
                       "Server: "
-                      (mapcar #'car (collab-mode--server-alist)))
+                      (mapcar #'car (collab--server-alist)))
                      'interactive))
-  (collab-mode--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
-    (let* ((info (alist-get server (collab-mode--server-alist)
+  (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
+    (let* ((info (alist-get server (collab--server-alist)
                             nil nil #'equal))
-           (file-list (collab-mode--list-files-req
+           (file-list (collab--list-files-req
                        server (nth 0 info) (nth 1 info)))
            file-name)
 
@@ -1276,7 +1276,7 @@ its name rather than doc id) to connect."
                                  return (plist-get elm :fileName))))
 
       ;; Replace buffer content with document content.
-      (let* ((resp (collab-mode--connect-to-file-req doc-id server))
+      (let* ((resp (collab--connect-to-file-req doc-id server))
              (content (plist-get resp :content))
              (site-id (plist-get resp :siteId))
              (inhibit-read-only t))
@@ -1285,40 +1285,40 @@ its name rather than doc id) to connect."
           (when (y-or-n-p "Save buffer before merging?")
             (save-buffer)))
 
-        ;; Same as in ‘collab-mode--open-file’.
+        ;; Same as in ‘collab--open-file’.
         (collab-monitored-mode -1)
         (erase-buffer)
         (insert content)
         (goto-char (point-min))
         (let ((buffer-file-name file-name))
           (set-auto-mode))
-        (collab-mode--enable doc-id server site-id)))))
+        (collab--enable doc-id server site-id)))))
 
-(defun collab-mode-disconnect-buffer ()
+(defun collab-disconnect-buffer ()
   "Disconnect current buffer, returning it to a regular buffer."
   (interactive)
-  (collab-mode--check-precondition)
-  (let ((doc-id (car collab-mode--doc-server))
-        (server-id (cdr collab-mode--doc-server)))
-    (collab-mode--catch-error
+  (collab--check-precondition)
+  (let ((doc-id (car collab--doc-server))
+        (server-id (cdr collab--doc-server)))
+    (collab--catch-error
         (format "can’t disconnect from Doc(%s)" doc-id)
-      (collab-mode--disconnect-from-file-req doc-id server-id)))
-  (collab-mode--disable)
+      (collab--disconnect-from-file-req doc-id server-id)))
+  (collab--disable)
   (message "Disconnected"))
 
-(defun collab-mode--print-history (&optional debug)
+(defun collab--print-history (&optional debug)
   "Print debugging history for the current buffer.
 If called with an interactive argument (DEBUG), print more
 detailed history."
   (interactive "p")
-  (collab-mode--check-precondition)
-  (let ((doc-id (car collab-mode--doc-server))
-        (server-id (cdr collab-mode--doc-server))
+  (collab--check-precondition)
+  (let ((doc-id (car collab--doc-server))
+        (server-id (cdr collab--doc-server))
         (debug (eq debug 4)))
-    (collab-mode--catch-error
+    (collab--catch-error
         (format "can’t print history of Doc(%s)" doc-id)
-      (collab-mode--send-ops-now)
-      (let ((text (collab-mode--print-history-req doc-id server-id debug))
+      (collab--send-ops-now)
+      (let ((text (collab--print-history-req doc-id server-id debug))
             undo-tip)
         (pop-to-buffer (format "*collab history for %s*"
                                (buffer-name)))
@@ -1346,20 +1346,20 @@ detailed history."
                  (?d "disconnect" "Disconnect and stop collaboration")
                  (?h "hub" "Open collab hub")))))
     (pcase (car resp)
-      (?s (call-interactively #'collab-mode-share-buffer))
-      (?r (call-interactively #'collab-mode-reconnect-buffer))
-      (?d (collab-mode-disconnect-buffer))
-      (?h (collab-hub)))))
+      (?s (call-interactively #'collab-share-buffer))
+      (?r (call-interactively #'collab-reconnect-buffer))
+      (?d (collab-disconnect-buffer))
+      (?h (collab)))))
 
 ;;; Debug
 
-(defun collab-mode--setup-2 ()
+(defun collab--setup-2 ()
   "Setup test session #2."
   (interactive)
-  (setq collab-mode-server-alist '(("#1" . ("ws://127.0.0.1:8822" "blah"))))
-  (setq collab-mode-local-server-config '("#2" "ws://127.0.0.1:8822"))
-  (setq collab-mode-connection-type '(socket 7702)))
+  (setq collab-server-alist '(("#1" . ("ws://127.0.0.1:8822" "blah"))))
+  (setq collab-local-server-config '("#2" "ws://127.0.0.1:8822"))
+  (setq collab-connection-type '(socket 7702)))
 
 (provide 'collab-mode)
 
-;;; collab-mode.el ends here
+;;; collab.el ends here
