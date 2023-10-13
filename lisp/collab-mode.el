@@ -49,6 +49,54 @@ CREDENTIAL).")
      "#fbafe4" "#949494" "#ece133" "#56b4e9")
   "Cursor color ring.")
 
+;;; Generic helpers
+
+;; https://nullprogram.com/blog/2010/05/11/
+(defun collab-mode--uuid ()
+  "Return a newly generated UUID."
+  (let ((str (md5 (format "%s%s%s%s%s%s%s%s%s%s"
+                          (user-uid)
+                          (emacs-pid)
+                          (system-name)
+                          (user-full-name)
+                          user-mail-address
+                          (current-time)
+                          (emacs-uptime)
+                          (garbage-collect)
+                          (random)
+                          (recent-keys)))))
+    (format "%s-%s-3%s-%s-%s"
+            (substring str 0 8)
+            (substring str 8 12)
+            (substring str 13 16)
+            (substring str 16 20)
+            (substring str 20 32))))
+
+(defun collab-mode--decode-color (color)
+  "Convert COLOR in ”#RRGGBB” format to (R G B)."
+  (list (string-to-number (substring color 1 3) 16)
+        (string-to-number (substring color 3 5) 16)
+        (string-to-number (substring color 5 7) 16)))
+
+(defun collab-mode--encode-color (color)
+  "Convert COLOR in (R G B) format to ”#RRGGBB”."
+  (format "#%.2x%.2x%.2x" (nth 0 color) (nth 1 color) (nth 2 color)))
+
+(defun collab-mode--blend-color (base above alpha)
+  "Return a color made of ABOVE with alpha ALPHA placed above BASE.
+Both COLOR’S are like ”#RRGGBB”, ALPHA is a float between 0 and 1."
+  (collab-mode--encode-color
+   (cl-labels ((comp (base above alpha)
+                 (+ (* base (- 1 alpha)) (* above alpha)))
+               (bound (color) (cond ((> color 255) 255)
+                                    ((< color 0) 0)
+                                    (t color))))
+     (let* ((color-base (collab-mode--decode-color base))
+            (color-above (collab-mode--decode-color above)))
+       (cl-loop for base in color-base
+                for above in color-above
+                collect (bound (comp base above alpha)))))))
+
 ;;; Icons
 
 (defvar collab-mode--load-directory
@@ -128,7 +176,7 @@ command that acts on a collab-monitored buffer."
      'collab-mode "Current buffer doesn’t have a doc id or server id")))
 
 
-;;; Cursor
+;;; Cursor tracking
 
 (defvar-local collab-mode--cursor-ov-alist nil
   "An alist mapping user’s site id to cursor overlays.")
@@ -136,14 +184,23 @@ command that acts on a collab-monitored buffer."
 (defvar-local collab-mode--my-site-id nil
   "My site-id.")
 
-(defun collab-mode--move-cursor (site-id pos)
-  "Move user (SITE-ID)’s cursor overlay to POS."
+(defvar collab-mode--sync-cursor-timer-table
+  (make-hash-table :test #'equal)
+  "Hash table mapping (doc-id . server-id) to sync cursor timers.")
+
+(defun collab-mode--move-cursor (site-id pos &optional mark)
+  "Move user (SITE-ID)’s cursor overlay to POS.
+If MARK non-nil, show active region."
   (when (and (not (eq site-id collab-mode--my-site-id))
              (<= (point-min) pos (point-max)))
     (let* ((idx (mod site-id
                      (length collab-mode-cursor-colors)))
-           (face `(:background
-                   ,(nth idx collab-mode-cursor-colors)))
+           (color (nth idx collab-mode-cursor-colors))
+           (region-color (collab-mode--blend-color
+                          (face-attribute 'default :background)
+                          color 0.2))
+           (face `(:background ,color))
+           (region-face `(:background ,region-color))
            (ov (or (alist-get site-id collab-mode--cursor-ov-alist)
                    (let ((ov (make-overlay (min (1+ pos) (point-max))
                                            (min (+ pos 2) (point-max))
@@ -152,12 +209,50 @@ command that acts on a collab-monitored buffer."
                      (push (cons site-id ov) collab-mode--cursor-ov-alist)
                      ov))))
 
-      (if (eq pos (point-max))
+      (if (not mark)
           (progn
-            (overlay-put ov 'after-string (propertize " " 'face face))
-            (move-overlay ov pos (min (1+ pos) (point-max))))
-        (overlay-put ov 'after-string nil)
-        (move-overlay ov pos (1+ pos))))))
+            (overlay-put ov 'face face)
+            (if (eq pos (point-max))
+                (progn
+                  (overlay-put ov 'after-string (propertize " " 'face face))
+                  (move-overlay ov pos (min (1+ pos) (point-max))))
+              (overlay-put ov 'after-string nil)
+              (move-overlay ov pos (1+ pos))))
+
+        (move-overlay ov (min pos mark) (max pos mark))
+        (overlay-put ov 'face region-face)
+        (overlay-put ov 'after-string nil)))))
+
+(defvar collab-monitored-mode)
+(defun collab-mode--send-cursor-pos-1 (buffer)
+  "Send cursor position of BUFFER to the collab process."
+  (when (equal buffer (current-buffer))
+    (collab-mode--check-precondition)
+    (collab-mode--catch-error "can’t send cursor position to remote"
+      (let* ((doc-id (car collab-mode--doc-server))
+             (server-id (cdr collab-mode--doc-server))
+             (site-id collab-mode--my-site-id))
+        (collab-mode--send-info-req
+         doc-id server-id
+         (if (region-active-p)
+             `( :type "_pos" :point ,(point)
+                :mark ,(mark) :siteId ,site-id)
+           `(:type "_pos" :point ,(point) :siteId ,site-id)))))
+
+    (remhash collab-mode--doc-server
+             collab-mode--sync-cursor-timer-table)))
+
+(defun collab-mode--send-cursor-pos ()
+  "Move user (SITE-ID)’s cursor overlay to POS."
+  (collab-mode--check-precondition)
+  (when (null (gethash collab-mode--doc-server
+                       collab-mode--sync-cursor-timer-table))
+    ;; Run with an idle timer to we don’t interrupt scrolling, etc.
+    (let ((timer (run-with-idle-timer
+                  0.5 nil #'collab-mode--send-cursor-pos-1
+                  (current-buffer))))
+      (puthash collab-mode--doc-server timer
+               collab-mode--sync-cursor-timer-table))))
 
 
 ;;; Edit tracking
@@ -301,40 +396,45 @@ So that the idle timer can send its pending ops.")
 
 (defun collab-mode--post-command-hasty ()
   "Like ‘collab-mode--post-command’ but just send ops out."
-  (when (and (not collab-mode--inhibit-hooks)
-             collab-mode--ops-current-command)
-    (collab-mode--send-ops (nreverse collab-mode--ops-current-command))
-    (setq collab-mode--ops-current-command nil)))
+  (when (not collab-mode--inhibit-hooks)
+    (if (not collab-mode--ops-current-command)
+        (collab-mode--send-cursor-pos)
+      (collab-mode--send-ops (nreverse collab-mode--ops-current-command))
+      (setq collab-mode--ops-current-command nil))))
 
 (defun collab-mode--post-command ()
   "Convert ops in the buffer and send them to the collab process.
 Then apply the returned remote ops."
-  (when (and (not collab-mode--inhibit-hooks)
-             collab-mode--ops-current-command)
-    (if-let ((amalgamated-op
-              (and (eq 1 (length collab-mode--ops-current-command))
-                   (let ((this-op (car collab-mode--ops-current-command))
-                         (last-op (car collab-mode--pending-ops)))
-                     (and last-op
-                          (collab-mode--maybe-amalgamate
-                           last-op this-op))))))
-        ;; Amalgamated, don’t send ops yet.
-        (progn
-          (setcar collab-mode--pending-ops amalgamated-op)
-          (message "Amalgamate, %s" collab-mode--pending-ops))
-      ;; Didn’t amalgamate, send ops.
-      (message "No amalgamate, %s %s"
-               collab-mode--pending-ops
-               collab-mode--ops-current-command)
-      (collab-mode--send-ops (nreverse collab-mode--pending-ops))
-      (setq collab-mode--pending-ops collab-mode--ops-current-command))
+  (when (not collab-mode--inhibit-hooks)
+    (if (not collab-mode--ops-current-command)
+        (collab-mode--send-cursor-pos)
+      (if-let ((amalgamated-op
+                (and (eq 1 (length collab-mode--ops-current-command))
+                     (let ((this-op
+                            (car collab-mode--ops-current-command))
+                           (last-op (car collab-mode--pending-ops)))
+                       (and last-op
+                            (collab-mode--maybe-amalgamate
+                             last-op this-op))))))
+          ;; Amalgamated, don’t send ops yet.
+          (progn
+            (setcar collab-mode--pending-ops amalgamated-op)
+            (message "Amalgamate, %s" collab-mode--pending-ops))
+        ;; Didn’t amalgamate, send ops.
+        (message "No amalgamate, %s %s"
+                 collab-mode--pending-ops
+                 collab-mode--ops-current-command)
 
-    (setq collab-mode--ops-current-command nil)
+        (collab-mode--send-ops (nreverse collab-mode--pending-ops))
+        (setq collab-mode--pending-ops collab-mode--ops-current-command))
 
-    ;; Register this buffer so the idle timer will send pending ops.
-    (when (not (memq (current-buffer)
-                     collab-mode--idle-timer-registered-buffer))
-      (push (current-buffer) collab-mode--idle-timer-registered-buffer))))
+      (setq collab-mode--ops-current-command nil)
+
+      ;; Register this buffer so the idle timer will send pending ops.
+      (when (not (memq (current-buffer)
+                       collab-mode--idle-timer-registered-buffer))
+        (push (current-buffer)
+              collab-mode--idle-timer-registered-buffer)))))
 
 (defun collab-mode--send-ops-now ()
   "Immediately send any pending ops to the collab process."
@@ -580,6 +680,21 @@ If we receive a ServerError notification, just display a warning."
                         doc server buffer last-seq))
            (puthash (cons doc server) timer
                     collab-mode--dispatcher-timer-table)))))
+    ('Info
+     (let* ((doc-id (plist-get params :docId))
+            (server-id (plist-get params :serverId))
+            (value (plist-get params :value)))
+       (pcase (plist-get value :type)
+         ("_pos" (let* (
+                        (pos (plist-get value :point))
+                        (mark (plist-get value :mark))
+                        (site-id (plist-get value :siteId))
+                        (buf (gethash (cons doc-id server-id)
+                                      collab-mode--buffer-table)))
+                   (when (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (collab-mode--move-cursor site-id pos mark)))))))
+     )
     ('ServerError
      (display-warning
       'collab-mode
@@ -677,6 +792,15 @@ If DEBUG non-nil, print debug version."
                         :serverId ,server
                         :debug ,(if debug t :json-false))
                      :timeout collab-mode-rpc-timeout)))
+
+(defun collab-mode--send-info-req (doc server info)
+  "Send INFO to DOC on SERVER.
+INFO should be a plist JSON object. This request is async."
+  (let ((conn (collab-mode--connect)))
+    (jsonrpc-notify conn 'SendInfo
+                    `( :serverId ,server
+                       :docId ,doc
+                       :info ,info))))
 
 (defsubst collab-mode--encode-op (op)
   "Encode Elisp OP into JSONRPC format."

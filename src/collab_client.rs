@@ -15,19 +15,13 @@
 //! to the editor and drop the [Doc], which will clean up the
 //! background threads.
 
-use crate::abstract_server::{ClientEnum, DocServer};
+use crate::abstract_server::{ClientEnum, DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::{mpsc, watch};
-use tokio_stream::Stream;
 use tokio_stream::StreamExt;
-
-// *** Types
-
-type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
 
 // *** Structs
 
@@ -57,7 +51,7 @@ impl Doc {
         mut server: ClientEnum,
         file_name: &str,
         file: &str,
-        external_notifier: std::sync::mpsc::Sender<NewOpNotification>,
+        external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<Doc> {
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
@@ -72,7 +66,7 @@ impl Doc {
 
         // Now server will spawn a thread that keeps sending new ops
         // to our channel.
-        let stream = server.recv_op(&doc_id, 0).await?;
+        let (op_stream, info_stream) = server.recv_op_and_info(&doc_id, 0).await?;
 
         // Spawn a thread that retrieves remote ops and add to
         // `remote_op_buffer`
@@ -80,7 +74,8 @@ impl Doc {
             doc_id.clone(),
             server.site_id(),
             server.server_id(),
-            stream,
+            op_stream,
+            info_stream,
             remote_op_buffer,
             notifier_tx,
             err_tx.clone(),
@@ -107,11 +102,11 @@ impl Doc {
     pub async fn new_connect_file(
         mut server: ClientEnum,
         doc_id: DocId,
-        external_notifier: std::sync::mpsc::Sender<NewOpNotification>,
+        external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<(Doc, String)> {
         // Download file.
         let snapshot = server.request_file(&doc_id).await?;
-        let stream = server.recv_op(&doc_id, snapshot.seq).await?;
+        let (op_stream, info_stream) = server.recv_op_and_info(&doc_id, snapshot.seq).await?;
 
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
@@ -128,7 +123,8 @@ impl Doc {
             doc_id.clone(),
             server.site_id(),
             server.server_id(),
-            stream,
+            op_stream,
+            info_stream,
             Arc::clone(&remote_op_buffer),
             notifier_tx,
             err_tx.clone(),
@@ -290,11 +286,49 @@ fn spawn_thread_receive_remote_op(
     site_id: SiteId,
     server_id: ServerId,
     mut remote_op_stream: OpStream,
+    mut remote_info_stream: InfoStream,
     remote_op_buffer: Arc<Mutex<Vec<FatOp>>>,
     notifier_tx: Arc<watch::Sender<()>>,
     error_channel: mpsc::Sender<CollabError>,
-    external_notifier: std::sync::mpsc::Sender<NewOpNotification>,
+    external_notifier: std::sync::mpsc::Sender<CollabNotification>,
 ) -> tokio::task::JoinHandle<()> {
+    // Receive info.
+    let error_channel_1 = error_channel.clone();
+    let external_notifier_1 = external_notifier.clone();
+    let doc_id_1 = doc_id.clone();
+    let server_id_1 = server_id.clone();
+    tokio::spawn(async move {
+        while let Some(info) = remote_info_stream.next().await {
+            match info {
+                Err(err) => {
+                    error_channel_1.send(err).await.unwrap();
+                    return;
+                }
+                Ok(info) => match serde_json::from_str(&info) {
+                    Ok(value) => {
+                        external_notifier_1
+                            .send(CollabNotification::Info(InfoNotification {
+                                doc_id: doc_id_1.clone(),
+                                server_id: server_id_1.clone(),
+                                value,
+                            }))
+                            .unwrap();
+                    }
+                    Err(err) => {
+                        error_channel_1.send(err.into()).await.unwrap();
+                        // Not fatal, don't need to return.
+                    }
+                },
+            }
+        }
+        let err = CollabError::ChannelClosed(format!(
+            "Doc({}) Internal channel (local server --info--> local client) broke",
+            &doc_id
+        ));
+        error_channel_1.send(err).await.unwrap();
+    });
+    // Receive op.
+    //
     // Draining remote_op_stream and storing ops into a buffer seems
     // redundant, but is easier to write and understand in the big
     // picture.
@@ -351,11 +385,11 @@ fn spawn_thread_receive_remote_op(
 
             // Notify JSONRPC server to notify the editor.
             if truly_remote_op_arrived {
-                let res = external_notifier.send(NewOpNotification {
+                let res = external_notifier.send(CollabNotification::Op(NewOpNotification {
                     doc_id: doc_id.clone(),
                     server_id: server_id.clone(),
                     last_seq: last_global_seq,
-                });
+                }));
                 if let Err(err) = res {
                     let err = CollabError::ChannelClosed(format!(
                     "Doc({}) Internal notification channel (Doc --(doc,server)--> jsonrpc) broke: {:#}",

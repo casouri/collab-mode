@@ -76,6 +76,20 @@ pub struct NewOpNotification {
     pub last_seq: GlobalSeq,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InfoNotification {
+    pub doc_id: DocId,
+    pub server_id: ServerId,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub enum CollabNotification {
+    Op(NewOpNotification),
+    Info(InfoNotification),
+}
+
 /// A snapshot of a document. Returned by the server when a site
 /// requests a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,10 +106,11 @@ pub enum DocServerReq {
     ShareFile { file_name: String, content: String },
     ListFiles,
     SendOp(ContextOps),
-    RecvOp { doc_id: DocId, after: GlobalSeq },
+    RecvOpAndInfo { doc_id: DocId, after: GlobalSeq },
     RequestFile(DocId),
     DeleteFile(DocId),
     Login(Credential),
+    SendInfo { doc_id: DocId, info: String },
 }
 
 /// Reponses sent to webrpc client.
@@ -108,6 +123,8 @@ pub enum DocServerResp {
     RequestFile(Snapshot),
     DeleteFile,
     Login(SiteId),
+    SendInfo,
+    RecvInfo(String),
     Err(CollabError),
 }
 

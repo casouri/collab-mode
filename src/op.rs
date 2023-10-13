@@ -396,7 +396,7 @@ impl std::fmt::Debug for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::Ins((pos, content)) => {
-                let mut content = content.to_string();
+                let content = content.to_string();
                 write!(f, "ins({pos}, {:?})", content)
             }
             Op::Del(ops, recover_list) => {

@@ -2,19 +2,13 @@
 //! [crate::abstract_server::DocServer] trait, users can access remote
 //! servers with this client.
 
-use crate::abstract_server::DocServer;
+use crate::abstract_server::{DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
 use crate::webrpc::Endpoint;
 use async_trait::async_trait;
-use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::Stream;
-
-// *** Types
-
-type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
 
 // *** Structs
 
@@ -130,40 +124,48 @@ impl DocServer for WebrpcClient {
         }
     }
 
-    async fn recv_op(&mut self, doc_id: &DocId, after: GlobalSeq) -> CollabResult<OpStream> {
+    async fn recv_op_and_info(
+        &mut self,
+        doc_id: &DocId,
+        after: GlobalSeq,
+    ) -> CollabResult<(OpStream, InfoStream)> {
         let mut rx = self
             .endpoint
-            .send_request(&DocServerReq::RecvOp {
+            .send_request(&DocServerReq::RecvOpAndInfo {
                 doc_id: doc_id.clone(),
                 after,
             })
             .await?;
 
-        let (tx_ret, rx_ret) = mpsc::channel::<CollabResult<Vec<FatOp>>>(1);
+        let (tx_op, rx_op) = mpsc::channel::<CollabResult<Vec<FatOp>>>(1);
+        let (tx_info, rx_info) = mpsc::channel::<CollabResult<String>>(1);
         let doc_id = doc_id.clone();
         let _ = tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
                 match res {
                     Err(err) => {
-                        tx_ret.send(Err(err.into())).await.unwrap();
+                        tx_op.send(Err(err.into())).await.unwrap();
                         return;
                     }
                     Ok(msg) => match msg.unpack::<DocServerResp>() {
                         Err(err) => {
-                            tx_ret.send(Err(err.into())).await.unwrap();
+                            tx_op.send(Err(err.into())).await.unwrap();
                             return;
                         }
                         Ok(resp) => {
                             log::debug!(
-                                "rev_op(doc_id={doc_id}, after={after}) =streaming=> {:?}",
+                                "rev_op_and_info(doc_id={doc_id}, after={after}) =streaming=> {:?}",
                                 &resp
                             );
                             match resp {
                                 DocServerResp::RecvOp(ops) => {
-                                    tx_ret.send(Ok(ops)).await.unwrap();
+                                    tx_op.send(Ok(ops)).await.unwrap();
+                                }
+                                DocServerResp::RecvInfo(info) => {
+                                    tx_info.send(Ok(info)).await.unwrap();
                                 }
                                 resp => {
-                                    tx_ret
+                                    tx_op
                                         .send(Err(unexpected_resp("RecvOp", resp)))
                                         .await
                                         .unwrap();
@@ -175,7 +177,10 @@ impl DocServer for WebrpcClient {
                 }
             }
         });
-        Ok(Box::pin(ReceiverStream::from(rx_ret)))
+        Ok((
+            Box::pin(ReceiverStream::from(rx_op)),
+            Box::pin(ReceiverStream::from(rx_info)),
+        ))
     }
 
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
@@ -189,6 +194,24 @@ impl DocServer for WebrpcClient {
             DocServerResp::DeleteFile => Ok(()),
             DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
             resp => Err(unexpected_resp("DeleteFile", resp)),
+        }
+    }
+
+    async fn send_info(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
+        let debug_msg = format!("send_info(info={info})");
+        let resp = self
+            .endpoint
+            .send_request_oneshot(&DocServerReq::SendInfo {
+                doc_id: doc_id.clone(),
+                info,
+            })
+            .await?
+            .unpack()?;
+        log::debug!("{debug_msg} => {:?}", &resp);
+        match resp {
+            DocServerResp::SendInfo => Ok(()),
+            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            resp => Err(unexpected_resp("SendInfo", resp)),
         }
     }
 }

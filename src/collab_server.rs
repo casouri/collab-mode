@@ -7,7 +7,7 @@
 //! server to remote sites with gRPC, by implementing the
 //! [crate::rpc::doc_server_server::DocServer] trait.
 
-use crate::abstract_server::DocServer;
+use crate::abstract_server::{DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
 use crate::op::{DocId, GlobalSeq, Op, SiteId};
 use crate::types::*;
@@ -15,16 +15,15 @@ use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
 use jumprope::JumpRope;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
+
+const RETAINED_INFO_MSG_MAX: usize = 32;
 
 // *** Types
-
-type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
 
 #[async_trait]
 impl DocServer for LocalServer {
@@ -49,9 +48,19 @@ impl DocServer for LocalServer {
     async fn send_op(&mut self, ops: ContextOps) -> CollabResult<()> {
         self.send_op_1(ops).await
     }
-    async fn recv_op(&mut self, doc_id: &DocId, after: GlobalSeq) -> CollabResult<OpStream> {
-        let stream = self.recv_op_1(doc_id, after).await?;
-        Ok(Box::pin(stream.map(|ops| Ok(ops))))
+    async fn recv_op_and_info(
+        &mut self,
+        doc_id: &DocId,
+        after: GlobalSeq,
+    ) -> CollabResult<(OpStream, InfoStream)> {
+        let (op_stream, info_stream) = self.recv_op_1(doc_id, after).await?;
+        Ok((
+            Box::pin(op_stream.map(|ops| Ok(ops))),
+            Box::pin(info_stream.map(|ops| Ok(ops))),
+        ))
+    }
+    async fn send_info(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
+        self.send_info_1(doc_id, info).await
     }
 }
 
@@ -81,6 +90,10 @@ struct Doc {
     tx: watch::Sender<()>,
     /// Clone a rx from this rx, and check for new op notification.
     rx: watch::Receiver<()>,
+    /// Incoming info are sent to this channel.
+    tx_info: broadcast::Sender<String>,
+    /// Retain this receiver so the channel is not closed.
+    _rx_info: broadcast::Receiver<String>,
 }
 
 // *** Functions for Doc
@@ -88,12 +101,15 @@ struct Doc {
 impl Doc {
     pub fn new(file_name: &str, content: &str) -> Doc {
         let (tx, rx) = watch::channel(());
+        let (tx_info, rx_info) = broadcast::channel(RETAINED_INFO_MSG_MAX);
         Doc {
             name: file_name.to_string(),
             engine: ServerEngine::new(),
             buffer: JumpRope::from(content),
             tx,
             rx,
+            tx_info,
+            _rx_info: rx_info,
         }
     }
 
@@ -184,44 +200,60 @@ impl LocalServer {
         &self,
         doc_id: &DocId,
         mut after: GlobalSeq,
-    ) -> CollabResult<ReceiverStream<Vec<FatOp>>> {
-        let (tx, rx) = mpsc::channel(1);
+    ) -> CollabResult<(ReceiverStream<Vec<FatOp>>, ReceiverStream<String>)> {
+        let (tx_op, rx_op) = mpsc::channel(1);
+        let (tx_info, rx_info) = mpsc::channel(1);
         // Clone a notification channel and a reference to the doc,
         // listen for notification and get new ops from the doc, and
         // feed into the channel.
         let res = if let Some(doc) = self.docs.read().await.get(doc_id) {
-            Ok((doc.lock().await.rx.clone(), doc.clone()))
+            let doc_inner = doc.lock().await;
+            Ok((
+                doc_inner.rx.clone(),
+                doc_inner.tx_info.subscribe(),
+                doc.clone(),
+            ))
         } else {
             Err(CollabError::DocNotFound(doc_id.clone()))
         };
-        let (mut notifier, doc) = res?;
+        let (mut notifier, mut inner_rx_info, doc) = res?;
 
         let _ = tokio::spawn(async move {
-            loop {
-                if notifier.changed().await.is_ok() {
-                    let doc = doc.lock().await;
-                    log::debug!(
-                        "recv_op() Local server collects global ops after seq#{} to send out",
-                        after
-                    );
-                    let ops = doc.engine.global_ops_after(after);
-                    after += ops.len() as GlobalSeq;
-                    log::debug!(
-                        "recv_op() Local server sends op to gRPC server or local client: {:?}",
-                        &ops
-                    );
-                    if let Err(_) = tx.send(ops).await {
-                        // When the local or remote
-                        // [crate::collab_client::Doc] is dropped,
-                        // its connection to us is dropped. This
-                        // is not an error.
-                        log::info!("Internal channel (local server --op--> local client or grpc server) closed.");
-                        return;
-                    }
+            while notifier.changed().await.is_ok() {
+                let doc = doc.lock().await;
+                log::debug!(
+                    "recv_op() Local server collects global ops after seq#{} to send out",
+                    after
+                );
+                let ops = doc.engine.global_ops_after(after);
+                after += ops.len() as GlobalSeq;
+                log::debug!(
+                    "recv_op() Local server sends op to gRPC server or local client: {:?}",
+                    &ops
+                );
+                if let Err(_) = tx_op.send(ops).await {
+                    // When the local or remote
+                    // [crate::collab_client::Doc] is dropped,
+                    // its connection to us is dropped. This
+                    // is not an error.
+                    log::info!("Internal channel (local server --op--> local client or grpc server) closed.");
+                    return;
                 }
             }
         });
-        Ok(ReceiverStream::from(rx))
+
+        // Using select creates too much indent, might as well start
+        // two tasks.
+        let _ = tokio::spawn(async move {
+            while let Ok(info) = inner_rx_info.recv().await {
+                if let Err(_) = tx_info.send(info).await {
+                    log::info!("Internal channel (local server --info--> local client or grpc server) closed.");
+                    return;
+                }
+            }
+        });
+
+        Ok((ReceiverStream::from(rx_op), ReceiverStream::from(rx_info)))
     }
 
     pub async fn list_files_1(&self) -> Vec<DocInfo> {
@@ -247,6 +279,15 @@ impl LocalServer {
         let mut docs = self.docs.write().await;
         docs.remove(doc_id);
         Ok(())
+    }
+
+    async fn send_info_1(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
+        if let Some(doc) = self.docs.read().await.get(doc_id) {
+            doc.lock().await.tx_info.send(info).unwrap();
+            Ok(())
+        } else {
+            Err(CollabError::DocNotFound(doc_id.clone()))
+        }
     }
 }
 
@@ -325,17 +366,35 @@ async fn handle_request(
             server.send_op_1(ops).await?;
             Ok(Some(DocServerResp::SendOp))
         }
-        DocServerReq::RecvOp { doc_id, after } => {
-            let mut stream = server.recv_op_1(&doc_id, after).await?;
+        DocServerReq::SendInfo { doc_id, info } => {
+            server.send_info_1(&doc_id, info).await?;
+            Ok(Some(DocServerResp::SendInfo))
+        }
+        DocServerReq::RecvOpAndInfo { doc_id, after } => {
+            let (mut stream_op, mut stream_info) = server.recv_op_1(&doc_id, after).await?;
             let endpoint_1 = endpoint.clone();
+            let endpoint_2 = endpoint.clone();
             let req_id = msg.req_id;
+            // Send ops.
             let _ = tokio::spawn(async move {
-                while let Some(op) = stream.next().await {
+                while let Some(op) = stream_op.next().await {
                     let res = endpoint_1
                         .send_response(req_id, &DocServerResp::RecvOp(op))
                         .await;
                     if let Err(err) = res {
                         log::warn!("Error sending ops to remote client: {:?}", err);
+                        return;
+                    }
+                }
+            });
+            // Send info.
+            let _ = tokio::spawn(async move {
+                while let Some(info) = stream_info.next().await {
+                    let res = endpoint_2
+                        .send_response(req_id, &DocServerResp::RecvInfo(info))
+                        .await;
+                    if let Err(err) = res {
+                        log::warn!("Error sending info to remote client: {:?}", err);
                         return;
                     }
                 }

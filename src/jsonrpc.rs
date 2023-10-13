@@ -21,7 +21,7 @@ use crate::error::{CollabError, CollabResult};
 // use crate::grpc_client::GrpcClient;
 use crate::types::*;
 use crate::webrpc_client::WebrpcClient;
-use lsp_server::{Connection, Message, Request, RequestId, Response};
+use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -42,7 +42,7 @@ pub struct JSONRPCServer {
     /// Doc when we create one, and the Doc will send remote op
     /// notification to the notification channel, which JSONRPCServer
     /// will receive and send notification to the editor.
-    notifier_tx: std::sync::mpsc::Sender<NewOpNotification>,
+    notifier_tx: std::sync::mpsc::Sender<CollabNotification>,
 }
 
 // *** Entry functions
@@ -84,9 +84,15 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
     // throttle-control notifications?
     std::thread::spawn(move || {
         for notif in notifier_rx.iter() {
-            let msg = lsp_server::Notification {
-                method: NotificationCode::RemoteOpArrived.into(),
-                params: serde_json::to_value(notif).unwrap(),
+            let msg = match notif {
+                CollabNotification::Op(notif) => lsp_server::Notification {
+                    method: NotificationCode::RemoteOpArrived.into(),
+                    params: serde_json::to_value(notif).unwrap(),
+                },
+                CollabNotification::Info(info) => lsp_server::Notification {
+                    method: NotificationCode::Info.into(),
+                    params: serde_json::to_value(info).unwrap(),
+                },
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
                 log::error!("Error sending jsonrpc notification to editor: {:#}", err);
@@ -173,8 +179,13 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
                 Message::Response(_) => {
                     log::info!("Received a response");
                 }
-                Message::Notification(_) => {
-                    log::info!("Received a notification");
+                Message::Notification(notif) => {
+                    let res = jsonrpc_server
+                        .handle_notification(notif.clone(), doc_server.clone())
+                        .await;
+                    if let Err(err) = res {
+                        log::error!("Error handling notification {:?}: {:?}", &notif, err);
+                    }
                 }
             }
         }
@@ -223,7 +234,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
 impl JSONRPCServer {
     pub fn new(
         server: LocalServer,
-        notifier_tx: std::sync::mpsc::Sender<NewOpNotification>,
+        notifier_tx: std::sync::mpsc::Sender<CollabNotification>,
     ) -> JSONRPCServer {
         let mut client_map = HashMap::new();
         client_map.insert(SERVER_ID_SELF.to_string(), server.into());
@@ -283,6 +294,21 @@ impl JSONRPCServer {
             todo!()
         };
         Ok(msg)
+    }
+
+    /// Handle `notif`.
+    async fn handle_notification(
+        &mut self,
+        notif: Notification,
+        server: LocalServer,
+    ) -> CollabResult<()> {
+        if notif.method == "SendInfo" {
+            let params: SendInfoParams = serde_json::from_value(notif.params)?;
+            self.handle_send_info_notif(params).await?;
+            Ok(())
+        } else {
+            todo!()
+        }
     }
 }
 
@@ -373,6 +399,14 @@ impl JSONRPCServer {
             last_seq,
         };
         Ok(resp)
+    }
+
+    pub async fn handle_send_info_notif(&mut self, params: SendInfoParams) -> CollabResult<()> {
+        let client = self.get_client(&params.server_id)?;
+        client
+            .send_info(&params.doc_id, params.info.to_string())
+            .await?;
+        Ok(())
     }
 
     pub async fn handle_list_files_request(

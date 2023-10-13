@@ -28,6 +28,7 @@ pub enum NotificationCode {
     ServerError,
     SignalingTimesUp,
     AcceptConnectionErr,
+    Info,
 }
 
 impl Into<String> for NotificationCode {
@@ -37,6 +38,7 @@ impl Into<String> for NotificationCode {
             NotificationCode::ServerError => "ServerError".to_string(),
             NotificationCode::SignalingTimesUp => "SignalingTimesUp".to_string(),
             NotificationCode::AcceptConnectionErr => "AcceptConnectionErr".to_string(),
+            NotificationCode::Info => "Info".to_string(),
         }
     }
 }
@@ -81,6 +83,14 @@ pub struct SendOpParams {
 pub struct SendOpResp {
     pub ops: Vec<EditorLeanOp>,
     pub last_seq: GlobalSeq,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendInfoParams {
+    pub info: serde_json::Value,
+    pub doc_id: DocId,
+    pub server_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
