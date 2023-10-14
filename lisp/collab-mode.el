@@ -843,7 +843,7 @@ If MOVE-POINT non-nil, move point as the edit would."
   (let ((inhibit-modification-hooks t)
         (collab--inhibit-hooks t)
         (start (point-marker)))
-    (pcase (plist-get op :op)
+    (pcase op
       (`(:Ins [,pos ,str])
        (goto-char (1+ pos))
        (insert str))
@@ -889,7 +889,8 @@ collab process."
             (last-seq (plist-get resp :lastSeq))
             last-op)
         (seq-map (lambda (op)
-                   (collab--apply-jrpc-op op)
+                   (collab--apply-jrpc-op
+                    (plist-get op :op))
                    (setq last-op op))
                  remote-ops)
         (pcase last-op
