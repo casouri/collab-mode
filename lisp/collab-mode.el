@@ -1300,22 +1300,21 @@ When called interactively, prompt for the server."
            (doc-id (plist-get resp :docId))
            (site-id (plist-get resp :siteId)))
       (collab--enable doc-id server site-id)
-      (save-excursion
-        (display-buffer (collab--hub-buffer)
-                        '(() . ((inhibit-same-window . t))))
-        (with-current-buffer (collab--hub-buffer)
-          (let* ((link (format "%s/%s/%s"
-                               (string-trim-left
-                                (nth 1 collab-local-server-config)
-                                (rx "ws://"))
-                               (nth 0 collab-local-server-config)
-                               doc-id))
-                 (collab--current-message
-                  (collab--fairy "Your file is shared, and here’s the link
+      (display-buffer (collab--hub-buffer)
+                      '(() . ((inhibit-same-window . t))))
+      (with-current-buffer (collab--hub-buffer)
+        (collab--accept-connection)
+        (let* ((link (format "%s/%s/%s"
+                             (string-trim-left
+                              (nth 1 collab-local-server-config)
+                              (rx "ws://"))
+                             (nth 0 collab-local-server-config)
+                             doc-id))
+               (collab--current-message
+                (collab--fairy "Your file is shared, and here’s the link
 Friends can connect, with just a click!
 LINK: %s" (propertize link 'face 'link))))
-            (collab--refresh))))))
-  (collab--accept-connection) )
+          (collab--refresh))))))
 
 (defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
