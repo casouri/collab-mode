@@ -86,9 +86,9 @@ CREDENTIAL).")
 
 (defun collab--decode-color (color)
   "Convert COLOR in ”#RRGGBB” format to (R G B)."
-  (list (string-to-number (substring color 1 3) 16)
-        (string-to-number (substring color 3 5) 16)
-        (string-to-number (substring color 5 7) 16)))
+  (mapcar (lambda (color)
+            (/ color 256))
+          (or (color-values color) (color-values "white"))))
 
 (defun collab--encode-color (color)
   "Convert COLOR in (R G B) format to ”#RRGGBB”."
