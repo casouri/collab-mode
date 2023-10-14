@@ -245,28 +245,30 @@ fn transform_di_with_recover(
         }
         //    |  recover_op  |
         // |       base         |
-        else if recover_op_start > base_start && recover_op_end < base_end {
+        else if recover_op_start >= base_start && recover_op_end <= base_end {
             new_recover_list.push(recover_op.clone());
         }
         //      |  recover_op  |
         // |  base  |
-        else if recover_op_start < base_end && recover_op_end > base_start {
+        else if base_end > recover_op_start && base_end <= recover_op_end {
             let mid = (base_end - recover_op_start) as usize;
             let recover_op_merge = (recover_op_start, recover_op.1[..mid].to_string());
             let recover_op_stay = (base_end, recover_op.1[mid..].to_string());
             merge_in(recover_op_merge, &mut new_ops);
-            assert!(recover_op_stay.1.len() > 0);
-            new_recover_list.push(recover_op_stay);
+            if mid != recover_op.1.len() {
+                new_recover_list.push(recover_op_stay);
+            }
         }
         // |  recover_op  |
         //           |  base  |
-        else if recover_op_end > base_start && recover_op_start < base_end {
+        else if base_start >= recover_op_start && base_start < recover_op_start {
             let mid = (base_start - recover_op_start) as usize;
             let recover_op_stay = (recover_op_start, recover_op.1[..mid].to_string());
             let recover_op_merge = (base_start, recover_op.1[mid..].to_string());
             merge_in(recover_op_merge, &mut new_ops);
-            assert!(recover_op_stay.1.len() > 0);
-            new_recover_list.push(recover_op_stay);
+            if mid != 0 {
+                new_recover_list.push(recover_op_stay);
+            }
         } else {
             new_recover_list.push(recover_op.clone());
         }
