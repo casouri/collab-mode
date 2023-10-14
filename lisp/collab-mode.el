@@ -19,6 +19,10 @@
   "Collaboration mode."
   :group 'editting)
 
+(defcustom collab-display-name nil
+  "The display name of the user."
+  :type 'string)
+
 (defvar collab-rpc-timeout 1
   "Timeout in seconds to wait for connection to collab process.")
 
@@ -1215,7 +1219,7 @@ immediately."
     (setq-local collab--accepting-connection t)
     (collab--refresh)))
 
-(defun collab ()
+(defun collab-hub ()
   "Pop up the collab hub interface."
   (interactive)
   (switch-to-buffer (get-buffer-create collab--hub-buffer))
@@ -1345,8 +1349,10 @@ detailed history."
 (defun collab-mode ()
   "The main entry point of collab-mode, select an operation to perform."
   (interactive)
+  (unless collab-display-name
+    (collab-mode--initial-setup))
   (let ((resp (read-multiple-choice
-               "🧚 Heya! What do you want to do? "
+               "🧚 Heya! It’s nice to see you too! Tell me, what do you want to do? "
                '((?s "share this buffer" "Share this buffer to a server")
                  (?r "reconnect to doc" "Reconnect to a document")
                  (?d "disconnect" "Disconnect and stop collaboration")
@@ -1357,7 +1363,25 @@ detailed history."
             (call-interactively #'collab-share-buffer)))
       (?r (call-interactively #'collab-reconnect-buffer))
       (?d (collab-disconnect-buffer))
-      (?h (collab)))))
+      (?h (collab-hub)))))
+
+;;; Setup
+
+(defun collab-mode--initial-setup ()
+  "Initial setup wizard. Set display name, download binary, etc."
+  (let ((display-name (read-string "🧚 Heya! I’m dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- " user-full-name)))
+    (customize-set-variable 'collab-display-name display-name)
+    (customize-save-customized)
+
+    (when (and (not (executable-find "collab-mode"))
+               (y-or-n-p "🧚 No binary here, a tiny regret. Shall we fetch from the internet? "))
+      (let ((choice (car (read-multiple-choice
+                          "🧚 Three choices in the little chest, which one suits you the best? "
+                          '((?l "linux_x64" "Linux x86_64")
+                            (?m "mac_x64" "Mac x86_64")
+                            (?a "mac_arm" "Mac ARM"))))))
+        (ignore choice)
+        (message "TODO download binary")))))
 
 ;;; Debug
 
