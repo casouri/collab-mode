@@ -669,7 +669,6 @@ including SEQ."
         (puthash (cons doc server) timer
                  collab--dispatcher-timer-table)))))
 
-(defvar collab--hub-buffer)
 (defun collab--dispatch-notification (_conn method params)
   "Dispatch JSONRPC notifications.
 
@@ -726,7 +725,7 @@ If we receive a ServerError notification, just display a warning."
      (run-with-timer
       0 nil
       (lambda ()
-        (with-current-buffer collab--hub-buffer
+        (with-current-buffer (collab--hub-buffer)
           (setq collab--accepting-connection nil)
           (collab--refresh)
           (message "Collab process stopped accepting connections")))))
@@ -734,7 +733,7 @@ If we receive a ServerError notification, just display a warning."
      (run-with-timer
       0 nil
       (lambda ()
-        (with-current-buffer collab--hub-buffer
+        (with-current-buffer (collab--hub-buffer)
           (setq collab--accepting-connection nil)
           (collab--refresh)
           (display-warning
@@ -950,8 +949,9 @@ If REDO is non-nil, redo the most recent undo instead."
 
 ;;; UI
 
-(defvar collab--hub-buffer "*collab*"
-  "Buffer name for the hub buffer.")
+(defun collab--hub-buffer ()
+  "Return the hub buffer."
+  (get-buffer-create "*collab*"))
 
 (defvar collab--current-message nil
   "If non-nil, collab hub will show this message in the UI.
@@ -1278,7 +1278,7 @@ If SERVER-ID and DOC-ID non-nil, use them instead."
 (defun collab-hub ()
   "Pop up the collab hub interface."
   (interactive)
-  (switch-to-buffer (get-buffer-create collab--hub-buffer))
+  (switch-to-buffer (collab--hub-buffer))
   (collab--hub-mode)
   (collab--refresh))
 
@@ -1301,9 +1301,9 @@ When called interactively, prompt for the server."
            (site-id (plist-get resp :siteId)))
       (collab--enable doc-id server site-id)
       (save-excursion
-        (display-buffer collab--hub-buffer
+        (display-buffer (collab--hub-buffer)
                         '(() . ((inhibit-same-window . t))))
-        (with-current-buffer collab--hub-buffer
+        (with-current-buffer (collab--hub-buffer)
           (let* ((link (format "%s/%s/%s"
                                (string-trim-left
                                 (nth 1 collab-local-server-config)
@@ -1314,8 +1314,8 @@ When called interactively, prompt for the server."
                   (collab--fairy "Your file is shared, and here’s the link
 Friends can connect, with just a click!
 LINK: %s" (propertize link 'face 'link))))
-            (collab--refresh))
-          (collab--accept-connection))))))
+            (collab--refresh))))))
+  (collab--accept-connection) )
 
 (defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
@@ -1405,7 +1405,7 @@ SHARE-LINK should be in the form of signaling-server/server-id/doc-id."
 
     (collab--open-file doc-id server-id)
     (save-excursion
-      (with-current-buffer collab--hub-buffer
+      (with-current-buffer (collab--hub-buffer)
         (collab--refresh)))))
 
 (defun collab--print-history (&optional debug)
