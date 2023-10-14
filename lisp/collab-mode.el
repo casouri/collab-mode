@@ -101,6 +101,13 @@ Both COLOR’S are like ”#RRGGBB”, ALPHA is a float between 0 and 1."
                 for above in color-above
                 collect (bound (comp base above alpha)))))))
 
+(defun collab--fairy (format-string &rest args)
+  "Format string, and append a fairy and the front.
+Behaves like ‘format’ regarding FORMAT-STRING and ARGS,"
+  (apply #'format (concat (if (char-displayable-p ?🧚) "🧚 " "* ")
+                          format-string)
+         args))
+
 ;;; Icons
 
 (defvar collab--load-directory
@@ -1352,14 +1359,14 @@ detailed history."
   (unless collab-display-name
     (collab-mode--initial-setup))
   (let ((resp (read-multiple-choice
-               "🧚 Heya! It’s nice to see you too! Tell me, what do you want to do? "
+               (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do? ")
                '((?s "share this buffer" "Share this buffer to a server")
                  (?r "reconnect to doc" "Reconnect to a document")
                  (?d "disconnect" "Disconnect and stop collaboration")
                  (?h "hub" "Open collab hub")))))
     (pcase (car resp)
       (?s (when (or (null collab-monitored-mode)
-                    (y-or-n-p "This buffer is already in collab-mode, are you sure you want to share it as a new doc? "))
+                    (y-or-n-p (collab--fairy "Buffer in collab-mode, already quite set. Share it as new doc, confirm without regret? ")))
             (call-interactively #'collab-share-buffer)))
       (?r (call-interactively #'collab-reconnect-buffer))
       (?d (collab-disconnect-buffer))
@@ -1369,14 +1376,14 @@ detailed history."
 
 (defun collab-mode--initial-setup ()
   "Initial setup wizard. Set display name, download binary, etc."
-  (let ((display-name (read-string "🧚 Heya! I’m dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- " user-full-name)))
+  (let ((display-name (read-string (collab--fairy "Heya! I’m dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name)))
     (customize-set-variable 'collab-display-name display-name)
     (customize-save-customized)
 
     (when (and (not (executable-find "collab-mode"))
-               (y-or-n-p "🧚 No binary here, a tiny regret. Shall we fetch from the internet? "))
+               (y-or-n-p (collab--fairy "No binary here, a tiny regret. Shall we fetch from the internet? ")))
       (let ((choice (car (read-multiple-choice
-                          "🧚 Three choices in the little chest, which one suits you the best? "
+                          (collab--fairy "Three choices in the chest, which one suits you the best? ")
                           '((?l "linux_x64" "Linux x86_64")
                             (?m "mac_x64" "Mac x86_64")
                             (?a "mac_arm" "Mac ARM"))))))
