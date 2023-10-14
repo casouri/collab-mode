@@ -1226,8 +1226,9 @@ If SERVER-ID and DOC-ID non-nil, use them instead."
           (unless (get-text-property (1- (point)) 'collab-status)
             (insert " " (propertize (icon-string 'collab-status-on)
                                     'collab-status t)))
-          (display-buffer
-           (generate-new-buffer (concat "*collab: " file-name "*")))
+          (select-window
+           (display-buffer
+            (generate-new-buffer (concat "*collab: " file-name "*"))))
           (collab-monitored-mode -1)
           (erase-buffer)
           (insert content)
@@ -1304,7 +1305,9 @@ When called interactively, prompt for the server."
                         '(() . ((inhibit-same-window . t))))
         (with-current-buffer collab--hub-buffer
           (let* ((link (format "%s/%s/%s"
-                               (nth 1 collab-local-server-config)
+                               (string-trim-left
+                                (nth 1 collab-local-server-config)
+                                (rx "ws://"))
                                (nth 0 collab-local-server-config)
                                doc-id))
                  (collab--current-message
@@ -1387,14 +1390,22 @@ its name rather than doc id) to connect."
   "Connect to the file at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/server-id/doc-id."
   (interactive (list (read-string "Share link: ")))
-  (let* ((segments (split-string share-link "/" nil t))
-         (signaling-addr (nth 0 segments))
+  (let* ((segments (split-string share-link "/" nil " "))
+         (signaling-addr (concat "ws://" (nth 0 segments)))
          (server-id (nth 1 segments))
-         (doc-id (nth 2 segments)))
+         (doc-id (string-to-number (nth 2 segments))))
     (unless (alist-get server-id collab-server-alist nil nil #'equal)
       (push (cons server-id (list signaling-addr ""))
             collab-server-alist))
-    (collab--open-file doc-id server-id)))
+
+    ;; TODO Only connect to server if we haven’t yet.
+    (collab--catch-error (format "can’t connect to Server %s" server-id)
+      (collab--list-files-req server-id signaling-addr ""))
+
+    (collab--open-file doc-id server-id)
+    (save-excursion
+      (with-current-buffer collab--hub-buffer
+        (collab--refresh)))))
 
 (defun collab--print-history (&optional debug)
   "Print debugging history for the current buffer.
