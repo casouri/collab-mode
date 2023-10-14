@@ -401,8 +401,8 @@ So that the idle timer can send its pending ops.")
                        ;; c) Text prop change.
                        nil
                      ;; d) Replace.
-                     (push (list 'ins beg current group-seq) ops)
-                     (push (list 'del beg old group-seq) ops))))
+                     (push (list 'del beg old group-seq) ops)
+                     (push (list 'ins beg current group-seq) ops))))
 
              (funcall error-fn)))
           (_ (funcall error-fn))))
