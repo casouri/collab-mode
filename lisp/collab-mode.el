@@ -23,6 +23,14 @@
   "The display name of the user."
   :type 'string)
 
+(defface collab-success-background
+  '((t . (:inherit diff-refine-added :extend t)))
+  "The highlight used for indicating a success.")
+
+(defface collab-failure-background
+  '((t . (:inherit diff-refine-removed :extend t)))
+  "The highlight used for indicating a failure.")
+
 (defvar collab-rpc-timeout 1
   "Timeout in seconds to wait for connection to collab process.")
 
@@ -167,7 +175,7 @@ MSG should be something like “can’t do xxx”."
     `(condition-case ,err
          (progn
            ,@body)
-       (error
+       ((debug error)
         (when collab-monitored-mode
           (collab--disable))
         (display-warning 'collab
@@ -528,7 +536,7 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
           (setq-local mode-line-misc-info
                       (cons collab--mode-line mode-line-misc-info)))
 
-        (setq-local buffer-undo-list t)
+        ;; (setq-local buffer-undo-list t)
 
         (setq-local collab--pending-ops nil)
         (setq-local collab--ops-current-command nil)
@@ -551,9 +559,9 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
       (delete-overlay (cdr ov)))
     (setq-local collab--cursor-ov-alist nil)
 
+    ;; (setq-local buffer-undo-list nil)
     (setq-local collab--doc-server nil)
-    (setq-local collab--my-site-id nil)
-    (setq-local buffer-undo-list nil)))
+    (setq-local collab--my-site-id nil)))
 
 (defun collab--enable (doc-id server-id my-site-id)
   "Enable ‘collab-monitored-mode’ in the current buffer.
@@ -567,13 +575,13 @@ MY-SITE-ID is the site if of this editor."
   (collab-monitored-mode)
   (let ((pulse-delay 0.1))
     (pulse-momentary-highlight-region
-     (point-min) (point-max) 'diff-refine-added)))
+     (point-min) (point-max) 'collab-success-background)))
 
 (defun collab--disable ()
   "Disable ‘collab’ for the current buffer and flash red."
   (let ((pulse-delay 0.1))
     (pulse-momentary-highlight-region
-     (point-min) (point-max) 'diff-refine-removed))
+     (point-min) (point-max) 'collab-failure-background))
   (collab-monitored-mode -1))
 
 (defvar collab--stashed-state-plist nil
@@ -944,6 +952,11 @@ If REDO is non-nil, redo the most recent undo instead."
 (defvar collab--hub-buffer "*collab*"
   "Buffer name for the hub buffer.")
 
+(defvar collab--current-message nil
+  "If non-nil, collab hub will show this message in the UI.
+This should be let-bound when calling ‘collab-hub’, rather than
+set globally.")
+
 (defmacro collab--save-excursion (&rest body)
   "Save position, execute BODY, and restore point.
 Point is not restored in the face of non-local exit."
@@ -1048,7 +1061,9 @@ If INSERT-STATUS, insert a red DOWN symbol."
   (eldoc-mode))
 
 (defun collab--render ()
-  "Render collab mode buffer."
+  "Render collab mode buffer.
+
+Also insert ‘collab--current-message’ if it’s non-nil."
   (let ((connection-up nil)
         (have-some-file nil))
     ;; Insert headers.
@@ -1078,30 +1093,40 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (insert "0" "\n")
     (insert "\n")
 
+    (when collab--current-message
+      (let ((beg (point)))
+        (insert "\n" collab--current-message "\n\n")
+        (font-lock-append-text-property beg (point) 'face 'diff-added)
+        (insert "\n")))
+
     ;; Insert each server and files.
     (dolist (entry (collab--server-alist))
       (let ((beg (point))
             (server-has-some-file nil))
         (condition-case err
-            (if connection-up
-                (collab--insert-server
-                 (car entry) (nth 0 (cdr entry))
-                 (nth 1 (cdr entry)))
-              ;; (collab--insert-disconnected-server (car entry))
-              )
+            (if (not connection-up)
+                ;; Hide disconnected servers for now..
+                ;; (collab--insert-disconnected-server (car entry))
+                ()
+              (setq server-has-some-file
+                    (collab--insert-server
+                     (car entry) (nth 0 (cdr entry))
+                     (nth 1 (cdr entry))))
+              (when server-has-some-file
+                (insert "\n")))
           (jsonrpc-error
            (delete-region beg (point))
+           ;; Hide disconnected servers for now.
            ;; (collab--insert-disconnected-server (car entry) t)
-           (setq collab--most-recent-error
-                 (format "Error connecting to remote peer: %s" err))))
-        (setq have-some-file (or have-some-file server-has-some-file)))
-      ;; Insert an empty line after a server section.
-      (insert "\n"))
+           ;; (setq collab--most-recent-error
+           ;;       (format "Error connecting to remote peer: %s" err))
+           ))
+        (setq have-some-file (or have-some-file server-has-some-file))))
 
     ;; Footer.
     (unless have-some-file
-      (insert (collab--fairy "No shared docs, not here, not now.
-Shall we create one, and if so, how?\n\n")))
+      (insert "\n" (collab--fairy "No shared docs, not here, not now.
+Shall we create one, and if so, how?\n\n\n")))
 
     (insert (substitute-command-keys
              "PRESS + TO SHARE A FILE
@@ -1272,7 +1297,20 @@ When called interactively, prompt for the server."
                    (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
            (site-id (plist-get resp :siteId)))
-      (collab--enable doc-id server site-id))))
+      (collab--enable doc-id server site-id)
+      (save-excursion
+        (display-buffer collab--hub-buffer
+                        '(() . ((inhibit-same-window . t))))
+        (with-current-buffer collab--hub-buffer
+          (let* ((link (format "%s/%s/%s"
+                               (nth 1 collab-local-server-config)
+                               (nth 0 collab-local-server-config)
+                               doc-id))
+                 (collab--current-message
+                  (collab--fairy "Your file is shared, and here’s the link
+Friends can connect, with just a click!
+LINK: %s" (propertize link 'face 'link))))
+            (collab--refresh)))))))
 
 (defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
