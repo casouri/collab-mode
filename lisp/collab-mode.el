@@ -35,11 +35,11 @@ The value can be ‘pipe’, meaning use stdio for connection,
 or (socket PORT), meaning using a socket connection, and PORT
 should be the port number.")
 
-(defvar collab-local-server-config '("#1" "ws://127.0.0.1:8822")
+(defvar collab-local-server-config '("#1" "ws://linode:8822")
   "A list storing configuration for the local server.
 The list should be (SERVER-ID SIGNALING-SERVER-ADDR).")
 
-(defvar collab-server-alist '(("#2" . ("ws://127.0.0.1:8822" "")))
+(defvar collab-server-alist '(("#2" . ("ws://linode:8822" "")))
   "An alist of server configurations.
 Each key is SERVER-ID, each value is (SIGNALING-SERVER-ADDR
 CREDENTIAL).")
@@ -103,10 +103,13 @@ Both COLOR’S are like ”#RRGGBB”, ALPHA is a float between 0 and 1."
 
 (defun collab--fairy (format-string &rest args)
   "Format string, and append a fairy and the front.
-Behaves like ‘format’ regarding FORMAT-STRING and ARGS,"
-  (apply #'format (concat (if (char-displayable-p ?🧚) "🧚 " "* ")
-                          format-string)
-         args))
+Behaves like ‘format’ regarding FORMAT-STRING and ARGS. It also
+substitutes command keys like docstring, see
+‘substitute-command-keys’."
+  (substitute-command-keys
+   (apply #'format (concat (if (char-displayable-p ?🧚) "🧚 " "* ")
+                           format-string)
+          args)))
 
 ;;; Icons
 
@@ -975,7 +978,7 @@ SERVER is its server id."
 (defun collab--insert-server (server signaling-server credential)
   "Insert SERVER (server id) on SIGNALING-SERVER and its files.
 Server has CREDENTIAL. SIGNALING-SERVER is the address of the
-signaling server."
+signaling server. Return t if the server has some file to list."
   (let ((beg (point)))
     ;; 1. Insert server line.
     (insert (propertize server 'face 'bold
@@ -995,7 +998,11 @@ signaling server."
         (insert (propertize "(empty)\n" 'face 'shadow)))
       ;; 4. Mark server section.
       (add-text-properties beg (point)
-                           `(collab-server-id ,server)))))
+                           `(collab-server-id ,server))
+      ;; Don’t show the local server if there’s no hosted files.
+      (when (and (equal server "self") (null files))
+        (delete-region beg (point)))
+      (if files t nil))))
 
 (defun collab--insert-disconnected-server
     (server &optional insert-status)
@@ -1025,6 +1032,7 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (define-key map (kbd "k") #'collab--disconnect-from-file)
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "A") #'collab--accept-connection)
+    (define-key map (kbd "C") #'collab-connect-to-file)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1041,7 +1049,8 @@ If INSERT-STATUS, insert a red DOWN symbol."
 
 (defun collab--render ()
   "Render collab mode buffer."
-  (let ((connection-up nil))
+  (let ((connection-up nil)
+        (have-some-file nil))
     ;; Insert headers.
     (insert "Connection: ")
     (condition-case err
@@ -1071,22 +1080,33 @@ If INSERT-STATUS, insert a red DOWN symbol."
 
     ;; Insert each server and files.
     (dolist (entry (collab--server-alist))
-      (let ((beg (point)))
+      (let ((beg (point))
+            (server-has-some-file nil))
         (condition-case err
             (if connection-up
                 (collab--insert-server
-                 (car entry) (nth 0 (cdr entry)) (nth 1 (cdr entry)))
-              (collab--insert-disconnected-server (car entry)))
+                 (car entry) (nth 0 (cdr entry))
+                 (nth 1 (cdr entry)))
+              ;; (collab--insert-disconnected-server (car entry))
+              )
           (jsonrpc-error
            (delete-region beg (point))
-           (collab--insert-disconnected-server (car entry) t)
+           ;; (collab--insert-disconnected-server (car entry) t)
            (setq collab--most-recent-error
-                 (format "Error connecting to remote peer: %s" err)))))
+                 (format "Error connecting to remote peer: %s" err))))
+        (setq have-some-file (or have-some-file server-has-some-file)))
       ;; Insert an empty line after a server section.
       (insert "\n"))
 
-    (insert "PRESS + TO CONNECT to REMOTE SERVER\n")
-    (insert "PRESS A TO ACCEPT REMOTE CONNECTIONS (for 180s)\n")
+    ;; Footer.
+    (unless have-some-file
+      (insert (collab--fairy "No shared docs, not here, not now.
+Shall we create one, and if so, how?\n\n")))
+
+    (insert (substitute-command-keys
+             "PRESS + TO SHARE A FILE
+PRESS \\[collab-connect-to-file] TO CONNECT TO A REMOTE DOC
+PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (when collab--most-recent-error
       (insert
        (propertize (concat "\n\nMost recent error:\n\n"
@@ -1159,26 +1179,28 @@ immediately."
     (goto-char (point-min))
     (forward-line (1- line))))
 
-(defun collab--open-file ()
-  "Open the file at point."
+(defun collab--open-file (&optional doc-id server-id)
+  "Open the file at point.
+If SERVER-ID and DOC-ID non-nil, use them instead."
   (interactive)
-  (let* ((doc-id (get-text-property (point) 'collab-doc-id))
-         (file-name (get-text-property (point) 'collab-file-name))
-         (server-id (get-text-property (point) 'collab-server-id))
+  (let* ((doc-id (or doc-id (get-text-property (point) 'collab-doc-id)))
+         (server-id (or server-id
+                        (get-text-property (point) 'collab-server-id)))
          (buf (gethash (cons doc-id server-id)
                        collab--buffer-table)))
-    (if (and buf (buffer-live-p buf))
-        (pop-to-buffer buf)
+    (if (buffer-live-p buf)
+        (display-buffer buf)
       (collab--catch-error (format "can’t connect to Doc(%s)" doc-id)
         (let* ((resp (collab--connect-to-file-req doc-id server-id))
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
+               (file-name (plist-get resp :fileName))
                (inhibit-read-only t))
           (end-of-line)
           (unless (get-text-property (1- (point)) 'collab-status)
             (insert " " (propertize (icon-string 'collab-status-on)
                                     'collab-status t)))
-          (pop-to-buffer
+          (display-buffer
            (generate-new-buffer (concat "*collab: " file-name "*")))
           (collab-monitored-mode -1)
           (erase-buffer)
@@ -1236,9 +1258,8 @@ immediately."
 (defun collab-share-buffer (server file-name)
   "Share the current buffer to SERVER under FILE-NAME.
 When called interactively, prompt for the server."
-  (interactive (list (completing-read
-                      "Server: "
-                      (mapcar #'car (collab--server-alist)))
+  ;; For the moment, always share to local server.
+  (interactive (list "self"
                      (read-string
                       "File name: "
                       (or (and buffer-file-name
@@ -1323,6 +1344,19 @@ its name rather than doc id) to connect."
   (collab--disable)
   (message "Disconnected"))
 
+(defun collab-connect-to-file (share-link)
+  "Connect to the file at SHARE-LINK.
+SHARE-LINK should be in the form of signaling-server/server-id/doc-id."
+  (interactive (list (read-string "Share link: ")))
+  (let* ((segments (split-string share-link "/" nil t))
+         (signaling-addr (nth 0 segments))
+         (server-id (nth 1 segments))
+         (doc-id (nth 2 segments)))
+    (unless (alist-get server-id collab-server-alist nil nil #'equal)
+      (push (cons server-id (list signaling-addr ""))
+            collab-server-alist))
+    (collab--open-file doc-id server-id)))
+
 (defun collab--print-history (&optional debug)
   "Print debugging history for the current buffer.
 If called with an interactive argument (DEBUG), print more
@@ -1395,8 +1429,8 @@ detailed history."
 (defun collab--setup-2 ()
   "Setup test session #2."
   (interactive)
-  (setq collab-server-alist '(("#1" . ("ws://127.0.0.1:8822" "blah"))))
-  (setq collab-local-server-config '("#2" "ws://127.0.0.1:8822"))
+  (setq collab-server-alist '(("#1" . ("ws://linode:8822" "blah"))))
+  (setq collab-local-server-config '("#2" "ws://linode:8822"))
   (setq collab-connection-type '(socket 7702)))
 
 (provide 'collab-mode)
