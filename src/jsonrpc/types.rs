@@ -125,6 +125,7 @@ pub struct DocIdParams {
 pub struct ConnectToFileResp {
     pub content: String,
     pub site_id: SiteId,
+    pub file_name: String,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

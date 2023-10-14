@@ -29,6 +29,7 @@ use tokio_stream::StreamExt;
 /// Represents a local or remote document.
 pub struct Doc {
     doc_id: DocId,
+    file_name: String,
     engine: Arc<Mutex<ClientEngine>>,
     remote_op_buffer: Arc<Mutex<Vec<FatOp>>>,
     /// server: CollabServer,
@@ -57,7 +58,13 @@ impl Doc {
         let (err_tx, err_rx) = mpsc::channel(2);
         let doc_id = server.share_file(file_name, file).await?;
 
-        let mut doc = make_doc(server.site_id(), doc_id.clone(), 0, err_rx);
+        let mut doc = make_doc(
+            server.site_id(),
+            doc_id.clone(),
+            file_name.to_string(),
+            0,
+            err_rx,
+        );
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
         let notifier_tx = Arc::clone(&doc.new_ops_tx);
@@ -111,7 +118,13 @@ impl Doc {
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
         let site_id = server.site_id();
-        let mut doc = make_doc(site_id.clone(), doc_id.clone(), snapshot.seq, err_rx);
+        let mut doc = make_doc(
+            site_id.clone(),
+            doc_id.clone(),
+            snapshot.file_name,
+            snapshot.seq,
+            err_rx,
+        );
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
         let notifier_tx = Arc::clone(&doc.new_ops_tx);
@@ -156,6 +169,11 @@ impl Doc {
     /// Get the id of this doc.
     pub fn doc_id(&self) -> DocId {
         self.doc_id.clone()
+    }
+
+    /// Get the file name of this doc.
+    pub fn file_name(&self) -> String {
+        self.file_name.clone()
     }
 
     /// Get the notifier channel for this doc. The channel is notified
@@ -259,6 +277,7 @@ impl Doc {
 fn make_doc(
     site_id: SiteId,
     doc_id: DocId,
+    file_name: String,
     base_seq: GlobalSeq,
     err_rx: mpsc::Receiver<CollabError>,
 ) -> Doc {
@@ -269,6 +288,7 @@ fn make_doc(
     Doc {
         doc_id: doc_id.clone(),
         engine: engine.clone(),
+        file_name,
         remote_op_buffer,
         site_seq: 0,
         new_ops_tx: Arc::new(notifier_tx),

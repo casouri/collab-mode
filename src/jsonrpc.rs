@@ -454,9 +454,14 @@ impl JSONRPCServer {
             self.notifier_tx.clone(),
         )
         .await?;
+        let file_name = doc.file_name();
         self.doc_map
             .insert(DocDesignator::new(&params.doc_id, &params.server_id), doc);
-        let resp = ConnectToFileResp { content, site_id };
+        let resp = ConnectToFileResp {
+            content,
+            site_id,
+            file_name,
+        };
         Ok(resp)
     }
 

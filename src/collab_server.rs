@@ -142,6 +142,7 @@ impl Doc {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             buffer: self.buffer.to_string(),
+            file_name: self.name.clone(),
             seq: self.engine.current_seq(),
         }
     }

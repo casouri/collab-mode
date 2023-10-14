@@ -96,6 +96,8 @@ pub enum CollabNotification {
 pub struct Snapshot {
     /// The file content.
     pub buffer: String,
+    /// File name of the doc.
+    pub file_name: String,
     /// Sequence number of the last op.
     pub seq: GlobalSeq,
 }
