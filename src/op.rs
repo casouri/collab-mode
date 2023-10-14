@@ -230,16 +230,33 @@ fn transform_di_with_recover(
     for recover_op in recover_list {
         let recover_op_start = recover_op.0;
         let recover_op_end = recover_op_start + recover_op.1.len() as u64;
+        // |  recover_op  |
+        //    |  base  |
+        if recover_op_start < base_start && recover_op_end > base_end {
+            let mid1 = (base_start - recover_op_start) as usize;
+            let mid2 = (recover_op_end - base_end) as usize;
+            let recover_op_stay_1 = (recover_op_start, recover_op.1[..mid1].to_string());
+            let recover_op_stay_2 = (base_end, recover_op.1[mid1..mid2].to_string());
+            merge_in(base.clone(), &mut new_ops);
+            assert!(recover_op_stay_1.1.len() > 0);
+            new_recover_list.push(recover_op_stay_1);
+            assert!(recover_op_stay_2.1.len() > 0);
+            new_recover_list.push(recover_op_stay_2);
+        }
+        //    |  recover_op  |
+        // |       base         |
+        else if recover_op_start > base_start && recover_op_end < base_end {
+            new_recover_list.push(recover_op.clone());
+        }
         //      |  recover_op  |
         // |  base  |
-        if recover_op_start < base_end && recover_op_end > base_start {
+        else if recover_op_start < base_end && recover_op_end > base_start {
             let mid = (base_end - recover_op_start) as usize;
             let recover_op_merge = (recover_op_start, recover_op.1[..mid].to_string());
             let recover_op_stay = (base_end, recover_op.1[mid..].to_string());
             merge_in(recover_op_merge, &mut new_ops);
-            if recover_op_stay.1.len() > 0 {
-                new_recover_list.push(recover_op_stay);
-            }
+            assert!(recover_op_stay.1.len() > 0);
+            new_recover_list.push(recover_op_stay);
         }
         // |  recover_op  |
         //           |  base  |
@@ -248,9 +265,8 @@ fn transform_di_with_recover(
             let recover_op_stay = (recover_op_start, recover_op.1[..mid].to_string());
             let recover_op_merge = (base_start, recover_op.1[mid..].to_string());
             merge_in(recover_op_merge, &mut new_ops);
-            if recover_op_stay.1.len() > 0 {
-                new_recover_list.push(recover_op_stay);
-            }
+            assert!(recover_op_stay.1.len() > 0);
+            new_recover_list.push(recover_op_stay);
         } else {
             new_recover_list.push(recover_op.clone());
         }
