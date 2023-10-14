@@ -392,7 +392,8 @@ So that the idle timer can send its pending ops.")
           (`(,rbeg ,rend ,content)
            (if (<= rbeg beg end rend)
 
-               (let ((old (substring content (- beg rbeg) len))
+               (let ((old (substring
+                           content (- beg rbeg) (+ (- beg rbeg) len)))
                      (current (buffer-substring-no-properties beg end)))
                  (if (eq beg end)
                      ;; b) Delete.
