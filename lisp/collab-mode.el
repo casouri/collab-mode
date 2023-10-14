@@ -1314,7 +1314,8 @@ When called interactively, prompt for the server."
                   (collab--fairy "Your file is shared, and here’s the link
 Friends can connect, with just a click!
 LINK: %s" (propertize link 'face 'link))))
-            (collab--refresh)))))))
+            (collab--refresh))
+          (collab--accept-connection))))))
 
 (defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
