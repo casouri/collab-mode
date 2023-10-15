@@ -464,7 +464,8 @@ impl<O: Operation> FatOp<O> {
 
     /// Transform `self` against every op in `ops` sequentially.
     pub fn batch_transform(&mut self, ops: &[FatOp<O>]) {
-        let skip_map = find_ops_to_skip(ops);
+        // let skip_map = find_ops_to_skip(ops);
+        let skip_map = vec![false; ops.len()];
         self.batch_transform_1(ops, &skip_map[..])
     }
 
@@ -486,7 +487,8 @@ impl<O: Operation> FatOp<O> {
     /// the meantime, transform every op in `ops` against `self`, and
     /// return the new `ops`.
     pub fn symmetric_transform(&mut self, ops: &[FatOp<O>]) -> Vec<FatOp<O>> {
-        let skip_map = find_ops_to_skip(ops);
+        // let skip_map = find_ops_to_skip(ops);
+        let skip_map = vec![false; ops.len()];
         self.symmetric_transform_1(ops, &skip_map[..])
     }
 
@@ -547,8 +549,10 @@ pub fn quatradic_transform<O: Operation>(
     mut ops1: Vec<FatOp<O>>,
     mut ops2: Vec<FatOp<O>>,
 ) -> (Vec<FatOp<O>>, Vec<FatOp<O>>) {
-    let skip1 = find_ops_to_skip(&ops1[..]);
-    let skip2 = find_ops_to_skip(&ops2[..]);
+    // let skip1 = find_ops_to_skip(&ops1[..]);
+    // let skip2 = find_ops_to_skip(&ops2[..]);
+    let skip1 = vec![false; ops1.len()];
+    let skip2 = vec![false; ops2.len()];
 
     let mut idx2 = 0;
     for op2 in &mut ops2 {
