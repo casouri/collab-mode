@@ -122,10 +122,12 @@ impl GlobalHistory {
                     idx_of_orig = *self.undo_queue.last().unwrap();
                     self.undo_tip = Some(self.undo_queue.len() - 1);
                 }
-                // Next redo will undo this undo op.
-                self.undo_queue[self.undo_tip.unwrap()] = op_seq;
+                // Always undo/redo the original op. The original op
+                // has the original intent, the inverse are
+                // distorted and intent is lost.
+                // self.undo_queue[self.undo_tip.unwrap()] = op_seq;
                 let seq_of_orig = idx_of_orig + 1;
-                Ok(OpKind::Undo(seq_of_new_op - seq_of_orig as usize))
+                Ok(OpKind::Undo(seq_of_new_op - seq_of_orig as usize, true))
             }
             EditorOpKind::Redo => {
                 if let Some(idx) = self.undo_tip {
@@ -135,10 +137,12 @@ impl GlobalHistory {
                     } else {
                         self.undo_tip = Some(idx + 1);
                     }
-                    // Next undo will undo this redo op.
-                    self.undo_queue[idx] = op_seq;
+                    // Always undo/redo the original op. The original op
+                    // has the original intent, the inverse are
+                    // distorted and intent is lost.
+                    // self.undo_queue[idx] = op_seq;
                     let seq_of_inverse = idx_of_inverse + 1;
-                    Ok(OpKind::Undo(seq_of_new_op - seq_of_inverse as usize))
+                    Ok(OpKind::Undo(seq_of_new_op - seq_of_inverse as usize, false))
                 } else {
                     Err(EngineError::UndoError("No ops to redo".to_string()))
                 }
@@ -151,7 +155,8 @@ impl GlobalHistory {
         fn print_kind(kind: OpKind) -> &'static str {
             match kind {
                 OpKind::Original => "O",
-                OpKind::Undo(_) => "U",
+                OpKind::Undo(_, true) => "U",
+                OpKind::Undo(_, false) => "R",
             }
         }
 
@@ -196,7 +201,8 @@ impl GlobalHistory {
         fn print_kind(kind: OpKind, seq: GlobalSeq) -> String {
             match kind {
                 OpKind::Original => "O".to_string(),
-                OpKind::Undo(delta) => format!("U({})", seq - delta as u32),
+                OpKind::Undo(delta, true) => format!("U({})", seq - delta as u32),
+                OpKind::Undo(delta, false) => format!("R({})", seq - delta as u32),
             }
         }
 
@@ -387,7 +393,7 @@ impl ClientEngine {
 
         match &op.kind {
             OpKind::Original => self.gh.undo_queue.push(inferred_seq),
-            OpKind::Undo(_) => (),
+            OpKind::Undo(_, _) => (),
         }
 
         self.gh.local.push(op);
@@ -434,9 +440,9 @@ impl ClientEngine {
             let mut offset = 0;
             for op in &mut self.gh.local {
                 let kind = op.kind;
-                if let OpKind::Undo(delta) = kind {
+                if let OpKind::Undo(delta, undo_p) = kind {
                     if offset < delta {
-                        op.kind = OpKind::Undo(delta + 1);
+                        op.kind = OpKind::Undo(delta + 1, undo_p);
                     }
                 }
                 offset += 1;
@@ -504,7 +510,10 @@ impl ClientEngine {
             }
             prev_group_seq = Some(op.group_seq);
 
-            op.inverse();
+            // We always undo/redo the original op.
+            if !redo {
+                op.inverse();
+            }
             let seq = self.gh.undo_queue[idxidx];
             let mut transform_base = self.gh.all_ops_after(seq);
             transform_base.extend_from_slice(&ops[..]);
