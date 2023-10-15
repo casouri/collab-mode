@@ -1113,10 +1113,11 @@ Also insert ‘collab--current-message’ if it’s non-nil."
                      (car entry) (nth 0 (cdr entry))
                      (nth 1 (cdr entry)))))
           (jsonrpc-error
-           (delete-region beg (point))
-           (collab--insert-disconnected-server (car entry) t)
-           (setq collab--most-recent-error
-                 (format "Error connecting to remote peer: %s" err))))
+           (unless (equal (car entry) "self")
+             (delete-region beg (point))
+             (collab--insert-disconnected-server (car entry) t)
+             (setq collab--most-recent-error
+                   (format "Error connecting to remote peer: %s" err)))))
         (setq have-some-file (or have-some-file server-has-some-file)))
       (insert "\n"))
 
@@ -1255,8 +1256,8 @@ If SERVER-ID and DOC-ID non-nil, use them instead."
 (defun collab--delete-file ()
   "Delete the file at point."
   (interactive)
-  (let ((doc-id (get-text-property (point) 'collab-doc-id))
-        (server-id (get-text-property (point) 'collab-server-id)))
+  (when-let ((doc-id (get-text-property (point) 'collab-doc-id))
+             (server-id (get-text-property (point) 'collab-server-id)))
     (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
       (collab--delete-file-req doc-id server-id))
     (collab--refresh)))
