@@ -1107,23 +1107,18 @@ Also insert ‘collab--current-message’ if it’s non-nil."
             (server-has-some-file nil))
         (condition-case err
             (if (not connection-up)
-                ;; Hide disconnected servers for now..
-                ;; (collab--insert-disconnected-server (car entry))
-                ()
+                (collab--insert-disconnected-server (car entry))
               (setq server-has-some-file
                     (collab--insert-server
                      (car entry) (nth 0 (cdr entry))
-                     (nth 1 (cdr entry))))
-              (when server-has-some-file
-                (insert "\n")))
+                     (nth 1 (cdr entry)))))
           (jsonrpc-error
            (delete-region beg (point))
-           ;; Hide disconnected servers for now.
-           ;; (collab--insert-disconnected-server (car entry) t)
-           ;; (setq collab--most-recent-error
-           ;;       (format "Error connecting to remote peer: %s" err))
-           ))
-        (setq have-some-file (or have-some-file server-has-some-file))))
+           (collab--insert-disconnected-server (car entry) t)
+           (setq collab--most-recent-error
+                 (format "Error connecting to remote peer: %s" err))))
+        (setq have-some-file (or have-some-file server-has-some-file)))
+      (insert "\n"))
 
     ;; Footer.
     (unless have-some-file
