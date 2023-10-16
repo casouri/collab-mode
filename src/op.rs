@@ -26,10 +26,9 @@ pub type GroupSeq = u32;
 pub enum OpKind {
     /// Original op.
     Original,
-    /// An undo (or redo) op that undoes (or redoes) the ops this many
-    /// counts before the referrer op in history. The second arg is
-    /// true for undo, false for redo.
-    Undo(usize, bool),
+    /// An undo op that undoes the ops this many counts before the
+    /// referrer op in history.
+    Undo(usize),
 }
 
 // *** Trait
@@ -526,19 +525,13 @@ impl<O: Operation> FatOp<O> {
 /// transformation. An op is skipped if there is an undo op that
 /// undoes it. Returns a bitmap, if bitmap[i] = true, skip ops[i]
 /// during transformation.
-///
-/// NOTE: Since we now always undo/redo the ORIGINAL op and don't skip
-/// ops now, the skipping function is both broken and unused. (In
-/// order to work, the algorithm relies on the premise that each op
-/// records the immediate op it undoes, but now all undo/redo ops
-/// records the very original op instead.)
 pub fn find_ops_to_skip<O>(ops: &[FatOp<O>]) -> Vec<bool> {
     if ops.len() == 0 {
         return vec![];
     }
     let mut bitmap = vec![false; ops.len()];
     for idx in (0..ops.len()).rev() {
-        if let OpKind::Undo(delta, _) = ops[idx].kind {
+        if let OpKind::Undo(delta) = ops[idx].kind {
             if !bitmap[idx] && idx >= delta {
                 // It's possible for delta to be greater than idx, in
                 // that case the inverse is in `ops` but the original
@@ -602,7 +595,7 @@ mod tests {
             site_seq: 1, // Dummy value.
             doc: 0,
             op,
-            kind: OpKind::Undo(undo_delta, true),
+            kind: OpKind::Undo(undo_delta),
             group_seq: 1, // Dummy value.
         }
     }
