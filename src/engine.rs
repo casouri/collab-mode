@@ -3,6 +3,7 @@
 
 use crate::{op::quatradic_transform, types::*};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::result::Result;
 use thiserror::Error;
 
@@ -31,6 +32,50 @@ impl ContextOps {
     }
 }
 
+/// A range in the full document. Each range is either a live text
+/// (not deleted) or dead text (deleted). All the ranges should be in
+/// order, connect, and don't overlap.
+#[derive(Debug, Clone)]
+enum Range {
+    /// Live text, (pos, len).
+    Live(u64, u64),
+    /// Tombstone, (pos, text).
+    Dead(u64, String),
+}
+
+/// A cursor in the full document (which contains tombstones). This
+/// cursor also tracks the editor document's position. Translating
+/// between editor position and full document position around a cursor
+/// is very fast.
+#[derive(Debug, Clone)]
+struct Cursor {
+    /// The position of this cursor in the editor's document. This
+    /// position doesn't account for the tombstones.
+    editor_pos: u64,
+    /// The actual position in the full document containing tombstones.
+    full_pos: u64,
+    /// The index of the nearest tombestone in the graveyard that's
+    /// positioned after the cursor.
+    tombestone_idx: Option<usize>,
+}
+
+/// The full document that contains both live text and tombstones.
+#[derive(Debug, Clone)]
+struct FullDoc {
+    ranges: Vec<Range>,
+    /// Cursor for each site.
+    cursors: HashMap<SiteId, Cursor>,
+}
+
+impl Default for FullDoc {
+    fn default() -> Self {
+        FullDoc {
+            ranges: vec![],
+            cursors: HashMap::new(),
+        }
+    }
+}
+
 /// Global history buffer. The whole buffer is made of global_buffer +
 /// local_buffer.
 #[derive(Debug, Clone)]
@@ -49,7 +94,23 @@ struct GlobalHistory {
     undo_queue: Vec<GlobalSeq>,
     /// An index into `local_ops`. Points to the currently undone op.
     undo_tip: Option<usize>,
+    /// The full document.
+    full_doc: FullDoc,
 }
+
+impl Default for GlobalHistory {
+    fn default() -> Self {
+        GlobalHistory {
+            global: vec![],
+            local: vec![],
+            undo_queue: vec![],
+            undo_tip: None,
+            full_doc: FullDoc::default(),
+        }
+    }
+}
+
+// *** GlobalHistory
 
 impl GlobalHistory {
     /// Get the global ops with sequence number larger than `seq`.
@@ -240,6 +301,8 @@ impl GlobalHistory {
     }
 }
 
+// *** Client and server engine
+
 /// OT control algorithm engine for client. Used by
 /// [crate::collab_client::Doc].
 #[derive(Debug, Clone)]
@@ -308,17 +371,12 @@ pub enum EngineError {
 
 type EngineResult<T> = Result<T, EngineError>;
 
-// *** Processing functions
+// *** ClientEngine DO
 
 impl ClientEngine {
     pub fn new(site: SiteId, base_seq: GlobalSeq) -> ClientEngine {
         ClientEngine {
-            gh: GlobalHistory {
-                global: vec![],
-                local: vec![],
-                undo_queue: vec![],
-                undo_tip: None,
-            },
+            gh: GlobalHistory::default(),
             site,
             current_seq: base_seq,
             current_site_seq: 0,
@@ -459,7 +517,11 @@ impl ClientEngine {
             Ok(Some(op))
         }
     }
+}
 
+// *** ClientEngine UNDO
+
+impl ClientEngine {
     /// Generate undo or redo ops from the current undo tip.
     fn generate_undo_op_1(&mut self, redo: bool) -> Vec<EditorOp> {
         let mut idxidx;
@@ -540,15 +602,12 @@ impl ClientEngine {
     }
 }
 
+// *** ServerEngine
+
 impl ServerEngine {
     pub fn new() -> ServerEngine {
         ServerEngine {
-            gh: GlobalHistory {
-                global: vec![],
-                local: vec![],
-                undo_queue: vec![],
-                undo_tip: None,
-            },
+            gh: GlobalHistory::default(),
             current_seq: 0,
         }
     }
