@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::result::Result;
 use thiserror::Error;
 
-// *** Data structure
+// *** Data structures
 
 /// A continuous series of local ops with a context. Used by clients
 /// to send multiple ops to the server at once. The context sequence
@@ -32,38 +32,82 @@ impl ContextOps {
     }
 }
 
+// *** FullDoc
+
 /// A range in the full document. Each range is either a live text
 /// (not deleted) or dead text (deleted). All the ranges should be in
 /// order, connect, and don't overlap.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Range {
-    /// Live text, (pos, len).
-    Live(u64, u64),
-    /// Tombstone, (pos, text).
-    Dead(u64, String),
+    /// Live text, (len).
+    Live(u64),
+    /// Tombstone, (text).
+    Dead(String),
+}
+
+impl Range {
+    /// Return true for live text, false for dead text.
+    fn is_live(&self) -> bool {
+        match self {
+            Self::Live(_) => true,
+            Self::Dead(_) => false,
+        }
+    }
+    /// Return the length of the range.
+    fn len(&self) -> u64 {
+        match self {
+            Self::Live(len) => *len,
+            Self::Dead(text) => text.len() as u64,
+        }
+    }
+
+    /// Return the length of this range. If this range is dead, return
+    /// 0.
+    fn live_len(&self) -> u64 {
+        if self.is_live() {
+            self.len()
+        } else {
+            0
+        }
+    }
 }
 
 /// A cursor in the full document (which contains tombstones). This
 /// cursor also tracks the editor document's position. Translating
 /// between editor position and full document position around a cursor
 /// is very fast.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Cursor {
     /// The position of this cursor in the editor's document. This
     /// position doesn't account for the tombstones.
     editor_pos: u64,
     /// The actual position in the full document containing tombstones.
     full_pos: u64,
-    /// The index of the nearest tombestone in the graveyard that's
-    /// positioned after the cursor.
-    tombestone_idx: Option<usize>,
+    /// The index of the range in which this cursor is. range.start <=
+    /// cursor.full_pos < range.end.
+    range_idx: Option<usize>,
+}
+
+impl Cursor {
+    // Return the editor_pos if `editor_pos` is true; return full_pos
+    // otherwise.
+    fn pos(&self, editor_pos: bool) -> u64 {
+        if editor_pos {
+            self.editor_pos
+        } else {
+            self.full_pos
+        }
+    }
 }
 
 /// The full document that contains both live text and tombstones.
 #[derive(Debug, Clone)]
 struct FullDoc {
+    /// Ranges fully covering the document. The ranges are coalesced
+    /// after every insertion and deletion, so there should never be
+    /// two consecutive ranges that has the same liveness.
     ranges: Vec<Range>,
-    /// Cursor for each site.
+    /// Cursor for each site. TODO: cursors garbage collect?
     cursors: HashMap<SiteId, Cursor>,
 }
 
@@ -75,6 +119,224 @@ impl Default for FullDoc {
         }
     }
 }
+
+impl FullDoc {
+    fn get_cursor(&mut self, site: &SiteId) -> Cursor {
+        if self.cursors.get(site).is_none() {
+            let cursor = Cursor {
+                editor_pos: 0,
+                full_pos: 0,
+                range_idx: None,
+            };
+            self.cursors.insert(site.clone(), cursor);
+        }
+        self.cursors.get(site).unwrap().clone()
+    }
+
+    /// Convert a editor pos to a full doc pos if `editor_pos` is
+    /// true, and the other way around if false. This also moves the
+    /// cursor to around editor pos. Unless there is no ranges in the
+    /// doc, `cursor` must points to a range after this function
+    /// returns (unless there's no range).
+    fn convert_pos(&self, pos: u64, cursor: &mut Cursor, editor_pos: bool) -> u64 {
+        if pos == 0 {
+            // `cursor` must points to a range after this function
+            // returns.
+            if self.ranges.len() > 0 {
+                cursor.range_idx = Some(0);
+            }
+            return 0;
+        }
+        if pos == cursor.pos(editor_pos) {
+            return cursor.full_pos;
+        }
+        if self.ranges.len() == 0 {
+            return 0;
+        }
+        let mut range_idx = cursor.range_idx.unwrap_or(0);
+        if range_idx == 0 {
+            cursor.editor_pos = 0;
+            cursor.full_pos = 0;
+        }
+        let mut range = &self.ranges[range_idx];
+
+        // At this point, `cursor` is at the beginning of `range`.
+        // This should not change.
+
+        // We go forward/backward until `editor_op` lies within
+        // `range` (range.beg <= editor_op <= range.end).
+        if pos > cursor.pos(editor_pos) {
+            while pos
+                > cursor.pos(editor_pos)
+                    + if editor_pos {
+                        range.live_len()
+                    } else {
+                        range.len()
+                    }
+            {
+                cursor.full_pos += range.len();
+                if range.is_live() {
+                    cursor.editor_pos += range.len();
+                }
+                range_idx += 1;
+                cursor.range_idx = Some(range_idx);
+                range = &self.ranges[range_idx];
+            }
+        } else {
+            while pos < cursor.pos(editor_pos) {
+                range_idx -= 1;
+                range = &self.ranges[range_idx];
+                cursor.range_idx = Some(range_idx);
+
+                cursor.full_pos -= range.len();
+                if range.is_live() {
+                    cursor.editor_pos -= range.len();
+                }
+            }
+        }
+        // `cursor` must points to a range after this function
+        // returns.
+        cursor.range_idx = Some(range_idx);
+        // At this point, `pos` should be within `range`. And
+        // `cursor` is at the beginning of `range`.
+        if editor_pos {
+            // Editor pos -> full pos.
+            cursor.pos(!editor_pos) + (pos - cursor.pos(editor_pos))
+        } else {
+            // Full pos -> editor pos.
+            cursor.pos(!editor_pos)
+                + if range.is_live() {
+                    pos - cursor.pos(editor_pos)
+                } else {
+                    0
+                }
+        }
+    }
+
+    /// Shift all the cursors whose range_idx is equal or after `idx`
+    /// by `delta` to the right, and shift their range_idx by
+    /// `range_idx_delta` to the right.
+    fn shift_cursors_right(&mut self, idx: usize, delta: u64, range_idx_delta: usize) {
+        for (site, cursor) in self.cursors.iter_mut() {
+            if let Some(cursor_idx) = cursor.range_idx {
+                if cursor_idx >= idx {
+                    cursor.full_pos += delta;
+                    cursor.editor_pos += delta;
+                    cursor.range_idx = Some(cursor_idx + range_idx_delta);
+                }
+            }
+        }
+    }
+
+    /// Shift all the cursors whose range_idx is equal or after `idx`
+    /// by `delta` to the left, and shift their range_idx by
+    /// `range_idx_delta` to the left.
+    fn shift_cursors_left(&mut self, idx: usize, delta: u64, range_idx_delta: usize) {
+        for (_, cursor) in self.cursors.iter_mut() {
+            if let Some(cursor_idx) = cursor.range_idx {
+                if cursor_idx >= idx {
+                    cursor.full_pos -= delta;
+                    cursor.editor_pos -= delta;
+                    cursor.range_idx = Some(cursor_idx - range_idx_delta);
+                }
+            }
+        }
+    }
+
+    /// Apply an insertion as full position `pos` of `len` characters.
+    /// `cursor` should point to the range that receives the
+    /// insertion.
+    fn apply_ins(&mut self, pos: u64, len: u64, cursor: &mut Cursor) {
+        if self.ranges.len() == 0 {
+            // (a)
+            self.ranges.push(Range::Live(len));
+            return;
+        }
+        let range_idx = cursor.range_idx.unwrap();
+        let range = &mut self.ranges[range_idx];
+        let range_beg = cursor.full_pos;
+        let range_end = range_beg + range.len();
+
+        assert!(range_beg <= pos);
+        assert!(pos <= range_end);
+        if range.is_live() {
+            // (b)
+            *range = Range::Live(range.len() + len);
+            self.shift_cursors_right(range_idx + 1, len, 0);
+            return;
+        }
+        // `pos` at beginning of a dead range.
+        if range_beg == pos {
+            // Is there a range before this range?
+            if range_idx >= 1 {
+                // (c)
+                let range_before = &mut self.ranges[range_idx - 1];
+                assert!(range_before.is_live());
+                *range_before = Range::Live(range_before.len() + len);
+                self.shift_cursors_right(range_idx, len, 0);
+                cursor.full_pos += len;
+                cursor.editor_pos += len;
+            } else {
+                // (d)
+                self.ranges.insert(range_idx, Range::Live(len));
+                self.shift_cursors_right(range_idx, len, 1);
+                cursor.full_pos += len;
+                cursor.editor_pos += len;
+                cursor.range_idx = Some(range_idx + 1);
+            }
+            return;
+        }
+        // `pos` at the end of a dead range.
+        if range_end == pos {
+            if range_idx + 1 < self.ranges.len() {
+                // (e)
+                let range_after = &mut self.ranges[range_idx + 1];
+                assert!(range_after.is_live());
+                *range_after = Range::Live(range_after.len() + len);
+                self.shift_cursors_right(range_idx + 2, len, 0);
+            } else {
+                // (f)
+                self.ranges.push(Range::Live(len));
+            }
+            return;
+        }
+        // (g) `pos` inside a dead range.
+        let mid = (pos - range_beg) as usize;
+        if let Range::Dead(text) = range {
+            //    |                 range                   |
+            // -> |  left_half  |   middle   |  right_half  |
+            //               ^
+            //               cursor
+            let left_half = Range::Dead(text[..mid].to_string());
+            let right_half = Range::Dead(text[mid..].to_string());
+            let middle = Range::Live(len);
+            self.ranges.remove(range_idx);
+            self.ranges.insert(range_idx, right_half);
+            self.ranges.insert(range_idx, middle);
+            self.ranges.insert(range_idx, left_half);
+            self.shift_cursors_right(range_idx + 1, len, 2);
+            cursor.full_pos = pos;
+            cursor.editor_pos = cursor.editor_pos; // Don't change.
+            cursor.range_idx = Some(range_idx + 1);
+        } else {
+            panic!();
+        }
+    }
+
+    // Convert the position of `op` to full doc position, and apply it
+    // to the full doc.
+    fn process_local_op(&mut self, op: &mut FatOp) {
+        let mut cursor = self.get_cursor(&op.site);
+        // match op.op {
+        //     Op::Ins((pos, text)) => {
+        //         let full_pos = self.convert_pos(pos, &mut cursor, true);
+        //     }
+        // }
+        todo!();
+    }
+}
+
+// *** GlobalHistory
 
 /// Global history buffer. The whole buffer is made of global_buffer +
 /// local_buffer.
@@ -109,8 +371,6 @@ impl Default for GlobalHistory {
         }
     }
 }
-
-// *** GlobalHistory
 
 impl GlobalHistory {
     /// Get the global ops with sequence number larger than `seq`.
@@ -882,9 +1142,211 @@ mod tests {
 
         println!("undo_ops: {:?}", undo_ops);
 
-        assert!(undo_ops[0] == Op::Del(vec![(1, "}".to_string())], vec![]));
-        assert!(undo_ops[1] == Op::Del(vec![(0, "{".to_string())], vec![]));
-        assert!(undo_ops[2] == Op::Ins((0, "{".to_string())));
-        assert!(undo_ops[3] == Op::Del(vec![(0, "{".to_string())], vec![]));
+        assert!(undo_ops[0] == EditorOp::Del(vec![(1, "}".to_string())]));
+        assert!(undo_ops[1] == EditorOp::Del(vec![(0, "{".to_string())]));
+        assert!(undo_ops[2] == EditorOp::Ins((0, "{".to_string())));
+        assert!(undo_ops[3] == EditorOp::Del(vec![(0, "{".to_string())]));
+    }
+
+    #[test]
+    fn test_convert_pos() {
+        let mut doc = FullDoc::default();
+        doc.ranges = vec![
+            Range::Live(10),
+            Range::Dead("xxxxxxxxxx".to_string()),
+            Range::Live(10),
+        ];
+        let mut cursor = doc.get_cursor(&0);
+
+        // Cursor go forward.
+        assert!(doc.convert_pos(10, &mut cursor, true) == 10);
+        // The cursor must point to a range after calling
+        // `convert_pos`.
+        assert!(cursor.editor_pos == 0 && cursor.full_pos == 0 && cursor.range_idx == Some(0));
+
+        assert!(doc.convert_pos(11, &mut cursor, true) == 21);
+        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+
+        assert!(doc.convert_pos(20, &mut cursor, true) == 30);
+        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+
+        // Cursor go back.
+        assert!(doc.convert_pos(15, &mut cursor, true) == 25);
+        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+
+        assert!(doc.convert_pos(9, &mut cursor, true) == 9);
+        assert!(cursor.editor_pos == 0 && cursor.full_pos == 0 && cursor.range_idx == Some(0));
+
+        // Full pos to editor pos.
+        assert!(doc.convert_pos(1, &mut cursor, false) == 1);
+        assert!(cursor.editor_pos == 0 && cursor.full_pos == 0 && cursor.range_idx == Some(0));
+
+        assert!(doc.convert_pos(15, &mut cursor, false) == 10);
+        assert!(cursor.editor_pos == 10 && cursor.full_pos == 10 && cursor.range_idx == Some(1));
+
+        assert!(doc.convert_pos(20, &mut cursor, false) == 10);
+        assert!(cursor.editor_pos == 10 && cursor.full_pos == 10 && cursor.range_idx == Some(1));
+
+        assert!(doc.convert_pos(21, &mut cursor, false) == 11);
+        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+    }
+
+    fn vec_eq<T: Eq>(vec1: &Vec<T>, vec2: &Vec<T>) -> bool {
+        vec1.len() == vec2.len() && vec1.iter().zip(vec2).filter(|&(a, b)| a != b).count() == 0
+    }
+
+    #[test]
+    fn test_apply_ins() {
+        let mut doc = FullDoc::default();
+        let mut cursor = doc.get_cursor(&0);
+
+        doc.cursors.insert(
+            1,
+            Cursor {
+                editor_pos: 0,
+                full_pos: 0,
+                range_idx: None,
+            },
+        );
+
+        // (a)
+        doc.convert_pos(0, &mut cursor, true);
+        doc.apply_ins(0, 10, &mut cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(10)]));
+        assert!(cursor.full_pos == 0);
+        assert!(cursor.editor_pos == 0);
+        // [Live(10)]
+        let cursor1 = doc.cursors.get(&1).unwrap();
+        assert!(cursor1.full_pos == 0);
+        assert!(cursor1.editor_pos == 0);
+        assert!(cursor1.range_idx == None);
+
+        // (b)
+        doc.convert_pos(0, &mut cursor, true);
+        doc.apply_ins(0, 10, &mut cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(20)]));
+        assert!(cursor.full_pos == 0);
+        assert!(cursor.editor_pos == 0);
+        assert!(cursor.range_idx == Some(0));
+        // [Live(20)]
+
+        doc.cursors.insert(
+            2,
+            Cursor {
+                editor_pos: 20,
+                full_pos: 20,
+                range_idx: Some(1),
+            },
+        );
+
+        // (c)
+        doc.ranges.push(Range::Dead("xxxxxxxxxx".to_string()));
+        // [Live(20) Dead(10)]
+        cursor.full_pos = 20;
+        cursor.editor_pos = 20;
+        cursor.range_idx = Some(1);
+        doc.apply_ins(20, 10, &mut cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![Range::Live(30), Range::Dead("xxxxxxxxxx".to_string())]
+        ));
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(cursor.full_pos == 30);
+        assert!(cursor.editor_pos == 30);
+        assert!(cursor.range_idx == Some(1));
+        // [Live(30) Dead(10)]
+
+        let cursor2 = doc.cursors.get(&2).unwrap();
+        assert!(cursor2.full_pos == 30);
+        assert!(cursor2.editor_pos == 30);
+        assert!(cursor2.range_idx == Some(1));
+
+        // (d)
+        doc.ranges.remove(0);
+        // [Dead(10)]
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+        doc.apply_ins(0, 10, &mut cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![Range::Live(10), Range::Dead("xxxxxxxxxx".to_string())]
+        ));
+        assert!(cursor.full_pos == 10);
+        assert!(cursor.editor_pos == 10);
+        assert!(cursor.range_idx == Some(1));
+        // [Live(10) Dead(10)];
+
+        // (f)
+        cursor.full_pos = 10;
+        cursor.editor_pos = 10;
+        cursor.range_idx = Some(1);
+        doc.apply_ins(20, 10, &mut cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![
+                Range::Live(10),
+                Range::Dead("xxxxxxxxxx".to_string()),
+                Range::Live(10)
+            ]
+        ));
+        // [Live(10) Dead(10) Live(10)]
+
+        // (e)
+        doc.ranges.push(Range::Dead("xxxxxxxxxx".to_string()));
+        // [Live(10) Dead(10) Live(10) Dead(10)]
+        doc.apply_ins(20, 10, &mut cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![
+                Range::Live(10),
+                Range::Dead("xxxxxxxxxx".to_string()),
+                Range::Live(20),
+                Range::Dead("xxxxxxxxxx".to_string()),
+            ]
+        ));
+        // [Live(10) Dead(10) Live(20) Dead(10)]
+
+        doc.cursors.insert(
+            3,
+            Cursor {
+                editor_pos: 30,
+                full_pos: 40,
+                range_idx: Some(3),
+            },
+        );
+
+        // (g)
+        doc.apply_ins(15, 10, &mut cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![
+                Range::Live(10),
+                Range::Dead("xxxxx".to_string()),
+                Range::Live(10),
+                Range::Dead("xxxxx".to_string()),
+                Range::Live(20),
+                Range::Dead("xxxxxxxxxx".to_string()),
+            ]
+        ));
+        assert!(cursor.full_pos == 15);
+        assert!(cursor.editor_pos == 10);
+        assert!(cursor.range_idx == Some(2));
+
+        let cursor3 = doc.cursors.get(&3).unwrap();
+        assert!(cursor3.full_pos == 50);
+        assert!(cursor3.editor_pos == 40);
+        assert!(cursor3.range_idx == Some(5));
     }
 }
