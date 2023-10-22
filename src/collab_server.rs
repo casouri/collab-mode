@@ -115,27 +115,28 @@ impl Doc {
 
     /// Apply `op` to the document.
     pub fn apply_op(&mut self, op: Op) -> CollabResult<()> {
-        match &op {
-            Op::Ins((pos, content)) => {
-                if *pos > self.buffer.len_chars() as u64 {
-                    Err(CollabError::OpOutOfBound(op, self.buffer.len_chars()))
-                } else {
-                    self.buffer.insert(*pos as usize, &content);
-                    Ok(())
-                }
-            }
-            Op::Del(ops, _) => {
-                for dop in ops {
-                    let start = dop.0 as usize;
-                    let end = dop.0 as usize + dop.1.len();
-                    if end > self.buffer.len_chars() {
-                        return Err(CollabError::OpOutOfBound(op, self.buffer.len_chars()));
-                    }
-                    self.buffer.replace(start..end, "");
-                }
-                Ok(())
-            }
-        }
+        // match &op {
+        //     Op::Ins((pos, content)) => {
+        //         if *pos > self.buffer.len_chars() as u64 {
+        //             Err(CollabError::OpOutOfBound(op, self.buffer.len_chars()))
+        //         } else {
+        //             self.buffer.insert(*pos as usize, &content);
+        //             Ok(())
+        //         }
+        //     }
+        //     Op::Del(ops, _) => {
+        //         for dop in ops {
+        //             let start = dop.0 as usize;
+        //             let end = dop.0 as usize + dop.1.len();
+        //             if end > self.buffer.len_chars() {
+        //                 return Err(CollabError::OpOutOfBound(op, self.buffer.len_chars()));
+        //             }
+        //             self.buffer.replace(start..end, "");
+        //         }
+        //         Ok(())
+        //     }
+        // }
+        todo!()
     }
 
     /// Return the current snapshot of the document.

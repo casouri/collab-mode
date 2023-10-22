@@ -204,23 +204,25 @@ impl Doc {
         let mut engine = self.engine.lock().await;
         for op in ops {
             self.site_seq += 1;
-            let fatop = FatOp {
+            let fatop = FatOpUnprocessed {
                 seq: None,
                 doc: self.doc_id.clone(),
                 site: engine.site_id(),
-                op: op.op.into(),
+                op: op.op,
                 site_seq: self.site_seq,
                 kind: OpKind::Original, // Use a dummy value.
                 group_seq: op.group_seq,
             };
-            engine.process_local_op(fatop, op.kind)?;
+            engine.process_local_op(fatop)?;
         }
 
         // 2. Process pending remote ops.
-        let mut transformed_remote_ops: Vec<FatOp> = vec![];
+        let mut last_op = 0;
+        let mut transformed_remote_ops: Vec<EditorLeanOp> = vec![];
         for op in remote_ops {
-            if let Some(op) = engine.process_remote_op(op)? {
+            if let Some((op, seq)) = engine.process_remote_op(op)? {
                 transformed_remote_ops.push(op);
+                last_op = seq;
             }
         }
 
@@ -229,25 +231,17 @@ impl Doc {
         // ops.
         self.new_ops_tx.send(()).unwrap();
 
-        let last_op = get_last_global_seq(&transformed_remote_ops)?.unwrap_or(0);
-
-        Ok((
-            transformed_remote_ops
-                .into_iter()
-                .map(|op| op.into())
-                .collect(),
-            last_op,
-        ))
+        Ok((transformed_remote_ops, last_op))
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.
-    pub async fn undo(&mut self) -> CollabResult<Vec<EditorOp>> {
+    pub async fn undo(&mut self) -> CollabResult<Vec<EditInstruction>> {
         self.check_async_errors()?;
         Ok(self.engine.lock().await.generate_undo_op())
     }
 
     /// Return `n` consecutive redo ops from the current undo tip.
-    pub async fn redo(&mut self) -> CollabResult<Vec<EditorOp>> {
+    pub async fn redo(&mut self) -> CollabResult<Vec<EditInstruction>> {
         self.check_async_errors()?;
         Ok(self.engine.lock().await.generate_redo_op())
     }

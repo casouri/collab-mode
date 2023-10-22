@@ -96,7 +96,7 @@ pub struct SendInfoParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoResp {
-    pub ops: Vec<EditorOp>,
+    pub ops: Vec<EditInstruction>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

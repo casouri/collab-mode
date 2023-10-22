@@ -3,6 +3,7 @@
 
 use crate::{op::quatradic_transform, types::*};
 use serde::{Deserialize, Serialize};
+use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::result::Result;
 use thiserror::Error;
@@ -41,8 +42,8 @@ impl ContextOps {
 enum Range {
     /// Live text, (len).
     Live(u64),
-    /// Tombstone, (text).
-    Dead(String),
+    /// Tombstone, (len).
+    Dead(u64),
 }
 
 impl Range {
@@ -57,7 +58,7 @@ impl Range {
     fn len(&self) -> u64 {
         match self {
             Self::Live(len) => *len,
-            Self::Dead(text) => text.len() as u64,
+            Self::Dead(len) => *len,
         }
     }
 
@@ -228,21 +229,6 @@ impl FullDoc {
         }
     }
 
-    /// Shift all the cursors whose range_idx is equal or after `idx`
-    /// by `delta` to the left, and shift their range_idx by
-    /// `range_idx_delta` to the left.
-    fn shift_cursors_left(&mut self, idx: usize, delta: u64, range_idx_delta: usize) {
-        for (_, cursor) in self.cursors.iter_mut() {
-            if let Some(cursor_idx) = cursor.range_idx {
-                if cursor_idx >= idx {
-                    cursor.full_pos -= delta;
-                    cursor.editor_pos -= delta;
-                    cursor.range_idx = Some(cursor_idx - range_idx_delta);
-                }
-            }
-        }
-    }
-
     /// Apply an insertion as full position `pos` of `len` characters.
     /// `cursor` should point to the range that receives the
     /// insertion.
@@ -301,14 +287,14 @@ impl FullDoc {
             return;
         }
         // (g) `pos` inside a dead range.
-        let mid = (pos - range_beg) as usize;
-        if let Range::Dead(text) = range {
+        let mid = pos - range_beg;
+        if let Range::Dead(dead_len) = range {
             //    |                 range                   |
             // -> |  left_half  |   middle   |  right_half  |
-            //               ^
-            //               cursor
-            let left_half = Range::Dead(text[..mid].to_string());
-            let right_half = Range::Dead(text[mid..].to_string());
+            //                  ^
+            //                  cursor
+            let left_half = Range::Dead(mid);
+            let right_half = Range::Dead(*dead_len - mid);
             let middle = Range::Live(len);
             self.ranges.remove(range_idx);
             self.ranges.insert(range_idx, right_half);
@@ -323,16 +309,391 @@ impl FullDoc {
         }
     }
 
+    /// Mark the range from `pos` to `pos` + `len` as dead. `cursor`
+    /// should point to the first [Range] in the range.
+    fn apply_mark_dead(&mut self, pos: u64, mut len: u64, cursor: &Cursor) {
+        let marked_range_initial_beg = pos;
+        let marked_range_initial_end = pos + len;
+        let mut range_idx = cursor.range_idx.unwrap();
+        let mut range = &self.ranges[range_idx];
+        let mut final_ranges = vec![];
+
+        let mut affected_ranges_idx_beg = range_idx;
+        let mut affected_ranges_idx_end = range_idx + 1;
+
+        let mut range_beg = cursor.full_pos;
+        let mut range_end = range_beg + range.len();
+        // Ensure that the cursor is at the right range.
+        assert!(range_beg <= marked_range_initial_beg);
+
+        loop {
+            // [       range      ]
+            // [   marked range   ]
+            if range_beg == marked_range_initial_beg && range_end == marked_range_initial_end {
+                if range.is_live() {
+                    self.ranges[range_idx] = Range::Dead(len);
+                    return;
+                } else {
+                    return;
+                }
+            }
+            if range_beg < marked_range_initial_beg {
+                // [ range ]
+                //    [      marked range     ]
+                // or
+                // [           range              ]
+                //    [      marked range     ]
+                let prefix_len = marked_range_initial_beg - range_beg;
+                if let Range::Dead(range_len) = range {
+                    // Extend the marked range.
+                    len += prefix_len;
+                } else {
+                    let prefix_range = Range::Live(prefix_len);
+                    final_ranges.push(prefix_range);
+                }
+            }
+            if range_end > marked_range_initial_end {
+                //                        [ range ]
+                //    [      marked range     ]
+                // or
+                //  [           range           ]
+                //    [      marked range     ]
+                let suffix_mid = marked_range_initial_end - range_beg;
+                if let Range::Dead(range_len) = range {
+                    // Extend the marked range.
+                    len += *range_len - suffix_mid;
+                    final_ranges.push(Range::Dead(len));
+                    break;
+                } else {
+                    let suffix_range = Range::Live(range.len() - suffix_mid);
+                    final_ranges.push(Range::Dead(len));
+                    final_ranges.push(suffix_range);
+                    break;
+                }
+            }
+            //            [ range ]
+            //    [      marked range     ]
+            // or
+            //    [ range ]
+            //    [      marked range     ]
+            // or
+            //                    [ range ]
+            //    [      marked range     ]
+            // Either case, we don't need to do anything special.
+            if range_end == marked_range_initial_end {
+                final_ranges.push(Range::Dead(len));
+                break;
+            }
+            // [ range ]
+            //          [  marked range  ]
+            if range_end == marked_range_initial_beg {
+                affected_ranges_idx_beg += 1;
+            }
+            range_idx += 1;
+            affected_ranges_idx_end = range_idx + 1;
+            assert!(range_idx < self.ranges.len());
+            range = &self.ranges[range_idx];
+            range_beg = range_end;
+            range_end = range_beg + range.len();
+        }
+        // At this point, `final_ranges` contains 1-3 ranges that are
+        // going to replace the affected ranges.
+        self.ranges.splice(
+            affected_ranges_idx_beg..affected_ranges_idx_end,
+            final_ranges,
+        );
+        for (_, other_cursor) in self.cursors.iter_mut() {
+            if let Some(other_cursor_range_idx) = other_cursor.range_idx {
+                if other_cursor_range_idx >= affected_ranges_idx_beg
+                    && other_cursor_range_idx < affected_ranges_idx_end
+                {
+                    other_cursor.range_idx = cursor.range_idx;
+                    other_cursor.full_pos = cursor.full_pos;
+                    other_cursor.editor_pos = cursor.editor_pos;
+                }
+            }
+        }
+    }
+
+    /// Mark the range from `pos` to `pos` + `len` as live. `cursor`
+    /// should point to the first [Range] in the range.
+    fn apply_mark_live(&mut self, pos: u64, mut len: u64, cursor: &Cursor) {
+        let marked_range_initial_beg = pos;
+        let marked_range_initial_end = pos + len;
+        let mut range_idx = cursor.range_idx.unwrap();
+        let mut range = &self.ranges[range_idx];
+        let mut final_ranges = vec![];
+
+        let mut affected_ranges_idx_beg = range_idx;
+        let mut affected_ranges_idx_end = range_idx + 1;
+
+        let mut range_beg = cursor.full_pos;
+        let mut range_end = range_beg + range.len();
+        // Ensure that the cursor is at the right range.
+        assert!(range_beg <= marked_range_initial_beg);
+
+        loop {
+            // [       range      ]
+            // [   marked range   ]
+            if range_beg == marked_range_initial_beg && range_end == marked_range_initial_end {
+                if range.is_live() {
+                    return;
+                } else {
+                    self.ranges[range_idx] = Range::Live(len);
+                    return;
+                }
+            }
+            if range_beg < marked_range_initial_beg {
+                // [ range ]
+                //    [      marked range     ]
+                // or
+                // [           range              ]
+                //    [      marked range     ]
+                let prefix_len = marked_range_initial_beg - range_beg;
+                if let Range::Dead(range_text) = range {
+                    let prefix_range = Range::Dead(prefix_len);
+                    final_ranges.push(prefix_range);
+                } else {
+                    // Extend the marked range.
+                    len += prefix_len;
+                }
+            }
+            if range_end > marked_range_initial_end {
+                //                        [ range ]
+                //    [      marked range     ]
+                // or
+                //  [           range           ]
+                //    [      marked range     ]
+                let suffix_mid = marked_range_initial_end - range_beg;
+                if let Range::Dead(range_len) = range {
+                    let suffix_range = Range::Dead(range_len - suffix_mid);
+                    final_ranges.push(Range::Live(len));
+                    final_ranges.push(suffix_range);
+                    break;
+                } else {
+                    // Extend the marked range.
+                    len += range.len() - suffix_mid;
+                    final_ranges.push(Range::Live(len));
+                    break;
+                }
+            }
+            //            [ range ]
+            //    [      marked range     ]
+            // or
+            //    [ range ]
+            //    [      marked range     ]
+            // or
+            //                    [ range ]
+            //    [      marked range     ]
+            // Either case, we don't need to do anything special.
+            if range_end == marked_range_initial_end {
+                final_ranges.push(Range::Live(len));
+                break;
+            }
+            // [ range ]
+            //          [  marked range  ]
+            if range_end == marked_range_initial_beg {
+                affected_ranges_idx_beg += 1;
+            }
+            range_idx += 1;
+            affected_ranges_idx_end = range_idx + 1;
+            assert!(range_idx < self.ranges.len());
+            range = &self.ranges[range_idx];
+            range_beg = range_end;
+            range_end = range_beg + range.len();
+        }
+        // At this point, `final_ranges` contains 1-3 ranges that are
+        // going to replace the affected ranges.
+        self.ranges.splice(
+            affected_ranges_idx_beg..affected_ranges_idx_end,
+            final_ranges,
+        );
+        for (_, other_cursor) in self.cursors.iter_mut() {
+            if let Some(other_cursor_range_idx) = other_cursor.range_idx {
+                if other_cursor_range_idx >= affected_ranges_idx_beg
+                    && other_cursor_range_idx < affected_ranges_idx_end
+                {
+                    other_cursor.range_idx = cursor.range_idx;
+                    other_cursor.full_pos = cursor.full_pos;
+                    other_cursor.editor_pos = cursor.editor_pos;
+                }
+            }
+        }
+    }
+
+    /// If `live` is true, convert mark_live at `pos` with `text` to a
+    /// ins op for the editor; if false, convert mark_dead at `pos`
+    /// with `text` to a del op for the editor. `cursor` should point
+    /// to the first [Range] in the affected range. Push the converted
+    /// ranges into `ranges`.
+    fn mark_to_ins_or_del(
+        &self,
+        pos: u64,
+        text: String,
+        cursor: &Cursor,
+        ranges: &mut Vec<(u64, String)>,
+        live: bool,
+    ) {
+        if text.len() == 0 {
+            return;
+        }
+        let marked_beg = pos;
+        let marked_end = pos + text.len() as u64;
+        let mut range_idx = cursor.range_idx.unwrap();
+        let mut range = &self.ranges[range_idx];
+        let mut range_full_beg = cursor.full_pos;
+        let mut range_full_end = range_full_beg + range.len();
+        let mut range_editor_beg = cursor.editor_pos;
+        loop {
+            // println!(
+            //     "{}, {:?}, {}, {}, {}",
+            //     range_idx, range, range_full_beg, range_full_end, range_editor_beg
+            // );
+            if (live != range.is_live())
+                && range_full_beg <= marked_beg
+                && marked_beg < range_full_end
+            {
+                // [  range  ]      or   [  range  ]
+                //   [   mrkd   ]            [mrkd]
+                //   [  cap  ]               [cap ]
+                let captured_start = 0;
+                let captured_end = (min(range_full_end, marked_end) - marked_beg) as usize;
+                let captured_text = text[captured_start..captured_end].to_string();
+                let captured_editor_beg = range_editor_beg + (marked_beg - range_full_beg);
+                ranges.push((captured_editor_beg, captured_text));
+            } else if (live != range.is_live())
+                && range_full_beg <= marked_end
+                && marked_end < range_full_end
+            {
+                //    [   range   ]
+                // [  marked   ]
+                //    [  cap   ]
+                let captured_start = (max(range_full_beg, marked_beg) - marked_beg) as usize;
+                let captured_end = text.len();
+                let captured_text = text[captured_start..captured_end].to_string();
+                let captured_editor_beg = range_editor_beg;
+                ranges.push((captured_editor_beg, captured_text));
+            } else if (live != range.is_live())
+                && range_full_beg > marked_beg
+                && range_full_end < marked_end
+            {
+                //    [  range  ]
+                // [     marked    ]
+                let captured_start = (range_full_beg - marked_beg) as usize;
+                let captured_end = (range_full_end - marked_beg) as usize;
+                let captured_text = text[captured_start..captured_end].to_string();
+                let captured_editor_beg = range_editor_beg;
+                ranges.push((captured_editor_beg, captured_text));
+            }
+
+            // Prepare states for the next iteration.
+            if range.is_live() {
+                range_editor_beg += range.len();
+            }
+            range_idx += 1;
+            if range_idx == self.ranges.len() {
+                return;
+            }
+            range = &self.ranges[range_idx];
+            range_full_beg = range_full_end;
+            range_full_end = range_full_beg + range.len();
+            if range_full_beg >= marked_end {
+                return;
+            }
+        }
+    }
+
     // Convert the position of `op` to full doc position, and apply it
     // to the full doc.
-    fn process_local_op(&mut self, op: &mut FatOp) {
-        let mut cursor = self.get_cursor(&op.site);
-        // match op.op {
-        //     Op::Ins((pos, text)) => {
-        //         let full_pos = self.convert_pos(pos, &mut cursor, true);
-        //     }
-        // }
-        todo!();
+    fn convert_editor_op_and_apply(&mut self, op: FatOpUnprocessed) -> FatOp {
+        let site = op.site.clone();
+        let mut cursor = self.get_cursor(&site);
+
+        fn process_ops(
+            doc: &mut FullDoc,
+            mut cursor: Cursor,
+            site: SiteId,
+            ops: Vec<(u64, String)>,
+            live: bool,
+        ) -> Vec<(u64, String)> {
+            let mut new_ops = vec![];
+            for (pos, text) in ops.into_iter() {
+                let full_pos = doc.convert_pos(pos, &mut cursor, true);
+                if live {
+                    doc.apply_mark_live(full_pos, text.len() as u64, &cursor);
+                } else {
+                    doc.apply_mark_dead(full_pos, text.len() as u64, &cursor);
+                }
+                new_ops.push((full_pos, text))
+            }
+            doc.cursors.insert(site, cursor);
+            new_ops
+        }
+
+        let converted_op = match op.op.clone() {
+            EditorOp::Ins(pos, text) => {
+                let full_pos = self.convert_pos(pos, &mut cursor, true);
+                self.apply_ins(full_pos, text.len() as u64, &mut cursor);
+                self.cursors.insert(site, cursor);
+                Op::Ins((full_pos, text))
+            }
+            EditorOp::Del(pos, text) => {
+                let full_pos = self.convert_pos(pos, &mut cursor, true);
+                self.apply_mark_dead(full_pos, text.len() as u64, &cursor);
+                self.cursors.insert(site, cursor);
+                Op::Mark(vec![(pos, text)], false)
+            }
+            EditorOp::Undo(EditInstruction::Ins(ops)) => {
+                Op::Mark(process_ops(self, cursor, site, ops, true), true)
+            }
+            EditorOp::Redo(EditInstruction::Ins(ops)) => {
+                Op::Mark(process_ops(self, cursor, site, ops, true), true)
+            }
+            EditorOp::Undo(EditInstruction::Del(ops)) => {
+                Op::Mark(process_ops(self, cursor, site, ops, false), false)
+            }
+            EditorOp::Redo(EditInstruction::Del(ops)) => {
+                Op::Mark(process_ops(self, cursor, site, ops, false), false)
+            }
+        };
+        // Put it back.
+        self.cursors.insert(op.site, cursor);
+        op.swap(converted_op)
+    }
+
+    /// Convert internal `op` from full pos to editor pos, and also
+    /// apply it to the full_doc.
+    fn convert_internal_op_and_apply(&mut self, op: Op, site: &SiteId) -> EditInstruction {
+        let mut cursor = self.get_cursor(site);
+        match op {
+            Op::Ins((pos, text)) => {
+                let editor_pos = self.convert_pos(pos, &mut cursor, false);
+                self.apply_ins(pos, text.len() as u64, &mut cursor);
+                self.cursors.insert(site.clone(), cursor);
+                EditInstruction::Ins(vec![(editor_pos, text)])
+            }
+            Op::Mark(ops, live) => {
+                let mut new_ops = vec![];
+                for (pos, text) in ops.into_iter() {
+                    // Move cursor to the right position.
+                    self.convert_pos(pos, &mut cursor, false);
+                    let text_len = text.len() as u64;
+                    // Convert before apply.
+                    self.mark_to_ins_or_del(pos, text, &cursor, &mut new_ops, live);
+                    if live {
+                        self.apply_mark_live(pos, text_len as u64, &cursor);
+                    } else {
+                        self.apply_mark_dead(pos, text_len as u64, &cursor);
+                    }
+                }
+                self.cursors.insert(site.clone(), cursor);
+                if live {
+                    EditInstruction::Ins(new_ops)
+                } else {
+                    EditInstruction::Del(new_ops)
+                }
+            }
+        }
     }
 }
 
@@ -424,6 +785,7 @@ impl GlobalHistory {
                     self.undo_queue.drain(idx..);
                 }
                 self.undo_tip = None;
+                self.undo_queue.push(op_seq);
                 Ok(OpKind::Original)
             }
             EditorOpKind::Undo => {
@@ -622,7 +984,7 @@ pub enum EngineError {
     #[error("We expect to see global sequence {0:?} in op {1:?}")]
     SeqMismatch(GlobalSeq, FatOp),
     #[error("We expect to see site sequence number {0:?} in op {1:?}")]
-    SiteSeqMismatch(LocalSeq, FatOp),
+    SiteSeqMismatch(LocalSeq, FatOpUnprocessed),
     #[error("Op {0:?} should have a global seq number, but doesn't")]
     SeqMissing(FatOp),
     #[error("Undo error: {0}")]
@@ -687,26 +1049,74 @@ impl ClientEngine {
         }
     }
 
+    /// Convert `op` from an internal op (with full doc positions) to
+    /// an editor op. Also apply the `op` to the full doc.
+    pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> EditorLeanOp {
+        let converted_op = self
+            .gh
+            .full_doc
+            .convert_internal_op_and_apply(op.op.clone(), &op.site);
+        EditorLeanOp {
+            op: converted_op,
+            site_id: op.site,
+        }
+    }
+
+    /// Convert `ops` from an internal op to an editor op, but don't
+    /// apply `ops` to the full doc.
+    pub fn convert_internal_ops_dont_apply(&mut self, ops: Vec<FatOp>) -> Vec<EditInstruction> {
+        // We achieve "don't apply" by applying each op, and then
+        // applying their inverse. Because for a series of ops, we
+        // have to apply the first op in order to transform the later
+        // op.
+        let mut converted_ops = vec![];
+        for op in ops.iter() {
+            let converted_op = self
+                .gh
+                .full_doc
+                .convert_internal_op_and_apply(op.op.clone(), &op.site);
+            converted_ops.push(converted_op);
+        }
+
+        // Now we need to reverse the affect of applying those ops.
+        // Suppose ops = [1 2 3 4], now minI_history is [1 2 3 4], we
+        // start from inverting 4 and applying I(4). Now mini_history
+        // is [1 2 3 4 I(4)], then we inverse 3, transform it against
+        // 3 4 I(4), now mini_history is [1 2 3 4 I(4) I(3)], and so on.
+        let mut mini_history = ops.clone();
+        for idx in (mini_history.len() - 1)..0 {
+            let mut op = mini_history[idx].clone();
+            op.inverse();
+            op.batch_transform(&mini_history[idx + 1..]);
+            self.gh
+                .full_doc
+                .convert_internal_op_and_apply(op.op.clone(), &op.site);
+            mini_history.push(op);
+        }
+        converted_ops
+    }
+
     /// Process local op, possibly transform it and add it to history.
-    pub fn process_local_op(&mut self, mut op: FatOp, kind: EditorOpKind) -> EngineResult<()> {
+    pub fn process_local_op(&mut self, unproc_op: FatOpUnprocessed) -> EngineResult<()> {
         log::debug!(
             "process_local_op({:?}) current_site_seq: {}",
-            &op,
+            &unproc_op,
             self.current_site_seq
         );
 
-        if op.site_seq != self.current_site_seq + 1 {
-            return Err(EngineError::SiteSeqMismatch(self.current_site_seq + 1, op));
+        if unproc_op.site_seq != self.current_site_seq + 1 {
+            return Err(EngineError::SiteSeqMismatch(
+                self.current_site_seq + 1,
+                unproc_op,
+            ));
         }
-        self.current_site_seq = op.site_seq;
+        self.current_site_seq = unproc_op.site_seq;
+
+        let kind = unproc_op.op.kind();
+        let mut op = self.gh.full_doc.convert_editor_op_and_apply(unproc_op);
 
         let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
         op.kind = self.gh.process_opkind(kind, inferred_seq)?;
-
-        match &op.kind {
-            OpKind::Original => self.gh.undo_queue.push(inferred_seq),
-            OpKind::Undo(_) => (),
-        }
 
         self.gh.local.push(op);
 
@@ -715,7 +1125,10 @@ impl ClientEngine {
 
     /// Process remote op, transform it and add it to history. Return
     /// the ops for the editor to apply, if any.
-    pub fn process_remote_op(&mut self, mut op: FatOp) -> EngineResult<Option<FatOp>> {
+    pub fn process_remote_op(
+        &mut self,
+        mut op: FatOp,
+    ) -> EngineResult<Option<(EditorLeanOp, GlobalSeq)>> {
         log::debug!(
             "process_remote_op({:?}) current_seq: {}",
             &op,
@@ -741,8 +1154,9 @@ impl ClientEngine {
             Ok(None)
         } else {
             // We received an op generated at another site, transform
-            // the local history against it, add it to history, and
-            // return it.
+            // it against local history and local history against it,
+            // add it to history, convert it to editor op, and return
+            // it.
             let new_local_ops = op.symmetric_transform(&self.gh.local[..]);
             self.current_seq = seq;
             self.gh.local = new_local_ops;
@@ -774,7 +1188,14 @@ impl ClientEngine {
                 }
             }
 
-            Ok(Some(op))
+            let seq = op.seq.unwrap();
+            let site = op.site;
+            let op = self
+                .gh
+                .full_doc
+                .convert_internal_op_and_apply(op.op, &op.site);
+
+            Ok(Some((EditorLeanOp { op, site_id: site }, seq)))
         }
     }
 }
@@ -783,7 +1204,7 @@ impl ClientEngine {
 
 impl ClientEngine {
     /// Generate undo or redo ops from the current undo tip.
-    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<EditorOp> {
+    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<EditInstruction> {
         let mut idxidx;
         if redo {
             if self.gh.undo_tip.is_none() {
@@ -837,18 +1258,18 @@ impl ClientEngine {
                 idxidx += 1;
             }
         }
-        ops.into_iter().map(|op| op.op.into()).collect()
+        self.convert_internal_ops_dont_apply(ops)
     }
 
     /// Generate an undo op from the current undo tip. Return an empty
     /// vector if there's no more op to undo.
-    pub fn generate_undo_op(&mut self) -> Vec<EditorOp> {
+    pub fn generate_undo_op(&mut self) -> Vec<EditInstruction> {
         self.generate_undo_op_1(false)
     }
 
     /// Generate a redo op from the current undo tip. Return en empty
     /// vector if there's no more ops to redo.
-    pub fn generate_redo_op(&mut self) -> Vec<EditorOp> {
+    pub fn generate_redo_op(&mut self) -> Vec<EditInstruction> {
         self.generate_undo_op_1(true)
     }
 
@@ -880,10 +1301,7 @@ impl ServerEngine {
     ) -> EngineResult<Vec<FatOp>> {
         let l1 = self.gh.ops_after(context);
         // Transform ops against L1, then we can append ops to global
-        // history. `quatradic_transform` can skip coupled
-        // original-inverse pairs but can't take care of decoupled
-        // ones. But we don't care. It's too expensive to handle
-        // decoupled original-inverse pairs.
+        // history.
         (_, ops) = quatradic_transform(l1, ops);
 
         // Assign sequence number for each op in ops.
@@ -903,12 +1321,14 @@ mod tests {
     use super::*;
     use crate::op::Op;
 
-    fn apply(doc: &mut String, op: &Op) {
+    fn apply(doc: &mut String, op: &EditInstruction) {
         match op {
-            Op::Ins((pos, str)) => {
-                doc.insert_str(*pos as usize, &str);
+            EditInstruction::Ins(edits) => {
+                for (pos, str) in edits.iter().rev() {
+                    doc.insert_str(*pos as usize, &str);
+                }
             }
-            Op::Del(edits, _) => {
+            EditInstruction::Del(edits) => {
                 for (pos, str) in edits.iter().rev() {
                     doc.replace_range((*pos as usize)..(*pos as usize + str.len()), "");
                 }
@@ -928,9 +1348,21 @@ mod tests {
         }
     }
 
+    fn make_fatop_unproc(op: EditorOp, site: &SiteId, site_seq: LocalSeq) -> FatOpUnprocessed {
+        crate::op::FatOp {
+            seq: None,
+            site: site.clone(),
+            site_seq,
+            doc: 1,
+            op,
+            kind: OpKind::Original,
+            group_seq: 1, // Dummy value.
+        }
+    }
+
     // **** Puzzles
 
-    /// deOPT puzzle, take from II.c in "A Time Interval Based
+    /// deOPT puzzle, taken from II.c in "A Time Interval Based
     // Consistency Control Algorithm for Interactive Groupware
     // Applications".
     #[test]
@@ -943,45 +1375,59 @@ mod tests {
         let mut client_a = ClientEngine::new(site_a.clone(), 0);
         let mut client_b = ClientEngine::new(site_b.clone(), 0);
 
+        client_a.gh.full_doc.ranges = vec![Range::Live(4)];
+        client_b.gh.full_doc.ranges = vec![Range::Live(4)];
+
         let mut server = ServerEngine::new();
 
-        let op_a1 = make_fatop(Op::Del(vec![(0, "a".to_string())], vec![]), &site_a, 1);
-        let op_a2 = make_fatop(Op::Ins((2, "x".to_string())), &site_a, 2);
-        let op_b1 = make_fatop(Op::Del(vec![(2, "c".to_string())], vec![]), &site_b, 1);
-
-        let kind = EditorOpKind::Original;
+        let editor_op_a1 = EditorOp::Del(0, "a".to_string());
+        let editor_op_a2 = EditorOp::Ins(2, "x".to_string());
+        let editor_op_b1 = EditorOp::Del(2, "c".to_string());
+        let op_a1 = make_fatop_unproc(editor_op_a1.clone(), &site_a, 1);
+        let op_a2 = make_fatop_unproc(editor_op_a2.clone(), &site_a, 2);
+        let op_b1 = make_fatop_unproc(editor_op_b1.clone(), &site_b, 1);
 
         // Local edits.
-        apply(&mut doc_a, &op_a1.op);
-        client_a.process_local_op(op_a1.clone(), kind).unwrap();
+        apply(&mut doc_a, &editor_op_a1.into());
+        client_a.process_local_op(op_a1.clone()).unwrap();
         assert_eq!(doc_a, "bcd");
+        assert!(vec_eq(
+            &client_a.gh.full_doc.ranges,
+            &vec![Range::Dead(1), Range::Live(3)]
+        ));
 
-        apply(&mut doc_a, &op_a2.op);
-        client_a.process_local_op(op_a2.clone(), kind).unwrap();
+        apply(&mut doc_a, &editor_op_a2.into());
+        client_a.process_local_op(op_a2.clone()).unwrap();
         assert_eq!(doc_a, "bcxd");
+        assert!(vec_eq(
+            &client_a.gh.full_doc.ranges,
+            &vec![Range::Dead(1), Range::Live(4)]
+        ));
 
-        apply(&mut doc_b, &op_b1.op);
-        client_b.process_local_op(op_b1.clone(), kind).unwrap();
+        apply(&mut doc_b, &editor_op_b1.into());
+        client_b.process_local_op(op_b1.clone()).unwrap();
         assert_eq!(doc_b, "abd");
+        assert!(vec_eq(
+            &client_b.gh.full_doc.ranges,
+            &vec![Range::Live(2), Range::Dead(1), Range::Live(1)]
+        ));
 
         // Server processing.
         let ops_from_a = client_a.maybe_package_local_ops().unwrap();
         let ops_from_b = client_b.maybe_package_local_ops().unwrap();
-        println!("ops_from_b: {:?}", &ops_from_b);
         let a_ops = server
             .process_ops(ops_from_a.ops, ops_from_a.context)
             .unwrap();
         let b_ops = server
             .process_ops(ops_from_b.ops, ops_from_b.context)
             .unwrap();
-        println!("b_ops: {:?}", &b_ops);
 
         // Client A processing.
         let a1_at_a = client_a.process_remote_op(a_ops[0].clone()).unwrap();
         assert_eq!(a1_at_a, None);
         let a2_at_a = client_a.process_remote_op(a_ops[1].clone()).unwrap();
         assert_eq!(a2_at_a, None);
-        let b1_at_a = client_a
+        let (b1_at_a, _) = client_a
             .process_remote_op(b_ops[0].clone())
             .unwrap()
             .unwrap();
@@ -990,11 +1436,11 @@ mod tests {
         assert_eq!(doc_a, "bxd");
 
         // Client B processing.
-        let a1_at_b = client_b
+        let (a1_at_b, _) = client_b
             .process_remote_op(a_ops[0].clone())
             .unwrap()
             .unwrap();
-        let a2_at_b = client_b
+        let (a2_at_b, _) = client_b
             .process_remote_op(a_ops[1].clone())
             .unwrap()
             .unwrap();
@@ -1003,11 +1449,12 @@ mod tests {
 
         apply(&mut doc_b, &a1_at_b.op);
         assert_eq!(doc_b, "bd");
+
         apply(&mut doc_b, &a2_at_b.op);
         assert_eq!(doc_b, "bxd");
     }
 
-    // False-tie puzzle, take from II.D in "A Time Interval Based
+    // False-tie puzzle, taken from II.D in "A Time Interval Based
     // Consistency Control Algorithm for Interactive Groupware
     // Applications".
     #[test]
@@ -1023,25 +1470,30 @@ mod tests {
         let mut client_b = ClientEngine::new(site_b.clone(), 0);
         let mut client_c = ClientEngine::new(site_c.clone(), 0);
 
+        client_a.gh.full_doc.ranges = vec![Range::Live(3)];
+        client_b.gh.full_doc.ranges = vec![Range::Live(3)];
+        client_c.gh.full_doc.ranges = vec![Range::Live(3)];
+
         let mut server = ServerEngine::new();
 
-        let op_a1 = make_fatop(Op::Ins((2, "1".to_string())), &site_a, 1);
-        let op_b1 = make_fatop(Op::Ins((1, "2".to_string())), &site_b, 1);
-        let op_c1 = make_fatop(Op::Del(vec![(1, "b".to_string())], vec![]), &site_c, 1);
-
-        let kind = EditorOpKind::Original;
+        let editor_op_a1 = EditorOp::Ins(2, "1".to_string());
+        let editor_op_b1 = EditorOp::Ins(1, "2".to_string());
+        let editor_op_c1 = EditorOp::Del(1, "b".to_string());
+        let op_a1 = make_fatop_unproc(editor_op_a1.clone(), &site_a, 1);
+        let op_b1 = make_fatop_unproc(editor_op_b1.clone(), &site_b, 1);
+        let op_c1 = make_fatop_unproc(editor_op_c1.clone(), &site_c, 1);
 
         // Local edits.
-        apply(&mut doc_a, &op_a1.op);
-        client_a.process_local_op(op_a1.clone(), kind).unwrap();
+        apply(&mut doc_a, &editor_op_a1.into());
+        client_a.process_local_op(op_a1.clone()).unwrap();
         assert_eq!(doc_a, "ab1c");
 
-        apply(&mut doc_b, &op_b1.op);
-        client_b.process_local_op(op_b1.clone(), kind).unwrap();
+        apply(&mut doc_b, &editor_op_b1.into());
+        client_b.process_local_op(op_b1.clone()).unwrap();
         assert_eq!(doc_b, "a2bc");
 
-        apply(&mut doc_c, &op_c1.op);
-        client_c.process_local_op(op_c1.clone(), kind).unwrap();
+        apply(&mut doc_c, &editor_op_c1.into());
+        client_c.process_local_op(op_c1.clone()).unwrap();
         assert_eq!(doc_c, "ac");
 
         // Server processing.
@@ -1060,11 +1512,11 @@ mod tests {
             .unwrap();
 
         // Client A processing.
-        let b1_at_a = client_a
+        let (b1_at_a, _) = client_a
             .process_remote_op(b_ops[0].clone())
             .unwrap()
             .unwrap();
-        let c1_at_a = client_a
+        let (c1_at_a, _) = client_a
             .process_remote_op(c_ops[0].clone())
             .unwrap()
             .unwrap();
@@ -1078,11 +1530,11 @@ mod tests {
 
         // Client B processing.
         let b1_at_b = client_b.process_remote_op(b_ops[0].clone()).unwrap();
-        let c1_at_b = client_b
+        let (c1_at_b, _) = client_b
             .process_remote_op(c_ops[0].clone())
             .unwrap()
             .unwrap();
-        let a1_at_b = client_b
+        let (a1_at_b, _) = client_b
             .process_remote_op(a_ops[0].clone())
             .unwrap()
             .unwrap();
@@ -1094,12 +1546,12 @@ mod tests {
         assert_eq!(doc_b, "a21c");
 
         // Client C processing.
-        let b1_at_c = client_c
+        let (b1_at_c, _) = client_c
             .process_remote_op(b_ops[0].clone())
             .unwrap()
             .unwrap();
         let c1_at_c = client_c.process_remote_op(c_ops[0].clone()).unwrap();
-        let a1_at_c = client_c
+        let (a1_at_c, _) = client_c
             .process_remote_op(a_ops[0].clone())
             .unwrap()
             .unwrap();
@@ -1117,45 +1569,33 @@ mod tests {
         let site_id = 1;
         let mut client_engine = ClientEngine::new(site_id, 1);
         // op1: original edit.
-        let op1 = make_fatop(Op::Ins((0, "{".to_string())), &site_id, 1);
+        let op1 = make_fatop_unproc(EditorOp::Ins(0, "{".to_string()), &site_id, 1);
         // Auto-insert parenthesis. I don't know why it deletes the
         // inserted bracket first, but that's what it does.
-        let op2 = make_fatop(Op::Del(vec![(0, "{".to_string())], vec![]), &site_id, 2);
-        let op3 = make_fatop(Op::Ins((0, "{".to_string())), &site_id, 3);
-        let op4 = make_fatop(Op::Ins((1, "}".to_string())), &site_id, 4);
+        let op2 = make_fatop_unproc(EditorOp::Del(0, "{".to_string()), &site_id, 2);
+        let op3 = make_fatop_unproc(EditorOp::Ins(0, "{".to_string()), &site_id, 3);
+        let op4 = make_fatop_unproc(EditorOp::Ins(1, "}".to_string()), &site_id, 4);
         // All four ops have the same group, which is what we want.
 
-        client_engine
-            .process_local_op(op1, EditorOpKind::Original)
-            .unwrap();
-        client_engine
-            .process_local_op(op2, EditorOpKind::Original)
-            .unwrap();
-        client_engine
-            .process_local_op(op3, EditorOpKind::Original)
-            .unwrap();
-        client_engine
-            .process_local_op(op4, EditorOpKind::Original)
-            .unwrap();
+        client_engine.process_local_op(op1).unwrap();
+        client_engine.process_local_op(op2).unwrap();
+        client_engine.process_local_op(op3).unwrap();
+        client_engine.process_local_op(op4).unwrap();
 
         let undo_ops = client_engine.generate_undo_op();
 
         println!("undo_ops: {:?}", undo_ops);
 
-        assert!(undo_ops[0] == EditorOp::Del(vec![(1, "}".to_string())]));
-        assert!(undo_ops[1] == EditorOp::Del(vec![(0, "{".to_string())]));
-        assert!(undo_ops[2] == EditorOp::Ins((0, "{".to_string())));
-        assert!(undo_ops[3] == EditorOp::Del(vec![(0, "{".to_string())]));
+        assert!(undo_ops[0] == EditInstruction::Del(vec![(1, "}".to_string())]));
+        assert!(undo_ops[1] == EditInstruction::Del(vec![(0, "{".to_string())]));
+        assert!(undo_ops[2] == EditInstruction::Ins(vec![(0, "{".to_string())]));
+        assert!(undo_ops[3] == EditInstruction::Del(vec![(0, "{".to_string())]));
     }
 
     #[test]
     fn test_convert_pos() {
         let mut doc = FullDoc::default();
-        doc.ranges = vec![
-            Range::Live(10),
-            Range::Dead("xxxxxxxxxx".to_string()),
-            Range::Live(10),
-        ];
+        doc.ranges = vec![Range::Live(10), Range::Dead(10), Range::Live(10)];
         let mut cursor = doc.get_cursor(&0);
 
         // Cursor go forward.
@@ -1193,6 +1633,10 @@ mod tests {
 
     fn vec_eq<T: Eq>(vec1: &Vec<T>, vec2: &Vec<T>) -> bool {
         vec1.len() == vec2.len() && vec1.iter().zip(vec2).filter(|&(a, b)| a != b).count() == 0
+    }
+
+    fn make_str(n: usize) -> String {
+        (0..n).map(|_| "x").collect()
     }
 
     #[test]
@@ -1242,16 +1686,13 @@ mod tests {
         );
 
         // (c)
-        doc.ranges.push(Range::Dead("xxxxxxxxxx".to_string()));
+        doc.ranges.push(Range::Dead(10));
         // [Live(20) Dead(10)]
         cursor.full_pos = 20;
         cursor.editor_pos = 20;
         cursor.range_idx = Some(1);
         doc.apply_ins(20, 10, &mut cursor);
-        assert!(vec_eq(
-            &doc.ranges,
-            &vec![Range::Live(30), Range::Dead("xxxxxxxxxx".to_string())]
-        ));
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(30), Range::Dead(10)]));
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(cursor.full_pos == 30);
@@ -1273,10 +1714,7 @@ mod tests {
         doc.apply_ins(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
-        assert!(vec_eq(
-            &doc.ranges,
-            &vec![Range::Live(10), Range::Dead("xxxxxxxxxx".to_string())]
-        ));
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(10), Range::Dead(10)]));
         assert!(cursor.full_pos == 10);
         assert!(cursor.editor_pos == 10);
         assert!(cursor.range_idx == Some(1));
@@ -1291,16 +1729,12 @@ mod tests {
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
-            &vec![
-                Range::Live(10),
-                Range::Dead("xxxxxxxxxx".to_string()),
-                Range::Live(10)
-            ]
+            &vec![Range::Live(10), Range::Dead(10), Range::Live(10)]
         ));
         // [Live(10) Dead(10) Live(10)]
 
         // (e)
-        doc.ranges.push(Range::Dead("xxxxxxxxxx".to_string()));
+        doc.ranges.push(Range::Dead(10));
         // [Live(10) Dead(10) Live(10) Dead(10)]
         doc.apply_ins(20, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
@@ -1309,9 +1743,9 @@ mod tests {
             &doc.ranges,
             &vec![
                 Range::Live(10),
-                Range::Dead("xxxxxxxxxx".to_string()),
+                Range::Dead(10),
                 Range::Live(20),
-                Range::Dead("xxxxxxxxxx".to_string()),
+                Range::Dead(10),
             ]
         ));
         // [Live(10) Dead(10) Live(20) Dead(10)]
@@ -1326,21 +1760,21 @@ mod tests {
         );
 
         // (g)
-        doc.apply_ins(15, 10, &mut cursor);
+        doc.apply_ins(16, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
             &vec![
                 Range::Live(10),
-                Range::Dead("xxxxx".to_string()),
+                Range::Dead(6),
                 Range::Live(10),
-                Range::Dead("xxxxx".to_string()),
+                Range::Dead(4),
                 Range::Live(20),
-                Range::Dead("xxxxxxxxxx".to_string()),
+                Range::Dead(10),
             ]
         ));
-        assert!(cursor.full_pos == 15);
+        assert!(cursor.full_pos == 16);
         assert!(cursor.editor_pos == 10);
         assert!(cursor.range_idx == Some(2));
 
@@ -1348,5 +1782,289 @@ mod tests {
         assert!(cursor3.full_pos == 50);
         assert!(cursor3.editor_pos == 40);
         assert!(cursor3.range_idx == Some(5));
+    }
+
+    #[test]
+    fn test_apply_mark_dead() {
+        let mut doc = FullDoc::default();
+        let mut cursor = doc.get_cursor(&0);
+        cursor.range_idx = Some(0);
+
+        // Case 1.
+        // [   Live   ][Dead][   Live   ][Dead][   Live   ]
+        //      [              Marked               ]
+        doc.ranges = vec![
+            Range::Live(10),
+            Range::Dead(5),
+            Range::Live(5),
+            Range::Dead(10),
+            Range::Live(10),
+        ];
+        doc.cursors.insert(
+            1,
+            Cursor {
+                editor_pos: 10,
+                full_pos: 10,
+                range_idx: Some(1),
+            },
+        );
+        doc.cursors.insert(
+            2,
+            Cursor {
+                editor_pos: 15,
+                full_pos: 30,
+                range_idx: Some(4),
+            },
+        );
+
+        doc.apply_mark_dead(6, 30, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![Range::Live(6), Range::Dead(30), Range::Live(4)]
+        ));
+        let cursor1 = doc.get_cursor(&1);
+        assert!(cursor1.full_pos == cursor.full_pos);
+        assert!(cursor1.editor_pos == cursor.editor_pos);
+        assert!(cursor1.range_idx == cursor.range_idx);
+        let cursor2 = doc.get_cursor(&2);
+        assert!(cursor2.full_pos == cursor.full_pos);
+        assert!(cursor2.editor_pos == cursor.editor_pos);
+        assert!(cursor2.range_idx == cursor.range_idx);
+
+        // Case 2.
+        // [   Dead   ][Live][   Dead   ][Live][   Dead   ]
+        //      [              Marked               ]
+        doc.ranges = vec![
+            Range::Dead(10),
+            Range::Live(5),
+            Range::Dead(10),
+            Range::Live(5),
+            Range::Dead(10),
+        ];
+
+        doc.apply_mark_dead(6, 30, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Dead(40)]));
+
+        // Case 3.
+        // [   Dead   ]
+        // [  Marked  ]
+        doc.ranges = vec![Range::Dead(10)];
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+
+        doc.apply_mark_dead(0, 10, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Dead(10)]));
+
+        // Case 4.
+        // [   Live   ]
+        // [  Marked  ]
+        doc.ranges = vec![Range::Live(10)];
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+
+        doc.apply_mark_dead(0, 10, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Dead(10)]));
+
+        // Case 5.
+        // [      Live      ]
+        //    [  Marked  ]
+        doc.ranges = vec![Range::Live(20)];
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+
+        doc.apply_mark_dead(6, 10, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![Range::Live(6), Range::Dead(10), Range::Live(4)]
+        ));
+        assert!(cursor.full_pos == 0);
+        assert!(cursor.editor_pos == 0);
+        assert!(cursor.range_idx == Some(0));
+    }
+
+    #[test]
+    fn test_apply_mark_live() {
+        let mut doc = FullDoc::default();
+        let mut cursor = doc.get_cursor(&0);
+        cursor.range_idx = Some(0);
+
+        // Case 1.
+        // [   Live   ][Dead][Live][   Dead   ][   Live   ]
+        //      [              Marked               ]
+        doc.ranges = vec![
+            Range::Live(10),
+            Range::Dead(5),
+            Range::Live(5),
+            Range::Dead(10),
+            Range::Live(10),
+        ];
+        doc.cursors.insert(
+            1,
+            Cursor {
+                editor_pos: 10,
+                full_pos: 10,
+                range_idx: Some(1),
+            },
+        );
+        doc.cursors.insert(
+            2,
+            Cursor {
+                editor_pos: 15,
+                full_pos: 30,
+                range_idx: Some(4),
+            },
+        );
+
+        doc.apply_mark_live(6, 30, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(40)]));
+
+        let cursor1 = doc.get_cursor(&1);
+        assert!(cursor1.full_pos == cursor.full_pos);
+        assert!(cursor1.editor_pos == cursor.editor_pos);
+        assert!(cursor1.range_idx == cursor.range_idx);
+        let cursor2 = doc.get_cursor(&2);
+        assert!(cursor2.full_pos == cursor.full_pos);
+        assert!(cursor2.editor_pos == cursor.editor_pos);
+        assert!(cursor2.range_idx == cursor.range_idx);
+
+        // Case 2.
+        // [   Dead   ][Live][   Dead   ][Live][   Dead   ]
+        //      [              Marked               ]
+        doc.ranges = vec![
+            Range::Dead(10),
+            Range::Live(5),
+            Range::Dead(10),
+            Range::Live(5),
+            Range::Dead(10),
+        ];
+
+        doc.apply_mark_live(6, 30, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![Range::Dead(6), Range::Live(30), Range::Dead(4)]
+        ));
+
+        // Case 3.
+        // [   Dead   ]
+        // [  Marked  ]
+        doc.ranges = vec![Range::Dead(10)];
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+
+        doc.apply_mark_live(0, 10, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(10)]));
+
+        // Case 4.
+        // [   Live   ]
+        // [  Marked  ]
+        doc.ranges = vec![Range::Live(10)];
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+
+        doc.apply_mark_live(0, 10, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(10)]));
+
+        // Case 5.
+        // [      Dead      ]
+        //    [  Marked  ]
+        doc.ranges = vec![Range::Dead(20)];
+        cursor.full_pos = 0;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(0);
+
+        doc.apply_mark_live(6, 10, &cursor);
+        println!("Ranges {:#?}", doc.ranges);
+        println!("{:#?}", cursor);
+        assert!(vec_eq(
+            &doc.ranges,
+            &vec![Range::Dead(6), Range::Live(10), Range::Dead(4)]
+        ));
+        assert!(cursor.full_pos == 0);
+        assert!(cursor.editor_pos == 0);
+        assert!(cursor.range_idx == Some(0));
+    }
+
+    #[test]
+    fn test_mark_to_ins_or_del() {
+        let mut doc = FullDoc::default();
+        let mut cursor = doc.get_cursor(&0);
+        cursor.range_idx = Some(0);
+
+        // Case 1.
+        // [   Live   ][Dead][Live][   Dead   ][   Live   ]
+        //      [              Live               ]
+        doc.ranges = vec![
+            Range::Live(10),
+            Range::Dead(5),
+            Range::Live(5),
+            Range::Dead(10),
+            Range::Live(10),
+        ];
+
+        let mut ranges = vec![];
+        doc.mark_to_ins_or_del(6, make_str(30), &cursor, &mut ranges, true);
+        println!("Ranges {:#?}", ranges);
+        assert!(vec_eq(
+            &ranges,
+            &vec![(10, make_str(5)), (15, make_str(10))]
+        ));
+
+        // Case 2.
+        // [   Live   ][Dead][Live][   Dead   ][   Live   ]
+        //      [              Dead               ]
+        doc.ranges = vec![
+            Range::Live(10),
+            Range::Dead(5),
+            Range::Live(5),
+            Range::Dead(10),
+            Range::Live(10),
+        ];
+
+        let mut ranges = vec![];
+        doc.mark_to_ins_or_del(6, make_str(30), &cursor, &mut ranges, false);
+        println!("Ranges {:#?}", ranges);
+        assert!(vec_eq(
+            &ranges,
+            &vec![(6, make_str(4)), (10, make_str(5)), (15, make_str(6))]
+        ));
+
+        // Case 3.
+        // [   Dead   ]
+        // [   Live   ]
+        doc.ranges = vec![Range::Dead(10)];
+        let mut ranges = vec![];
+        doc.mark_to_ins_or_del(0, make_str(10), &cursor, &mut ranges, true);
+        assert!(vec_eq(&ranges, &vec![(0, make_str(10))]));
+
+        // Case 4.
+        // [   Live   ]
+        // [   Dead   ]
+        doc.ranges = vec![Range::Live(10)];
+        let mut ranges = vec![];
+        doc.mark_to_ins_or_del(0, make_str(10), &cursor, &mut ranges, false);
+        assert!(vec_eq(&ranges, &vec![(0, make_str(10))]));
     }
 }

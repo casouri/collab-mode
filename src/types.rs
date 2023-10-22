@@ -12,10 +12,41 @@ use crate::error::CollabError;
 pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
+pub type FatOpUnprocessed = crate::op::FatOp<EditorOp>;
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
-    Ins((u64, String)),
+    Ins(u64, String),
+    Del(u64, String),
+    Undo(EditInstruction),
+    Redo(EditInstruction),
+}
+
+impl EditorOp {
+    pub fn kind(&self) -> EditorOpKind {
+        match self {
+            EditorOp::Ins(_, _) => EditorOpKind::Original,
+            EditorOp::Del(_, _) => EditorOpKind::Original,
+            EditorOp::Undo(_) => EditorOpKind::Undo,
+            EditorOp::Redo(_) => EditorOpKind::Undo,
+        }
+    }
+}
+
+impl Into<EditInstruction> for EditorOp {
+    fn into(self) -> EditInstruction {
+        match self {
+            Self::Ins(pos, text) => EditInstruction::Ins(vec![(pos, text)]),
+            Self::Del(pos, text) => EditInstruction::Del(vec![(pos, text)]),
+            Self::Undo(instr) => instr,
+            Self::Redo(instr) => instr,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+pub enum EditInstruction {
+    Ins(Vec<(u64, String)>),
     Del(Vec<(u64, String)>),
 }
 
@@ -26,18 +57,27 @@ pub enum EditorOpKind {
     Redo,
 }
 
+// Dummy implementation.
+impl crate::op::Operation for EditorOp {
+    fn transform(&self, base: &Self, self_site: &SiteId, base_site: &SiteId) -> Self {
+        panic!()
+    }
+    fn inverse(&mut self) {
+        panic!()
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorFatOp {
     pub op: EditorOp,
     pub group_seq: GroupSeq,
-    pub kind: EditorOpKind,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorLeanOp {
-    pub op: EditorOp,
+    pub op: EditInstruction,
     pub site_id: SiteId,
 }
 
@@ -130,29 +170,11 @@ pub enum DocServerResp {
     Err(CollabError),
 }
 
-impl Into<Op> for EditorOp {
-    fn into(self) -> Op {
-        match self {
-            Self::Ins(op) => Op::Ins(op),
-            Self::Del(ops) => Op::Del(ops, vec![]),
-        }
-    }
-}
-
-impl From<Op> for EditorOp {
-    fn from(value: Op) -> Self {
-        match value {
-            Op::Ins(op) => Self::Ins(op),
-            Op::Del(ops, _) => Self::Del(ops),
-        }
-    }
-}
-
-impl From<FatOp> for EditorLeanOp {
-    fn from(value: FatOp) -> Self {
-        EditorLeanOp {
-            op: value.op.into(),
-            site_id: value.site,
-        }
-    }
-}
+// impl From<FatOp> for EditorLeanOp {
+//     fn from(value: FatOp) -> Self {
+//         EditorLeanOp {
+//             op: value.op.into(),
+//             site_id: value.site,
+//         }
+//     }
+// }
