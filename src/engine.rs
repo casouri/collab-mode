@@ -116,7 +116,11 @@ impl FullDoc {
     /// Create a full doc with initial document length at `init_len`.
     fn new(init_len: u64) -> FullDoc {
         FullDoc {
-            ranges: vec![Range::Live(init_len)],
+            ranges: if init_len > 0 {
+                vec![Range::Live(init_len)]
+            } else {
+                vec![]
+            },
             cursors: HashMap::new(),
         }
     }
@@ -1383,13 +1387,10 @@ mod tests {
 
         let site_a = 1;
         let site_b = 2;
-        let mut client_a = ClientEngine::new(site_a.clone(), 0);
-        let mut client_b = ClientEngine::new(site_b.clone(), 0);
+        let mut client_a = ClientEngine::new(site_a.clone(), 0, 4);
+        let mut client_b = ClientEngine::new(site_b.clone(), 0, 4);
 
-        client_a.gh.full_doc.ranges = vec![Range::Live(4)];
-        client_b.gh.full_doc.ranges = vec![Range::Live(4)];
-
-        let mut server = ServerEngine::new();
+        let mut server = ServerEngine::new(0);
 
         let editor_op_a1 = EditorOp::Del(0, "a".to_string());
         let editor_op_a2 = EditorOp::Ins(2, "x".to_string());
@@ -1477,15 +1478,11 @@ mod tests {
         let site_a = 1;
         let site_b = 2;
         let site_c = 3;
-        let mut client_a = ClientEngine::new(site_a.clone(), 0);
-        let mut client_b = ClientEngine::new(site_b.clone(), 0);
-        let mut client_c = ClientEngine::new(site_c.clone(), 0);
+        let mut client_a = ClientEngine::new(site_a.clone(), 0, 3);
+        let mut client_b = ClientEngine::new(site_b.clone(), 0, 3);
+        let mut client_c = ClientEngine::new(site_c.clone(), 0, 3);
 
-        client_a.gh.full_doc.ranges = vec![Range::Live(3)];
-        client_b.gh.full_doc.ranges = vec![Range::Live(3)];
-        client_c.gh.full_doc.ranges = vec![Range::Live(3)];
-
-        let mut server = ServerEngine::new();
+        let mut server = ServerEngine::new(0);
 
         let editor_op_a1 = EditorOp::Ins(2, "1".to_string());
         let editor_op_b1 = EditorOp::Ins(1, "2".to_string());
@@ -1578,7 +1575,7 @@ mod tests {
     #[test]
     fn undo() {
         let site_id = 1;
-        let mut client_engine = ClientEngine::new(site_id, 1);
+        let mut client_engine = ClientEngine::new(site_id, 1, 0);
         // op1: original edit.
         let op1 = make_fatop_unproc(EditorOp::Ins(0, "{".to_string()), &site_id, 1);
         // Auto-insert parenthesis. I don't know why it deletes the
@@ -1605,7 +1602,7 @@ mod tests {
 
     #[test]
     fn test_convert_pos() {
-        let mut doc = FullDoc::default();
+        let mut doc = FullDoc::new(0);
         doc.ranges = vec![Range::Live(10), Range::Dead(10), Range::Live(10)];
         let mut cursor = doc.get_cursor(&0);
 
@@ -1652,7 +1649,7 @@ mod tests {
 
     #[test]
     fn test_apply_ins() {
-        let mut doc = FullDoc::default();
+        let mut doc = FullDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
 
         doc.cursors.insert(
@@ -1797,7 +1794,7 @@ mod tests {
 
     #[test]
     fn test_apply_mark_dead() {
-        let mut doc = FullDoc::default();
+        let mut doc = FullDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
         cursor.range_idx = Some(0);
 
@@ -1908,7 +1905,7 @@ mod tests {
 
     #[test]
     fn test_apply_mark_live() {
-        let mut doc = FullDoc::default();
+        let mut doc = FullDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
         cursor.range_idx = Some(0);
 
@@ -2020,7 +2017,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_ins_or_del() {
-        let mut doc = FullDoc::default();
+        let mut doc = FullDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
         cursor.range_idx = Some(0);
 
