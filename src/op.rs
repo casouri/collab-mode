@@ -228,21 +228,9 @@ impl<O: Operation> FatOp<O> {
 
     /// Transform `self` against every op in `ops` sequentially.
     pub fn batch_transform(&mut self, ops: &[FatOp<O>]) {
-        // let skip_map = find_ops_to_skip(ops);
-        let skip_map = vec![false; ops.len()];
-        self.batch_transform_1(ops, &skip_map[..])
-    }
-
-    /// Transform `self` against every op in `ops` sequentially.
-    /// `skip_map` is a bitmap that tells whether to skip an op in
-    /// `ops`. If skip_map[idx] is true, ops[idx] is considered as
-    /// identity.
-    fn batch_transform_1(&mut self, ops: &[FatOp<O>], skip_map: &[bool]) {
         let mut idx = 0;
         for op in ops {
-            if !skip_map[idx] {
-                self.transform(op);
-            }
+            self.transform(op);
             idx += 0;
         }
     }
@@ -251,26 +239,12 @@ impl<O: Operation> FatOp<O> {
     /// the meantime, transform every op in `ops` against `self`, and
     /// return the new `ops`.
     pub fn symmetric_transform(&mut self, ops: &[FatOp<O>]) -> Vec<FatOp<O>> {
-        // let skip_map = find_ops_to_skip(ops);
-        let skip_map = vec![false; ops.len()];
-        self.symmetric_transform_1(ops, &skip_map[..])
-    }
-
-    /// Transform `self` against every op in `ops` sequentially. In
-    /// the meantime, transform every op in `ops` against `self`, and
-    /// return the new `ops`. `skip_map` is a bitmap that tells
-    /// whether to skip an op in `ops`. If skip_map[idx] is true,
-    /// ops[idx] is considered as identity. Regardless of skip_map,
-    /// every op in `ops` are transformed against `op`.
-    fn symmetric_transform_1(&mut self, ops: &[FatOp<O>], skip_map: &[bool]) -> Vec<FatOp<O>> {
         let mut new_ops = vec![];
         let mut idx = 0;
         for op in ops {
             let mut new_op = op.clone();
             new_op.transform(self);
-            if !skip_map[idx] {
-                self.transform(op);
-            }
+            self.transform(op);
             new_ops.push(new_op);
             idx += 1;
         }
@@ -308,29 +282,15 @@ pub fn find_ops_to_skip<O>(ops: &[FatOp<O>]) -> Vec<bool> {
     bitmap
 }
 
-/// Transform ops1 against ops2, and transform ops2 against ops1. Return the transformed ops1 and ops2.
+/// Transform ops1 against ops2, and transform ops2 against ops1.
+/// Return the transformed ops1 and ops2. Pass the shorter list as
+/// `ops1` because it's copied, and `ops2` are transformed in-place.
 pub fn quatradic_transform<O: Operation>(
     mut ops1: Vec<FatOp<O>>,
     mut ops2: Vec<FatOp<O>>,
 ) -> (Vec<FatOp<O>>, Vec<FatOp<O>>) {
-    // let skip1 = find_ops_to_skip(&ops1[..]);
-    // let skip2 = find_ops_to_skip(&ops2[..]);
-    let skip1 = vec![false; ops1.len()];
-    let skip2 = vec![false; ops2.len()];
-
-    let mut idx2 = 0;
     for op2 in &mut ops2 {
-        if !skip2[idx2] {
-            // Every op in ops1 are transformed against op2, in the
-            // meantime, op2 are transformed against all non-identity
-            // ops in ops1.
-            ops1 = op2.symmetric_transform_1(&ops1[..], &skip1[..]);
-        } else {
-            // If op2 is identify, only transform op2 against ops1,
-            // but don't transform ops1 against op2.
-            op2.batch_transform_1(&ops1[..], &skip1[..]);
-        }
-        idx2 += 1;
+        ops1 = op2.symmetric_transform(&ops1[..]);
     }
     (ops1, ops2)
 }
