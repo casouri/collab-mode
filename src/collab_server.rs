@@ -13,7 +13,7 @@ use crate::op::{DocId, GlobalSeq, Op, SiteId};
 use crate::types::*;
 use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
-use jumprope::JumpRope;
+use gapbuf::GapBuffer;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -85,7 +85,7 @@ struct Doc {
     /// The server engine that transforms and stores ops for this doc.
     engine: ServerEngine,
     /// The document itself.
-    buffer: JumpRope,
+    buffer: GapBuffer<char>,
     /// Engine sends a Unit to tx when there are new ops.
     tx: watch::Sender<()>,
     /// Clone a rx from this rx, and check for new op notification.
@@ -102,10 +102,12 @@ impl Doc {
     pub fn new(file_name: &str, content: &str) -> Doc {
         let (tx, rx) = watch::channel(());
         let (tx_info, rx_info) = broadcast::channel(RETAINED_INFO_MSG_MAX);
+        let mut buffer = GapBuffer::new();
+        buffer.insert_many(0, content.chars());
         Doc {
             name: file_name.to_string(),
-            engine: ServerEngine::new(),
-            buffer: JumpRope::from(content),
+            engine: ServerEngine::new(content.len() as u64),
+            buffer,
             tx,
             rx,
             tx_info,
@@ -114,35 +116,28 @@ impl Doc {
     }
 
     /// Apply `op` to the document.
-    pub fn apply_op(&mut self, op: Op) -> CollabResult<()> {
-        // match &op {
-        //     Op::Ins((pos, content)) => {
-        //         if *pos > self.buffer.len_chars() as u64 {
-        //             Err(CollabError::OpOutOfBound(op, self.buffer.len_chars()))
-        //         } else {
-        //             self.buffer.insert(*pos as usize, &content);
-        //             Ok(())
-        //         }
-        //     }
-        //     Op::Del(ops, _) => {
-        //         for dop in ops {
-        //             let start = dop.0 as usize;
-        //             let end = dop.0 as usize + dop.1.len();
-        //             if end > self.buffer.len_chars() {
-        //                 return Err(CollabError::OpOutOfBound(op, self.buffer.len_chars()));
-        //             }
-        //             self.buffer.replace(start..end, "");
-        //         }
-        //         Ok(())
-        //     }
-        // }
-        todo!()
+    pub fn apply_op(&mut self, op: FatOp) -> CollabResult<()> {
+        let instr = self.engine.convert_internal_op_and_apply(op);
+        match instr {
+            EditInstruction::Ins(edits) => {
+                for (pos, str) in edits.iter().rev() {
+                    self.buffer.insert_many(*pos as usize, str.chars());
+                }
+            }
+            EditInstruction::Del(edits) => {
+                for (pos, str) in edits.iter().rev() {
+                    self.buffer
+                        .drain((*pos as usize)..(*pos as usize + str.len()));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Return the current snapshot of the document.
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
-            buffer: self.buffer.to_string(),
+            buffer: self.buffer.iter().collect::<String>(),
             file_name: self.name.clone(),
             seq: self.engine.current_seq(),
         }
@@ -183,9 +178,12 @@ impl LocalServer {
             let ops = doc.engine.process_ops(ops.ops, ops.context)?;
 
             for op in ops {
-                doc.apply_op(op.op)?;
+                doc.apply_op(op)?;
             }
-            log::debug!("send_op() doc: \"{}\"", doc.buffer.to_string());
+            log::debug!(
+                "send_op() doc: \"{}\"",
+                doc.buffer.iter().collect::<String>()
+            );
 
             // Notification channel are never closed.
             // TODO: report error to error channel.

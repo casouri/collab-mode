@@ -11,7 +11,7 @@ description = "One-stop-shop for collaborative editing"
 thiserror = "1.0.40"
 anyhow = "1.0.71"
 rand = "0.8.5"
-jumprope = "1.1.2"
+gapbuf = "0.1.4"
 log = "0.4.18"
 env_logger = "0.10.0"
 clap = { version = "4.3.3", features = ["derive", "cargo"] }

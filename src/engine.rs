@@ -112,16 +112,16 @@ struct FullDoc {
     cursors: HashMap<SiteId, Cursor>,
 }
 
-impl Default for FullDoc {
-    fn default() -> Self {
+impl FullDoc {
+    /// Create a full doc with initial document length at `init_len`.
+    fn new(init_len: u64) -> FullDoc {
         FullDoc {
-            ranges: vec![],
+            ranges: vec![Range::Live(init_len)],
             cursors: HashMap::new(),
         }
     }
-}
 
-impl FullDoc {
+    /// Return a copy of the cursor for `site`.
     fn get_cursor(&mut self, site: &SiteId) -> Cursor {
         if self.cursors.get(site).is_none() {
             let cursor = Cursor {
@@ -324,6 +324,7 @@ impl FullDoc {
         let mut range_beg = cursor.full_pos;
         let mut range_end = range_beg + range.len();
         // Ensure that the cursor is at the right range.
+        dbg!(range_beg, marked_range_initial_beg, &self.ranges, cursor);
         assert!(range_beg <= marked_range_initial_beg);
 
         loop {
@@ -721,19 +722,19 @@ struct GlobalHistory {
     full_doc: FullDoc,
 }
 
-impl Default for GlobalHistory {
-    fn default() -> Self {
+impl GlobalHistory {
+    /// Create a global history where `init_len` is the initial length
+    /// of the document it will be tracking.
+    fn new(init_len: u64) -> GlobalHistory {
         GlobalHistory {
             global: vec![],
             local: vec![],
             undo_queue: vec![],
             undo_tip: None,
-            full_doc: FullDoc::default(),
+            full_doc: FullDoc::new(init_len),
         }
     }
-}
 
-impl GlobalHistory {
     /// Get the global ops with sequence number larger than `seq`.
     fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
         if seq < self.global.len() as GlobalSeq {
@@ -996,9 +997,12 @@ type EngineResult<T> = Result<T, EngineError>;
 // *** ClientEngine DO
 
 impl ClientEngine {
-    pub fn new(site: SiteId, base_seq: GlobalSeq) -> ClientEngine {
+    /// `site` is the site id of local site, `base_seq` is the
+    /// starting global seq number, `init_len` is the length of the
+    /// starting document.
+    pub fn new(site: SiteId, base_seq: GlobalSeq, init_len: u64) -> ClientEngine {
         ClientEngine {
-            gh: GlobalHistory::default(),
+            gh: GlobalHistory::new(init_len),
             site,
             current_seq: base_seq,
             current_site_seq: 0,
@@ -1189,13 +1193,9 @@ impl ClientEngine {
             }
 
             let seq = op.seq.unwrap();
-            let site = op.site;
-            let op = self
-                .gh
-                .full_doc
-                .convert_internal_op_and_apply(op.op, &op.site);
+            let op = self.convert_internal_op_and_apply(op);
 
-            Ok(Some((EditorLeanOp { op, site_id: site }, seq)))
+            Ok(Some((op, seq)))
         }
     }
 }
@@ -1286,11 +1286,22 @@ impl ClientEngine {
 // *** ServerEngine
 
 impl ServerEngine {
-    pub fn new() -> ServerEngine {
+    /// `init_len` is the length of the starting document.
+    pub fn new(init_len: u64) -> ServerEngine {
         ServerEngine {
-            gh: GlobalHistory::default(),
+            gh: GlobalHistory::new(init_len),
             current_seq: 0,
         }
+    }
+
+    /// Convert `op` from an internal op (with full doc positions) to
+    /// an editor op. Also apply the `op` to the full doc.
+    pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> EditInstruction {
+        let converted_op = self
+            .gh
+            .full_doc
+            .convert_internal_op_and_apply(op.op.clone(), &op.site);
+        converted_op
     }
 
     /// Process `op` from a client, return the transformed `ops`.

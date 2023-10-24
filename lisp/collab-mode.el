@@ -829,31 +829,32 @@ INFO should be a plist JSON object. This request is async."
   (pcase op
     (`(ins ,pos ,str ,group-seq)
      `( :op (:Ins [,(1- pos) ,str])
-        :groupSeq ,group-seq
-        :kind "Original"))
+        :groupSeq ,group-seq))
 
     (`(del ,pos ,str ,group-seq)
-     `( :op (:Del [[,(1- pos) ,str]])
-        :groupSeq ,group-seq
-        :kind "Original"))))
+     `( :op (:Del [,(1- pos) ,str])
+        :groupSeq ,group-seq))))
 
-(defsubst collab--apply-jrpc-op (op &optional move-point)
-  "Decode JSPNRPC OP into Elisp format.
+(defsubst collab--apply-edit-instruction (instr &optional move-point)
+  "Decode EditInstruction INSTR and apply it.
 If MOVE-POINT non-nil, move point as the edit would."
   (let ((inhibit-modification-hooks t)
         (collab--inhibit-hooks t)
         (start (point-marker)))
-    (pcase op
-      (`(:Ins [,pos ,str])
-       (goto-char (1+ pos))
-       (insert str))
+    (pcase instr
+      (`(:Ins ,edits)
+       (mapc (lambda (edit)
+               (let ((pos (aref edit 0))
+                     (text (aref edit 1)))
+                 (goto-char (1+ pos))
+                 (insert text)))
+             (reverse edits)))
       (`(:Del ,edits)
-       (when (> (length edits) 0)
-         (cl-loop for idx from (1- (length edits)) to 0
-                  for edit = (aref edits idx)
-                  do (delete-region (1+ (aref edit 0))
-                                    (1+ (+ (aref edit 0)
-                                           (length (aref edit 1)))))))))
+       (mapc (lambda (edit)
+               (let ((pos (aref edit 0))
+                     (text (aref edit 1)))
+                 (delete-region (1+ pos) (+ 1 pos (length text)))))
+             (reverse edits))))
     (unless move-point
       (goto-char start))))
 
@@ -861,8 +862,7 @@ If MOVE-POINT non-nil, move point as the edit would."
   "Send OPS to the collab server and apply returned remote ops.
 
 If ENCODED is non-nil, OPS should be already in sexp JSON
-format (a list of EditorOp), and this function will skip encoding
-it.
+format (a list of EditorOp, probably the Undo or Redo variant).
 
 Return the largest global seq of all the ops received from the
 collab process."
@@ -877,19 +877,16 @@ collab process."
              conn 'SendOp
              `( :docId ,(car collab--doc-server)
                 :serverId ,(cdr collab--doc-server)
-                :ops ,(if (not encoded)
-                          (if ops
-                              (vconcat (mapcar #'collab--encode-op
-                                               ops))
-                            [])
-                        ops))
+                :ops ,(if encoded ops
+                        (if ops (vconcat (mapcar #'collab--encode-op ops))
+                          [])))
              :timeout collab-rpc-timeout))
       ;; Only ‘seq-map’ can map over vector.
       (let ((remote-ops (plist-get resp :ops))
             (last-seq (plist-get resp :lastSeq))
             last-op)
         (seq-map (lambda (op)
-                   (collab--apply-jrpc-op
+                   (collab--apply-edit-instruction
                     (plist-get op :op))
                    (setq last-op op))
                  remote-ops)
@@ -920,20 +917,21 @@ If REDO is non-nil, redo the most recent undo instead."
                                 :docId ,(car collab--doc-server)
                                 :kind ,(if redo "Redo" "Undo"))
                              :timeout collab-rpc-timeout))
-      (if-let ((json-ops (plist-get resp :ops)))
-          (if (eq (length json-ops) 0)
+      (if-let ((instructions (plist-get resp :ops)))
+          (if (eq (length instructions) 0)
               (message "No more operations to %s" (if redo "redo" "undo"))
             ;; Only ‘seq-map’ can map over vector. TODO: if the op is
             ;; identify, undo one more step.
-            (seq-map (lambda (json-op)
-                       (collab--apply-jrpc-op json-op t))
-                     json-ops)
+            (seq-map (lambda (instr)
+                       (collab--apply-edit-instruction instr t))
+                     instructions)
             (collab--send-ops
-             (vconcat (seq-map (lambda (json-op)
-                                 `( :op ,json-op
-                                    :groupSeq ,collab--group-seq
-                                    :kind ,(if redo "Redo" "Undo")))
-                               json-ops))
+             (vconcat (seq-map (lambda (instr)
+                                 `( :op ,(if redo
+                                             `(:Redo ,instr)
+                                           `(:Undo ,instr))
+                                    :groupSeq ,collab--group-seq))
+                               instructions))
              t))
         (user-error "No more operations to %s"
                     (if redo "redo" "undo"))))))

@@ -62,6 +62,7 @@ impl Doc {
             server.site_id(),
             doc_id.clone(),
             file_name.to_string(),
+            file.len() as u64,
             0,
             err_rx,
         );
@@ -122,6 +123,7 @@ impl Doc {
             site_id.clone(),
             doc_id.clone(),
             snapshot.file_name,
+            snapshot.buffer.len() as u64,
             snapshot.seq,
             err_rx,
         );
@@ -272,10 +274,15 @@ fn make_doc(
     site_id: SiteId,
     doc_id: DocId,
     file_name: String,
+    init_len: u64,
     base_seq: GlobalSeq,
     err_rx: mpsc::Receiver<CollabError>,
 ) -> Doc {
-    let engine = Arc::new(Mutex::new(ClientEngine::new(site_id.clone(), base_seq)));
+    let engine = Arc::new(Mutex::new(ClientEngine::new(
+        site_id.clone(),
+        base_seq,
+        init_len,
+    )));
     let remote_op_buffer = Arc::new(Mutex::new(vec![]));
     let (notifier_tx, notifier_rx) = watch::channel(());
     let thread_handlers = vec![];
