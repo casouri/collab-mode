@@ -99,6 +99,97 @@ impl Cursor {
             self.full_pos
         }
     }
+
+    /// Move cursor to the beginning of `iter`.
+    fn move_to_beg(&mut self, iter: &RangeIterator) {
+        self.full_pos = iter.range_beg;
+        self.editor_pos = iter.editor_range_beg;
+        self.range_idx = Some(iter.range_idx);
+    }
+
+    /// Move cursor to the position of `cursor`.
+    fn move_to_cursor(&mut self, cursor: &Cursor) {
+        self.range_idx = cursor.range_idx;
+        self.full_pos = cursor.full_pos;
+        self.editor_pos = cursor.editor_pos;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RangeIterator {
+    range_idx: usize,
+    range_beg: u64,
+    range_end: u64,
+    editor_range_beg: u64,
+    editor_range_end: u64,
+    affected_ranges_idx_beg: usize,
+    affected_ranges_idx_end: usize,
+}
+
+impl RangeIterator {
+    fn new(ranges: &[Range], cursor: &Cursor) -> RangeIterator {
+        let range_idx = cursor.range_idx.unwrap();
+        let range = &ranges[range_idx];
+        let editor_range_len = if range.is_live() { range.len() } else { 0 };
+        RangeIterator {
+            range_idx,
+            range_beg: cursor.full_pos,
+            range_end: cursor.full_pos + range.len(),
+            affected_ranges_idx_beg: range_idx,
+            editor_range_beg: cursor.editor_pos,
+            editor_range_end: cursor.editor_pos + editor_range_len,
+            affected_ranges_idx_end: range_idx + 1,
+        }
+    }
+
+    /// Return the length of the current range.
+    fn range_len(&self) -> u64 {
+        self.range_end - self.range_beg
+    }
+
+    fn shift_affected_range_left(&mut self) {
+        self.affected_ranges_idx_beg -= 1;
+        self.affected_ranges_idx_end -= 1;
+    }
+
+    fn extend_affected_range_right(&mut self) {
+        self.affected_ranges_idx_end += 1;
+    }
+
+    fn contract_affected_range_right(&mut self) {
+        self.affected_ranges_idx_beg += 1;
+    }
+
+    /// Return the current range.
+    fn range<'a>(&self, ranges: &'a [Range]) -> &'a Range {
+        &ranges[self.range_idx]
+    }
+
+    /// Move to the left by one, return the currently range.
+    fn move_left<'a>(&mut self, ranges: &'a [Range]) -> &'a Range {
+        self.range_idx -= 1;
+        let range = &ranges[self.range_idx];
+        self.range_end = self.range_beg;
+        self.range_beg = self.range_end - range.len();
+
+        let editor_range_len = if range.is_live() { range.len() } else { 0 };
+        self.editor_range_end = self.editor_range_beg;
+        self.editor_range_beg = self.editor_range_end - editor_range_len;
+        range
+    }
+
+    /// Move to the right by one, return the current range.
+    fn move_right<'a>(&mut self, ranges: &'a [Range]) -> &'a Range {
+        self.range_idx += 1;
+        let range = &ranges[self.range_idx];
+        self.range_beg = self.range_end;
+        self.range_end = self.range_beg + range.len();
+
+        let editor_range_len = if range.is_live() { range.len() } else { 0 };
+        self.editor_range_beg = self.editor_range_end;
+        self.editor_range_end = self.editor_range_beg + editor_range_len;
+        range
+    }
 }
 
 /// The full document that contains both live text and tombstones.
@@ -148,6 +239,8 @@ impl FullDoc {
             // `cursor` must points to a range after this function
             // returns.
             if self.ranges.len() > 0 {
+                cursor.full_pos = 0;
+                cursor.editor_pos = 0;
                 cursor.range_idx = Some(0);
             }
             return 0;
@@ -315,215 +408,246 @@ impl FullDoc {
 
     /// Mark the range from `pos` to `pos` + `len` as dead. `cursor`
     /// should point to the first [Range] in the range.
-    fn apply_mark_dead(&mut self, pos: u64, mut len: u64, cursor: &Cursor) {
+    fn apply_mark_dead(&mut self, pos: u64, mut len: u64, cursor: &mut Cursor) {
         let marked_range_initial_beg = pos;
         let marked_range_initial_end = pos + len;
-        let mut range_idx = cursor.range_idx.unwrap();
-        let mut range = &self.ranges[range_idx];
+
+        let mut iter = RangeIterator::new(&self.ranges, cursor);
+        let mut range = iter.range(&self.ranges);
         let mut final_ranges = vec![];
 
-        let mut affected_ranges_idx_beg = range_idx;
-        let mut affected_ranges_idx_end = range_idx + 1;
-
-        let mut range_beg = cursor.full_pos;
-        let mut range_end = range_beg + range.len();
         // Ensure that the cursor is at the right range.
-        dbg!(range_beg, marked_range_initial_beg, &self.ranges, cursor);
-        assert!(range_beg <= marked_range_initial_beg);
+        assert!(iter.range_beg <= marked_range_initial_beg);
+
+        dbg!(pos, len, &cursor, &self.ranges, &iter);
+
+        // Move left one range so we can cover the range that precedes
+        // the starting range.
+        if iter.range_end > marked_range_initial_beg && iter.range_idx > 0 {
+            range = iter.move_left(&self.ranges);
+            iter.shift_affected_range_left();
+        }
 
         loop {
-            // [       range      ]
-            // [   marked range   ]
-            if range_beg == marked_range_initial_beg && range_end == marked_range_initial_end {
-                if range.is_live() {
-                    self.ranges[range_idx] = Range::Dead(len);
-                    return;
+            dbg!(&iter);
+            // [ range ]
+            //           [  marked range  ]
+            if iter.range_end < marked_range_initial_beg {
+                iter.contract_affected_range_right();
+            }
+            // [ range ]
+            //          [  marked range  ]
+            else if iter.range_end == marked_range_initial_beg {
+                if !range.is_live() {
+                    len += iter.range_len();
+                    cursor.move_to_beg(&iter);
                 } else {
-                    return;
+                    iter.contract_affected_range_right();
                 }
             }
-            if range_beg < marked_range_initial_beg {
+            // At this point, current iter range must have some
+            // overlap with the marked range.
+            else {
                 // [ range ]
                 //    [      marked range     ]
                 // or
                 // [           range              ]
                 //    [      marked range     ]
-                let prefix_len = marked_range_initial_beg - range_beg;
-                if let Range::Dead(range_len) = range {
-                    // Extend the marked range.
-                    len += prefix_len;
-                } else {
-                    let prefix_range = Range::Live(prefix_len);
-                    final_ranges.push(prefix_range);
+                if iter.range_beg < marked_range_initial_beg {
+                    let prefix_len = marked_range_initial_beg - iter.range_beg;
+                    if let Range::Dead(_) = range {
+                        // Extend the marked range.
+                        len += prefix_len;
+                    } else {
+                        let prefix_range = Range::Live(prefix_len);
+                        final_ranges.push(prefix_range);
+                    }
                 }
-            }
-            if range_end > marked_range_initial_end {
                 //                        [ range ]
                 //    [      marked range     ]
                 // or
                 //  [           range           ]
                 //    [      marked range     ]
-                let suffix_mid = marked_range_initial_end - range_beg;
-                if let Range::Dead(range_len) = range {
-                    // Extend the marked range.
-                    len += *range_len - suffix_mid;
+                if iter.range_end > marked_range_initial_end {
+                    let suffix_mid = marked_range_initial_end - iter.range_beg;
+                    if let Range::Dead(range_len) = range {
+                        // Extend the marked range.
+                        len += *range_len - suffix_mid;
+                        final_ranges.push(Range::Dead(len));
+                        break;
+                    } else {
+                        let suffix_range = Range::Live(range.len() - suffix_mid);
+                        final_ranges.push(Range::Dead(len));
+                        final_ranges.push(suffix_range);
+                        break;
+                    }
+                }
+                //                    [ range ]
+                //    [      marked range     ]
+                if iter.range_end == marked_range_initial_end {
+                    if iter.range_idx + 1 < self.ranges.len() {
+                        let next_range = iter.move_right(&self.ranges);
+                        if !next_range.is_live() {
+                            len += iter.range_len();
+                            iter.extend_affected_range_right();
+                        }
+                    }
                     final_ranges.push(Range::Dead(len));
-                    break;
-                } else {
-                    let suffix_range = Range::Live(range.len() - suffix_mid);
-                    final_ranges.push(Range::Dead(len));
-                    final_ranges.push(suffix_range);
                     break;
                 }
+                //            [ range ]
+                //    [      marked range     ]
+                // or
+                //    [ range ]
+                //    [      marked range     ]
+                // Do nothing and go to next iteration.
             }
-            //            [ range ]
-            //    [      marked range     ]
-            // or
-            //    [ range ]
-            //    [      marked range     ]
-            // or
-            //                    [ range ]
-            //    [      marked range     ]
-            // Either case, we don't need to do anything special.
-            if range_end == marked_range_initial_end {
-                final_ranges.push(Range::Dead(len));
-                break;
-            }
-            // [ range ]
-            //          [  marked range  ]
-            if range_end == marked_range_initial_beg {
-                affected_ranges_idx_beg += 1;
-            }
-            range_idx += 1;
-            affected_ranges_idx_end = range_idx + 1;
-            assert!(range_idx < self.ranges.len());
-            range = &self.ranges[range_idx];
-            range_beg = range_end;
-            range_end = range_beg + range.len();
+
+            range = iter.move_right(&self.ranges);
+            iter.extend_affected_range_right();
+            assert!(iter.range_idx < self.ranges.len());
         }
+        // Loop ends.
+
+        dbg!(&iter);
+
         // At this point, `final_ranges` contains 1-3 ranges that are
         // going to replace the affected ranges.
         self.ranges.splice(
-            affected_ranges_idx_beg..affected_ranges_idx_end,
+            iter.affected_ranges_idx_beg..iter.affected_ranges_idx_end,
             final_ranges,
         );
         for (_, other_cursor) in self.cursors.iter_mut() {
             if let Some(other_cursor_range_idx) = other_cursor.range_idx {
-                if other_cursor_range_idx >= affected_ranges_idx_beg
-                    && other_cursor_range_idx < affected_ranges_idx_end
+                if other_cursor_range_idx >= iter.affected_ranges_idx_beg
+                    && other_cursor_range_idx < iter.affected_ranges_idx_end
                 {
-                    other_cursor.range_idx = cursor.range_idx;
-                    other_cursor.full_pos = cursor.full_pos;
-                    other_cursor.editor_pos = cursor.editor_pos;
+                    other_cursor.move_to_cursor(cursor);
                 }
             }
         }
+        dbg!(&self.ranges, &cursor);
     }
 
     /// Mark the range from `pos` to `pos` + `len` as live. `cursor`
     /// should point to the first [Range] in the range.
-    fn apply_mark_live(&mut self, pos: u64, mut len: u64, cursor: &Cursor) {
+    fn apply_mark_live(&mut self, pos: u64, mut len: u64, cursor: &mut Cursor) {
         let marked_range_initial_beg = pos;
         let marked_range_initial_end = pos + len;
-        let mut range_idx = cursor.range_idx.unwrap();
-        let mut range = &self.ranges[range_idx];
+
+        let mut iter = RangeIterator::new(&self.ranges, cursor);
+        let mut range = iter.range(&self.ranges);
         let mut final_ranges = vec![];
 
-        let mut affected_ranges_idx_beg = range_idx;
-        let mut affected_ranges_idx_end = range_idx + 1;
-
-        let mut range_beg = cursor.full_pos;
-        let mut range_end = range_beg + range.len();
         // Ensure that the cursor is at the right range.
-        assert!(range_beg <= marked_range_initial_beg);
+        assert!(iter.range_beg <= marked_range_initial_beg);
+
+        dbg!(pos, len, &cursor, &self.ranges, &iter);
+
+        // Move left one range so we can cover the range that precedes
+        // the starting range.
+        if iter.range_end > marked_range_initial_beg && iter.range_idx > 0 {
+            range = iter.move_left(&self.ranges);
+            iter.shift_affected_range_left();
+        }
 
         loop {
-            // [       range      ]
-            // [   marked range   ]
-            if range_beg == marked_range_initial_beg && range_end == marked_range_initial_end {
+            // [ range ]
+            //           [  marked range  ]
+            if iter.range_end < marked_range_initial_beg {
+                iter.contract_affected_range_right();
+            }
+            // [ range ]
+            //          [  marked range  ]
+            else if iter.range_end == marked_range_initial_beg {
                 if range.is_live() {
-                    return;
+                    len += iter.range_len();
+                    cursor.move_to_beg(&iter);
                 } else {
-                    self.ranges[range_idx] = Range::Live(len);
-                    return;
+                    iter.contract_affected_range_right();
                 }
             }
-            if range_beg < marked_range_initial_beg {
+            // At this point, current iter range must have some
+            // overlap with the marked range.
+            else {
                 // [ range ]
                 //    [      marked range     ]
                 // or
                 // [           range              ]
                 //    [      marked range     ]
-                let prefix_len = marked_range_initial_beg - range_beg;
-                if let Range::Dead(range_text) = range {
-                    let prefix_range = Range::Dead(prefix_len);
-                    final_ranges.push(prefix_range);
-                } else {
-                    // Extend the marked range.
-                    len += prefix_len;
+                if iter.range_beg < marked_range_initial_beg {
+                    let prefix_len = marked_range_initial_beg - iter.range_beg;
+                    if let Range::Dead(_) = range {
+                        let prefix_range = Range::Dead(prefix_len);
+                        final_ranges.push(prefix_range);
+                    } else {
+                        // Extend the marked range.
+                        len += prefix_len;
+                        cursor.move_to_beg(&iter);
+                    }
                 }
-            }
-            if range_end > marked_range_initial_end {
                 //                        [ range ]
                 //    [      marked range     ]
                 // or
                 //  [           range           ]
                 //    [      marked range     ]
-                let suffix_mid = marked_range_initial_end - range_beg;
-                if let Range::Dead(range_len) = range {
-                    let suffix_range = Range::Dead(range_len - suffix_mid);
-                    final_ranges.push(Range::Live(len));
-                    final_ranges.push(suffix_range);
-                    break;
-                } else {
-                    // Extend the marked range.
-                    len += range.len() - suffix_mid;
+                if iter.range_end > marked_range_initial_end {
+                    let suffix_mid = marked_range_initial_end - iter.range_beg;
+                    if let Range::Dead(range_len) = range {
+                        let suffix_range = Range::Dead(range_len - suffix_mid);
+                        final_ranges.push(Range::Live(len));
+                        final_ranges.push(suffix_range);
+                        break;
+                    } else {
+                        // Extend the marked range.
+                        len += range.len() - suffix_mid;
+                        final_ranges.push(Range::Live(len));
+                        break;
+                    }
+                }
+                //                    [ range ]
+                //    [      marked range     ]
+                if iter.range_end == marked_range_initial_end {
+                    if iter.range_idx + 1 < self.ranges.len() {
+                        let next_range = iter.move_right(&self.ranges);
+                        if next_range.is_live() {
+                            len += iter.range_len();
+                            iter.extend_affected_range_right();
+                        }
+                    }
                     final_ranges.push(Range::Live(len));
                     break;
                 }
+                //            [ range ]
+                //    [      marked range     ]
+                // or
+                //    [ range ]
+                //    [      marked range     ]
+                // Do nothing and go to next iteration.
             }
-            //            [ range ]
-            //    [      marked range     ]
-            // or
-            //    [ range ]
-            //    [      marked range     ]
-            // or
-            //                    [ range ]
-            //    [      marked range     ]
-            // Either case, we don't need to do anything special.
-            if range_end == marked_range_initial_end {
-                final_ranges.push(Range::Live(len));
-                break;
-            }
-            // [ range ]
-            //          [  marked range  ]
-            if range_end == marked_range_initial_beg {
-                affected_ranges_idx_beg += 1;
-            }
-            range_idx += 1;
-            affected_ranges_idx_end = range_idx + 1;
-            assert!(range_idx < self.ranges.len());
-            range = &self.ranges[range_idx];
-            range_beg = range_end;
-            range_end = range_beg + range.len();
+
+            range = iter.move_right(&self.ranges);
+            iter.extend_affected_range_right();
+            assert!(iter.range_idx < self.ranges.len());
         }
+        // Loop over.
+
         // At this point, `final_ranges` contains 1-3 ranges that are
         // going to replace the affected ranges.
         self.ranges.splice(
-            affected_ranges_idx_beg..affected_ranges_idx_end,
+            iter.affected_ranges_idx_beg..iter.affected_ranges_idx_end,
             final_ranges,
         );
         for (_, other_cursor) in self.cursors.iter_mut() {
             if let Some(other_cursor_range_idx) = other_cursor.range_idx {
-                if other_cursor_range_idx >= affected_ranges_idx_beg
-                    && other_cursor_range_idx < affected_ranges_idx_end
+                if other_cursor_range_idx >= iter.affected_ranges_idx_beg
+                    && other_cursor_range_idx < iter.affected_ranges_idx_end
                 {
-                    other_cursor.range_idx = cursor.range_idx;
-                    other_cursor.full_pos = cursor.full_pos;
-                    other_cursor.editor_pos = cursor.editor_pos;
+                    other_cursor.move_to_cursor(cursor);
                 }
             }
         }
+        dbg!(&self.ranges, &cursor);
     }
 
     /// If `live` is true, convert mark_live at `pos` with `text` to a
@@ -625,9 +749,9 @@ impl FullDoc {
             for (pos, text) in ops.into_iter() {
                 let full_pos = doc.convert_pos(pos, &mut cursor, true);
                 if live {
-                    doc.apply_mark_live(full_pos, text.len() as u64, &cursor);
+                    doc.apply_mark_live(full_pos, text.len() as u64, &mut cursor);
                 } else {
-                    doc.apply_mark_dead(full_pos, text.len() as u64, &cursor);
+                    doc.apply_mark_dead(full_pos, text.len() as u64, &mut cursor);
                 }
                 new_ops.push((full_pos, text))
             }
@@ -644,7 +768,7 @@ impl FullDoc {
             }
             EditorOp::Del(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
-                self.apply_mark_dead(full_pos, text.len() as u64, &cursor);
+                self.apply_mark_dead(full_pos, text.len() as u64, &mut cursor);
                 self.cursors.insert(site, cursor);
                 Op::Mark(vec![(pos, text)], false)
             }
@@ -686,9 +810,9 @@ impl FullDoc {
                     // Convert before apply.
                     self.mark_to_ins_or_del(pos, text, &cursor, &mut new_ops, live);
                     if live {
-                        self.apply_mark_live(pos, text_len as u64, &cursor);
+                        self.apply_mark_live(pos, text_len as u64, &mut cursor);
                     } else {
-                        self.apply_mark_dead(pos, text_len as u64, &cursor);
+                        self.apply_mark_dead(pos, text_len as u64, &mut cursor);
                     }
                 }
                 self.cursors.insert(site.clone(), cursor);
@@ -1825,7 +1949,7 @@ mod tests {
             },
         );
 
-        doc.apply_mark_dead(6, 30, &cursor);
+        doc.apply_mark_dead(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
@@ -1852,7 +1976,7 @@ mod tests {
             Range::Dead(10),
         ];
 
-        doc.apply_mark_dead(6, 30, &cursor);
+        doc.apply_mark_dead(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(40)]));
@@ -1865,7 +1989,7 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_dead(0, 10, &cursor);
+        doc.apply_mark_dead(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(10)]));
@@ -1878,7 +2002,7 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_dead(0, 10, &cursor);
+        doc.apply_mark_dead(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(10)]));
@@ -1891,13 +2015,28 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_dead(6, 10, &cursor);
+        doc.apply_mark_dead(6, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
             &vec![Range::Live(6), Range::Dead(10), Range::Live(4)]
         ));
+        assert!(cursor.full_pos == 0);
+        assert!(cursor.editor_pos == 0);
+        assert!(cursor.range_idx == Some(0));
+
+        // Case 6.
+        // [ Dead ][ Live ][ Dead ]
+        //         [ Dead ]
+        doc.ranges = vec![Range::Dead(10), Range::Live(10), Range::Dead(10)];
+        cursor.full_pos = 10;
+        cursor.editor_pos = 0;
+        cursor.range_idx = Some(1);
+        doc.apply_mark_dead(10, 10, &mut cursor);
+        dbg!(&doc.ranges);
+        dbg!(&cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Dead(30)]));
         assert!(cursor.full_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
@@ -1936,7 +2075,7 @@ mod tests {
             },
         );
 
-        doc.apply_mark_live(6, 30, &cursor);
+        doc.apply_mark_live(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(40)]));
@@ -1961,7 +2100,7 @@ mod tests {
             Range::Dead(10),
         ];
 
-        doc.apply_mark_live(6, 30, &cursor);
+        doc.apply_mark_live(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
@@ -1977,7 +2116,7 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_live(0, 10, &cursor);
+        doc.apply_mark_live(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(10)]));
@@ -1990,7 +2129,7 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_live(0, 10, &cursor);
+        doc.apply_mark_live(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(10)]));
@@ -2003,13 +2142,28 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_live(6, 10, &cursor);
+        doc.apply_mark_live(6, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
             &vec![Range::Dead(6), Range::Live(10), Range::Dead(4)]
         ));
+        assert!(cursor.full_pos == 0);
+        assert!(cursor.editor_pos == 0);
+        assert!(cursor.range_idx == Some(0));
+
+        // Case 6.
+        // [ Live ][ Dead ][ Live ]
+        //         [ Live ]
+        doc.ranges = vec![Range::Live(10), Range::Dead(10), Range::Live(10)];
+        cursor.full_pos = 10;
+        cursor.editor_pos = 10;
+        cursor.range_idx = Some(1);
+        doc.apply_mark_live(10, 10, &mut cursor);
+        dbg!(&doc.ranges);
+        dbg!(&cursor);
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(30)]));
         assert!(cursor.full_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
