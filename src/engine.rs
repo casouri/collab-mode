@@ -120,6 +120,7 @@ struct RangeIterator {
     range_idx: usize,
     range_beg: u64,
     range_end: u64,
+    is_live: bool,
     editor_range_beg: u64,
     editor_range_end: u64,
     affected_ranges_idx_beg: usize,
@@ -135,6 +136,7 @@ impl RangeIterator {
             range_idx,
             range_beg: cursor.full_pos,
             range_end: cursor.full_pos + range.len(),
+            is_live: range.is_live(),
             affected_ranges_idx_beg: range_idx,
             editor_range_beg: cursor.editor_pos,
             editor_range_end: cursor.editor_pos + editor_range_len,
@@ -169,6 +171,7 @@ impl RangeIterator {
     fn move_left<'a>(&mut self, ranges: &'a [Range]) -> &'a Range {
         self.range_idx -= 1;
         let range = &ranges[self.range_idx];
+        self.is_live = range.is_live();
         self.range_end = self.range_beg;
         self.range_beg = self.range_end - range.len();
 
@@ -182,6 +185,7 @@ impl RangeIterator {
     fn move_right<'a>(&mut self, ranges: &'a [Range]) -> &'a Range {
         self.range_idx += 1;
         let range = &ranges[self.range_idx];
+        self.is_live = range.is_live();
         self.range_beg = self.range_end;
         self.range_end = self.range_beg + range.len();
 
@@ -281,7 +285,12 @@ impl FullDoc {
                 range = &self.ranges[range_idx];
             }
         } else {
-            while pos < cursor.pos(editor_pos) {
+            while (pos < cursor.pos(editor_pos))
+                // To make editor pos -> full pos is not
+                // deterministic, we always pick the beg of a dead
+                // range over the end of one.
+                || (editor_pos && pos == cursor.pos(editor_pos) && range.is_live() && range_idx > 0)
+            {
                 range_idx -= 1;
                 range = &self.ranges[range_idx];
                 cursor.range_idx = Some(range_idx);
@@ -419,8 +428,6 @@ impl FullDoc {
         // Ensure that the cursor is at the right range.
         assert!(iter.range_beg <= marked_range_initial_beg);
 
-        dbg!(pos, len, &cursor, &self.ranges, &iter);
-
         // Move left one range so we can cover the range that precedes
         // the starting range.
         if iter.range_end > marked_range_initial_beg && iter.range_idx > 0 {
@@ -429,7 +436,6 @@ impl FullDoc {
         }
 
         loop {
-            dbg!(&iter);
             // [ range ]
             //           [  marked range  ]
             if iter.range_end < marked_range_initial_beg {
@@ -509,8 +515,6 @@ impl FullDoc {
         }
         // Loop ends.
 
-        dbg!(&iter);
-
         // At this point, `final_ranges` contains 1-3 ranges that are
         // going to replace the affected ranges.
         self.ranges.splice(
@@ -526,7 +530,6 @@ impl FullDoc {
                 }
             }
         }
-        dbg!(&self.ranges, &cursor);
     }
 
     /// Mark the range from `pos` to `pos` + `len` as live. `cursor`
@@ -541,8 +544,6 @@ impl FullDoc {
 
         // Ensure that the cursor is at the right range.
         assert!(iter.range_beg <= marked_range_initial_beg);
-
-        dbg!(pos, len, &cursor, &self.ranges, &iter);
 
         // Move left one range so we can cover the range that precedes
         // the starting range.
@@ -647,7 +648,6 @@ impl FullDoc {
                 }
             }
         }
-        dbg!(&self.ranges, &cursor);
     }
 
     /// If `live` is true, convert mark_live at `pos` with `text` to a
@@ -668,65 +668,54 @@ impl FullDoc {
         }
         let marked_beg = pos;
         let marked_end = pos + text.len() as u64;
-        let mut range_idx = cursor.range_idx.unwrap();
-        let mut range = &self.ranges[range_idx];
-        let mut range_full_beg = cursor.full_pos;
-        let mut range_full_end = range_full_beg + range.len();
-        let mut range_editor_beg = cursor.editor_pos;
+        let mut iter = RangeIterator::new(&self.ranges, cursor);
+
         loop {
-            // println!(
-            //     "{}, {:?}, {}, {}, {}",
-            //     range_idx, range, range_full_beg, range_full_end, range_editor_beg
-            // );
-            if (live != range.is_live())
-                && range_full_beg <= marked_beg
-                && marked_beg < range_full_end
+            if (live != iter.is_live) && iter.range_beg <= marked_beg && marked_beg < iter.range_end
             {
                 // [  range  ]      or   [  range  ]
                 //   [   mrkd   ]            [mrkd]
                 //   [  cap  ]               [cap ]
                 let captured_start = 0;
-                let captured_end = (min(range_full_end, marked_end) - marked_beg) as usize;
+                let captured_end = (min(iter.range_end, marked_end) - marked_beg) as usize;
                 let captured_text = text[captured_start..captured_end].to_string();
-                let captured_editor_beg = range_editor_beg + (marked_beg - range_full_beg);
+                let captured_editor_beg = if iter.is_live {
+                    iter.editor_range_beg + (marked_beg - iter.range_beg)
+                } else {
+                    iter.editor_range_beg
+                };
                 ranges.push((captured_editor_beg, captured_text));
-            } else if (live != range.is_live())
-                && range_full_beg <= marked_end
-                && marked_end < range_full_end
+            } else if (live != iter.is_live)
+                && iter.range_beg <= marked_end
+                && marked_end < iter.range_end
             {
                 //    [   range   ]
                 // [  marked   ]
                 //    [  cap   ]
-                let captured_start = (max(range_full_beg, marked_beg) - marked_beg) as usize;
+                let captured_start = (max(iter.range_beg, marked_beg) - marked_beg) as usize;
                 let captured_end = text.len();
                 let captured_text = text[captured_start..captured_end].to_string();
-                let captured_editor_beg = range_editor_beg;
+                let captured_editor_beg = iter.editor_range_beg;
                 ranges.push((captured_editor_beg, captured_text));
-            } else if (live != range.is_live())
-                && range_full_beg > marked_beg
-                && range_full_end < marked_end
+            } else if (live != iter.is_live)
+                && iter.range_beg > marked_beg
+                && iter.range_end < marked_end
             {
                 //    [  range  ]
                 // [     marked    ]
-                let captured_start = (range_full_beg - marked_beg) as usize;
-                let captured_end = (range_full_end - marked_beg) as usize;
+                let captured_start = (iter.range_beg - marked_beg) as usize;
+                let captured_end = (iter.range_end - marked_beg) as usize;
                 let captured_text = text[captured_start..captured_end].to_string();
-                let captured_editor_beg = range_editor_beg;
+                let captured_editor_beg = iter.editor_range_beg;
                 ranges.push((captured_editor_beg, captured_text));
             }
 
             // Prepare states for the next iteration.
-            if range.is_live() {
-                range_editor_beg += range.len();
-            }
-            range_idx += 1;
-            if range_idx == self.ranges.len() {
+            if iter.range_idx + 1 == self.ranges.len() {
                 return;
             }
-            range = &self.ranges[range_idx];
-            range_full_beg = range_full_end;
-            range_full_end = range_full_beg + range.len();
-            if range_full_beg >= marked_end {
+            iter.move_right(&self.ranges);
+            if iter.range_beg >= marked_end {
                 return;
             }
         }
@@ -1233,8 +1222,9 @@ impl ClientEngine {
         log::debug!(
             "process_local_op({:?}) current_site_seq: {}",
             &unproc_op,
-            self.current_site_seq
+            self.current_site_seq,
         );
+        dbg!(&self.gh.full_doc.ranges);
 
         if unproc_op.site_seq != self.current_site_seq + 1 {
             return Err(EngineError::SiteSeqMismatch(
@@ -1246,6 +1236,7 @@ impl ClientEngine {
 
         let kind = unproc_op.op.kind();
         let mut op = self.gh.full_doc.convert_editor_op_and_apply(unproc_op);
+        dbg!("converted_op", &op, &self.gh.full_doc.ranges);
 
         let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
         op.kind = self.gh.process_opkind(kind, inferred_seq)?;
