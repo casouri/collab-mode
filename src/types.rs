@@ -18,8 +18,8 @@ pub type FatOpUnprocessed = crate::op::FatOp<EditorOp>;
 pub enum EditorOp {
     Ins(u64, String),
     Del(u64, String),
-    Undo(EditInstruction),
-    Redo(EditInstruction),
+    Undo,
+    Redo,
 }
 
 impl EditorOp {
@@ -27,19 +27,8 @@ impl EditorOp {
         match self {
             EditorOp::Ins(_, _) => EditorOpKind::Original,
             EditorOp::Del(_, _) => EditorOpKind::Original,
-            EditorOp::Undo(_) => EditorOpKind::Undo,
-            EditorOp::Redo(_) => EditorOpKind::Undo,
-        }
-    }
-}
-
-impl Into<EditInstruction> for EditorOp {
-    fn into(self) -> EditInstruction {
-        match self {
-            Self::Ins(pos, text) => EditInstruction::Ins(vec![(pos, text)]),
-            Self::Del(pos, text) => EditInstruction::Del(vec![(pos, text)]),
-            Self::Undo(instr) => instr,
-            Self::Redo(instr) => instr,
+            EditorOp::Undo => EditorOpKind::Undo,
+            EditorOp::Redo => EditorOpKind::Undo,
         }
     }
 }

@@ -926,12 +926,8 @@ If REDO is non-nil, redo the most recent undo instead."
                        (collab--apply-edit-instruction instr t))
                      instructions)
             (collab--send-ops
-             (vconcat (seq-map (lambda (instr)
-                                 `( :op ,(if redo
-                                             `(:Redo ,instr)
-                                           `(:Undo ,instr))
-                                    :groupSeq ,collab--group-seq))
-                               instructions))
+             `[( :op ,(if redo "Redo" "Undo")
+                 :groupSeq ,collab--group-seq)]
              t))
         (user-error "No more operations to %s"
                     (if redo "redo" "undo"))))))

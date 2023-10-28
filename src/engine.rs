@@ -727,27 +727,6 @@ impl FullDoc {
         let site = op.site.clone();
         let mut cursor = self.get_cursor(&site);
 
-        fn process_ops(
-            doc: &mut FullDoc,
-            mut cursor: Cursor,
-            site: SiteId,
-            ops: Vec<(u64, String)>,
-            live: bool,
-        ) -> Vec<(u64, String)> {
-            let mut new_ops = vec![];
-            for (pos, text) in ops.into_iter() {
-                let full_pos = doc.convert_pos(pos, &mut cursor, true);
-                if live {
-                    doc.apply_mark_live(full_pos, text.len() as u64, &mut cursor);
-                } else {
-                    doc.apply_mark_dead(full_pos, text.len() as u64, &mut cursor);
-                }
-                new_ops.push((full_pos, text))
-            }
-            doc.cursors.insert(site, cursor);
-            new_ops
-        }
-
         let converted_op = match op.op.clone() {
             EditorOp::Ins(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
@@ -761,18 +740,7 @@ impl FullDoc {
                 self.cursors.insert(site, cursor);
                 Op::Mark(vec![(pos, text)], false)
             }
-            EditorOp::Undo(EditInstruction::Ins(ops)) => {
-                Op::Mark(process_ops(self, cursor, site, ops, true), true)
-            }
-            EditorOp::Redo(EditInstruction::Ins(ops)) => {
-                Op::Mark(process_ops(self, cursor, site, ops, true), true)
-            }
-            EditorOp::Undo(EditInstruction::Del(ops)) => {
-                Op::Mark(process_ops(self, cursor, site, ops, false), false)
-            }
-            EditorOp::Redo(EditInstruction::Del(ops)) => {
-                Op::Mark(process_ops(self, cursor, site, ops, false), false)
-            }
+            _ => panic!(),
         };
         // Put it back.
         self.cursors.insert(op.site, cursor);
@@ -1235,14 +1203,37 @@ impl ClientEngine {
         self.current_site_seq = unproc_op.site_seq;
 
         let kind = unproc_op.op.kind();
-        let mut op = self.gh.full_doc.convert_editor_op_and_apply(unproc_op);
-        dbg!("converted_op", &op, &self.gh.full_doc.ranges);
+        let ops = match &unproc_op.op {
+            EditorOp::Ins(_, _) => vec![self.gh.full_doc.convert_editor_op_and_apply(unproc_op)],
+            EditorOp::Del(_, _) => vec![self.gh.full_doc.convert_editor_op_and_apply(unproc_op)],
+            EditorOp::Undo => self
+                .generate_undo_op_1(false)
+                .into_iter()
+                .map(|op| {
+                    let fatop = unproc_op.clone().swap(op.op);
+                    let _ = self.convert_internal_op_and_apply(fatop.clone());
+                    fatop
+                })
+                .collect(),
+            EditorOp::Redo => self
+                .generate_undo_op_1(true)
+                .into_iter()
+                .map(|op| {
+                    let fatop = unproc_op.clone().swap(op.op);
+                    let _ = self.convert_internal_op_and_apply(fatop.clone());
+                    fatop
+                })
+                .collect(),
+        };
 
-        let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
-        op.kind = self.gh.process_opkind(kind, inferred_seq)?;
+        dbg!("converted_ops", &ops, &self.gh.full_doc.ranges);
 
-        self.gh.local.push(op);
+        for mut op in ops {
+            let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
+            op.kind = self.gh.process_opkind(kind, inferred_seq)?;
 
+            self.gh.local.push(op);
+        }
         Ok(())
     }
 
@@ -1322,8 +1313,11 @@ impl ClientEngine {
 // *** ClientEngine UNDO
 
 impl ClientEngine {
-    /// Generate undo or redo ops from the current undo tip.
-    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<EditInstruction> {
+    /// Generate undo or redo ops from the current undo tip. Although
+    /// this function returns [FatOp]s, most of the field of the
+    /// [FatOp] (seq, site_seq, etc) are dummy values, only `site` is
+    /// accurate and useful.
+    fn generate_undo_op_1(&mut self, redo: bool) -> Vec<FatOp> {
         let mut idxidx;
         if redo {
             if self.gh.undo_tip.is_none() {
@@ -1377,19 +1371,21 @@ impl ClientEngine {
                 idxidx += 1;
             }
         }
-        self.convert_internal_ops_dont_apply(ops)
+        ops
     }
 
     /// Generate an undo op from the current undo tip. Return an empty
     /// vector if there's no more op to undo.
     pub fn generate_undo_op(&mut self) -> Vec<EditInstruction> {
-        self.generate_undo_op_1(false)
+        let ops = self.generate_undo_op_1(false);
+        self.convert_internal_ops_dont_apply(ops)
     }
 
     /// Generate a redo op from the current undo tip. Return en empty
     /// vector if there's no more ops to redo.
     pub fn generate_redo_op(&mut self) -> Vec<EditInstruction> {
-        self.generate_undo_op_1(true)
+        let ops = self.generate_undo_op_1(true);
+        self.convert_internal_ops_dont_apply(ops)
     }
 
     /// Print debugging history.
