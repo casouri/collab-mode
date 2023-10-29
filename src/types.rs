@@ -28,7 +28,7 @@ impl EditorOp {
             EditorOp::Ins(_, _) => EditorOpKind::Original,
             EditorOp::Del(_, _) => EditorOpKind::Original,
             EditorOp::Undo => EditorOpKind::Undo,
-            EditorOp::Redo => EditorOpKind::Undo,
+            EditorOp::Redo => EditorOpKind::Redo,
         }
     }
 }
