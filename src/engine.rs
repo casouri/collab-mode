@@ -54,6 +54,10 @@ impl Range {
             Self::Dead(_) => false,
         }
     }
+    /// Return false for live text, true for dead text.
+    fn is_dead(&self) -> bool {
+        !self.is_live()
+    }
     /// Return the length of the range.
     fn len(&self) -> u64 {
         match self {
@@ -416,14 +420,23 @@ impl FullDoc {
     }
 
     /// Mark the range from `pos` to `pos` + `len` as dead. `cursor`
-    /// should point to the first [Range] in the range.
-    fn apply_mark_dead(&mut self, pos: u64, mut len: u64, cursor: &mut Cursor) {
+    /// should point to the first [Range] in the range. Return the
+    /// affected ranges that was actually flipped from live ranges, in
+    /// the form of [(pos, len)].
+    fn apply_mark_dead(&mut self, pos: u64, mut len: u64, cursor: &mut Cursor) -> Vec<(u64, u64)> {
         let marked_range_initial_beg = pos;
         let marked_range_initial_end = pos + len;
 
         let mut iter = RangeIterator::new(&self.ranges, cursor);
         let mut range = iter.range(&self.ranges);
         let mut final_ranges = vec![];
+        let mut flipped_ranges = vec![];
+
+        let mut push_wo_dup = |range: (u64, u64)| {
+            if flipped_ranges.last().is_none() || *flipped_ranges.last().unwrap() != range {
+                flipped_ranges.push(range);
+            }
+        };
 
         // Ensure that the cursor is at the right range.
         assert!(iter.range_beg <= marked_range_initial_beg);
@@ -444,7 +457,7 @@ impl FullDoc {
             // [ range ]
             //          [  marked range  ]
             else if iter.range_end == marked_range_initial_beg {
-                if !range.is_live() {
+                if range.is_dead() {
                     len += iter.range_len();
                     cursor.move_to_beg(&iter);
                 } else {
@@ -461,12 +474,16 @@ impl FullDoc {
                 //    [      marked range     ]
                 if iter.range_beg < marked_range_initial_beg {
                     let prefix_len = marked_range_initial_beg - iter.range_beg;
-                    if let Range::Dead(_) = range {
+                    if range.is_dead() {
                         // Extend the marked range.
                         len += prefix_len;
                     } else {
                         let prefix_range = Range::Live(prefix_len);
                         final_ranges.push(prefix_range);
+
+                        let flipped_beg = marked_range_initial_beg;
+                        let flipped_end = min(marked_range_initial_end, iter.range_end);
+                        push_wo_dup((flipped_beg, flipped_end - flipped_beg));
                     }
                 }
                 //                        [ range ]
@@ -475,22 +492,33 @@ impl FullDoc {
                 //  [           range           ]
                 //    [      marked range     ]
                 if iter.range_end > marked_range_initial_end {
-                    let suffix_mid = marked_range_initial_end - iter.range_beg;
-                    if let Range::Dead(range_len) = range {
+                    let suffix_len = iter.range_end - marked_range_initial_end;
+                    if range.is_dead() {
                         // Extend the marked range.
-                        len += *range_len - suffix_mid;
+                        len += suffix_len;
                         final_ranges.push(Range::Dead(len));
                         break;
                     } else {
-                        let suffix_range = Range::Live(range.len() - suffix_mid);
                         final_ranges.push(Range::Dead(len));
-                        final_ranges.push(suffix_range);
+                        final_ranges.push(Range::Live(suffix_len));
+
+                        let flipped_beg = max(iter.range_beg, marked_range_initial_beg);
+                        let flipped_len = marked_range_initial_end - flipped_beg;
+                        push_wo_dup((flipped_beg, flipped_len));
                         break;
                     }
                 }
                 //                    [ range ]
                 //    [      marked range     ]
                 if iter.range_end == marked_range_initial_end {
+                    if range.is_live() {
+                        let flipped_range = (iter.range_beg, iter.range_len());
+                        if flipped_ranges.last().is_none()
+                            || *flipped_ranges.last().unwrap() != flipped_range
+                        {
+                            flipped_ranges.push(flipped_range);
+                        }
+                    }
                     if iter.range_idx + 1 < self.ranges.len() {
                         let next_range = iter.move_right(&self.ranges);
                         if !next_range.is_live() {
@@ -507,6 +535,9 @@ impl FullDoc {
                 //    [ range ]
                 //    [      marked range     ]
                 // Do nothing and go to next iteration.
+                if range.is_live() {
+                    push_wo_dup((iter.range_beg, iter.range_len()));
+                }
             }
 
             range = iter.move_right(&self.ranges);
@@ -530,6 +561,7 @@ impl FullDoc {
                 }
             }
         }
+        flipped_ranges
     }
 
     /// Mark the range from `pos` to `pos` + `len` as live. `cursor`
@@ -736,9 +768,21 @@ impl FullDoc {
             }
             EditorOp::Del(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
-                self.apply_mark_dead(full_pos, text.len() as u64, &mut cursor);
+                let editor_end = pos + text.len() as u64;
+                let full_len = self.convert_pos(editor_end, &mut cursor.clone(), true) - full_pos;
+                // Make sure to skip the already dead ranges. Then
+                // when we undo this op, we only insert the text we
+                // actually deleted.
+                let flipped_ranges = self.apply_mark_dead(full_pos, full_len, &mut cursor);
+                let mut text_idx = 0;
+                let mut converted_ops = vec![];
+                for (pos, len) in dbg!(flipped_ranges) {
+                    let len = len as usize;
+                    converted_ops.push((pos, text[text_idx..text_idx + len].to_string()));
+                    text_idx += len;
+                }
                 self.cursors.insert(site, cursor);
-                Op::Mark(vec![(pos, text)], false)
+                Op::Mark(converted_ops, false)
             }
             _ => panic!(),
         };
@@ -758,25 +802,28 @@ impl FullDoc {
                 self.cursors.insert(site.clone(), cursor);
                 EditInstruction::Ins(vec![(editor_pos, text)])
             }
-            Op::Mark(ops, live) => {
-                let mut new_ops = vec![];
-                for (pos, text) in ops.into_iter() {
+            Op::Mark(edits, live) => {
+                let mut new_edits = vec![];
+                let mut new_edits_bare = vec![];
+                for (pos, text) in edits.into_iter() {
                     // Move cursor to the right position.
                     self.convert_pos(pos, &mut cursor, false);
-                    let text_len = text.len() as u64;
-                    // Convert before apply.
-                    self.mark_to_ins_or_del(pos, text, &cursor, &mut new_ops, live);
+                    new_edits_bare.push((pos, text.len() as u64));
+                    self.mark_to_ins_or_del(pos, text, &cursor, &mut new_edits, live);
+                }
+                for (pos, len) in new_edits_bare.into_iter() {
+                    self.convert_pos(pos, &mut cursor, false);
                     if live {
-                        self.apply_mark_live(pos, text_len as u64, &mut cursor);
+                        self.apply_mark_live(pos, len, &mut cursor);
                     } else {
-                        self.apply_mark_dead(pos, text_len as u64, &mut cursor);
+                        self.apply_mark_dead(pos, len, &mut cursor);
                     }
                 }
                 self.cursors.insert(site.clone(), cursor);
                 if live {
-                    EditInstruction::Ins(new_ops)
+                    EditInstruction::Ins(new_edits)
                 } else {
-                    EditInstruction::Del(new_ops)
+                    EditInstruction::Del(new_edits)
                 }
             }
         }

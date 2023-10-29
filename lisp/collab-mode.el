@@ -226,7 +226,7 @@ If MARK non-nil, show active region."
            (ov (or (alist-get site-id collab--cursor-ov-alist)
                    (let ((ov (make-overlay (min (1+ pos) (point-max))
                                            (min (+ pos 2) (point-max))
-                                           nil nil nil)))
+                                           nil t nil)))
                      (overlay-put ov 'face face)
                      (push (cons site-id ov) collab--cursor-ov-alist)
                      ov))))
@@ -891,8 +891,10 @@ collab process."
                    (setq last-op op))
                  remote-ops)
         (pcase last-op
-          (`(:op (:Ins [,pos ,str]) :siteId ,site-id)
-           (collab--move-cursor site-id (+ 1 pos (length str))))
+          (`(:op (:Ins ,edits) :siteId ,site-id)
+           (when (> (length edits) 0)
+             (collab--move-cursor
+              site-id (1+ (aref (aref edits (1- (length edits))) 0)))))
           (`(:op (:Del ,edits) :siteId ,site-id)
            (when (> (length edits) 0)
              (collab--move-cursor
