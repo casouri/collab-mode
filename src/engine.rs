@@ -710,7 +710,12 @@ impl FullDoc {
                 //   [  cap  ]               [cap ]
                 let captured_start = 0;
                 let captured_end = (min(iter.range_end, marked_end) - marked_beg) as usize;
-                let captured_text = text[captured_start..captured_end].to_string();
+                // let captured_text = text[captured_start..captured_end].to_string();
+                let captured_text = text
+                    .chars()
+                    .skip(captured_start)
+                    .take(captured_end - captured_start)
+                    .collect::<String>();
                 let captured_editor_beg = if iter.is_live {
                     iter.editor_range_beg + (marked_beg - iter.range_beg)
                 } else {
@@ -726,7 +731,12 @@ impl FullDoc {
                 //    [  cap   ]
                 let captured_start = (max(iter.range_beg, marked_beg) - marked_beg) as usize;
                 let captured_end = text.len();
-                let captured_text = text[captured_start..captured_end].to_string();
+                // let captured_text = text[captured_start..captured_end].to_string();
+                let captured_text = text
+                    .chars()
+                    .skip(captured_start)
+                    .take(captured_end - captured_start)
+                    .collect::<String>();
                 let captured_editor_beg = iter.editor_range_beg;
                 ranges.push((captured_editor_beg, captured_text));
             } else if (live != iter.is_live)
@@ -737,7 +747,12 @@ impl FullDoc {
                 // [     marked    ]
                 let captured_start = (iter.range_beg - marked_beg) as usize;
                 let captured_end = (iter.range_end - marked_beg) as usize;
-                let captured_text = text[captured_start..captured_end].to_string();
+                // let captured_text = text[captured_start..captured_end].to_string();
+                let captured_text = text
+                    .chars()
+                    .skip(captured_start)
+                    .take(captured_end - captured_start)
+                    .collect::<String>();
                 let captured_editor_beg = iter.editor_range_beg;
                 ranges.push((captured_editor_beg, captured_text));
             }
@@ -776,9 +791,10 @@ impl FullDoc {
                 let flipped_ranges = self.apply_mark_dead(full_pos, full_len, &mut cursor);
                 let mut text_idx = 0;
                 let mut converted_ops = vec![];
-                for (pos, len) in dbg!(flipped_ranges) {
+                for (pos, len) in flipped_ranges {
                     let len = len as usize;
-                    converted_ops.push((pos, text[text_idx..text_idx + len].to_string()));
+                    // converted_ops.push((pos, text[text_idx..text_idx + len].to_string()));
+                    converted_ops.push((pos, text.chars().skip(text_idx).take(len).collect()));
                     text_idx += len;
                 }
                 self.cursors.insert(site, cursor);
@@ -1494,6 +1510,18 @@ mod tests {
     use super::*;
     use crate::op::Op;
 
+    fn apply_editor_op(doc: &mut String, op: &EditorOp) {
+        match op {
+            EditorOp::Ins(pos, text) => {
+                doc.insert_str(*pos as usize, text);
+            }
+            EditorOp::Del(pos, text) => {
+                doc.replace_range(*pos as usize..(*pos as usize) + text.len(), "");
+            }
+            _ => panic!(),
+        }
+    }
+
     fn apply(doc: &mut String, op: &EditInstruction) {
         match op {
             EditInstruction::Ins(edits) => {
@@ -1558,7 +1586,7 @@ mod tests {
         let op_b1 = make_fatop_unproc(editor_op_b1.clone(), &site_b, 1);
 
         // Local edits.
-        apply(&mut doc_a, &editor_op_a1.into());
+        apply_editor_op(&mut doc_a, &editor_op_a1);
         client_a.process_local_op(op_a1.clone()).unwrap();
         assert_eq!(doc_a, "bcd");
         assert!(vec_eq(
@@ -1566,7 +1594,7 @@ mod tests {
             &vec![Range::Dead(1), Range::Live(3)]
         ));
 
-        apply(&mut doc_a, &editor_op_a2.into());
+        apply_editor_op(&mut doc_a, &editor_op_a2);
         client_a.process_local_op(op_a2.clone()).unwrap();
         assert_eq!(doc_a, "bcxd");
         assert!(vec_eq(
@@ -1574,7 +1602,7 @@ mod tests {
             &vec![Range::Dead(1), Range::Live(4)]
         ));
 
-        apply(&mut doc_b, &editor_op_b1.into());
+        apply_editor_op(&mut doc_b, &editor_op_b1);
         client_b.process_local_op(op_b1.clone()).unwrap();
         assert_eq!(doc_b, "abd");
         assert!(vec_eq(
@@ -1650,15 +1678,15 @@ mod tests {
         let op_c1 = make_fatop_unproc(editor_op_c1.clone(), &site_c, 1);
 
         // Local edits.
-        apply(&mut doc_a, &editor_op_a1.into());
+        apply_editor_op(&mut doc_a, &editor_op_a1);
         client_a.process_local_op(op_a1.clone()).unwrap();
         assert_eq!(doc_a, "ab1c");
 
-        apply(&mut doc_b, &editor_op_b1.into());
+        apply_editor_op(&mut doc_b, &editor_op_b1);
         client_b.process_local_op(op_b1.clone()).unwrap();
         assert_eq!(doc_b, "a2bc");
 
-        apply(&mut doc_c, &editor_op_c1.into());
+        apply_editor_op(&mut doc_c, &editor_op_c1);
         client_c.process_local_op(op_c1.clone()).unwrap();
         assert_eq!(doc_c, "ac");
 

@@ -98,8 +98,11 @@ fn transform_di(
         vec![(new_pos, content1.clone())]
     } else {
         // base inside op.
-        let del_before_ins = (pos1, content1[..((pos2 - pos1) as usize)].to_string());
-        let del_after_ins = (end2, content1[((pos2 - pos1) as usize)..].to_string());
+        let mid = (pos2 - pos1) as usize;
+        // let del_before_ins = (pos1, content1[..((pos2 - pos1) as usize)].to_string());
+        let del_before_ins = (pos1, content1.chars().take(mid).collect::<String>());
+        // let del_after_ins = (end2, content1[((pos2 - pos1) as usize)..].to_string());
+        let del_after_ins = (end2, content1.chars().skip(mid).collect::<String>());
         let mut res = vec![];
         if del_before_ins.1.len() > 0 {
             res.push(del_before_ins)
@@ -228,10 +231,8 @@ impl<O: Operation> FatOp<O> {
 
     /// Transform `self` against every op in `ops` sequentially.
     pub fn batch_transform(&mut self, ops: &[FatOp<O>]) {
-        let mut idx = 0;
         for op in ops {
             self.transform(op);
-            idx += 0;
         }
     }
 
@@ -240,13 +241,11 @@ impl<O: Operation> FatOp<O> {
     /// return the new `ops`.
     pub fn symmetric_transform(&mut self, ops: &[FatOp<O>]) -> Vec<FatOp<O>> {
         let mut new_ops = vec![];
-        let mut idx = 0;
         for op in ops {
             let mut new_op = op.clone();
             new_op.transform(self);
             self.transform(op);
             new_ops.push(new_op);
-            idx += 1;
         }
         new_ops
     }
