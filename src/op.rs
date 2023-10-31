@@ -34,7 +34,7 @@ pub enum OpKind {
 // *** Trait
 
 pub trait Operation: std::fmt::Debug + Clone + PartialEq + Eq {
-    fn transform(&self, base: &Self, self_site: &SiteId, base_site: &SiteId) -> Self;
+    fn transform(&self, base: &Self) -> Self;
     fn inverse(&mut self);
 }
 
@@ -45,10 +45,10 @@ pub trait Operation: std::fmt::Debug + Clone + PartialEq + Eq {
 pub enum Op {
     /// Insertion.
     //   pos  content
-    Ins((u64, String)),
+    Ins((u64, String), SiteId),
     /// Deletion.
     //       pos  content   live/dead
-    Mark(Vec<(u64, String)>, bool),
+    Mark(Vec<(u64, String)>, bool, SiteId),
 }
 
 fn pos_less_than(pos1: u64, pos2: u64, site1: &SiteId, site2: &SiteId) -> bool {
@@ -117,20 +117,25 @@ impl Operation for Op {
     /// Create the inverse of this op.
     fn inverse(&mut self) {
         match self {
-            Op::Ins((pos, str)) => *self = Op::Mark(vec![(*pos, str.clone())], false),
-            Op::Mark(ops, live) => *self = Op::Mark(ops.clone(), !(*live)),
+            Op::Ins((pos, str), site) => {
+                *self = Op::Mark(vec![(*pos, str.clone())], false, site.clone())
+            }
+            Op::Mark(ops, live, site) => *self = Op::Mark(ops.clone(), !(*live), site.clone()),
         }
     }
 
-    fn transform(&self, base: &Op, self_site: &SiteId, base_site: &SiteId) -> Op {
+    fn transform(&self, base: &Op) -> Op {
         match (self, base) {
-            (Op::Ins(op), Op::Ins(base)) => Op::Ins(transform_ii(op, base, self_site, base_site)),
-            (Op::Mark(ops, live), Op::Ins(base)) => {
+            (Op::Ins(op, self_site), Op::Ins(base, base_site)) => Op::Ins(
+                transform_ii(op, base, self_site, base_site),
+                self_site.clone(),
+            ),
+            (Op::Mark(ops, live, self_site), Op::Ins(base, base_site)) => {
                 let mut new_ops = vec![];
                 for op in ops.iter() {
                     new_ops.extend(transform_di(op, base, self_site, base_site));
                 }
-                Op::Mark(new_ops, live.clone())
+                Op::Mark(new_ops, live.clone(), self_site.clone())
             }
             _ => self.clone(),
         }
@@ -140,14 +145,17 @@ impl Operation for Op {
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::Ins((pos, content)) => {
+            Op::Ins((pos, content), _) => {
                 let mut content = content.to_string();
                 content = content.replace("\t", "⭾");
                 content = content.replace("\n", "⮐");
                 write!(f, "ins({pos}, {content})")
             }
-            Op::Mark(ops, live) => {
+            Op::Mark(ops, live, _) => {
                 let mut out = String::new();
+                if ops.len() == 0 {
+                    out += "[]";
+                }
                 for op in ops {
                     if *live {
                         out += format!("mark_live({}, {}) ", op.0, op.1).as_str();
@@ -164,11 +172,11 @@ impl std::fmt::Display for Op {
 impl std::fmt::Debug for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::Ins((pos, content)) => {
+            Op::Ins((pos, content), _) => {
                 let content = content.to_string();
                 write!(f, "ins({pos}, {:?})", content)
             }
-            Op::Mark(ops, live) => {
+            Op::Mark(ops, live, _) => {
                 let mut out = String::new();
                 for op in ops {
                     if *live {
@@ -226,7 +234,7 @@ impl<O: Operation> FatOp<O> {
     /// Transform `self` against another op `base`. The two op must
     /// have the same context.
     pub fn transform(&mut self, base: &FatOp<O>) {
-        self.op = self.op.transform(&base.op, &self.site, &base.site);
+        self.op = self.op.transform(&base.op);
     }
 
     /// Transform `self` against every op in `ops` sequentially.
@@ -324,27 +332,24 @@ mod tests {
     }
 
     fn test<O: Operation>(op: O, base: O, result: O) {
-        let mut op = make_fatop(op, 1);
-        let base = make_fatop(base, 2);
-        let result_op = make_fatop(result, 1);
-        op.transform(&base);
-        assert_eq!(op, result_op);
+        let new_op = op.transform(&base);
+        assert_eq!(new_op, result);
     }
 
     #[test]
     fn test_transform_ii() {
         println!("Ins Ins, op < base.");
         test(
-            Op::Ins((1, "x".to_string())),
-            Op::Ins((2, "y".to_string())),
-            Op::Ins((1, "x".to_string())),
+            Op::Ins((1, "x".to_string()), 1),
+            Op::Ins((2, "y".to_string()), 2),
+            Op::Ins((1, "x".to_string()), 1),
         );
 
         println!("Ins Ins, op > base.");
         test(
-            Op::Ins((1, "x".to_string())),
-            Op::Ins((0, "y".to_string())),
-            Op::Ins((2, "x".to_string())),
+            Op::Ins((1, "x".to_string()), 1),
+            Op::Ins((0, "y".to_string()), 2),
+            Op::Ins((2, "x".to_string()), 1),
         );
     }
 
@@ -377,23 +382,23 @@ mod tests {
     fn test_transform_di() {
         println!("Del Ins, op < base.");
         test(
-            Op::Mark(vec![(1, "xxx".to_string())], false),
-            Op::Ins((4, "y".to_string())),
-            Op::Mark(vec![(1, "xxx".to_string())], false),
+            Op::Mark(vec![(1, "xxx".to_string())], false, 1),
+            Op::Ins((4, "y".to_string()), 2),
+            Op::Mark(vec![(1, "xxx".to_string())], false, 1),
         );
 
         println!("Del Ins, base inside op.");
         test(
-            Op::Mark(vec![(1, "xxx".to_string())], false),
-            Op::Ins((2, "y".to_string())),
-            Op::Mark(vec![(1, "x".to_string()), (3, "xx".to_string())], false),
+            Op::Mark(vec![(1, "xxx".to_string())], false, 1),
+            Op::Ins((2, "y".to_string()), 2),
+            Op::Mark(vec![(1, "x".to_string()), (3, "xx".to_string())], false, 1),
         );
 
         println!("Del Ins, op > base");
         test(
-            Op::Mark(vec![(1, "xxx".to_string())], false),
-            Op::Ins((0, "y".to_string())),
-            Op::Mark(vec![(2, "xxx".to_string())], false),
+            Op::Mark(vec![(1, "xxx".to_string())], false, 1),
+            Op::Ins((0, "y".to_string()), 2),
+            Op::Mark(vec![(2, "xxx".to_string())], false, 1),
         );
     }
 

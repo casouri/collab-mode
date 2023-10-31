@@ -779,7 +779,7 @@ impl FullDoc {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
                 self.apply_ins(full_pos, text.len() as u64, &mut cursor);
                 self.cursors.insert(site, cursor);
-                Op::Ins((full_pos, text))
+                Op::Ins((full_pos, text), op.site)
             }
             EditorOp::Del(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
@@ -798,7 +798,7 @@ impl FullDoc {
                     text_idx += len;
                 }
                 self.cursors.insert(site, cursor);
-                Op::Mark(converted_ops, false)
+                Op::Mark(converted_ops, false, op.site)
             }
             _ => panic!(),
         };
@@ -812,13 +812,13 @@ impl FullDoc {
     fn convert_internal_op_and_apply(&mut self, op: Op, site: &SiteId) -> EditInstruction {
         let mut cursor = self.get_cursor(site);
         match op {
-            Op::Ins((pos, text)) => {
+            Op::Ins((pos, text), _) => {
                 let editor_pos = self.convert_pos(pos, &mut cursor, false);
                 self.apply_ins(pos, text.len() as u64, &mut cursor);
                 self.cursors.insert(site.clone(), cursor);
                 EditInstruction::Ins(vec![(editor_pos, text)])
             }
-            Op::Mark(edits, live) => {
+            Op::Mark(edits, live, _) => {
                 let mut new_edits = vec![];
                 let mut new_edits_bare = vec![];
                 for (pos, text) in edits.into_iter() {

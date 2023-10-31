@@ -48,7 +48,7 @@ pub enum EditorOpKind {
 
 // Dummy implementation.
 impl crate::op::Operation for EditorOp {
-    fn transform(&self, base: &Self, self_site: &SiteId, base_site: &SiteId) -> Self {
+    fn transform(&self, base: &Self) -> Self {
         panic!()
     }
     fn inverse(&mut self) {
