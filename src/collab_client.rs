@@ -206,16 +206,7 @@ impl Doc {
         let mut engine = self.engine.lock().await;
         for op in ops {
             self.site_seq += 1;
-            let fatop = FatOpUnprocessed {
-                seq: None,
-                doc: self.doc_id.clone(),
-                site: engine.site_id(),
-                op: op.op,
-                site_seq: self.site_seq,
-                kind: OpKind::Original, // Use a dummy value.
-                group_seq: op.group_seq,
-            };
-            engine.process_local_op(fatop)?;
+            engine.process_local_op(op, self.doc_id.clone(), self.site_seq.clone())?;
         }
 
         // 2. Process pending remote ops.
@@ -377,7 +368,7 @@ fn spawn_thread_receive_remote_op(
             );
             let truly_remote_op_arrived = ops
                 .iter()
-                .map(|op| op.site != site_id)
+                .map(|op| op.site() != site_id)
                 .reduce(|acc, flag| acc || flag);
             if truly_remote_op_arrived.is_none() {
                 continue;

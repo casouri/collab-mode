@@ -51,6 +51,16 @@ pub enum Op {
     Mark(Vec<(u64, String)>, bool, SiteId),
 }
 
+impl Op {
+    /// Return the site of the op.
+    pub fn site(&self) -> SiteId {
+        match self {
+            Self::Ins(_, site) => *site,
+            Self::Mark(_, _, site) => *site,
+        }
+    }
+}
+
 fn pos_less_than(pos1: u64, pos2: u64, site1: &SiteId, site2: &SiteId) -> bool {
     pos1 < pos2 || (pos1 == pos2 && site1 < site2)
 }
@@ -113,6 +123,7 @@ fn transform_di(
         res
     }
 }
+
 impl Operation for Op {
     /// Create the inverse of this op.
     fn inverse(&mut self) {
@@ -205,8 +216,6 @@ pub struct FatOp<O> {
     pub doc: DocId,
     /// The operation.
     pub op: O,
-    /// Site uuid. The site that generated this op.
-    pub site: SiteId,
     /// Site-local sequence number.
     pub site_seq: LocalSeq,
     /// The kind of this op.
@@ -222,11 +231,17 @@ impl<T> FatOp<T> {
             seq: self.seq,
             doc: self.doc,
             op,
-            site: self.site,
             site_seq: self.site_seq,
             kind: self.kind,
             group_seq: self.group_seq,
         }
+    }
+}
+
+impl FatOp<Op> {
+    /// Return the site of the op.
+    pub fn site(&self) -> SiteId {
+        self.op.site()
     }
 }
 
@@ -310,7 +325,6 @@ mod tests {
     fn make_fatop<O: Operation>(op: O, site: SiteId) -> FatOp<O> {
         FatOp {
             seq: None,
-            site,
             site_seq: 1, // Dummy value.
             doc: 0,
             op,
@@ -322,7 +336,6 @@ mod tests {
     fn make_undo_fatop<O: Operation>(op: O, site: SiteId, undo_delta: usize) -> FatOp<O> {
         FatOp {
             seq: None,
-            site,
             site_seq: 1, // Dummy value.
             doc: 0,
             op,

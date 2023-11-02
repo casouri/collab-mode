@@ -25,7 +25,7 @@ pub struct ContextOps {
 impl ContextOps {
     /// Return the site of the ops.
     pub fn site(&self) -> SiteId {
-        self.ops[0].site.clone()
+        self.ops[0].site()
     }
     /// Return the doc of the ops.
     pub fn doc(&self) -> DocId {
@@ -770,16 +770,15 @@ impl FullDoc {
 
     // Convert the position of `op` to full doc position, and apply it
     // to the full doc.
-    fn convert_editor_op_and_apply(&mut self, op: FatOpUnprocessed) -> FatOp {
-        let site = op.site.clone();
+    fn convert_editor_op_and_apply(&mut self, op: EditorOp, site: SiteId) -> Op {
         let mut cursor = self.get_cursor(&site);
 
-        let converted_op = match op.op.clone() {
+        let converted_op = match op.clone() {
             EditorOp::Ins(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
                 self.apply_ins(full_pos, text.len() as u64, &mut cursor);
                 self.cursors.insert(site, cursor);
-                Op::Ins((full_pos, text), op.site)
+                Op::Ins((full_pos, text), site)
             }
             EditorOp::Del(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
@@ -797,20 +796,21 @@ impl FullDoc {
                     converted_ops.push((pos, text.chars().skip(text_idx).take(len).collect()));
                     text_idx += len;
                 }
-                self.cursors.insert(site, cursor);
-                Op::Mark(converted_ops, false, op.site)
+                self.cursors.insert(site.clone(), cursor);
+                Op::Mark(converted_ops, false, site)
             }
             _ => panic!(),
         };
         // Put it back.
-        self.cursors.insert(op.site, cursor);
-        op.swap(converted_op)
+        self.cursors.insert(site, cursor);
+        converted_op
     }
 
     /// Convert internal `op` from full pos to editor pos, and also
     /// apply it to the full_doc.
-    fn convert_internal_op_and_apply(&mut self, op: Op, site: &SiteId) -> EditInstruction {
-        let mut cursor = self.get_cursor(site);
+    fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
+        let site = op.site();
+        let mut cursor = self.get_cursor(&site);
         match op {
             Op::Ins((pos, text), _) => {
                 let editor_pos = self.convert_pos(pos, &mut cursor, false);
@@ -1133,7 +1133,7 @@ pub enum EngineError {
     #[error("We expect to see global sequence {0:?} in op {1:?}")]
     SeqMismatch(GlobalSeq, FatOp),
     #[error("We expect to see site sequence number {0:?} in op {1:?}")]
-    SiteSeqMismatch(LocalSeq, FatOpUnprocessed),
+    SiteSeqMismatch(LocalSeq, EditorOp),
     #[error("Op {0:?} should have a global seq number, but doesn't")]
     SeqMissing(FatOp),
     #[error("Undo error: {0}")]
@@ -1203,14 +1203,11 @@ impl ClientEngine {
 
     /// Convert `op` from an internal op (with full doc positions) to
     /// an editor op. Also apply the `op` to the full doc.
-    pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> EditorLeanOp {
-        let converted_op = self
-            .gh
-            .full_doc
-            .convert_internal_op_and_apply(op.op.clone(), &op.site);
+    pub fn convert_internal_op_and_apply(&mut self, op: Op) -> EditorLeanOp {
+        let converted_op = self.gh.full_doc.convert_internal_op_and_apply(op.clone());
         EditorLeanOp {
             op: converted_op,
-            site_id: op.site,
+            site_id: op.site(),
         }
     }
 
@@ -1226,7 +1223,7 @@ impl ClientEngine {
             let converted_op = self
                 .gh
                 .full_doc
-                .convert_internal_op_and_apply(op.op.clone(), &op.site);
+                .convert_internal_op_and_apply(op.op.clone());
             converted_ops.push(converted_op);
         }
 
@@ -1242,49 +1239,56 @@ impl ClientEngine {
             op.batch_transform(&mini_history[idx + 1..]);
             self.gh
                 .full_doc
-                .convert_internal_op_and_apply(op.op.clone(), &op.site);
+                .convert_internal_op_and_apply(op.op.clone());
             mini_history.push(op);
         }
         converted_ops
     }
 
     /// Process local op, possibly transform it and add it to history.
-    pub fn process_local_op(&mut self, unproc_op: FatOpUnprocessed) -> EngineResult<()> {
+    pub fn process_local_op(
+        &mut self,
+        editor_op: EditorFatOp,
+        doc: DocId,
+        site_seq: LocalSeq,
+    ) -> EngineResult<()> {
         log::debug!(
             "process_local_op({:?}) current_site_seq: {}",
-            &unproc_op,
+            &editor_op,
             self.current_site_seq,
         );
         dbg!(&self.gh.full_doc.ranges);
 
-        if unproc_op.site_seq != self.current_site_seq + 1 {
-            return Err(EngineError::SiteSeqMismatch(
-                self.current_site_seq + 1,
-                unproc_op,
-            ));
-        }
-        self.current_site_seq = unproc_op.site_seq;
+        let op = editor_op.op;
+        let group_seq = editor_op.group_seq;
+        let kind = op.kind();
 
-        let kind = unproc_op.op.kind();
-        let ops = match &unproc_op.op {
-            EditorOp::Ins(_, _) => vec![self.gh.full_doc.convert_editor_op_and_apply(unproc_op)],
-            EditorOp::Del(_, _) => vec![self.gh.full_doc.convert_editor_op_and_apply(unproc_op)],
+        if site_seq != self.current_site_seq + 1 {
+            return Err(EngineError::SiteSeqMismatch(self.current_site_seq + 1, op));
+        }
+        self.current_site_seq = site_seq;
+
+        let ops = match &op {
+            EditorOp::Ins(_, _) => {
+                vec![self.gh.full_doc.convert_editor_op_and_apply(op, self.site)]
+            }
+            EditorOp::Del(_, _) => {
+                vec![self.gh.full_doc.convert_editor_op_and_apply(op, self.site)]
+            }
             EditorOp::Undo => self
                 .generate_undo_op_1(false)
                 .into_iter()
                 .map(|op| {
-                    let fatop = unproc_op.clone().swap(op.op);
-                    let _ = self.convert_internal_op_and_apply(fatop.clone());
-                    fatop
+                    let _ = self.convert_internal_op_and_apply(op.op.clone());
+                    op.op
                 })
                 .collect(),
             EditorOp::Redo => self
                 .generate_undo_op_1(true)
                 .into_iter()
                 .map(|op| {
-                    let fatop = unproc_op.clone().swap(op.op);
-                    let _ = self.convert_internal_op_and_apply(fatop.clone());
-                    fatop
+                    let _ = self.convert_internal_op_and_apply(op.op.clone());
+                    op.op
                 })
                 .collect(),
         };
@@ -1293,9 +1297,16 @@ impl ClientEngine {
 
         for mut op in ops {
             let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
-            op.kind = self.gh.process_opkind(kind, inferred_seq)?;
+            let op_kind = self.gh.process_opkind(kind, inferred_seq)?;
 
-            self.gh.local.push(op);
+            self.gh.local.push(crate::op::FatOp {
+                seq: None,
+                doc,
+                op,
+                site_seq,
+                kind: op_kind,
+                group_seq,
+            });
         }
         Ok(())
     }
@@ -1317,13 +1328,13 @@ impl ClientEngine {
             return Err(EngineError::SeqMismatch(self.current_seq + 1, op.clone()));
         }
 
-        if op.site == self.site {
+        if op.site() == self.site {
             // Move the op from the local part to the global part.
             if self.gh.local.len() == 0 {
                 return Err(EngineError::OpMissing(op.clone()));
             }
             let local_op = self.gh.local.remove(0);
-            if local_op.site != op.site || local_op.site_seq != op.site_seq {
+            if local_op.site() != op.site() || local_op.site_seq != op.site_seq {
                 return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
             }
             self.current_seq = seq;
@@ -1366,7 +1377,7 @@ impl ClientEngine {
             }
 
             let seq = op.seq.unwrap();
-            let op = self.convert_internal_op_and_apply(op);
+            let op = self.convert_internal_op_and_apply(op.op);
 
             Ok(Some((op, seq)))
         }
@@ -1478,7 +1489,7 @@ impl ServerEngine {
         let converted_op = self
             .gh
             .full_doc
-            .convert_internal_op_and_apply(op.op.clone(), &op.site);
+            .convert_internal_op_and_apply(op.op.clone());
         converted_op
     }
 
@@ -1537,28 +1548,8 @@ mod tests {
         }
     }
 
-    fn make_fatop(op: Op, site: &SiteId, site_seq: LocalSeq) -> FatOp {
-        FatOp {
-            seq: None,
-            site: site.clone(),
-            site_seq,
-            doc: 1,
-            op,
-            kind: OpKind::Original,
-            group_seq: 1, // Dummy value.
-        }
-    }
-
-    fn make_fatop_unproc(op: EditorOp, site: &SiteId, site_seq: LocalSeq) -> FatOpUnprocessed {
-        crate::op::FatOp {
-            seq: None,
-            site: site.clone(),
-            site_seq,
-            doc: 1,
-            op,
-            kind: OpKind::Original,
-            group_seq: 1, // Dummy value.
-        }
+    fn make_editor_fatop(op: EditorOp, group_seq: GroupSeq) -> EditorFatOp {
+        EditorFatOp { op, group_seq }
     }
 
     // **** Puzzles
@@ -1568,6 +1559,7 @@ mod tests {
     // Applications".
     #[test]
     fn deopt_puzzle() {
+        let doc_id = 1;
         let mut doc_a = "abcd".to_string();
         let mut doc_b = "abcd".to_string();
 
@@ -1581,13 +1573,13 @@ mod tests {
         let editor_op_a1 = EditorOp::Del(0, "a".to_string());
         let editor_op_a2 = EditorOp::Ins(2, "x".to_string());
         let editor_op_b1 = EditorOp::Del(2, "c".to_string());
-        let op_a1 = make_fatop_unproc(editor_op_a1.clone(), &site_a, 1);
-        let op_a2 = make_fatop_unproc(editor_op_a2.clone(), &site_a, 2);
-        let op_b1 = make_fatop_unproc(editor_op_b1.clone(), &site_b, 1);
+        let op_a1 = make_editor_fatop(editor_op_a1.clone(), 1);
+        let op_a2 = make_editor_fatop(editor_op_a2.clone(), 2);
+        let op_b1 = make_editor_fatop(editor_op_b1.clone(), 1);
 
         // Local edits.
         apply_editor_op(&mut doc_a, &editor_op_a1);
-        client_a.process_local_op(op_a1.clone()).unwrap();
+        client_a.process_local_op(op_a1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_a, "bcd");
         assert!(vec_eq(
             &client_a.gh.full_doc.ranges,
@@ -1595,7 +1587,7 @@ mod tests {
         ));
 
         apply_editor_op(&mut doc_a, &editor_op_a2);
-        client_a.process_local_op(op_a2.clone()).unwrap();
+        client_a.process_local_op(op_a2.clone(), doc_id, 2).unwrap();
         assert_eq!(doc_a, "bcxd");
         assert!(vec_eq(
             &client_a.gh.full_doc.ranges,
@@ -1603,7 +1595,7 @@ mod tests {
         ));
 
         apply_editor_op(&mut doc_b, &editor_op_b1);
-        client_b.process_local_op(op_b1.clone()).unwrap();
+        client_b.process_local_op(op_b1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_b, "abd");
         assert!(vec_eq(
             &client_b.gh.full_doc.ranges,
@@ -1657,6 +1649,8 @@ mod tests {
     // Applications".
     #[test]
     fn false_tie_puzzle() {
+        let doc_id = 1;
+
         let mut doc_a = "abc".to_string();
         let mut doc_b = "abc".to_string();
         let mut doc_c = "abc".to_string();
@@ -1673,21 +1667,21 @@ mod tests {
         let editor_op_a1 = EditorOp::Ins(2, "1".to_string());
         let editor_op_b1 = EditorOp::Ins(1, "2".to_string());
         let editor_op_c1 = EditorOp::Del(1, "b".to_string());
-        let op_a1 = make_fatop_unproc(editor_op_a1.clone(), &site_a, 1);
-        let op_b1 = make_fatop_unproc(editor_op_b1.clone(), &site_b, 1);
-        let op_c1 = make_fatop_unproc(editor_op_c1.clone(), &site_c, 1);
+        let op_a1 = make_editor_fatop(editor_op_a1.clone(), 1);
+        let op_b1 = make_editor_fatop(editor_op_b1.clone(), 1);
+        let op_c1 = make_editor_fatop(editor_op_c1.clone(), 1);
 
         // Local edits.
         apply_editor_op(&mut doc_a, &editor_op_a1);
-        client_a.process_local_op(op_a1.clone()).unwrap();
+        client_a.process_local_op(op_a1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_a, "ab1c");
 
         apply_editor_op(&mut doc_b, &editor_op_b1);
-        client_b.process_local_op(op_b1.clone()).unwrap();
+        client_b.process_local_op(op_b1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_b, "a2bc");
 
         apply_editor_op(&mut doc_c, &editor_op_c1);
-        client_c.process_local_op(op_c1.clone()).unwrap();
+        client_c.process_local_op(op_c1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_c, "ac");
 
         // Server processing.
@@ -1761,20 +1755,21 @@ mod tests {
     #[test]
     fn undo() {
         let site_id = 1;
+        let doc_id = 1;
         let mut client_engine = ClientEngine::new(site_id, 1, 0);
         // op1: original edit.
-        let op1 = make_fatop_unproc(EditorOp::Ins(0, "{".to_string()), &site_id, 1);
+        let op1 = make_editor_fatop(EditorOp::Ins(0, "{".to_string()), 1);
         // Auto-insert parenthesis. I don't know why it deletes the
         // inserted bracket first, but that's what it does.
-        let op2 = make_fatop_unproc(EditorOp::Del(0, "{".to_string()), &site_id, 2);
-        let op3 = make_fatop_unproc(EditorOp::Ins(0, "{".to_string()), &site_id, 3);
-        let op4 = make_fatop_unproc(EditorOp::Ins(1, "}".to_string()), &site_id, 4);
+        let op2 = make_editor_fatop(EditorOp::Del(0, "{".to_string()), 1);
+        let op3 = make_editor_fatop(EditorOp::Ins(0, "{".to_string()), 1);
+        let op4 = make_editor_fatop(EditorOp::Ins(1, "}".to_string()), 1);
         // All four ops have the same group, which is what we want.
 
-        client_engine.process_local_op(op1).unwrap();
-        client_engine.process_local_op(op2).unwrap();
-        client_engine.process_local_op(op3).unwrap();
-        client_engine.process_local_op(op4).unwrap();
+        client_engine.process_local_op(op1, doc_id, 1).unwrap();
+        client_engine.process_local_op(op2, doc_id, 2).unwrap();
+        client_engine.process_local_op(op3, doc_id, 3).unwrap();
+        client_engine.process_local_op(op4, doc_id, 4).unwrap();
 
         let undo_ops = client_engine.generate_undo_op();
 
