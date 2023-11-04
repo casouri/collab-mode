@@ -12,7 +12,6 @@ use crate::error::CollabError;
 pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type FatOp = crate::op::FatOp<Op>;
-pub type FatOpUnprocessed = crate::op::FatOp<EditorOp>;
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
@@ -44,16 +43,6 @@ pub enum EditorOpKind {
     Original,
     Undo,
     Redo,
-}
-
-// Dummy implementation.
-impl crate::op::Operation for EditorOp {
-    fn transform(&self, base: &Self) -> Self {
-        panic!()
-    }
-    fn inverse(&mut self) {
-        panic!()
-    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
