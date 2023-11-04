@@ -58,7 +58,7 @@ pub struct HelloParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareFileParams {
-    pub server_id: ServerId,
+    pub host_id: ServerId,
     pub file_name: String,
     pub content: String,
 }
@@ -75,7 +75,7 @@ pub struct ShareFileResp {
 pub struct SendOpParams {
     pub ops: Vec<EditorFatOp>,
     pub doc_id: DocId,
-    pub server_id: ServerId,
+    pub host_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -90,7 +90,7 @@ pub struct SendOpResp {
 pub struct SendInfoParams {
     pub info: serde_json::Value,
     pub doc_id: DocId,
-    pub server_id: ServerId,
+    pub host_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -102,7 +102,7 @@ pub struct UndoResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
-    pub server_id: ServerId,
+    pub host_id: ServerId,
     pub signaling_addr: String,
     pub credential: Credential,
 }
@@ -117,7 +117,7 @@ pub struct ListFilesResp {
 #[serde(rename_all = "camelCase")]
 pub struct DocIdParams {
     pub doc_id: DocId,
-    pub server_id: ServerId,
+    pub host_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -138,14 +138,14 @@ pub enum UndoKind {
 #[serde(rename_all = "camelCase")]
 pub struct UndoParams {
     pub doc_id: DocId,
-    pub server_id: ServerId,
+    pub host_id: ServerId,
     pub kind: UndoKind,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
-    pub server_id: ServerId,
+    pub host_id: ServerId,
     pub signaling_addr: String,
 }
 

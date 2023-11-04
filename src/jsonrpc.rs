@@ -361,7 +361,7 @@ impl JSONRPCServer {
         &mut self,
         params: ShareFileParams,
     ) -> CollabResult<ShareFileResp> {
-        let client = self.get_client(&params.server_id)?;
+        let client = self.get_client(&params.host_id)?;
         let site_id = client.site_id();
         let doc = Doc::new_share_file(
             client.clone(),
@@ -376,7 +376,7 @@ impl JSONRPCServer {
             site_id,
         };
         let key = DocDesignator {
-            server: params.server_id,
+            server: params.host_id,
             doc: doc.doc_id(),
         };
 
@@ -388,10 +388,10 @@ impl JSONRPCServer {
         &mut self,
         params: SendOpParams,
     ) -> CollabResult<SendOpResp> {
-        let doc = self.get_doc(&params.doc_id, &params.server_id)?;
+        let doc = self.get_doc(&params.doc_id, &params.host_id)?;
         let res = doc.send_op(params.ops).await;
         if res.is_err() {
-            self.remove_doc(&params.doc_id, &params.server_id);
+            self.remove_doc(&params.doc_id, &params.host_id);
         }
         let (remote_ops, last_seq) = res?;
         let resp = SendOpResp {
@@ -402,7 +402,7 @@ impl JSONRPCServer {
     }
 
     pub async fn handle_send_info_notif(&mut self, params: SendInfoParams) -> CollabResult<()> {
-        let client = self.get_client(&params.server_id)?;
+        let client = self.get_client(&params.host_id)?;
         client
             .send_info(&params.doc_id, params.info.to_string())
             .await?;
@@ -413,26 +413,26 @@ impl JSONRPCServer {
         &mut self,
         params: ListFilesParams,
     ) -> CollabResult<ListFilesResp> {
-        let res = if let Ok(client) = self.get_client(&params.server_id) {
+        let res = if let Ok(client) = self.get_client(&params.host_id) {
             client.list_files().await
         } else {
             // let client = GrpcClient::new(params.server_id.clone(), params.credential).await?;
             let client = WebrpcClient::new(
-                params.server_id.clone(),
+                params.host_id.clone(),
                 &params.signaling_addr,
                 params.credential,
             )
             .await?;
             self.client_map
-                .insert(params.server_id.clone(), client.into());
-            let client = self.client_map.get_mut(&params.server_id).unwrap();
+                .insert(params.host_id.clone(), client.into());
+            let client = self.client_map.get_mut(&params.host_id).unwrap();
             client.list_files().await
         };
         if res.is_err() {
             // If a client has problems, all it's associated docs must
             // have problems too, but no need to clean them up right
             // here. They will cleanup themselves.
-            self.client_map.remove(&params.server_id);
+            self.client_map.remove(&params.host_id);
         }
         let files = res?;
         let resp = ListFilesResp { files };
@@ -443,10 +443,10 @@ impl JSONRPCServer {
         &mut self,
         params: DocIdParams,
     ) -> CollabResult<ConnectToFileResp> {
-        if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
-            self.remove_doc(&params.doc_id, &params.server_id)
+        if self.get_doc(&params.doc_id, &params.host_id).is_ok() {
+            self.remove_doc(&params.doc_id, &params.host_id)
         }
-        let client = self.get_client(&params.server_id)?;
+        let client = self.get_client(&params.host_id)?;
         let site_id = client.site_id();
         let (doc, content) = Doc::new_connect_file(
             client.clone(),
@@ -456,7 +456,7 @@ impl JSONRPCServer {
         .await?;
         let file_name = doc.file_name();
         self.doc_map
-            .insert(DocDesignator::new(&params.doc_id, &params.server_id), doc);
+            .insert(DocDesignator::new(&params.doc_id, &params.host_id), doc);
         let resp = ConnectToFileResp {
             content,
             site_id,
@@ -469,8 +469,8 @@ impl JSONRPCServer {
         &mut self,
         params: DocIdParams,
     ) -> CollabResult<DocIdParams> {
-        if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
-            self.remove_doc(&params.doc_id, &params.server_id);
+        if self.get_doc(&params.doc_id, &params.host_id).is_ok() {
+            self.remove_doc(&params.doc_id, &params.host_id);
         }
         Ok(params)
     }
@@ -479,17 +479,17 @@ impl JSONRPCServer {
         &mut self,
         params: DocIdParams,
     ) -> CollabResult<DocIdParams> {
-        if self.get_doc(&params.doc_id, &params.server_id).is_ok() {
-            self.remove_doc(&params.doc_id, &params.server_id);
+        if self.get_doc(&params.doc_id, &params.host_id).is_ok() {
+            self.remove_doc(&params.doc_id, &params.host_id);
         }
-        if let Ok(cli) = self.get_client(&params.server_id) {
+        if let Ok(cli) = self.get_client(&params.host_id) {
             cli.delete_file(&params.doc_id).await?;
         }
         Ok(params)
     }
 
     pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<UndoResp> {
-        let doc = self.get_doc(&params.doc_id, &params.server_id)?;
+        let doc = self.get_doc(&params.doc_id, &params.host_id)?;
         let res = match params.kind {
             UndoKind::Undo => doc.undo().await,
             UndoKind::Redo => doc.redo().await,
@@ -500,7 +500,7 @@ impl JSONRPCServer {
                 Ok(resp)
             }
             Err(err) => {
-                self.remove_doc(&params.doc_id, &params.server_id);
+                self.remove_doc(&params.doc_id, &params.host_id);
                 Err(err)
             }
         }
@@ -513,7 +513,7 @@ impl JSONRPCServer {
         async_err_tx: tokio::sync::mpsc::Sender<CollabError>,
     ) -> CollabResult<()> {
         let _ = tokio::spawn(async move {
-            let res = run_webrpc_server(params.server_id, params.signaling_addr, server).await;
+            let res = run_webrpc_server(params.host_id, params.signaling_addr, server).await;
             if let Err(err) = res {
                 let err = match err {
                     CollabError::SignalingTimesUp(time) => CollabError::SignalingTimesUp(time),
