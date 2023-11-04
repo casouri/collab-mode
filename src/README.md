@@ -80,22 +80,13 @@ convergence with undo operations. Like TP1 and TP2, you can either use
 a transform function that satisfies them, or use a control algorithm
 that avoids them.
 
-COT avoids both IP2 and IP3 in its control algorithm at the cost of
-having abysmal asymptotic complexity, our algorithm does a couple
-ad-hoc patchwork that are a lot cheaper and very simple. The downside
-is that the result isn’t always intuitive. The documents are still
-consistent with each other, just the order might change if two user
-undo and redo at the same position. I think that’s reasonable since a)
-usually people tend to stay out of the way of each other and don’t
-edit at the exact same position, and b) as long as the consistency is
-guaranteed, small ordering issues can be easily fixed by the user.
-
 IP2 says sequentially transforming an operation A against another
 operation B and its inverse I(B) should end up giving you o back. This
 sounds trivially satisfiable but isn’t. An example: let A = del(0,
 abc), B = del(0, abc). With a normal transform function, you’ll end up
 with del(0, ""). To avoid IP2, you just need to make sure you never
-transform ops sequentially against an op and then its inverse.
+transform ops sequentially against an op and then its inverse (harder
+than you think).
 
 The other property, IP3 is a bit more complicated. In essence, it says
 the transformed inverse of an op should be equal to the inverse of the
@@ -106,40 +97,21 @@ equal to I(A’). Ie,
 
 IT(I(A), IT(B, A)) = I(IT(A, B))
 
-To avoid IP3, you need to make sure you never transform an inverse op
-I(A) against an op B where B is concurrent (context-independent) to
-A. Ie, don’t mingle inverse with concurrent ops together.
+COT avoids both IP2 and IP3 in its control algorithm at the cost of
+having abysmal asymptotic complexity: you need to always transform
+from the original op, that means keeping the original context for each
+op. No transformation at the server, no single path of transformation.
 
-My patch works are two-fold. First, when a delete op is canceled by
-another delete op when transforming, it saves the canceled part of the
-edit; when it later transforms against an insert op that redoes that
-edit, the edit is restored in the delete op. Example: del(0, "A")
-transforms against del(0, "A"), ins(0, "A"). Normally we’ll end up
-with del(0, ""), but with the restoration trick, we end up with del(0,
-"A"). This is fairly important for maintaining intuitive undo
-behavior.
+Instead, after much struggle, I decided to use tombstones. They solves
+every problem and is relatively simple, at the mere cost of keeping
+deleted characters. collab-mode is for temporary real-time sharing,
+keeping some deleted charaters is totally acceptable.
 
-A real-world example: when you type "{" in Emacs with bracket
-completion on, Emacs first deletes the "{", then inserts "{}". So the
-series of ops is
-
-``` text
-ins(0, {)
-del(0, {)
-ins(0, {)
-ins(1, })
-```
-
-Without the restoration trick, the user wouldn’t be able to undo all
-the operations, because the very first op, ins(0, {), will be inversed
-to del(0, {), and will be canceled by later ops.
-
-The second patchwork that I did is to skip inverse-pairs when
-transforming operations, like COT does. But we can only skip those
-pairs when transforming in the local history. It is still possible for
-an op to be transformed with an op, then later to that op’s inverse.
-This is called the decoupled-pair in the COT paper. Avoiding that is
-too expensive, so we just don’t do it.
+Since we have tombstones now, we need to convert between editor
+positions (excludes tombstones) and internal positions (includes
+tombstones). The conversion is sped up with cursors, basically the
+trick used in Yjs [4]; we don’t need to use trees like ST-Undo [5]
+does.
 
 # Undo policy
 
@@ -152,11 +124,7 @@ anymore.
 We also restrict undo and redo to ops created by the user, ie,
 everyone can only undo their own edits.
 
-# Undo implementation
-
-To skip do-undo pairs, whenever we transform an op A against a series
-of ops OPS, we scan OPS end to front and marks all the do-undo pairs,
-and when transforming A against OPS, the marked ones are skipped.
+# Undo op selection
 
 To chose the correct op to undo, and only undo the ops the user
 created, we maintain an "undo queue" (aka list of original ops made by
@@ -168,12 +136,12 @@ redo will move it forward.
 When the editor sends an Undo request, the collab process looks at the
 undo queue and undo tip, picks the original op to undo, transforms it,
 and sends it back to the editor. But at this point it doesn't modify
-the undo queue or undo tip. It is when the editor receives the op,
-applies it, and send it back, the collab process consider the undo
-operation complete, and moves the undo tip. It also replaces the
-pointer in the undo queue to point to the undo op just appended to the
-history; so that when the next time when the user redo the op, the
-redo op will be the inverse of this undo op.
+the undo queue or undo tip. The editor receives the op, applies it,
+and send it back, then collab process consider the undo operation
+complete, and moves the undo tip. It also replaces the pointer in the
+undo queue to point to the undo op just appended to the history; so
+that when the next time when the user redo the op, the redo op will be
+the inverse of this undo op.
 
 
 [1] Conditions and Patterns for Achieving Convergence in OT-Based
@@ -183,3 +151,8 @@ Co-Editors
 
 [3] Context-Based Operational Transformation in Distributed
 Collaborative Editing Systems
+
+[4] https://josephg.com/blog/crdts-go-brrr/
+
+[5] A semi-transparent selective undo algorithm for multi-user
+collaborative editors
