@@ -1,13 +1,13 @@
 //! This module provides a [Doc] object, used by [crate::jspnrpc],
 //! that encapsulates communicating to local and remote server and
 //! sending and receiving ops.
-
+//!
 //! [Doc] can be created by either sharing
 //! a local file to a local or remote server [Doc::new_share_file], or
 //! connecting to a document on a local or remote server by
 //! [Doc::new_connect_file]. Editor can send local ops to the Doc and
 //! receive (transformed) remotes ops to be applied.
-
+//!
 //! [Doc] starts background threads to send/receive ops, if error
 //! occurs, the error is captured and saved, the next time we caller
 //! uses one of [Doc]'s methods (sendop, undo, and redo), the error

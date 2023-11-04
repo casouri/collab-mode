@@ -1,5 +1,5 @@
 //! This module exposes the [DocServer] trait that abstracts over a
-//!local and remote server.
+//! local and remote server.
 
 use crate::collab_server::LocalServer;
 use crate::error::CollabResult;

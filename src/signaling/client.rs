@@ -1,11 +1,11 @@
 //! This module contains the client part of the signaling process.
 //! Collab server and collab client uses this modeule to establish
 //! connection between each other.
-
+//!
 //! A collab server would bind itself to an id on the signaling
 //! server, and a collab client knowing that id can establish a
 //! connection to the collab server.
-
+//!
 //! Specifically, a collab server creates a [Listener], and uses the
 //! [Listener::bind] method to bind to an id on the signaling server.
 //! Then it calls [Listener::accept] in a loop to accept connection
@@ -13,12 +13,12 @@
 //! [Listener::accept] returns a socket, the collab servers gets the
 //! client's sdp by [Socket::sdp], and send back its sdp with
 //! [Socket::send_sdp].
-
+//!
 //! A collab client creates a [Listener], and uses the
 //! [Listener::connect] method to connect to the collab server
 //! associated with the id and send its sdp to the server, and gets
 //! back a [Socket]. I can get the server's sdp by [Socket::sdp].
-
+//!
 //! Then, both sides send and receive ICE candidates through
 //! [Socket::send_candidate] and [Socket::recv_candidate], until the
 //! webrtc connection is established.

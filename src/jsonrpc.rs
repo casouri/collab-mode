@@ -1,15 +1,15 @@
 //! This module is the frontend of a collab process. It exposes two
 //! functions, [run_stdio] and [run_socket], that communicates with
 //! the editor with either pipe or socket.
-
+//!
 //! Then entry function will start two threads, one listens for
 //! "remote arrived" notification, and sends that notification to the
 //! editor; the other reads JSONRPC requests and serves them.
-
+//!
 //! Error handling: Error handling is synchronous, if error occurs
 //! when serving a request, the error is captured and packaged into a
 //! JSONRPC error and send back as the response.
-
+//!
 // Non-fatal errors occurred in [crate::collab_server::LocalServer]
 // are also communicated to the editor, they are sent to the editor in
 // the form of JSONRPC notifications.

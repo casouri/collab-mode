@@ -20,3 +20,6 @@ session-2:
 
 signaling:
 	$(RUST_ENV) cargo run --bin collab-signal -- run
+
+doc:
+	cargo doc --document-private-items --open

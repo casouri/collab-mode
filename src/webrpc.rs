@@ -3,43 +3,43 @@
 //! use [Endpoint] as a client to send requests, and receive one or
 //! more response; you can also use [Endpoint] as a server to listen
 //! for incoming requests and send back responses.
-
+//!
 //! To create a client, run [Endpoint::connect]. To create a server,
 //! first create a [Listener] using [Listener::bind], then accept
 //! incoming connections (in the form of [Endpoint]s) with
 //! [Listener::accept].
-
+//!
 //! For a client, to send a request, use [Endpoint::send_request]. It
 //! returns a channel on which you can receive responses to the
 //! request. Closing the channel terminates the request for both ends.
-
+//!
 //! For a server, you need to run [Endpoint::read_requests] to receive
 //! requests after you accepts an endpoint. This function runs in the
 //! background and reads incoming requests and responses and
 //! multiplexes them into corresponding channels. It returns a channel
 //! from which you can read requests.
-
+//!
 //! To send a response, use [Endpoint::send_response]. To send a
 //! series of responses, just call [Endpoint::send_response] multiple
 //! times until there's an error, which means either the client closes
 //! their end, or an error occurs.
-
+//!
 //! Each request-response session is made of messages flying both
 //! ways, a message can be either a request or a response, and they
 //! carry an request id to tell which request session it belongs to. A
 //! message doesn't have a size limit. Each message are chunked into
 //! frames, which has a max size, before sending over the data
 //! channel.
-
+//!
 //! We don't have synchronous acks for messages. When a client stops
 //! listening for responses of a request, the server eventually learns
 //! it, and sending further responses will return a `RequestClosed`
 //! error.
-
+//!
 //! Right now there's no recovery, any error (except
 //! [WebrpcError::RequestClosed]) is a fatal error. The user should
 //! reconnect and start over the work from a checkpoint.
-
+//!
 //! For a server, fatal errors are sent to the request channel; for a client
 //! fatal errors are sent to every response channel.
 

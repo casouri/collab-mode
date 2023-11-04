@@ -1,3 +1,38 @@
+# Note
+
+To include private modules in the doc, run
+
+``` shell
+cargo doc --document-private-items --open
+```
+
+# Topology
+
+Although collab-mode is p2p, the topology is somewhat centralized:
+there is a “host” that hosts the file and is the source-of-truth. Each
+“client” sends ops to the host and host broadcasts the op to all other
+clients. Clients join the group by contacting host and get a copy of
+the document. Internally we call the “host” collab server.
+
+# Connection and RPC
+
+We use webrtc data channels to establish p2p connections. It needs a
+public signaling server, which is implemented in
+[crate::signaling::server] The collab server (“host”) registers with a
+UUID on the signaling server, and collab client can connect to the
+server by querying the signaling server.
+
+For RPC, we implement a simple RPC ([crate::webrpc]) on top of webrtc
+data channel.
+
+# Communicating with editor
+
+[crate::jsonrpc] provides a jsonrpc server that faces the editor. The
+jsonrpc server creates a [crate::collab_client::Doc] upon editor
+request, by either sharing to the local server or connecting to a
+remote server, and delgates editor requests to
+[crate::collab_client::Doc].
+
 # OT control algorithm
 
 The algorithm we use is kind of a mix of POT[1] and stop-and-wait[2].

@@ -1,6 +1,6 @@
 //! This module provides a signaling server. Use
 //! [run_signaling_server] to run it.
-
+//!
 //! The server is pretty straightforward, it listens for websocket
 //! connections, spawns a task for each new connection and handles
 //! them with [handle_connection]. The server keeps a map mapping
