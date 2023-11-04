@@ -507,6 +507,12 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
   (let ((map (make-sparse-keymap)))
     (define-key map [remap undo-only] #'collab-undo)
     (define-key map [remap undo-redo] #'collab-redo)
+    (define-key map (kbd "C-/") #'collab-undo)
+    (define-key map (kbd "C-.") #'collab-redo)
+    (define-key map [remap undo]
+                (lambda (&rest _)
+                  (interactive)
+                  (message (collab--fairy "Emacs-undo won’t work in this mode, use ‘collab-undo/redo’ is what I was told! (undo → \\[collab-undo], redo → \\[collab-redo])"))))
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
