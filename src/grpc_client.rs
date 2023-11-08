@@ -37,7 +37,7 @@ impl GrpcClient {
     pub async fn new(server_addr: ServerId, credential: Credential) -> CollabResult<GrpcClient> {
         let mut client = rpc::doc_server_client::DocServerClient::connect(server_addr.clone())
             .await
-            .map_err(|err| CollabError::TransportErr(err.to_string()))?;
+            .map_err(|err| CollabError::RpcErr(err.to_string()))?;
         let resp = client
             .login(Request::new(rpc::Credential {
                 cred: credential.clone(),

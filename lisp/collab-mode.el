@@ -155,15 +155,20 @@ substitutes command keys like docstring, see
     (-32601 . MethodNotFound)
     (-32602 . InvalidParams)
     (-32603 . InternalError)
-    (-32099 . ServerErrorStart)
-    (-32000 . ServerErrorEnd)
 
-    (-31000 . ConnectionBroke)
-    (-30001 . OTEngineError)
-    (-30002 . PermissionDenied)
-    (-30003 . DocNotFound)
-    (-30004 . DocAlreadyExists))
+    (100 . NetworkError)
+    (101 . ServerNonFatalDocFatal)
+    (102 . ServerFatalError)
+
+    (104 . PermissionDenied)
+    (105 . DocNotFound)
+    (106 . DocAlreadyExists)
+    (107 . IOError))
   "An alist of JSONRPC error codes.")
+
+(defun collab--error-code-jsonrpc-error-p (code)
+  "Return non-nil if CODE represents a JSONRPC error."
+  (<= -32768 code -32000))
 
 (defmacro collab--catch-error (msg &rest body)
   "Execute BODY, catch jsonrpc errors.

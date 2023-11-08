@@ -333,7 +333,7 @@ fn spawn_thread_receive_remote_op(
                 },
             }
         }
-        let err = CollabError::ChannelClosed(format!(
+        let err = CollabError::DocFatal(format!(
             "Doc({}) Internal channel (local server --info--> local client) broke",
             &doc_id
         ));
@@ -348,7 +348,7 @@ fn spawn_thread_receive_remote_op(
         loop {
             let new_remote_ops = remote_op_stream.next().await;
             if new_remote_ops.is_none() {
-                let err = CollabError::ChannelClosed(format!(
+                let err = CollabError::DocFatal(format!(
                     "Doc({}) Internal channel (local server --op--> local client) broke",
                     &doc_id
                 ));
@@ -403,7 +403,7 @@ fn spawn_thread_receive_remote_op(
                     last_seq: last_global_seq,
                 }));
                 if let Err(err) = res {
-                    let err = CollabError::ChannelClosed(format!(
+                    let err = CollabError::DocFatal(format!(
                     "Doc({}) Internal notification channel (Doc --(doc,server)--> jsonrpc) broke: {:#}",
                     &doc_id, err
                 ));
@@ -449,10 +449,8 @@ fn get_last_global_seq(ops: &[FatOp]) -> CollabResult<Option<GlobalSeq>> {
         if let Some(last_global_seq) = last_op.seq {
             Ok(Some(last_global_seq))
         } else {
-            let err = CollabError::TransportErr(format!(
-                "Remote op doesn't have a global seq {:?}",
-                last_op
-            ));
+            let err =
+                CollabError::DocFatal(format!("Remote op doesn't have a global seq {:?}", last_op));
             Err(err)
         }
     } else {

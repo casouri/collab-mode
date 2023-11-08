@@ -14,11 +14,23 @@ pub enum ErrorCode {
     ServerErrorEnd = -32000,
 
     // Collab-mode errors.
-    ConnectionBroke = -31000,
-    OTEngineError = -31001,
-    PermissionDenied = -31002,
-    DocNotFound = -31003,
-    DocAlreadyExists = -31004,
+    //
+    /// Transient error, retry again later.
+    NetworkError = 100,
+    /// Server fatal error, restart the server.
+    ServerFatalError = 102,
+    /// Server can keep running but if the operation is concerned with
+    /// a doc, the doc must be reconnected.
+    ServerNonFatalDocFatal = 103,
+
+    /// Permission denied.
+    PermissionDenied = 104,
+    /// Doc not found.
+    DocNotFound = 105,
+    /// Doc already exists.
+    DocAlreadyExists = 106,
+    /// Local IO error.
+    IOError = 107,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,12 +60,6 @@ impl Into<String> for NotificationCode {
 pub struct HelloParams {
     pub site_id: SiteId,
 }
-
-// #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize, PartialOrd, Ord, Hash)]
-// pub enum ServerId {
-//     Local,
-//     Url(String),
-// }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

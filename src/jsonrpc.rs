@@ -212,20 +212,22 @@ fn make_err(id: RequestId, code: ErrorCode, message: String) -> Message {
 
 fn error_code(err: &CollabError) -> ErrorCode {
     match err {
-        CollabError::ParseError(_) => ErrorCode::InvalidParams,
-        CollabError::EngineError { err: _ } => ErrorCode::OTEngineError,
-        CollabError::OpOutOfBound(_, _) => ErrorCode::OTEngineError,
+        CollabError::ServerFatal(_) => ErrorCode::ServerFatalError,
+        CollabError::DocFatal(_) => ErrorCode::ServerNonFatalDocFatal,
+        CollabError::RpcError(_) => ErrorCode::NetworkError,
+        CollabError::EngineError(_) => ErrorCode::ServerNonFatalDocFatal,
+
         CollabError::DocNotFound(_) => ErrorCode::DocNotFound,
         CollabError::DocAlreadyExists(_) => ErrorCode::DocAlreadyExists,
-        CollabError::ServerNotConnected(_) => ErrorCode::ConnectionBroke,
-        CollabError::ChannelClosed(_) => ErrorCode::InternalError,
-        CollabError::TransportErr(_) => ErrorCode::ConnectionBroke,
-        CollabError::RemoteErr(_) => ErrorCode::InternalError,
-        CollabError::IOErr(_) => ErrorCode::InternalError,
-        // This shouldn't be ever needed.
-        CollabError::ServerDied(_) => ErrorCode::InternalError,
-        CollabError::SignalingTimesUp(_) => ErrorCode::ConnectionBroke,
-        CollabError::AcceptConnectionErr(_) => ErrorCode::ConnectionBroke,
+        CollabError::ServerNotConnected(_) => ErrorCode::NetworkError,
+
+        CollabError::RemoteErr(_) => ErrorCode::ServerNonFatalDocFatal,
+        CollabError::IOErr(_) => ErrorCode::IOError,
+
+        // This shouldn't be ever needed, because they are converted
+        // into notifications.
+        CollabError::SignalingTimesUp(_) => ErrorCode::NetworkError,
+        CollabError::AcceptConnectionErr(_) => ErrorCode::NetworkError,
     }
 }
 

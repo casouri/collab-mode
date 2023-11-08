@@ -1,49 +1,52 @@
 //! This module defines [CollabError], the error types used throughout
 //! the program.
 
-use crate::engine::EngineError;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum CollabError {
-    #[error("Server errors out and died: {0}")]
-    ServerDied(String),
-    #[error("Cannot parse request: {0}")]
-    ParseError(String),
-    #[error("Fatal OT engine error: {err:?}")]
-    EngineError {
-        #[from]
-        err: EngineError,
-    },
-    #[error("A document with this id already exists: {0:?}")]
+    #[error("Fatal server error ({0})")]
+    ServerFatal(String),
+    #[error("Rpc error ({0})")]
+    RpcError(String),
+    #[error("Doc fatal error ({0})")]
+    DocFatal(String),
+    #[error("Fatal OT engine error ({0})")]
+    EngineError(String),
+
+    #[error("Doc({0}) already exists")]
     DocAlreadyExists(DocId),
-    #[error("Cannot find the document with this id: {0:?}")]
+    #[error("Cannot find Doc({0})")]
     DocNotFound(DocId),
-    #[error("Not connected to the server: {0:?}")]
+    #[error("Not connected to Server({0})")]
     ServerNotConnected(ServerId),
-    #[error("Unexpected closed channel: {0}")]
-    ChannelClosed(String),
-    #[error("Operation out of bounds: {0:?}, doc size: {1:?}")]
-    OpOutOfBound(Op, usize),
-    #[error("gRPC transport error: {0}")]
-    TransportErr(String),
+
+    // Notification
+    #[error("Error accepting remote connections ({0})")]
+    AcceptConnectionErr(String),
     #[error("Allocated time ({0}s) on the signaling server is up")]
     SignalingTimesUp(u16),
-    #[error("Error accepting remote connections: {0}")]
-    AcceptConnectionErr(String),
-    #[error("Error returned from remote server: {0}")]
+
+    #[error("Error returned from remote server ({0})")]
     RemoteErr(Box<CollabError>),
-    #[error("IO error: {0}")]
+
+    #[error("IO error ({0})")]
     IOErr(String),
 }
 
 pub type CollabResult<T> = Result<T, CollabError>;
 
+impl From<crate::engine::EngineError> for CollabError {
+    fn from(value: crate::engine::EngineError) -> Self {
+        CollabError::EngineError(format!("{:#?}", value))
+    }
+}
+
 impl From<serde_json::Error> for CollabError {
     fn from(value: serde_json::Error) -> Self {
-        CollabError::ParseError(format!("{:#}", value))
+        CollabError::RpcError(format!("{:#}", value))
     }
 }
 
@@ -51,7 +54,7 @@ impl From<WebrpcError> for CollabError {
     fn from(value: WebrpcError) -> Self {
         match value {
             WebrpcError::SignalingTimesUp(time) => CollabError::SignalingTimesUp(time),
-            value => CollabError::TransportErr(format!("{:#}", value)),
+            value => CollabError::RpcError(format!("{:#}", value)),
         }
     }
 }

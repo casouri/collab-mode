@@ -218,7 +218,7 @@ impl DocServer for WebrpcClient {
 
 /// Create an error stating that `resp` wasn't the expected type.
 fn unexpected_resp(expected_resp: &str, resp: DocServerResp) -> CollabError {
-    CollabError::TransportErr(format!(
+    CollabError::RpcError(format!(
         "Expecting {expected_resp} response but got {:?}",
         resp
     ))
