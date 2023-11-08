@@ -9,7 +9,6 @@
 
 use crate::abstract_server::{DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
-use crate::op::{DocId, GlobalSeq, Op, SiteId};
 use crate::types::*;
 use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;

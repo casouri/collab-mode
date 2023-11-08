@@ -328,7 +328,7 @@ impl FullDoc {
     /// by `delta` to the right, and shift their range_idx by
     /// `range_idx_delta` to the right.
     fn shift_cursors_right(&mut self, idx: usize, delta: u64, range_idx_delta: usize) {
-        for (site, cursor) in self.cursors.iter_mut() {
+        for (_site, cursor) in self.cursors.iter_mut() {
             if let Some(cursor_idx) = cursor.range_idx {
                 if cursor_idx >= idx {
                     cursor.full_pos += delta;
@@ -1105,13 +1105,6 @@ pub struct ServerEngine {
     current_seq: GlobalSeq,
 }
 
-impl ClientEngine {
-    /// Return the site id.
-    pub fn site_id(&self) -> SiteId {
-        self.site.clone()
-    }
-}
-
 impl ServerEngine {
     /// Return global ops after `seq`.
     pub fn global_ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
@@ -1257,7 +1250,6 @@ impl ClientEngine {
             &editor_op,
             self.current_site_seq,
         );
-        dbg!(&self.gh.full_doc.ranges);
 
         let op = editor_op.op;
         let group_seq = editor_op.group_seq;
@@ -1293,9 +1285,7 @@ impl ClientEngine {
                 .collect(),
         };
 
-        dbg!("converted_ops", &ops, &self.gh.full_doc.ranges);
-
-        for mut op in ops {
+        for op in ops {
             let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
             let op_kind = self.gh.process_opkind(kind, inferred_seq)?;
 
@@ -2218,8 +2208,6 @@ mod tests {
         cursor.editor_pos = 10;
         cursor.range_idx = Some(1);
         doc.apply_mark_live(10, 10, &mut cursor);
-        dbg!(&doc.ranges);
-        dbg!(&cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(30)]));
         assert!(cursor.full_pos == 0);
         assert!(cursor.editor_pos == 0);
