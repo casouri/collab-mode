@@ -220,6 +220,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::DocNotFound(_) => ErrorCode::DocNotFound,
         CollabError::DocAlreadyExists(_) => ErrorCode::DocAlreadyExists,
         CollabError::ServerNotConnected(_) => ErrorCode::NetworkError,
+        CollabError::NotRegularFile(_) => ErrorCode::NotRegularFile,
 
         CollabError::RemoteErr(_) => ErrorCode::ServerNonFatalDocFatal,
         CollabError::IOErr(_) => ErrorCode::IOError,

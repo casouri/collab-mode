@@ -31,6 +31,8 @@ pub enum ErrorCode {
     DocAlreadyExists = 106,
     /// Local IO error.
     IOError = 107,
+    /// Not a regular file (a directory)
+    NotRegularFile = 108,
 }
 
 #[derive(Clone, Copy, Debug)]

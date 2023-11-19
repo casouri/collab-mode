@@ -22,6 +22,8 @@ pub enum CollabError {
     DocNotFound(DocId),
     #[error("Not connected to Server({0})")]
     ServerNotConnected(ServerId),
+    #[error("{0} is not a redular file")]
+    NotRegularFile(String),
 
     // Notification
     #[error("Error accepting remote connections ({0})")]
