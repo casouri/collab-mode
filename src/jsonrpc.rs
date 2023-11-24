@@ -24,6 +24,7 @@ use crate::webrpc_client::WebrpcClient;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub mod types;
 use types::*;
@@ -221,6 +222,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::DocAlreadyExists(_) => ErrorCode::DocAlreadyExists,
         CollabError::ServerNotConnected(_) => ErrorCode::NetworkError,
         CollabError::NotRegularFile(_) => ErrorCode::NotRegularFile,
+        CollabError::NotDirectory(_) => ErrorCode::NotDirectory,
 
         CollabError::RemoteErr(_) => ErrorCode::ServerNonFatalDocFatal,
         CollabError::IOErr(_) => ErrorCode::IOError,
@@ -416,10 +418,17 @@ impl JSONRPCServer {
         &mut self,
         params: ListFilesParams,
     ) -> CollabResult<ListFilesResp> {
-        let res = if let Ok(client) = self.get_client(&params.host_id) {
-            client.list_files().await
+        let dir_path = if params.doc_id.is_some() && params.path.is_some() {
+            let doc_id = params.doc_id.unwrap();
+            let path = Path::new(&params.path.unwrap()).to_path_buf();
+            Some((doc_id, path))
         } else {
-            // let client = GrpcClient::new(params.server_id.clone(), params.credential).await?;
+            None
+        };
+
+        let res = if let Ok(client) = self.get_client(&params.host_id) {
+            client.list_files(dir_path).await
+        } else {
             let client = WebrpcClient::new(
                 params.host_id.clone(),
                 &params.signaling_addr,
@@ -429,7 +438,7 @@ impl JSONRPCServer {
             self.client_map
                 .insert(params.host_id.clone(), client.into());
             let client = self.client_map.get_mut(&params.host_id).unwrap();
-            client.list_files().await
+            client.list_files(dir_path).await
         };
         if res.is_err() {
             // If a client has problems, all it's associated docs must

@@ -31,8 +31,10 @@ pub enum ErrorCode {
     DocAlreadyExists = 106,
     /// Local IO error.
     IOError = 107,
-    /// Not a regular file (a directory)
+    /// Not a regular file
     NotRegularFile = 108,
+    /// Not a directory
+    NotDirectory = 109,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,12 +112,14 @@ pub struct UndoResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
+    pub doc_id: Option<DocId>,
+    pub path: Option<String>,
     pub host_id: ServerId,
     pub signaling_addr: String,
     pub credential: Credential,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesResp {
     pub files: Vec<DocInfo>,

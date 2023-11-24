@@ -22,8 +22,10 @@ pub enum CollabError {
     DocNotFound(DocId),
     #[error("Not connected to Server({0})")]
     ServerNotConnected(ServerId),
-    #[error("{0} is not a redular file")]
+    #[error("{0} is not a regular file")]
     NotRegularFile(String),
+    #[error("{0} is not a directory")]
+    NotDirectory(String),
 
     // Notification
     #[error("Error accepting remote connections ({0})")]
@@ -39,6 +41,12 @@ pub enum CollabError {
 }
 
 pub type CollabResult<T> = Result<T, CollabError>;
+
+impl From<std::io::Error> for CollabError {
+    fn from(value: std::io::Error) -> Self {
+        CollabError::IOErr(value.to_string())
+    }
+}
 
 impl From<crate::engine::EngineError> for CollabError {
     fn from(value: crate::engine::EngineError) -> Self {

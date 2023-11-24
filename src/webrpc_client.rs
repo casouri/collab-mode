@@ -61,10 +61,10 @@ impl DocServer for WebrpcClient {
         self.server_id.clone()
     }
 
-    async fn list_files(&mut self) -> CollabResult<Vec<DocInfo>> {
+    async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
         let resp = self
             .endpoint
-            .send_request_oneshot(&DocServerReq::ListFiles)
+            .send_request_oneshot(&DocServerReq::ListFiles { dir_path })
             .await?
             .unpack()?;
         log::debug!("list_files() => {:?}", &resp);

@@ -14,6 +14,7 @@ use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
 use gapbuf::GapBuffer;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::sync::{Mutex, RwLock};
@@ -35,8 +36,8 @@ impl DocServer for LocalServer {
     async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId> {
         self.share_file_1(file_name, file).await
     }
-    async fn list_files(&mut self) -> CollabResult<Vec<DocInfo>> {
-        Ok(self.list_files_1().await)
+    async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
+        self.list_files_1(dir_path).await
     }
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {
         self.request_file_1(doc_id).await
@@ -73,6 +74,7 @@ pub struct LocalServer {
     /// SiteId given to the next connected client.
     next_site_id: Arc<Mutex<SiteId>>,
     docs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Doc>>>>>,
+    dirs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Dir>>>>>,
     user_list: Arc<Mutex<HashMap<Credential, SiteId>>>,
 }
 
@@ -81,6 +83,8 @@ pub struct LocalServer {
 struct Doc {
     /// Human-readable name for the doc.
     name: String,
+    /// The local file path, if exists.
+    file_path: Option<FilePath>,
     /// The server engine that transforms and stores ops for this doc.
     engine: ServerEngine,
     /// The document itself.
@@ -95,16 +99,26 @@ struct Doc {
     _rx_info: broadcast::Receiver<String>,
 }
 
+/// Stores relevant data for a shared dir, used by the server.
+#[derive(Debug)]
+struct Dir {
+    /// Human-readable name for the doc.
+    name: String,
+    /// Absolute path of the directory on disk.
+    path: PathBuf,
+}
+
 // *** Functions for Doc
 
 impl Doc {
-    pub fn new(file_name: &str, content: &str) -> Doc {
+    pub fn new(file_name: &str, content: &str, file_path: Option<FilePath>) -> Doc {
         let (tx, rx) = watch::channel(());
         let (tx_info, rx_info) = broadcast::channel(RETAINED_INFO_MSG_MAX);
         let mut buffer = GapBuffer::new();
         buffer.insert_many(0, content.chars());
         Doc {
             name: file_name.to_string(),
+            file_path,
             engine: ServerEngine::new(content.len() as u64),
             buffer,
             tx,
@@ -151,6 +165,7 @@ impl LocalServer {
             self_site_id: 0,
             next_site_id: Arc::new(Mutex::new(1)),
             docs: Arc::new(RwLock::new(HashMap::new())),
+            dirs: Arc::new(RwLock::new(HashMap::new())),
             user_list: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -162,7 +177,7 @@ impl LocalServer {
 
         docs.insert(
             doc_id.clone(),
-            Arc::new(Mutex::new(Doc::new(file_name, file))),
+            Arc::new(Mutex::new(Doc::new(file_name, file, None))),
         );
         Ok(doc_id)
     }
@@ -255,15 +270,70 @@ impl LocalServer {
         Ok((ReceiverStream::from(rx_op), ReceiverStream::from(rx_info)))
     }
 
-    pub async fn list_files_1(&self) -> Vec<DocInfo> {
+    /// Return the doc id of the doc if there is a doc with `path`.
+    async fn get_docs_with_path(&self, path: &FilePath) -> Option<DocFile> {
+        for (doc_id, doc) in self.docs.read().await.iter() {
+            let doc = doc.lock().await;
+            if let Some(path1) = &doc.file_path {
+                if path == path1 {
+                    return Some(DocFile::Doc(doc_id.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn list_directory(&self, dir_path: FilePath) -> CollabResult<Vec<DocInfo>> {
+        let (doc_id, rel_path) = dir_path;
+        if let Some(dir) = self.dirs.read().await.get(&doc_id) {
+            let dir = dir.lock().await;
+            let path = Path::new(&dir.path).join(rel_path);
+            drop(dir);
+
+            if !path.is_dir() {
+                // If there are error access the file, return that
+                // error instead of NotDirectory.
+                path.metadata()?;
+                return Err(CollabError::NotDirectory(
+                    path.to_string_lossy().to_string(),
+                ));
+            }
+            let mut res = vec![];
+            for file in std::fs::read_dir(&path)? {
+                let file_name_raw = file?.file_name();
+                let file_name = file_name_raw.to_string_lossy().into();
+                let rel_path = Path::new(&path).join(file_name_raw);
+                let file_path = (doc_id, rel_path);
+
+                if let Some(doc) = self.get_docs_with_path(&file_path).await {
+                    res.push(DocInfo { doc, file_name });
+                } else {
+                    let doc = DocFile::File(file_path);
+                    res.push(DocInfo { doc, file_name });
+                }
+            }
+            return Ok(res);
+        } else {
+            return Err(CollabError::DocNotFound(doc_id));
+        };
+    }
+
+    pub async fn list_files_1(&self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
+        if let Some(dir_path) = dir_path {
+            return self.list_directory(dir_path).await;
+        }
         let mut res = vec![];
         for (doc_id, doc) in self.docs.read().await.iter() {
-            res.push(DocInfo {
-                doc_id: doc_id.clone(),
-                file_name: doc.lock().await.name.clone(),
-            });
+            // TODO permission check.
+            // Only include top-level docs.
+            if doc.lock().await.file_path.is_none() {
+                res.push(DocInfo {
+                    doc: DocFile::Doc(doc_id.clone()),
+                    file_name: doc.lock().await.name.clone(),
+                })
+            };
         }
-        res
+        Ok(res)
     }
 
     pub async fn request_file_1(&self, doc_id: &DocId) -> CollabResult<Snapshot> {
@@ -357,8 +427,8 @@ async fn handle_request(
             let doc_id = server.share_file_1(&file_name, &content).await?;
             Ok(Some(DocServerResp::ShareFile(doc_id)))
         }
-        DocServerReq::ListFiles => {
-            let doc_info = server.list_files_1().await;
+        DocServerReq::ListFiles { dir_path } => {
+            let doc_info = server.list_files_1(dir_path).await?;
             Ok(Some(DocServerResp::ListFiles(doc_info)))
         }
         DocServerReq::SendOp(ops) => {

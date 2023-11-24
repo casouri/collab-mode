@@ -1,15 +1,17 @@
 //! This module re-exports some common types for convenience, and
 //! define a couple more.
 
+use crate::error::CollabError;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
+pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 
 pub type ServerId = String;
 pub const SERVER_ID_SELF: &str = "self";
 pub type Credential = String;
-
-pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
-use crate::error::CollabError;
-pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
+pub type FilePath = (DocId, PathBuf);
 
 pub type FatOp = crate::op::FatOp<Op>;
 
@@ -19,6 +21,14 @@ pub enum EditorOp {
     Del(u64, String),
     Undo,
     Redo,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum DocFile {
+    /// A shared doc.
+    Doc(DocId),
+    /// A file on disk, not yet shared.
+    File(FilePath),
 }
 
 impl EditorOp {
@@ -77,10 +87,10 @@ impl DocDesignator {
 
 /// File name plus doc id for a document. We might later add more meta
 /// info to a doc.
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocInfo {
-    pub doc_id: DocId,
+    pub doc: DocFile,
     pub file_name: String,
 }
 
@@ -124,7 +134,7 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DocServerReq {
     ShareFile { file_name: String, content: String },
-    ListFiles,
+    ListFiles { dir_path: Option<FilePath> },
     SendOp(ContextOps),
     RecvOpAndInfo { doc_id: DocId, after: GlobalSeq },
     RequestFile(DocId),
