@@ -24,7 +24,7 @@ use crate::webrpc_client::WebrpcClient;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod types;
 use types::*;
@@ -223,6 +223,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::ServerNotConnected(_) => ErrorCode::NetworkError,
         CollabError::NotRegularFile(_) => ErrorCode::NotRegularFile,
         CollabError::NotDirectory(_) => ErrorCode::NotDirectory,
+        CollabError::UnsupportedOperation(_) => ErrorCode::UnsupportedOperation,
 
         CollabError::RemoteErr(_) => ErrorCode::ServerNonFatalDocFatal,
         CollabError::IOErr(_) => ErrorCode::IOError,
@@ -371,7 +372,7 @@ impl JSONRPCServer {
         let doc = Doc::new_share_file(
             client.clone(),
             &params.file_name,
-            &params.content,
+            params.content,
             self.notifier_tx.clone(),
         )
         .await?;
@@ -386,6 +387,22 @@ impl JSONRPCServer {
         };
 
         self.doc_map.insert(key, doc);
+        Ok(resp)
+    }
+
+    pub async fn handle_share_dir_request(
+        &mut self,
+        params: ShareDirParams,
+    ) -> CollabResult<ShareDirResp> {
+        let client = self.get_client(&params.host_id)?;
+        let doc_id = client
+            .share_file(
+                &params.dir_name,
+                FileContentOrPath::Path(PathBuf::from(params.path)),
+            )
+            .await?;
+
+        let resp = ShareDirResp { doc_id };
         Ok(resp)
     }
 

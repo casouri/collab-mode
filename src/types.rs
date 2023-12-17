@@ -31,6 +31,14 @@ pub enum DocFile {
     File(FilePath),
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum FileContentOrPath {
+    /// File content.
+    Content(String),
+    /// File path.
+    Path(PathBuf),
+}
+
 impl EditorOp {
     pub fn kind(&self) -> EditorOpKind {
         match self {
@@ -133,14 +141,25 @@ pub struct Snapshot {
 /// Requests sent to webrpc server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DocServerReq {
-    ShareFile { file_name: String, content: String },
-    ListFiles { dir_path: Option<FilePath> },
+    ShareFile {
+        file_name: String,
+        content: FileContentOrPath,
+    },
+    ListFiles {
+        dir_path: Option<FilePath>,
+    },
     SendOp(ContextOps),
-    RecvOpAndInfo { doc_id: DocId, after: GlobalSeq },
+    RecvOpAndInfo {
+        doc_id: DocId,
+        after: GlobalSeq,
+    },
     RequestFile(DocId),
     DeleteFile(DocId),
     Login(Credential),
-    SendInfo { doc_id: DocId, info: String },
+    SendInfo {
+        doc_id: DocId,
+        info: String,
+    },
 }
 
 /// Reponses sent to webrpc client.

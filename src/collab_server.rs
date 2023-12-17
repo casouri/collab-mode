@@ -33,7 +33,11 @@ impl DocServer for LocalServer {
     fn server_id(&self) -> ServerId {
         SERVER_ID_SELF.to_string()
     }
-    async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId> {
+    async fn share_file(
+        &mut self,
+        file_name: &str,
+        file: FileContentOrPath,
+    ) -> CollabResult<DocId> {
         self.share_file_1(file_name, file).await
     }
     async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
@@ -170,15 +174,34 @@ impl LocalServer {
         }
     }
 
-    pub async fn share_file_1(&self, file_name: &str, file: &str) -> CollabResult<DocId> {
+    pub async fn share_file_1(
+        &self,
+        file_name: &str,
+        file: FileContentOrPath,
+    ) -> CollabResult<DocId> {
         // TODO permission check.
         let doc_id: DocId = rand::random();
-        let mut docs = self.docs.write().await;
+        match file {
+            FileContentOrPath::Content(content) => {
+                let mut docs = self.docs.write().await;
 
-        docs.insert(
-            doc_id.clone(),
-            Arc::new(Mutex::new(Doc::new(file_name, file, None))),
-        );
+                docs.insert(
+                    doc_id.clone(),
+                    Arc::new(Mutex::new(Doc::new(file_name, &content, None))),
+                );
+            }
+            FileContentOrPath::Path(path) => {
+                let mut dirs = self.dirs.write().await;
+
+                dirs.insert(
+                    doc_id.clone(),
+                    Arc::new(Mutex::new(Dir {
+                        name: file_name.to_string(),
+                        path,
+                    })),
+                );
+            }
+        }
         Ok(doc_id)
     }
 
@@ -424,7 +447,12 @@ async fn handle_request(
     let req = msg.unpack()?;
     match req {
         DocServerReq::ShareFile { file_name, content } => {
-            let doc_id = server.share_file_1(&file_name, &content).await?;
+            if let FileContentOrPath::Path(_) = &content {
+                return Err(CollabError::UnsupportedOperation(
+                    "Sharing directory to remote host".to_string(),
+                ));
+            }
+            let doc_id = server.share_file_1(&file_name, content).await?;
             Ok(Some(DocServerResp::ShareFile(doc_id)))
         }
         DocServerReq::ListFiles { dir_path } => {

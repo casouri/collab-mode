@@ -75,17 +75,27 @@ impl DocServer for WebrpcClient {
         }
     }
 
-    async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId> {
+    async fn share_file(
+        &mut self,
+        file_name: &str,
+        file: FileContentOrPath,
+    ) -> CollabResult<DocId> {
+        if let FileContentOrPath::Path(_) = &file {
+            return Err(CollabError::UnsupportedOperation(
+                "Sharing directory to a remote host".to_string(),
+            ));
+        }
+        let file_debug = format!("{:?}", &file);
         let resp = self
             .endpoint
             .send_request_oneshot(&DocServerReq::ShareFile {
                 file_name: file_name.to_string(),
-                content: file.to_string(),
+                content: file,
             })
             .await?
             .unpack()?;
         log::debug!(
-            "share_file(file_name={file_name}, file={file}) => {:?}",
+            "share_file(file_name={file_name}, file={file_debug}) => {:?}",
             &resp
         );
         match resp {

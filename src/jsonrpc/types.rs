@@ -35,6 +35,8 @@ pub enum ErrorCode {
     NotRegularFile = 108,
     /// Not a directory
     NotDirectory = 109,
+    /// Unsupported operation like sharing directory to remote host.
+    UnsupportedOperation = 110,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +80,20 @@ pub struct ShareFileParams {
 pub struct ShareFileResp {
     pub doc_id: DocId,
     pub site_id: SiteId,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareDirParams {
+    pub host_id: ServerId,
+    pub dir_name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareDirResp {
+    pub doc_id: DocId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

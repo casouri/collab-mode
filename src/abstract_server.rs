@@ -22,7 +22,8 @@ pub type InfoStream = Pin<Box<dyn Stream<Item = CollabResult<String>> + Send>>;
 pub trait DocServer: Send {
     fn site_id(&self) -> SiteId;
     fn server_id(&self) -> ServerId;
-    async fn share_file(&mut self, file_name: &str, file: &str) -> CollabResult<DocId>;
+    async fn share_file(&mut self, file_name: &str, file: FileContentOrPath)
+        -> CollabResult<DocId>;
     async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>>;
     async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot>;
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()>;

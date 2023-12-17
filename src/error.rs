@@ -7,6 +7,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum CollabError {
+    // Program error.
     #[error("Fatal server error ({0})")]
     ServerFatal(String),
     #[error("Rpc error ({0})")]
@@ -16,6 +17,7 @@ pub enum CollabError {
     #[error("Fatal OT engine error ({0})")]
     EngineError(String),
 
+    // User error.
     #[error("Doc({0}) already exists")]
     DocAlreadyExists(DocId),
     #[error("Cannot find Doc({0})")]
@@ -26,8 +28,10 @@ pub enum CollabError {
     NotRegularFile(String),
     #[error("{0} is not a directory")]
     NotDirectory(String),
+    #[error("{0} is not supported")]
+    UnsupportedOperation(String),
 
-    // Notification
+    // Notification.
     #[error("Error accepting remote connections ({0})")]
     AcceptConnectionErr(String),
     #[error("Allocated time ({0}s) on the signaling server is up")]

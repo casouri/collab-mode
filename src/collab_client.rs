@@ -51,18 +51,21 @@ impl Doc {
     pub async fn new_share_file(
         mut server: ClientEnum,
         file_name: &str,
-        file: &str,
+        file: String,
         external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<Doc> {
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
-        let doc_id = server.share_file(file_name, file).await?;
+        let file_len = file.len() as u64;
+        let doc_id = server
+            .share_file(file_name, FileContentOrPath::Content(file))
+            .await?;
 
         let mut doc = make_doc(
             server.site_id(),
             doc_id.clone(),
             file_name.to_string(),
-            file.len() as u64,
+            file_len,
             0,
             err_rx,
         );
