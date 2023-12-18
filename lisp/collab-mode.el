@@ -163,7 +163,9 @@ substitutes command keys like docstring, see
     (104 . PermissionDenied)
     (105 . DocNotFound)
     (106 . DocAlreadyExists)
-    (107 . IOError))
+    (107 . IOError)
+    (108 . NotRegularFile)
+    (109 . UnsupportedOperation))
   "An alist of JSONRPC error codes.")
 
 (defun collab--error-code-jsonrpc-error-p (code)
@@ -781,6 +783,20 @@ non-nil, override existing files."
                 :timeout collab-rpc-timeout)))
     resp))
 
+(defun collab--share-dir-req (server dir-name path)
+  "Share the directory with SERVER (address).
+DIR-NAME is the given name for the directory, PATH is the
+absolute path of the directory. Return (:docId DOC-ID). If FORCE
+is non-nil, override existing directories."
+  (let* ((conn (collab--connect))
+         (resp (jsonrpc-request
+                conn 'ShareDir
+                `( :hostId ,server
+                   :dirName ,dir-name
+                   :path ,path)
+                :timeout collab-rpc-timeout)))
+    resp))
+
 (defun collab--connect-to-file-req (doc server)
   "Connect to DOC (doc id) on SERVER (server address).
 Return (:siteId SITE-ID :content CONTENT)."
@@ -1320,6 +1336,18 @@ Friends can connect, with just a click!
 LINK: %s" (propertize link 'face 'link))))
           (collab--refresh))))))
 
+(defun collab-share-dir (dir dir-name)
+  "Share DIR to collab process under DIR-NAME."
+  (interactive (let ((dir (read-directory-name "Share directory: ")))
+                 (list (expand-file-name dir)
+                       (read-string "Name: " dir))))
+  (collab--catch-error "can’t share the directory"
+    (let* ((resp (collab--share-dir-req "self" dir-name dir))
+           (doc-id (plist-get resp :docId)))
+      ;; TODO: Should we refresh the collab hub, or even pop up the
+      ;; collab hub?
+      (ignore doc-id))))
+
 (defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
 
@@ -1333,50 +1361,50 @@ its name rather than doc id) to connect."
                       (mapcar #'car (collab--server-alist)))
                      'interactive))
   (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
-    (let* ((info (alist-get server (collab--server-alist)
-                            nil nil #'equal))
-           (file-list (collab--list-files-req
-                       server (nth 0 info) (nth 1 info)))
-           file-name)
+                       (let* ((info (alist-get server (collab--server-alist)
+                                               nil nil #'equal))
+                              (file-list (collab--list-files-req
+                                          server (nth 0 info) (nth 1 info)))
+                              file-name)
 
-      ;; Get file name by doc id, or prompt for file name and get doc
-      ;; id by file name.
-      (if (eq doc-id 'interactive)
-          (progn
-            (setq file-name (completing-read
-                             "Merge with: "
-                             (mapcar (lambda (elm)
-                                       (plist-get elm :fileName))
-                                     file-list)
-                             nil t))
-            (setq doc-id (cl-loop for elm in file-list
-                                  if (equal (plist-get elm :fileName)
-                                            file-name)
-                                  return (plist-get elm :docId))))
+                         ;; Get file name by doc id, or prompt for file name and get doc
+                         ;; id by file name.
+                         (if (eq doc-id 'interactive)
+                             (progn
+                               (setq file-name (completing-read
+                                                "Merge with: "
+                                                (mapcar (lambda (elm)
+                                                          (plist-get elm :fileName))
+                                                        file-list)
+                                                nil t))
+                               (setq doc-id (cl-loop for elm in file-list
+                                                     if (equal (plist-get elm :fileName)
+                                                               file-name)
+                                                     return (plist-get elm :docId))))
 
-        (setq file-name (cl-loop for elm in file-list
-                                 if (equal (plist-get elm :docId)
-                                           doc-id)
-                                 return (plist-get elm :fileName))))
+                           (setq file-name (cl-loop for elm in file-list
+                                                    if (equal (plist-get elm :docId)
+                                                              doc-id)
+                                                    return (plist-get elm :fileName))))
 
-      ;; Replace buffer content with document content.
-      (let* ((resp (collab--connect-to-file-req doc-id server))
-             (content (plist-get resp :content))
-             (site-id (plist-get resp :siteId))
-             (inhibit-read-only t))
+                         ;; Replace buffer content with document content.
+                         (let* ((resp (collab--connect-to-file-req doc-id server))
+                                (content (plist-get resp :content))
+                                (site-id (plist-get resp :siteId))
+                                (inhibit-read-only t))
 
-        (when (buffer-modified-p)
-          (when (y-or-n-p "Save buffer before merging?")
-            (save-buffer)))
+                           (when (buffer-modified-p)
+                             (when (y-or-n-p "Save buffer before merging?")
+                               (save-buffer)))
 
-        ;; Same as in ‘collab--open-file’.
-        (collab-monitored-mode -1)
-        (erase-buffer)
-        (insert content)
-        (goto-char (point-min))
-        (let ((buffer-file-name file-name))
-          (set-auto-mode))
-        (collab--enable doc-id server site-id)))))
+                           ;; Same as in ‘collab--open-file’.
+                           (collab-monitored-mode -1)
+                           (erase-buffer)
+                           (insert content)
+                           (goto-char (point-min))
+                           (let ((buffer-file-name file-name))
+                             (set-auto-mode))
+                           (collab--enable doc-id server site-id)))))
 
 (defun collab-disconnect-buffer ()
   "Disconnect current buffer, returning it to a regular buffer."
@@ -1449,15 +1477,17 @@ detailed history."
   (let ((resp (read-multiple-choice
                (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do? ")
                '((?s "share this buffer" "Share this buffer to a server")
+                 (?d "share a directory" "Share a directory")
                  (?r "reconnect to doc" "Reconnect to a document")
-                 (?d "disconnect" "Disconnect and stop collaboration")
+                 (?q "quit (disconnect)" "Disconnect and stop collaboration")
                  (?h "hub" "Open collab hub")))))
     (pcase (car resp)
       (?s (when (or (null collab-monitored-mode)
                     (y-or-n-p (collab--fairy "Buffer in collab-mode, already quite set. Share it as new doc, confirm without regret? ")))
             (call-interactively #'collab-share-buffer)))
+      (?d (call-interactively #'collab-share-dir))
       (?r (call-interactively #'collab-reconnect-buffer))
-      (?d (collab-disconnect-buffer))
+      (?q (collab-disconnect-buffer))
       (?h (collab-hub)))))
 
 ;;; Setup
