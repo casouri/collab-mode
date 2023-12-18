@@ -111,11 +111,12 @@ impl Doc {
     /// `client`.
     pub async fn new_connect_file(
         mut server: ClientEnum,
-        doc_id: DocId,
+        doc_file: DocFile,
         external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<(Doc, String)> {
         // Download file.
-        let snapshot = server.request_file(&doc_id).await?;
+        let snapshot = server.request_file(&doc_file).await?;
+        let doc_id = snapshot.doc_id;
         let (op_stream, info_stream) = server.recv_op_and_info(&doc_id, snapshot.seq).await?;
 
         // At most 2 errors from two worker threads.

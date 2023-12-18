@@ -275,7 +275,7 @@ impl JSONRPCServer {
             let resp = self.handle_list_files_request(params).await?;
             make_resp(request.id, resp)
         } else if request.method == "ConnectToFile" {
-            let params: DocIdParams = serde_json::from_value(request.params)?;
+            let params: ConnectToFileParams = serde_json::from_value(request.params)?;
             let resp = self.handle_connect_to_file_request(params).await?;
             make_resp(request.id, resp)
         } else if request.method == "DisconnectFromFile" {
@@ -474,26 +474,34 @@ impl JSONRPCServer {
 
     pub async fn handle_connect_to_file_request(
         &mut self,
-        params: DocIdParams,
+        params: ConnectToFileParams,
     ) -> CollabResult<ConnectToFileResp> {
-        if self.get_doc(&params.doc_id, &params.host_id).is_ok() {
-            self.remove_doc(&params.doc_id, &params.host_id)
+        match &params.file {
+            DocFile::Doc(doc_id) => {
+                if self.get_doc(doc_id, &params.host_id).is_ok() {
+                    self.remove_doc(doc_id, &params.host_id)
+                }
+            }
+            _ => (),
         }
+
         let client = self.get_client(&params.host_id)?;
         let site_id = client.site_id();
         let (doc, content) = Doc::new_connect_file(
             client.clone(),
-            params.doc_id.clone(),
+            params.file.clone(),
             self.notifier_tx.clone(),
         )
         .await?;
         let file_name = doc.file_name();
+        let doc_id = doc.doc_id();
         self.doc_map
-            .insert(DocDesignator::new(&params.doc_id, &params.host_id), doc);
+            .insert(DocDesignator::new(&doc_id, &params.host_id), doc);
         let resp = ConnectToFileResp {
             content,
             site_id,
             file_name,
+            doc_id,
         };
         Ok(resp)
     }

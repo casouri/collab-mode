@@ -105,13 +105,13 @@ impl DocServer for WebrpcClient {
         }
     }
 
-    async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {
+    async fn request_file(&mut self, doc_file: &DocFile) -> CollabResult<Snapshot> {
         let resp = self
             .endpoint
-            .send_request_oneshot(&DocServerReq::RequestFile(doc_id.clone()))
+            .send_request_oneshot(&DocServerReq::RequestFile(doc_file.clone()))
             .await?
             .unpack()?;
-        log::debug!("request_file(doc_id={doc_id}) => {:?}", &resp);
+        log::debug!("request_file(doc_file={:?}) => {:?}", doc_file, &resp);
         match resp {
             DocServerResp::RequestFile(snapshot) => Ok(snapshot),
             DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),

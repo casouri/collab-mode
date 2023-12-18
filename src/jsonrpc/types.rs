@@ -148,12 +148,20 @@ pub struct DocIdParams {
     pub host_id: ServerId,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectToFileParams {
+    pub host_id: ServerId,
+    pub file: DocFile,
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectToFileResp {
     pub content: String,
     pub site_id: SiteId,
     pub file_name: String,
+    pub doc_id: DocId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

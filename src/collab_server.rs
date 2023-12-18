@@ -14,6 +14,7 @@ use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
 use gapbuf::GapBuffer;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -37,13 +38,13 @@ impl DocServer for LocalServer {
         file_name: &str,
         file: FileContentOrPath,
     ) -> CollabResult<DocId> {
-        self.share_file_1(file_name, file).await
+        self.share_file_1(file_name, file, None).await
     }
     async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
         self.list_files_1(dir_path).await
     }
-    async fn request_file(&mut self, doc_id: &DocId) -> CollabResult<Snapshot> {
-        self.request_file_1(doc_id).await
+    async fn request_file(&mut self, doc_file: &DocFile) -> CollabResult<Snapshot> {
+        self.request_file_1(doc_file).await
     }
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
         self.delete_file_1(doc_id).await
@@ -151,11 +152,12 @@ impl Doc {
     }
 
     /// Return the current snapshot of the document.
-    pub fn snapshot(&self) -> Snapshot {
+    pub fn snapshot(&self, doc_id: DocId) -> Snapshot {
         Snapshot {
             buffer: self.buffer.iter().collect::<String>(),
             file_name: self.name.clone(),
             seq: self.engine.current_seq(),
+            doc_id,
         }
     }
 }
@@ -199,10 +201,38 @@ impl LocalServer {
         }
     }
 
+    /// Create a doc out of the file at `abs_path`, and return its
+    /// snapshot.
+    async fn get_dir_file(&self, dir_id: &DocId, abs_path: &Path) -> CollabResult<Snapshot> {
+        // We return full path here and let clients handle displaying
+        // more friendly names.
+        let file_name = abs_path.to_string_lossy().to_string();
+        let mut file = std::fs::File::open(abs_path)?;
+        let mut buf = String::new();
+        file.read_to_string(&mut buf)?;
+        let doc_id = self
+            .share_file_1(
+                &file_name,
+                FileContentOrPath::Content(buf.clone()),
+                Some((*dir_id, abs_path.to_path_buf())),
+            )
+            .await?;
+        let doc = self.get_doc(&doc_id).unwrap();
+        let snapshot = doc.lock().unwrap().snapshot(doc_id);
+        Ok(snapshot)
+    }
+
+    // `file_path` is only for `get_dir_file`. Other callers always
+    // pass a `None`. There are three use-cases for this function:
+    // 1. Share a buffer: file = content, file_path = None
+    // 2. Share a directory: file = path, file_path = None
+    // 3. Create a file that's in a shared directory: file = content,
+    //    file_path = file's full path.
     pub async fn share_file_1(
         &self,
         file_name: &str,
         file: FileContentOrPath,
+        file_path: Option<FilePath>,
     ) -> CollabResult<DocId> {
         // TODO permission check.
         let doc_id: DocId = rand::random();
@@ -212,7 +242,7 @@ impl LocalServer {
 
                 docs.insert(
                     doc_id.clone(),
-                    Arc::new(Mutex::new(Doc::new(file_name, &content, None))),
+                    Arc::new(Mutex::new(Doc::new(file_name, &content, file_path))),
                 );
             }
             FileContentOrPath::Path(path) => {
@@ -318,15 +348,11 @@ impl LocalServer {
     }
 
     /// Return the doc id of the doc if there is a doc with `path`.
-    async fn get_docs_with_path(&self, path: &FilePath) -> Option<DocFile> {
-        // Don't take any risk of deadlocks.
-        let docs: Vec<(u32, Arc<Mutex<Doc>>)> = self
-            .docs
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(doc_id, doc)| (*doc_id, doc.clone()))
-            .collect();
+    async fn get_docs_with_path(
+        &self,
+        docs: &[(u32, Arc<Mutex<Doc>>)],
+        path: &FilePath,
+    ) -> Option<DocFile> {
         for (doc_id, doc) in docs {
             let doc = doc.lock().unwrap();
             if let Some(path1) = &doc.file_path {
@@ -355,13 +381,20 @@ impl LocalServer {
                 ));
             }
             let mut res = vec![];
+            let docs: Vec<(u32, Arc<Mutex<Doc>>)> = self
+                .docs
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(doc_id, doc)| (*doc_id, doc.clone()))
+                .collect();
             for file in std::fs::read_dir(&path)? {
                 let file_name_raw = file?.file_name();
                 let file_name = file_name_raw.to_string_lossy().into();
-                let rel_path = Path::new(&path).join(file_name_raw);
-                let file_path = (doc_id, rel_path);
+                let abs_path = Path::new(&path).join(file_name_raw);
+                let file_path = (doc_id, abs_path);
 
-                if let Some(doc) = self.get_docs_with_path(&file_path).await {
+                if let Some(doc) = self.get_docs_with_path(&docs, &file_path).await {
                     res.push(DocInfo { doc, file_name });
                 } else {
                     let doc = DocFile::File(file_path);
@@ -403,11 +436,23 @@ impl LocalServer {
         Ok(res)
     }
 
-    pub async fn request_file_1(&self, doc_id: &DocId) -> CollabResult<Snapshot> {
-        if let Some(doc) = self.get_doc(doc_id) {
-            Ok(doc.lock().unwrap().snapshot())
-        } else {
-            Err(CollabError::DocNotFound(doc_id.clone()))
+    pub async fn request_file_1(&self, doc_file: &DocFile) -> CollabResult<Snapshot> {
+        match doc_file {
+            DocFile::Doc(doc_id) => {
+                if let Some(doc) = self.get_doc(doc_id) {
+                    Ok(doc.lock().unwrap().snapshot(*doc_id))
+                } else {
+                    Err(CollabError::DocNotFound(doc_id.clone()))
+                }
+            }
+            DocFile::File((dir_id, abs_path)) => {
+                if let Some(dir) = self.get_dir(dir_id) {
+                    self.get_dir_file(dir_id, abs_path).await
+                } else {
+                    // TODO: DirNotFound?
+                    Err(CollabError::DocNotFound(*dir_id))
+                }
+            }
         }
     }
 
@@ -496,7 +541,7 @@ async fn handle_request(
                     "Sharing directory to remote host".to_string(),
                 ));
             }
-            let doc_id = server.share_file_1(&file_name, content).await?;
+            let doc_id = server.share_file_1(&file_name, content, None).await?;
             Ok(Some(DocServerResp::ShareFile(doc_id)))
         }
         DocServerReq::ListFiles { dir_path } => {
@@ -542,8 +587,8 @@ async fn handle_request(
             });
             Ok(None)
         }
-        DocServerReq::RequestFile(doc_id) => {
-            let snapshot = server.request_file_1(&doc_id).await?;
+        DocServerReq::RequestFile(doc_file) => {
+            let snapshot = server.request_file_1(&doc_file).await?;
             Ok(Some(DocServerResp::RequestFile(snapshot)))
         }
         DocServerReq::DeleteFile(doc_id) => {

@@ -11,6 +11,9 @@ pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 pub type ServerId = String;
 pub const SERVER_ID_SELF: &str = "self";
 pub type Credential = String;
+/// A file in a directory that's not yet a doc. The path is the full
+/// path. We need to also record the doc id of the directory, because
+/// sometimes we need to find all of the doc that's inside a directory
 pub type FilePath = (DocId, PathBuf);
 
 pub type FatOp = crate::op::FatOp<Op>;
@@ -136,6 +139,9 @@ pub struct Snapshot {
     pub file_name: String,
     /// Sequence number of the last op.
     pub seq: GlobalSeq,
+    /// Doc id for this doc, useful for requesting a (dir_id,
+    /// rel_path).
+    pub doc_id: DocId,
 }
 
 /// Requests sent to webrpc server.
@@ -153,7 +159,7 @@ pub enum DocServerReq {
         doc_id: DocId,
         after: GlobalSeq,
     },
-    RequestFile(DocId),
+    RequestFile(DocFile),
     DeleteFile(DocId),
     Login(Credential),
     SendInfo {
