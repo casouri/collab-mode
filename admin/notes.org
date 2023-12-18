@@ -1,0 +1,17 @@
+
+* How to...
+** Add new requests
+- Add a method in ~abstract_server::DocServer~.
+- Add a type in ~types::DocServerReq~ and ~types::DocServerResp~
+- Add a method in ~collab_server::impl LocalServer~ (the name should be ~xxx_1~).
+- Add a branch in ~collab_server::handle_request~.
+- Add a method in ~collab_server::impl DocServer for LocalServer~.
+- Add a method in ~webrpc_client::impl DocServer for WebrpcClient~.
+- Add JSONRPC types in ~jsonrpc::types~ (~XXParams~, ~XXResp~).
+- Add a new function ~handle_xxx_request~ in ~jsonrpc~.
+- Add a branch in ~jsonrpc::impl JSONRPCServer::handle_request~
+
+** Add new errors
+- Add to ~error::CollabError~.
+- Add an error code in ~jsonrpc::types::ErrorCode~.
+- Add a switch case in ~jsonrpc::error_code~.
