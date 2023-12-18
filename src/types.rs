@@ -32,6 +32,8 @@ pub enum DocFile {
     Doc(DocId),
     /// A file on disk, not yet shared.
     File(FilePath),
+    /// A subdir on disk under a shared dir.
+    Dir(FilePath),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

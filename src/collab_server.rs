@@ -439,6 +439,19 @@ impl LocalServer {
                 })
             };
         }
+        let dirs: Vec<(u32, Arc<Mutex<Dir>>)> = self
+            .dirs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(dir_id, dir)| (*dir_id, dir.clone()))
+            .collect();
+        for (dir_id, dir) in dirs {
+            res.push(DocInfo {
+                doc: DocFile::File((dir_id, PathBuf::from("/"))),
+                file_name: dir.lock().unwrap().name.clone(),
+            })
+        }
         Ok(res)
     }
 
@@ -453,11 +466,15 @@ impl LocalServer {
             }
             DocFile::File((dir_id, rel_path)) => {
                 if let Some(dir) = self.get_dir(dir_id) {
-                    self.get_dir_file(&dir, rel_path).await
+                    self.get_dir_file(&dir_id, &dir, rel_path).await
                 } else {
                     // TODO: DirNotFound?
                     Err(CollabError::DocNotFound(*dir_id))
                 }
+            }
+            DocFile::Dir((dir_id, rel_path)) => {
+                let path = format!("{dir_id}/{}", rel_path.to_string_lossy());
+                Err(CollabError::NotRegularFile(path))
             }
         }
     }
