@@ -288,7 +288,7 @@ impl JSONRPCServer {
             make_resp(request.id, resp)
         } else if request.method == "Undo" {
             let params: UndoParams = serde_json::from_value(request.params)?;
-            let resp = self.handle_undo_request(params).await?;
+            let resp = self.handle_undo_request(params)?;
             make_resp(request.id, resp)
         } else if request.method == "AcceptConnection" {
             let params: AcceptConnectionParams = serde_json::from_value(request.params)?;
@@ -298,7 +298,7 @@ impl JSONRPCServer {
             make_resp(request.id, resp)
         } else if request.method == "PrintHistory" {
             let params: PrintHistoryParams = serde_json::from_value(request.params)?;
-            let resp = self.handle_print_history_request(params).await?;
+            let resp = self.handle_print_history_request(params)?;
             make_resp(request.id, resp)
         } else {
             todo!()
@@ -415,7 +415,7 @@ impl JSONRPCServer {
         params: SendOpParams,
     ) -> CollabResult<SendOpResp> {
         let doc = self.get_doc(&params.doc_id, &params.host_id)?;
-        let res = doc.send_op(params.ops).await;
+        let res = doc.send_op(params.ops);
         if res.is_err() {
             self.remove_doc(&params.doc_id, &params.host_id);
         }
@@ -521,11 +521,11 @@ impl JSONRPCServer {
         Ok(params)
     }
 
-    pub async fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<UndoResp> {
+    pub fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<UndoResp> {
         let doc = self.get_doc(&params.doc_id, &params.host_id)?;
         let res = match params.kind {
-            UndoKind::Undo => doc.undo().await,
-            UndoKind::Redo => doc.redo().await,
+            UndoKind::Undo => doc.undo(),
+            UndoKind::Redo => doc.redo(),
         };
         match res {
             Ok(ops) => {
@@ -558,11 +558,11 @@ impl JSONRPCServer {
         Ok(())
     }
 
-    pub async fn handle_print_history_request(
+    pub fn handle_print_history_request(
         &mut self,
         params: PrintHistoryParams,
     ) -> CollabResult<String> {
         let doc = self.get_doc(&params.doc_id, &params.server_id)?;
-        Ok(doc.print_history(params.debug).await)
+        Ok(doc.print_history(params.debug))
     }
 }

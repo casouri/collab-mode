@@ -18,8 +18,7 @@
 use crate::abstract_server::{ClientEnum, DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
 use crate::types::*;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::StreamExt;
 
@@ -193,7 +192,7 @@ impl Doc {
     /// remote ops. Return the transformed remote ops that editor can
     /// apply to its document, plus the last seq number among the ops
     /// returned.
-    pub async fn send_op(
+    pub fn send_op(
         &mut self,
         ops: Vec<EditorFatOp>,
     ) -> CollabResult<(Vec<EditorLeanOp>, GlobalSeq)> {
@@ -201,12 +200,12 @@ impl Doc {
 
         // Get remote ops before locking engine.
         let remote_ops: Vec<FatOp> = {
-            let mut remote_ops = self.remote_op_buffer.lock().await;
+            let mut remote_ops = self.remote_op_buffer.lock().unwrap();
             remote_ops.drain(..).collect()
         };
 
         // 1. Process local ops.
-        let mut engine = self.engine.lock().await;
+        let mut engine = self.engine.lock().unwrap();
         for op in ops {
             self.site_seq += 1;
             engine.process_local_op(op, self.doc_id.clone(), self.site_seq.clone())?;
@@ -231,15 +230,15 @@ impl Doc {
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.
-    pub async fn undo(&mut self) -> CollabResult<Vec<EditInstruction>> {
+    pub fn undo(&mut self) -> CollabResult<Vec<EditInstruction>> {
         self.check_async_errors()?;
-        Ok(self.engine.lock().await.generate_undo_op())
+        Ok(self.engine.lock().unwrap().generate_undo_op())
     }
 
     /// Return `n` consecutive redo ops from the current undo tip.
-    pub async fn redo(&mut self) -> CollabResult<Vec<EditInstruction>> {
+    pub fn redo(&mut self) -> CollabResult<Vec<EditInstruction>> {
         self.check_async_errors()?;
-        Ok(self.engine.lock().await.generate_redo_op())
+        Ok(self.engine.lock().unwrap().generate_redo_op())
     }
 
     /// Handle errors created by worker threads.
@@ -254,10 +253,10 @@ impl Doc {
     /// Display a log of the local history for debugging purpose. If
     /// `debug` is true, print more detailed (but more verbose)
     /// information.
-    pub async fn print_history(&self, debug: bool) -> String {
+    pub fn print_history(&self, debug: bool) -> String {
         // self.check_async_errors()?;
         let mut output = String::new();
-        output += self.engine.lock().await.print_history(debug).as_str();
+        output += self.engine.lock().unwrap().print_history(debug).as_str();
         output
     }
 }
@@ -392,7 +391,7 @@ fn spawn_thread_receive_remote_op(
                 }
             };
 
-            remote_op_buffer.lock().await.extend(ops);
+            remote_op_buffer.lock().unwrap().extend(ops);
 
             // Got some op from server, maybe we can send
             // new local ops now?
@@ -433,7 +432,7 @@ fn spawn_thread_send_local_op(
         loop {
             notifier_rx.changed().await.unwrap();
             let ops = {
-                let mut engine = engine.lock().await;
+                let mut engine = engine.lock().unwrap();
                 engine.maybe_package_local_ops()
             };
             if let Some(ops) = ops {
