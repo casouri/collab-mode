@@ -15,9 +15,8 @@ use async_trait::async_trait;
 use gapbuf::GapBuffer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -77,8 +76,8 @@ pub struct LocalServer {
     self_site_id: SiteId,
     /// SiteId given to the next connected client.
     next_site_id: Arc<Mutex<SiteId>>,
-    docs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Doc>>>>>,
-    dirs: Arc<RwLock<HashMap<DocId, Arc<Mutex<Dir>>>>>,
+    docs: Arc<Mutex<HashMap<DocId, Arc<Mutex<Doc>>>>>,
+    dirs: Arc<Mutex<HashMap<DocId, Arc<Mutex<Dir>>>>>,
     user_list: Arc<Mutex<HashMap<Credential, SiteId>>>,
 }
 
@@ -168,9 +167,35 @@ impl LocalServer {
         LocalServer {
             self_site_id: 0,
             next_site_id: Arc::new(Mutex::new(1)),
-            docs: Arc::new(RwLock::new(HashMap::new())),
-            dirs: Arc::new(RwLock::new(HashMap::new())),
+            docs: Arc::new(Mutex::new(HashMap::new())),
+            dirs: Arc::new(Mutex::new(HashMap::new())),
             user_list: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get the `Doc` with `doc_id`. Getting the `Doc` using this
+    /// function doesn't locks `self.docs`.
+    fn get_doc(&self, doc_id: &DocId) -> Option<Arc<Mutex<Doc>>> {
+        let docs = self.docs.lock().unwrap();
+        if let Some(doc) = docs.get(&doc_id) {
+            let doc = doc.clone();
+            drop(docs);
+            Some(doc)
+        } else {
+            None
+        }
+    }
+
+    /// Get the `Dir` with `doc_id`. Getting the `Dir` using this
+    /// function doesn't locks `self.docs`.
+    fn get_dir(&self, doc_id: &DocId) -> Option<Arc<Mutex<Dir>>> {
+        let dirs = self.dirs.lock().unwrap();
+        if let Some(dir) = dirs.get(&doc_id) {
+            let dir = dir.clone();
+            drop(dirs);
+            Some(dir)
+        } else {
+            None
         }
     }
 
@@ -183,7 +208,7 @@ impl LocalServer {
         let doc_id: DocId = rand::random();
         match file {
             FileContentOrPath::Content(content) => {
-                let mut docs = self.docs.write().await;
+                let mut docs = self.docs.lock().unwrap();
 
                 docs.insert(
                     doc_id.clone(),
@@ -191,7 +216,7 @@ impl LocalServer {
                 );
             }
             FileContentOrPath::Path(path) => {
-                let mut dirs = self.dirs.write().await;
+                let mut dirs = self.dirs.lock().unwrap();
 
                 dirs.insert(
                     doc_id.clone(),
@@ -208,8 +233,8 @@ impl LocalServer {
     /// Send local ops to the server. TODO: access control.
     pub async fn send_op_1(&self, ops: ContextOps) -> CollabResult<()> {
         let doc_id = ops.doc();
-        if let Some(doc) = self.docs.read().await.get(&doc_id) {
-            let mut doc = doc.lock().await;
+        if let Some(doc) = self.get_doc(&doc_id) {
+            let mut doc = doc.lock().unwrap();
 
             log::debug!("send_op() Local server receive ops, processing: {:?}", &ops);
             let ops = doc.engine.process_ops(ops.ops, ops.context)?;
@@ -243,26 +268,25 @@ impl LocalServer {
         // Clone a notification channel and a reference to the doc,
         // listen for notification and get new ops from the doc, and
         // feed into the channel.
-        let res = if let Some(doc) = self.docs.read().await.get(doc_id) {
-            let doc_inner = doc.lock().await;
-            Ok((
-                doc_inner.rx.clone(),
-                doc_inner.tx_info.subscribe(),
-                doc.clone(),
-            ))
-        } else {
-            Err(CollabError::DocNotFound(doc_id.clone()))
-        };
-        let (mut notifier, mut inner_rx_info, doc) = res?;
+        let maybe_doc = self.get_doc(doc_id);
+        if maybe_doc.is_none() {
+            return Err(CollabError::DocNotFound(doc_id.clone()));
+        }
+
+        let doc = maybe_doc.unwrap();
+        let doc1 = doc.clone();
+        let locked_doc = doc.lock().unwrap();
+        let mut notifier = locked_doc.rx.clone();
+        let mut inner_rx_info = locked_doc.tx_info.subscribe();
+        drop(locked_doc);
 
         let _ = tokio::spawn(async move {
             while notifier.changed().await.is_ok() {
-                let doc = doc.lock().await;
                 log::debug!(
                     "recv_op() Local server collects global ops after seq#{} to send out",
                     after
                 );
-                let ops = doc.engine.global_ops_after(after);
+                let ops = doc1.lock().unwrap().engine.global_ops_after(after);
                 after += ops.len() as GlobalSeq;
                 log::debug!(
                     "recv_op() Local server sends op to gRPC server or local client: {:?}",
@@ -295,8 +319,16 @@ impl LocalServer {
 
     /// Return the doc id of the doc if there is a doc with `path`.
     async fn get_docs_with_path(&self, path: &FilePath) -> Option<DocFile> {
-        for (doc_id, doc) in self.docs.read().await.iter() {
-            let doc = doc.lock().await;
+        // Don't take any risk of deadlocks.
+        let docs: Vec<(u32, Arc<Mutex<Doc>>)> = self
+            .docs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(doc_id, doc)| (*doc_id, doc.clone()))
+            .collect();
+        for (doc_id, doc) in docs {
+            let doc = doc.lock().unwrap();
             if let Some(path1) = &doc.file_path {
                 if path == path1 {
                     return Some(DocFile::Doc(doc_id.clone()));
@@ -308,10 +340,11 @@ impl LocalServer {
 
     pub async fn list_directory(&self, dir_path: FilePath) -> CollabResult<Vec<DocInfo>> {
         let (doc_id, rel_path) = dir_path;
-        if let Some(dir) = self.dirs.read().await.get(&doc_id) {
-            let dir = dir.lock().await;
-            let path = Path::new(&dir.path).join(rel_path);
-            drop(dir);
+        if let Some(dir) = self.get_dir(&doc_id) {
+            let path = {
+                let dir = dir.lock().unwrap();
+                Path::new(&dir.path).join(rel_path)
+            };
 
             if !path.is_dir() {
                 // If there are error access the file, return that
@@ -346,13 +379,24 @@ impl LocalServer {
             return self.list_directory(dir_path).await;
         }
         let mut res = vec![];
-        for (doc_id, doc) in self.docs.read().await.iter() {
+        // Clone the data out, because we don't want deadlocks, do we?
+        // I'm not sure if there are places where we lock a doc first
+        // and then lock self.docs, but let's just not take any risk.
+        let docs: Vec<(u32, Arc<Mutex<Doc>>)> = self
+            .docs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(doc_id, doc)| (*doc_id, doc.clone()))
+            .collect();
+        for (doc_id, doc) in docs {
             // TODO permission check.
             // Only include top-level docs.
-            if doc.lock().await.file_path.is_none() {
+            let no_path = doc.lock().unwrap().file_path.is_none();
+            if no_path {
                 res.push(DocInfo {
                     doc: DocFile::Doc(doc_id.clone()),
-                    file_name: doc.lock().await.name.clone(),
+                    file_name: doc.lock().unwrap().name.clone(),
                 })
             };
         }
@@ -360,22 +404,22 @@ impl LocalServer {
     }
 
     pub async fn request_file_1(&self, doc_id: &DocId) -> CollabResult<Snapshot> {
-        if let Some(doc) = self.docs.read().await.get(doc_id) {
-            Ok(doc.lock().await.snapshot())
+        if let Some(doc) = self.get_doc(doc_id) {
+            Ok(doc.lock().unwrap().snapshot())
         } else {
             Err(CollabError::DocNotFound(doc_id.clone()))
         }
     }
 
     async fn delete_file_1(&self, doc_id: &DocId) -> CollabResult<()> {
-        let mut docs = self.docs.write().await;
+        let mut docs = self.docs.lock().unwrap();
         docs.remove(doc_id);
         Ok(())
     }
 
     async fn send_info_1(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
-        if let Some(doc) = self.docs.read().await.get(doc_id) {
-            doc.lock().await.tx_info.send(info).unwrap();
+        if let Some(doc) = self.get_doc(doc_id) {
+            doc.lock().unwrap().tx_info.send(info).unwrap();
             Ok(())
         } else {
             Err(CollabError::DocNotFound(doc_id.clone()))
@@ -507,11 +551,12 @@ async fn handle_request(
             Ok(Some(DocServerResp::DeleteFile))
         }
         DocServerReq::Login(credential) => {
-            let mut user_list = server.user_list.lock().await;
+            let mut user_list = server.user_list.lock().unwrap();
             let site_id = if let Some(site_id) = user_list.get(&credential) {
                 site_id.clone()
             } else {
-                let mut next_site_id = server.next_site_id.lock().await;
+                // DLWARN: At this point we are still holding user_list.
+                let mut next_site_id = server.next_site_id.lock().unwrap();
                 let site_id = next_site_id.clone();
                 *next_site_id += 1;
                 user_list.insert(credential.clone(), site_id);
