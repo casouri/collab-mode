@@ -201,20 +201,26 @@ impl LocalServer {
         }
     }
 
-    /// Create a doc out of the file at `abs_path`, and return its
+    /// Create a doc out of the file at `rel_path` in `dir`, and return its
     /// snapshot.
-    async fn get_dir_file(&self, dir_id: &DocId, abs_path: &Path) -> CollabResult<Snapshot> {
+    async fn get_dir_file(
+        &self,
+        dir_id: &DocId,
+        dir: &Arc<Mutex<Dir>>,
+        rel_path: &Path,
+    ) -> CollabResult<Snapshot> {
+        let full_path = dir.lock().unwrap().path.join(rel_path);
         // We return full path here and let clients handle displaying
         // more friendly names.
-        let file_name = abs_path.to_string_lossy().to_string();
-        let mut file = std::fs::File::open(abs_path)?;
+        let file_name = full_path.to_string_lossy().to_string();
+        let mut file = std::fs::File::open(full_path)?;
         let mut buf = String::new();
         file.read_to_string(&mut buf)?;
         let doc_id = self
             .share_file_1(
                 &file_name,
                 FileContentOrPath::Content(buf.clone()),
-                Some((*dir_id, abs_path.to_path_buf())),
+                Some((*dir_id, rel_path.to_path_buf())),
             )
             .await?;
         let doc = self.get_doc(&doc_id).unwrap();
@@ -227,7 +233,7 @@ impl LocalServer {
     // 1. Share a buffer: file = content, file_path = None
     // 2. Share a directory: file = path, file_path = None
     // 3. Create a file that's in a shared directory: file = content,
-    //    file_path = file's full path.
+    //    file_path = file's dir and rel_path.
     pub async fn share_file_1(
         &self,
         file_name: &str,
@@ -445,9 +451,9 @@ impl LocalServer {
                     Err(CollabError::DocNotFound(doc_id.clone()))
                 }
             }
-            DocFile::File((dir_id, abs_path)) => {
+            DocFile::File((dir_id, rel_path)) => {
                 if let Some(dir) = self.get_dir(dir_id) {
-                    self.get_dir_file(dir_id, abs_path).await
+                    self.get_dir_file(&dir, rel_path).await
                 } else {
                     // TODO: DirNotFound?
                     Err(CollabError::DocNotFound(*dir_id))

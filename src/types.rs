@@ -11,9 +11,9 @@ pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
 pub type ServerId = String;
 pub const SERVER_ID_SELF: &str = "self";
 pub type Credential = String;
-/// A file in a directory that's not yet a doc. The path is the full
-/// path. We need to also record the doc id of the directory, because
-/// sometimes we need to find all of the doc that's inside a directory
+/// A file in a directory that's not yet a doc. The path is a relative
+/// path. We don't want to use full path since some people might
+/// consider the full path sensitive?
 pub type FilePath = (DocId, PathBuf);
 
 pub type FatOp = crate::op::FatOp<Op>;
