@@ -262,6 +262,10 @@ impl JSONRPCServer {
             let params: ShareFileParams = serde_json::from_value(request.params)?;
             let resp = self.handle_share_file_request(params).await?;
             make_resp(request.id, resp)
+        } else if request.method == "ShareDir" {
+            let params: ShareDirParams = serde_json::from_value(request.params)?;
+            let resp = self.handle_share_dir_request(params).await?;
+            make_resp(request.id, resp)
         } else if request.method == "SendOp" {
             let params: SendOpParams = serde_json::from_value(request.params)?;
             let resp = self.handle_send_op_request(params).await?;
