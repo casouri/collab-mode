@@ -370,7 +370,7 @@ impl LocalServer {
         None
     }
 
-    pub async fn list_directory(&self, dir_path: FilePath) -> CollabResult<Vec<DocInfo>> {
+    async fn list_directory(&self, dir_path: FilePath) -> CollabResult<Vec<DocInfo>> {
         let (doc_id, rel_path) = dir_path;
         if let Some(dir) = self.get_dir(&doc_id) {
             let path = {
@@ -395,10 +395,14 @@ impl LocalServer {
                 .map(|(doc_id, doc)| (*doc_id, doc.clone()))
                 .collect();
             for file in std::fs::read_dir(&path)? {
-                let file_name_raw = file?.file_name();
+                let file = file?;
+                let abs_path = file.path();
+                let rel_path = pathdiff::diff_paths(&abs_path, &path).unwrap();
+                // This traverses symlink.
+                let meta = std::fs::metadata(&abs_path)?;
+                let file_name_raw = file.file_name();
                 let file_name = file_name_raw.to_string_lossy().into();
-                let abs_path = Path::new(&path).join(file_name_raw);
-                let file_path = (doc_id, abs_path);
+                let file_path = (doc_id, rel_path);
 
                 if let Some(doc) = self.get_docs_with_path(&docs, &file_path).await {
                     res.push(DocInfo {
@@ -406,7 +410,11 @@ impl LocalServer {
                         file_name,
                     });
                 } else {
-                    let doc = DocDesc::File(file_path);
+                    let doc = if meta.is_file() {
+                        DocDesc::File(file_path)
+                    } else {
+                        DocDesc::Dir(file_path)
+                    };
                     res.push(DocInfo {
                         doc_desc: doc,
                         file_name,

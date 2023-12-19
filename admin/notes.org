@@ -1,6 +1,7 @@
 
 * Leaking implementation details
-- When listing files in a directory, we return the full path of each file, and when creating docs from one of these files, we also record the full path.
+- When listing files in a directory, we return the relative path of each file.
+- When listing symlinks in a directory, we use the path of the symlink, rather than that of the source file.
 - Signaling server only allocates three minutes for each listen request. Meaning that a host can only listen for incoming connection requests for 3 minutes.
 
 
