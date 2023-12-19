@@ -154,7 +154,7 @@ pub struct DocIdParams {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectToFileParams {
     pub host_id: ServerId,
-    pub file: DocDesc,
+    pub doc_desc: DocDesc,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

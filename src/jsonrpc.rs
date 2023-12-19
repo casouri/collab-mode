@@ -474,7 +474,7 @@ impl JSONRPCServer {
         &mut self,
         params: ConnectToFileParams,
     ) -> CollabResult<ConnectToFileResp> {
-        match &params.file {
+        match &params.doc_desc {
             DocDesc::Doc(doc_id) => {
                 if self.get_doc(doc_id, &params.host_id).is_ok() {
                     self.remove_doc(doc_id, &params.host_id)
@@ -487,7 +487,7 @@ impl JSONRPCServer {
         let site_id = client.site_id();
         let (doc, content) = Doc::new_connect_file(
             client.clone(),
-            params.file.clone(),
+            params.doc_desc.clone(),
             self.notifier_tx.clone(),
         )
         .await?;
