@@ -105,7 +105,7 @@ impl DocServer for WebrpcClient {
         }
     }
 
-    async fn request_file(&mut self, doc_file: &DocFile) -> CollabResult<Snapshot> {
+    async fn request_file(&mut self, doc_file: &DocDesc) -> CollabResult<Snapshot> {
         let resp = self
             .endpoint
             .send_request_oneshot(&DocServerReq::RequestFile(doc_file.clone()))

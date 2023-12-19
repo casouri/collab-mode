@@ -125,11 +125,13 @@ pub struct UndoResp {
     pub ops: Vec<EditInstruction>,
 }
 
+/// If both `doc_id` and `path` are None, list top-level docs and
+/// directories. If both are non-null, list files inside that
+/// particular directory.
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
-    pub doc_id: Option<DocId>,
-    pub path: Option<String>,
+    pub dir: Option<(DocId, String)>,
     pub host_id: ServerId,
     pub signaling_addr: String,
     pub credential: Credential,
@@ -152,7 +154,7 @@ pub struct DocIdParams {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectToFileParams {
     pub host_id: ServerId,
-    pub file: DocFile,
+    pub file: DocDesc,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

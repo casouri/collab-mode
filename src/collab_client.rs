@@ -111,7 +111,7 @@ impl Doc {
     /// `client`.
     pub async fn new_connect_file(
         mut server: ClientEnum,
-        doc_file: DocFile,
+        doc_file: DocDesc,
         external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<(Doc, String)> {
         // Download file.

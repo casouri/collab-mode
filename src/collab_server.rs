@@ -43,7 +43,7 @@ impl DocServer for LocalServer {
     async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
         self.list_files_1(dir_path).await
     }
-    async fn request_file(&mut self, doc_file: &DocFile) -> CollabResult<Snapshot> {
+    async fn request_file(&mut self, doc_file: &DocDesc) -> CollabResult<Snapshot> {
         self.request_file_1(doc_file).await
     }
     async fn delete_file(&mut self, doc_id: &DocId) -> CollabResult<()> {
@@ -358,12 +358,12 @@ impl LocalServer {
         &self,
         docs: &[(u32, Arc<Mutex<Doc>>)],
         path: &FilePath,
-    ) -> Option<DocFile> {
+    ) -> Option<DocDesc> {
         for (doc_id, doc) in docs {
             let doc = doc.lock().unwrap();
             if let Some(path1) = &doc.file_path {
                 if path == path1 {
-                    return Some(DocFile::Doc(doc_id.clone()));
+                    return Some(DocDesc::Doc(doc_id.clone()));
                 }
             }
         }
@@ -401,10 +401,16 @@ impl LocalServer {
                 let file_path = (doc_id, abs_path);
 
                 if let Some(doc) = self.get_docs_with_path(&docs, &file_path).await {
-                    res.push(DocInfo { doc, file_name });
+                    res.push(DocInfo {
+                        doc_desc: doc,
+                        file_name,
+                    });
                 } else {
-                    let doc = DocFile::File(file_path);
-                    res.push(DocInfo { doc, file_name });
+                    let doc = DocDesc::File(file_path);
+                    res.push(DocInfo {
+                        doc_desc: doc,
+                        file_name,
+                    });
                 }
             }
             return Ok(res);
@@ -434,7 +440,7 @@ impl LocalServer {
             let no_path = doc.lock().unwrap().file_path.is_none();
             if no_path {
                 res.push(DocInfo {
-                    doc: DocFile::Doc(doc_id.clone()),
+                    doc_desc: DocDesc::Doc(doc_id.clone()),
                     file_name: doc.lock().unwrap().name.clone(),
                 })
             };
@@ -448,23 +454,23 @@ impl LocalServer {
             .collect();
         for (dir_id, dir) in dirs {
             res.push(DocInfo {
-                doc: DocFile::File((dir_id, PathBuf::from("/"))),
+                doc_desc: DocDesc::File((dir_id, PathBuf::from("/"))),
                 file_name: dir.lock().unwrap().name.clone(),
             })
         }
         Ok(res)
     }
 
-    pub async fn request_file_1(&self, doc_file: &DocFile) -> CollabResult<Snapshot> {
+    pub async fn request_file_1(&self, doc_file: &DocDesc) -> CollabResult<Snapshot> {
         match doc_file {
-            DocFile::Doc(doc_id) => {
+            DocDesc::Doc(doc_id) => {
                 if let Some(doc) = self.get_doc(doc_id) {
                     Ok(doc.lock().unwrap().snapshot(*doc_id))
                 } else {
                     Err(CollabError::DocNotFound(doc_id.clone()))
                 }
             }
-            DocFile::File((dir_id, rel_path)) => {
+            DocDesc::File((dir_id, rel_path)) => {
                 if let Some(dir) = self.get_dir(dir_id) {
                     self.get_dir_file(&dir_id, &dir, rel_path).await
                 } else {
@@ -472,7 +478,7 @@ impl LocalServer {
                     Err(CollabError::DocNotFound(*dir_id))
                 }
             }
-            DocFile::Dir((dir_id, rel_path)) => {
+            DocDesc::Dir((dir_id, rel_path)) => {
                 let path = format!("{dir_id}/{}", rel_path.to_string_lossy());
                 Err(CollabError::NotRegularFile(path))
             }

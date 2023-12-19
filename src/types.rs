@@ -27,7 +27,7 @@ pub enum EditorOp {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum DocFile {
+pub enum DocDesc {
     /// A shared doc.
     Doc(DocId),
     /// A file on disk, not yet shared.
@@ -103,7 +103,7 @@ impl DocDesignator {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocInfo {
-    pub doc: DocFile,
+    pub doc_desc: DocDesc,
     pub file_name: String,
 }
 
@@ -161,7 +161,7 @@ pub enum DocServerReq {
         doc_id: DocId,
         after: GlobalSeq,
     },
-    RequestFile(DocFile),
+    RequestFile(DocDesc),
     DeleteFile(DocId),
     Login(Credential),
     SendInfo {

@@ -439,10 +439,8 @@ impl JSONRPCServer {
         &mut self,
         params: ListFilesParams,
     ) -> CollabResult<ListFilesResp> {
-        let dir_path = if params.doc_id.is_some() && params.path.is_some() {
-            let doc_id = params.doc_id.unwrap();
-            let path = Path::new(&params.path.unwrap()).to_path_buf();
-            Some((doc_id, path))
+        let dir_path = if let Some((dir_id, rel_path)) = &params.dir {
+            Some((*dir_id, PathBuf::from(rel_path)))
         } else {
             None
         };
@@ -477,7 +475,7 @@ impl JSONRPCServer {
         params: ConnectToFileParams,
     ) -> CollabResult<ConnectToFileResp> {
         match &params.file {
-            DocFile::Doc(doc_id) => {
+            DocDesc::Doc(doc_id) => {
                 if self.get_doc(doc_id, &params.host_id).is_ok() {
                     self.remove_doc(doc_id, &params.host_id)
                 }
