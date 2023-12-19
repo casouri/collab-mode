@@ -1384,50 +1384,50 @@ its name rather than doc id) to connect."
                       (mapcar #'car (collab--server-alist)))
                      'interactive))
   (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
-                       (let* ((info (alist-get server (collab--server-alist)
-                                               nil nil #'equal))
-                              (file-list (collab--list-files-req
-                                          server (nth 0 info) (nth 1 info)))
-                              file-name)
+    (let* ((info (alist-get server (collab--server-alist)
+                            nil nil #'equal))
+           (file-list (collab--list-files-req
+                       server (nth 0 info) (nth 1 info)))
+           file-name)
 
-                         ;; Get file name by doc id, or prompt for file name and get doc
-                         ;; id by file name.
-                         (if (eq doc-id 'interactive)
-                             (progn
-                               (setq file-name (completing-read
-                                                "Merge with: "
-                                                (mapcar (lambda (elm)
-                                                          (plist-get elm :fileName))
-                                                        file-list)
-                                                nil t))
-                               (setq doc-id (cl-loop for elm in file-list
-                                                     if (equal (plist-get elm :fileName)
-                                                               file-name)
-                                                     return (plist-get elm :docId))))
+      ;; Get file name by doc id, or prompt for file name and get doc
+      ;; id by file name.
+      (if (eq doc-id 'interactive)
+          (progn
+            (setq file-name (completing-read
+                             "Merge with: "
+                             (mapcar (lambda (elm)
+                                       (plist-get elm :fileName))
+                                     file-list)
+                             nil t))
+            (setq doc-id (cl-loop for elm in file-list
+                                  if (equal (plist-get elm :fileName)
+                                            file-name)
+                                  return (plist-get elm :docId))))
 
-                           (setq file-name (cl-loop for elm in file-list
-                                                    if (equal (plist-get elm :docId)
-                                                              doc-id)
-                                                    return (plist-get elm :fileName))))
+        (setq file-name (cl-loop for elm in file-list
+                                 if (equal (plist-get elm :docId)
+                                           doc-id)
+                                 return (plist-get elm :fileName))))
 
-                         ;; Replace buffer content with document content.
-                         (let* ((resp (collab--connect-to-file-req doc-id server))
-                                (content (plist-get resp :content))
-                                (site-id (plist-get resp :siteId))
-                                (inhibit-read-only t))
+      ;; Replace buffer content with document content.
+      (let* ((resp (collab--connect-to-file-req doc-id server))
+             (content (plist-get resp :content))
+             (site-id (plist-get resp :siteId))
+             (inhibit-read-only t))
 
-                           (when (buffer-modified-p)
-                             (when (y-or-n-p "Save buffer before merging?")
-                               (save-buffer)))
+        (when (buffer-modified-p)
+          (when (y-or-n-p "Save buffer before merging?")
+            (save-buffer)))
 
-                           ;; Same as in ‘collab--open-file’.
-                           (collab-monitored-mode -1)
-                           (erase-buffer)
-                           (insert content)
-                           (goto-char (point-min))
-                           (let ((buffer-file-name file-name))
-                             (set-auto-mode))
-                           (collab--enable doc-id server site-id)))))
+        ;; Same as in ‘collab--open-file’.
+        (collab-monitored-mode -1)
+        (erase-buffer)
+        (insert content)
+        (goto-char (point-min))
+        (let ((buffer-file-name file-name))
+          (set-auto-mode))
+        (collab--enable doc-id server site-id)))))
 
 (defun collab-disconnect-buffer ()
   "Disconnect current buffer, returning it to a regular buffer."
