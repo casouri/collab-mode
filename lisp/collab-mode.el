@@ -625,6 +625,15 @@ MY-SITE-ID is the site if of this editor."
 
 ;;; JSON-RPC
 
+(defun collab--doc-desc-id (doc-desc)
+  "Return the doc-id in DOC-DESC if it has one, else return nil.
+
+DOC-DESC := (:Doc DOC-ID)
+         | (:File [DOC-ID REL-PATH])
+         | (:Dir [DOC-ID REL-PATH])
+"
+  (and (eq (car doc-desc) :Doc) (cadr doc-desc)))
+
 ;;;; Connection
 
 (defvar collab--jsonrpc-connection nil
@@ -767,6 +776,7 @@ file is of the form (:docId DOC-ID :fileName FILE-NAME)."
                    :signalingAddr ,signaling-server
                    :credential ,credential)
                 :timeout collab-rpc-timeout)))
+    ;; Convert vector to a list.
     (seq-map #'identity (plist-get resp :files))))
 
 (defun collab--share-file-req (server filename content)
@@ -797,14 +807,14 @@ is non-nil, override existing directories."
                 :timeout collab-rpc-timeout)))
     resp))
 
-(defun collab--connect-to-file-req (doc server)
-  "Connect to DOC (doc id) on SERVER (server address).
+(defun collab--connect-to-file-req (doc-desc server)
+  "Connect to DOC-DESC on SERVER (server address).
 Return (:siteId SITE-ID :content CONTENT)."
   (let* ((conn (collab--connect))
          (resp (jsonrpc-request
                 conn 'ConnectToFile
                 `( :hostId ,server
-                   :docId ,doc)
+                   :docDesc ,doc-desc)
                 :timeout collab-rpc-timeout)))
     resp))
 
@@ -1001,15 +1011,20 @@ Point is not restored in the face of non-local exit."
 
 ;;;; Drawing the hub UI
 
-(defun collab--insert-file (doc-id file-name server)
-  "Insert file that has DOC-ID and FILE-NAME.
-SERVER is its server id."
+(defun collab--insert-file (doc-desc file-name server)
+  "Insert DOC-DESC with FILE-NAME.
+SERVER is its server id.
+
+See ‘collab--doc-desc-id’ for the shape of DOC-DESC."
   (let ((beg (point)))
     (insert file-name)
     (add-text-properties
-     beg (point) `( collab-doc-id ,doc-id
+     beg (point) `( collab-doc-desc ,doc-desc
                     collab-file-name ,file-name))
-    (when (collab--doc-connected doc-id server)
+    ;; If the doc is connected, it must be a :Doc.
+    (when (and (collab--doc-desc-id doc-desc)
+               (collab--doc-connected
+                (collab--doc-desc-id doc-desc) server))
       (insert " " (propertize (icon-string 'collab-status-on)
                               'collab-status t)))))
 
@@ -1028,10 +1043,11 @@ signaling server. Return t if the server has some file to list."
                   server signaling-server credential)))
       ;; 2. Insert files.
       (if files
+          ;; FILE is in DocInfo type.
           (dolist (file files)
-            (let ((doc-id (plist-get file :docId))
+            (let ((doc (plist-get file :doc))
                   (file-name (plist-get file :fileName)))
-              (collab--insert-file doc-id file-name server)
+              (collab--insert-file doc file-name server)
               (insert "\n")))
         (insert (propertize "(empty)\n" 'face 'shadow)))
       ;; 4. Mark server section.
@@ -1176,8 +1192,8 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
                   (overlay-put ov 'face 'collab-dynamic-highlight)
                   (setq collab--hl-ov-1 ov)))))
     (cond
-     ((get-text-property (point) 'collab-doc-id)
-      (let ((range (collab--prop-section 'collab-doc-id)))
+     ((get-text-property (point) 'collab-doc-desc)
+      (let ((range (collab--prop-section 'collab-doc-desc)))
         (move-overlay ov (car range) (cdr range)))
       (setq-local cursor-type nil))
      ((get-text-property (point) 'collab-server-line)
@@ -1195,10 +1211,10 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
   "Displays help information at point.
 Used for ‘eldoc-documentation-functions’, calls CALLBACK
 immediately."
-  (let ((doc-id (get-text-property (point) 'collab-doc-id))
+  (let ((doc-desc (get-text-property (point) 'collab-doc-desc))
         (host-id (get-text-property (point) 'collab-host-id)))
     (cond
-     (doc-id
+     (doc-desc
       (funcall callback
                "RET → Open File  x → Delete File  k → Disconnect"))
      (host-id
@@ -1229,17 +1245,21 @@ immediately."
   "Open the file at point.
 If HOST-ID and DOC-ID non-nil, use them instead."
   (interactive)
-  (let* ((doc-id (or doc-id (get-text-property (point) 'collab-doc-id)))
+  ;; See ‘collab--doc-desc-id’ for the shape of DOC-DESC.
+  (let* ((doc-desc (or (and doc-id `(:Doc ,doc-id))
+                       (get-text-property (point) 'collab-doc-desc)))
          (host-id (or host-id
                       (get-text-property (point) 'collab-host-id)))
-         (buf (gethash (cons doc-id host-id)
-                       collab--buffer-table)))
+         (buf (when-let ((doc-id (collab--doc-desc-id doc-desc)))
+                (gethash (cons doc-id host-id)
+                         collab--buffer-table))))
     (if (buffer-live-p buf)
         (display-buffer buf)
-      (collab--catch-error (format "can’t connect to Doc(%s)" doc-id)
-        (let* ((resp (collab--connect-to-file-req doc-id host-id))
+      (collab--catch-error (format "can’t connect to %s" doc-desc)
+        (let* ((resp (collab--connect-to-file-req doc-desc host-id))
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
+               (doc-id (plist-get resp :docId))
                (file-name (plist-get resp :fileName))
                (inhibit-read-only t))
           (end-of-line)
@@ -1260,13 +1280,16 @@ If HOST-ID and DOC-ID non-nil, use them instead."
 (defun collab--disconnect-from-file ()
   "Disconnect from the file at point."
   (interactive)
-  (let ((doc-id (get-text-property (point) 'collab-doc-id))
-        (host-id (get-text-property (point) 'collab-host-id)))
-    (collab--catch-error
-        (format "can’t disconnect from Doc(%s)" doc-id)
-      (collab--disconnect-from-file-req doc-id host-id))
-    (let ((buf (gethash (cons doc-id host-id)
-                        collab--buffer-table))
+  (let* ((doc-desc (get-text-property (point) 'collab-doc-desc))
+         (host-id (get-text-property (point) 'collab-host-id))
+         (doc-id (collab--doc-desc-id doc-desc)))
+    (when doc-id
+      (collab--catch-error
+          (format "can’t disconnect from Doc(%s)" doc-id)
+        (collab--disconnect-from-file-req doc-id host-id)))
+    (let ((buf (when doc-id
+                 (gethash (cons doc-id host-id)
+                          collab--buffer-table)))
           (inhibit-read-only t))
       (when buf
         (with-current-buffer buf
