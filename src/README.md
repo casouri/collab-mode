@@ -49,8 +49,9 @@ keep one history ([crate::engine::GlobalHistory]), which is made of
 the globally sequenced ops (let it be L₁) followed by local
 unsequenced ops (let it be L₂). Note that in this history, every op
 o\_i’s context C(o\_i) is the set of all ops before it, and we can
-infer the context of a global op with its g-seq, and that of a local
-op with it’s position in L₂ plus the content of L₁.
+infer the context of a global op with its g-seq (every ops before it
+in L₁), and that of a local op with it’s position in L₂ (every ops
+before it in L₂ plus all ops in L₁).
 
 At all times, the edit’s document state is the same as the document
 state at the end of the history (L₁ + L₂). So we know the op we send
@@ -74,18 +75,18 @@ incrementing g-seq.
 
 To keep the synchronization between the editor and the collab process,
 the editor has to block user input, send new ops to the collab
-process, receive remote ops, apply remote ops, and resume handling
-user input. The creation of new ops (which happens on the editor) has
-to be synchronized with everything else in the control algorithm
-(which happens on the collab process). The editor doesn’t have to pull
-the collab process constantly: the collab process can send the editor
-a notification when remote ops arrive, and the editor can send new ops
-(or an empty list of new ops when there isn’t any) to the collab
+process, apply remote ops, and resume handling user input. The
+creation of new ops (which happens on the editor) has to be
+synchronized with everything else in the control algorithm (which
+happens on the collab process). The editor doesn’t have to pull the
+collab process constantly: the collab process can send the editor a
+notification when remote ops arrive, and the editor can send new ops
+(or an empty list of new ops when there aren’t any) to the collab
 process and receive remote ops.
 
-On the collab process side, it don’t process ops received from the
-server until the editor initiates a new round of
-send-local-op-receive-remote-op. The collab process just stores newly
+On the collab process side, it don’t process remote ops received from
+the server until the editor initiates a new round of
+send-local-op-process-remote-op. The collab process just stores newly
 arrived op in a buffer, pretending they have not arrived yet. When the
 editor blocks user input and sends local ops, the collab process
 processes these local ops first, pretending that they happened before
@@ -116,12 +117,12 @@ a transform function that satisfies them, or use a control algorithm
 that avoids them.
 
 IP2 says sequentially transforming an operation A against another
-operation B and its inverse I(B) should end up giving you o back. This
+operation B and its inverse I(B) should end up giving you A back. This
 sounds trivially satisfiable but isn’t. An example: let A = del(0,
 abc), B = del(0, abc). With a normal transform function, you’ll end up
 with del(0, ""). To avoid IP2, you just need to make sure you never
 transform ops sequentially against an op and then its inverse (harder
-than you think).
+than you think, because of de-coupled inverse pairs).
 
 The other property, IP3 is a bit more complicated. In essence, it says
 the transformed inverse of an op should be equal to the inverse of the
@@ -135,12 +136,13 @@ IT(I(A), IT(B, A)) = I(IT(A, B))
 COT avoids both IP2 and IP3 in its control algorithm at the cost of
 having abysmal asymptotic complexity: you need to always transform
 from the original op, that means keeping the original context for each
-op. No transformation at the server, no single path of transformation.
+op. Optimizations like transformation at the server, and using single
+path of transformation are out of question.
 
-Instead, after much struggle, I decided to use tombstones. They solves
-every problem and is relatively simple, at the mere cost of keeping
-deleted characters. collab-mode is for temporary real-time sharing,
-keeping some deleted charaters is totally acceptable.
+After much struggle, I decided to use tombstones. They solves every
+problem and is relatively simple, at the mere cost of keeping deleted
+characters. collab-mode is for temporary real-time sharing, keeping
+some deleted charaters is totally acceptable.
 
 Since we have tombstones now, we need to convert between editor
 positions (excludes tombstones) and internal positions (includes

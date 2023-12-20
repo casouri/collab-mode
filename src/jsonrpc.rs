@@ -156,7 +156,8 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
             let msg = req_rx.recv().await;
             if msg.is_none() {
                 log::error!("JSONRPC request channel broke");
-                panic!();
+                // FIXME: Save everything and exit.
+                return;
             }
             match msg.unwrap() {
                 Message::Request(req) => {
@@ -439,10 +440,15 @@ impl JSONRPCServer {
         &mut self,
         params: ListFilesParams,
     ) -> CollabResult<ListFilesResp> {
-        let dir_path = if let Some((dir_id, rel_path)) = &params.dir {
-            Some((*dir_id, PathBuf::from(rel_path)))
-        } else {
-            None
+        let dir_path = match &params.dir {
+            Some(DocDesc::Dir((dir_id, rel_path))) => Some((*dir_id, PathBuf::from(rel_path))),
+            None => None,
+            _ => {
+                return Err(CollabError::NotDirectory(format!(
+                    "{:?}",
+                    &params.dir.unwrap()
+                )));
+            }
         };
 
         let res = if let Ok(client) = self.get_client(&params.host_id) {

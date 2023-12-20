@@ -462,7 +462,7 @@ impl LocalServer {
             .collect();
         for (dir_id, dir) in dirs {
             res.push(DocInfo {
-                doc_desc: DocDesc::File((dir_id, PathBuf::from("/"))),
+                doc_desc: DocDesc::Dir((dir_id, PathBuf::from("."))),
                 file_name: dir.lock().unwrap().name.clone(),
             })
         }

@@ -329,7 +329,8 @@ If MARK non-nil, show active region."
 ;; Case b) uses an idle timer.
 
 (defvar-local collab--doc-and-host nil
-  "(DOC-ID . HOST-ID) for the current buffer.")
+  "(DOC-ID . HOST-ID) for the current buffer.
+For ‘collab-dired-mode’ buffers, it’s (DOC-DESC . HOST-ID.")
 
 (defvar-local collab--accepting-connection nil
   "If non-nil, our collab process is accepting remote connections.")
@@ -634,6 +635,10 @@ DOC-DESC := (:Doc DOC-ID)
 "
   (and (eq (car doc-desc) :Doc) (cadr doc-desc)))
 
+(defun collab--doc-desc-dir-p (doc-desc)
+  "Return non-nil if DOC-DESC represents a directory."
+  (eq (car doc-desc) :Dir))
+
 ;;;; Connection
 
 (defvar collab--jsonrpc-connection nil
@@ -765,16 +770,20 @@ If we receive a ServerError notification, just display a warning."
 
 ;;;; Requests
 
-(defun collab--list-files-req (server signaling-server credential)
+(defun collab--list-files-req (dir server signaling-server credential)
   "Return a list of files on SERVER (address) with CREDENTIAL.
-SIGNALING-SERVER is the address of the signaling server. Each
-file is of the form (:docId DOC-ID :fileName FILE-NAME)."
+
+If DIR is non-nil, it should be the DOC-DESC of the directory we
+want to list. SIGNALING-SERVER is the address of the signaling
+server. Each file is of the form (:docDesc DOC-DESC :fileName
+FILE-NAME)."
   (let* ((conn (collab--connect))
          (resp (jsonrpc-request
                 conn 'ListFiles
-                `( :hostId ,server
-                   :signalingAddr ,signaling-server
-                   :credential ,credential)
+                (append `( :hostId ,server
+                           :signalingAddr ,signaling-server
+                           :credential ,credential)
+                        (and dir `(:dir ,dir)))
                 :timeout collab-rpc-timeout)))
     ;; Convert vector to a list.
     (seq-map #'identity (plist-get resp :files))))
@@ -1040,12 +1049,12 @@ signaling server. Return t if the server has some file to list."
       (insert (propertize " UP" 'face 'success)))
     (insert (propertize "\n" 'line-spacing 0.4))
     (let ((files (collab--list-files-req
-                  server signaling-server credential)))
+                  nil server signaling-server credential)))
       ;; 2. Insert files.
       (if files
           ;; FILE is in DocInfo type.
           (dolist (file files)
-            (let ((doc (plist-get file :doc))
+            (let ((doc (plist-get file :docDesc))
                   (file-name (plist-get file :fileName)))
               (collab--insert-file doc file-name server)
               (insert "\n")))
@@ -1243,18 +1252,35 @@ immediately."
 
 (defun collab--open-file (&optional doc-id host-id)
   "Open the file at point.
+There should be three text properties at point:
+
+- ‘collab-doc-desc’
+- ‘collab-file-name’
+- ‘collab-host-id’
+
 If HOST-ID and DOC-ID non-nil, use them instead."
   (interactive)
   ;; See ‘collab--doc-desc-id’ for the shape of DOC-DESC.
   (let* ((doc-desc (or (and doc-id `(:Doc ,doc-id))
                        (get-text-property (point) 'collab-doc-desc)))
+         (file-name (get-text-property (point) 'collab-file-name))
          (host-id (or host-id
                       (get-text-property (point) 'collab-host-id)))
          (buf (when-let ((doc-id (collab--doc-desc-id doc-desc)))
                 (gethash (cons doc-id host-id)
                          collab--buffer-table))))
-    (if (buffer-live-p buf)
-        (display-buffer buf)
+    (cond
+     ((buffer-live-p buf)
+      (display-buffer buf))
+     ((collab--doc-desc-dir-p doc-desc)
+      (select-window
+       (display-buffer
+        (get-buffer-create
+         (format "*collab dired: %s*" file-name))))
+      (collab-dired-mode)
+      (setq collab--doc-and-host (cons doc-desc host-id))
+      (collab--dired-refresh))
+     (t
       (collab--catch-error (format "can’t connect to %s" doc-desc)
         (let* ((resp (collab--connect-to-file-req doc-desc host-id))
                (site-id (plist-get resp :siteId))
@@ -1275,7 +1301,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
           (goto-char (point-min))
           (let ((buffer-file-name file-name))
             (set-auto-mode))
-          (collab--enable doc-id host-id site-id))))))
+          (collab--enable doc-id host-id site-id)))))))
 
 (defun collab--disconnect-from-file ()
   "Disconnect from the file at point."
@@ -1387,7 +1413,8 @@ its name rather than doc id) to connect."
     (let* ((info (alist-get server (collab--server-alist)
                             nil nil #'equal))
            (file-list (collab--list-files-req
-                       server (nth 0 info) (nth 1 info)))
+                       nil server (nth 0 info) (nth 1 info)))
+           doc-desc
            file-name)
 
       ;; Get file name by doc id, or prompt for file name and get doc
@@ -1400,18 +1427,20 @@ its name rather than doc id) to connect."
                                        (plist-get elm :fileName))
                                      file-list)
                              nil t))
-            (setq doc-id (cl-loop for elm in file-list
-                                  if (equal (plist-get elm :fileName)
-                                            file-name)
-                                  return (plist-get elm :docId))))
+            (setq doc-desc (cl-loop for elm in file-list
+                                    if (equal (plist-get elm :fileName)
+                                              file-name)
+                                    return (plist-get elm :docDesc))))
 
         (setq file-name (cl-loop for elm in file-list
-                                 if (equal (plist-get elm :docId)
+                                 if (equal (collab--doc-desc-id
+                                            (plist-get elm :docDesc))
                                            doc-id)
-                                 return (plist-get elm :fileName))))
+                                 return (plist-get elm :fileName)))
+        (setq doc-desc `(:Doc ,doc-id)))
 
       ;; Replace buffer content with document content.
-      (let* ((resp (collab--connect-to-file-req doc-id server))
+      (let* ((resp (collab--connect-to-file-req doc-desc server))
              (content (plist-get resp :content))
              (site-id (plist-get resp :siteId))
              (inhibit-read-only t))
@@ -1455,7 +1484,7 @@ SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
 
     ;; TODO Only connect to server if we haven’t yet.
     (collab--catch-error (format "can’t connect to Server %s" host-id)
-      (collab--list-files-req host-id signaling-addr ""))
+      (collab--list-files-req nil host-id signaling-addr ""))
 
     (collab--open-file doc-id host-id)
     (save-excursion
@@ -1512,6 +1541,55 @@ detailed history."
       (?r (call-interactively #'collab-reconnect-buffer))
       (?q (collab-disconnect-buffer))
       (?h (collab-hub)))))
+
+;;; Collab-dired
+
+(defvar collab-dired-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'collab--open-file)
+    (define-key map (kbd "x") #'collab--delete-file)
+    (define-key map (kbd "k") #'collab--disconnect-from-file)
+    (define-key map (kbd "g") #'collab--dired-refresh)
+
+    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "p") #'previous-line)
+    map)
+  "Keymap for ‘collab-dired-mode’.")
+
+(define-derived-mode collab-dired-mode special-mode
+  "Mode showing a shared directory."
+  (setq-local line-spacing 0.2))
+
+(defun collab--dired-refresh ()
+  "Refresh the current ‘collab-dired-mode’ buffer."
+  (interactive)
+  (let ((inhibit-read-only t)
+        (line (line-number-at-pos)))
+    (erase-buffer)
+    (collab--dired-render)
+    (goto-char (point-min))
+    (forward-line (1- line))))
+
+(defun collab--dired-render ()
+  "Draw the current ‘collab-dired-mode’ buffer from scratch."
+  (when (and (derived-mode-p 'collab-dired-mode) collab--doc-and-host)
+    (collab--catch-error (format "can’t connect to %s"
+                                 (car collab--doc-and-host))
+      (let* ((doc-desc (car collab--doc-and-host))
+             (host-id (cdr collab--doc-and-host))
+             (info (alist-get host-id (collab--server-alist)
+                              nil nil #'equal))
+             (file-list (collab--list-files-req
+                         doc-desc host-id (nth 0 info) (nth 1 info))))
+        (if (null file-list)
+            (insert (collab--fairy "This directory is so empty!\n"))
+          (dolist (file file-list)
+            (let ((doc (plist-get file :docDesc))
+                  (file-name (plist-get file :fileName)))
+              (collab--insert-file doc file-name host-id)
+              (insert "\n"))))
+        (put-text-property (point-min) (point-max)
+                           'collab-host-id host-id)))))
 
 ;;; Setup
 
