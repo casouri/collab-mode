@@ -639,6 +639,28 @@ DOC-DESC := (:Doc DOC-ID)
   "Return non-nil if DOC-DESC represents a directory."
   (eq (car doc-desc) :Dir))
 
+(defun collab--doc-desc-path (doc-desc)
+  "Return the relative path in DOC-DESC."
+  (pcase doc-desc
+    (`(:File [,_ ,path]) path)
+    (`(:Dir [,_ ,path]) path)
+    (_ nil)))
+
+(defun collab--doc-desc-parent (doc-desc)
+  "Return parent doc-desc of DOC-DESC.
+If DOC-DESC is a doc, return nil.
+If DOC-DESC is at the top-level, return itself."
+  (pcase doc-desc
+    (`(:File [,doc-id ,path])
+     `(:File [,doc-id ,(string-trim-right
+                        (or (file-name-directory path) ".")
+                        "/")]))
+    (`(:Dir [,doc-id ,path])
+     `(:Dir [,doc-id ,(string-trim-right
+                       (or (file-name-directory path) ".")
+                       "/")]))
+    (_ nil)))
+
 ;;;; Connection
 
 (defvar collab--jsonrpc-connection nil
@@ -1020,13 +1042,16 @@ Point is not restored in the face of non-local exit."
 
 ;;;; Drawing the hub UI
 
-(defun collab--insert-file (doc-desc file-name server)
+(defun collab--insert-file
+    (doc-desc file-name server &optional display-name)
   "Insert DOC-DESC with FILE-NAME.
-SERVER is its server id.
+
+SERVER is its server id. If DISPLAY-NAME non-nil, use that as the
+display name.
 
 See ‘collab--doc-desc-id’ for the shape of DOC-DESC."
   (let ((beg (point)))
-    (insert file-name)
+    (insert (or display-name file-name))
     (add-text-properties
      beg (point) `( collab-doc-desc ,doc-desc
                     collab-file-name ,file-name))
@@ -1204,15 +1229,18 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
      ((get-text-property (point) 'collab-doc-desc)
       (let ((range (collab--prop-section 'collab-doc-desc)))
         (move-overlay ov (car range) (cdr range)))
-      (setq-local cursor-type nil))
+      ;; (setq-local cursor-type nil)
+      )
      ((get-text-property (point) 'collab-server-line)
       (let ((range (collab--prop-section 'collab-host-id)))
         (move-overlay ov (car range) (cdr range)))
-      (setq-local cursor-type nil))
+      ;; (setq-local cursor-type nil)
+      )
      (t
       (when ov
         (move-overlay ov 1 1))
-      (kill-local-variable 'cursor-type)))))
+      ;; (kill-local-variable 'cursor-type)
+      ))))
 
 ;;;; Eldoc
 
@@ -1250,6 +1278,8 @@ immediately."
     (goto-char (point-min))
     (forward-line (1- line))))
 
+(defvar collab--dired-rel-path)
+(defvar collab--dired-root-name)
 (defun collab--open-file (&optional doc-id host-id)
   "Open the file at point.
 There should be three text properties at point:
@@ -1273,13 +1303,21 @@ If HOST-ID and DOC-ID non-nil, use them instead."
      ((buffer-live-p buf)
       (display-buffer buf))
      ((collab--doc-desc-dir-p doc-desc)
-      (select-window
-       (display-buffer
-        (get-buffer-create
-         (format "*collab dired: %s*" file-name))))
-      (collab-dired-mode)
-      (setq collab--doc-and-host (cons doc-desc host-id))
-      (collab--dired-refresh))
+      (let ((root-name collab--dired-root-name))
+        (select-window
+         (display-buffer
+          (get-buffer-create
+           (if (equal (collab--doc-desc-path doc-desc) ".")
+               (format "*collab dired: %s" (or root-name file-name))
+             (format "*collab dired: %s/%s*" root-name file-name)))))
+        (collab-dired-mode)
+        (setq collab--doc-and-host (cons doc-desc host-id))
+        (if (equal (collab--doc-desc-path doc-desc) ".")
+            (setq collab--dired-root-name (or root-name file-name)
+                  collab--dired-rel-path ".")
+          (setq collab--dired-root-name root-name
+                collab--dired-rel-path (collab--doc-desc-path doc-desc)))
+        (collab--dired-refresh)))
      (t
       (collab--catch-error (format "can’t connect to %s" doc-desc)
         (let* ((resp (collab--connect-to-file-req doc-desc host-id))
@@ -1381,7 +1419,7 @@ When called interactively, prompt for the server."
                              doc-id))
                (collab--current-message
                 (collab--fairy "Your file is shared, and here’s the link
-Friends can connect, with just a click!
+Anyone can connect with just a click!
 LINK: %s" (propertize link 'face 'link))))
           (collab--refresh))))))
 
@@ -1544,6 +1582,12 @@ detailed history."
 
 ;;; Collab-dired
 
+(defvar-local collab--dired-rel-path nil
+  "Relative path of this directory in the top-level shared directory.")
+
+(defvar-local collab--dired-root-name nil
+  "Name of the top-level shared directory this directory is in.")
+
 (defvar collab-dired-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'collab--open-file)
@@ -1556,9 +1600,8 @@ detailed history."
     map)
   "Keymap for ‘collab-dired-mode’.")
 
-(define-derived-mode collab-dired-mode special-mode
-  "Mode showing a shared directory."
-  (setq-local line-spacing 0.2))
+(define-derived-mode collab-dired-mode special-mode "Collab Dired"
+  "Mode showing a shared directory.")
 
 (defun collab--dired-refresh ()
   "Refresh the current ‘collab-dired-mode’ buffer."
@@ -1573,23 +1616,40 @@ detailed history."
 (defun collab--dired-render ()
   "Draw the current ‘collab-dired-mode’ buffer from scratch."
   (when (and (derived-mode-p 'collab-dired-mode) collab--doc-and-host)
-    (collab--catch-error (format "can’t connect to %s"
-                                 (car collab--doc-and-host))
-      (let* ((doc-desc (car collab--doc-and-host))
-             (host-id (cdr collab--doc-and-host))
-             (info (alist-get host-id (collab--server-alist)
-                              nil nil #'equal))
-             (file-list (collab--list-files-req
-                         doc-desc host-id (nth 0 info) (nth 1 info))))
-        (if (null file-list)
-            (insert (collab--fairy "This directory is so empty!\n"))
-          (dolist (file file-list)
-            (let ((doc (plist-get file :docDesc))
-                  (file-name (plist-get file :fileName)))
-              (collab--insert-file doc file-name host-id)
-              (insert "\n"))))
-        (put-text-property (point-min) (point-max)
-                           'collab-host-id host-id)))))
+    (cl-labels ((root-dir-p (path) (equal path ".")))
+      (collab--catch-error (format "can’t connect to %s"
+                                   (car collab--doc-and-host))
+        (let* ((doc-desc (car collab--doc-and-host))
+               (host-id (cdr collab--doc-and-host))
+               (info (alist-get host-id (collab--server-alist)
+                                nil nil #'equal))
+               (file-list (collab--list-files-req
+                           doc-desc host-id (nth 0 info) (nth 1 info)))
+               (parent-doc-desc (collab--doc-desc-parent doc-desc)))
+          (insert "Collab ( " collab--dired-root-name " / "
+                  (if (root-dir-p collab--dired-rel-path)
+                      ""
+                    collab--dired-rel-path)
+                  " ):\n")
+          (insert ".\n")
+          (if (root-dir-p collab--dired-rel-path)
+              (insert "..")
+            (collab--insert-file
+             parent-doc-desc
+             (string-trim-right
+              (or (file-name-directory collab--dired-rel-path) ".") "/")
+             host-id ".."))
+          (insert "\n")
+          (if (null file-list)
+              (insert (collab--fairy "It’s so empty here!\n"))
+            (dolist (file file-list)
+              (let* ((doc (plist-get file :docDesc))
+                     (file-name (plist-get file :fileName)))
+                (collab--insert-file
+                 doc (if (equal file-name "") "." file-name) host-id)
+                (insert "\n"))))
+          (put-text-property (point-min) (point-max)
+                             'collab-host-id host-id))))))
 
 ;;; Setup
 
@@ -1602,7 +1662,7 @@ detailed history."
     (when (and (not (executable-find "collab-mode"))
                (y-or-n-p (collab--fairy "No binary here, a tiny regret. Shall we fetch from the internet? ")))
       (let ((choice (car (read-multiple-choice
-                          (collab--fairy "Three choices in the chest, which one suits you the best? ")
+                          (collab--fairy "Which one suits you the best? ")
                           '((?l "linux_x64" "Linux x86_64")
                             (?m "mac_x64" "Mac x86_64")
                             (?a "mac_arm" "Mac ARM"))))))
