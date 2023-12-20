@@ -141,8 +141,22 @@ async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
         Url::parse_url("stun:stun3.l.google.com:19302").unwrap(),
         Url::parse_url("stun:stun4.l.google.com:19302").unwrap(),
         Url::parse_url("stun:stun.nextcloud.com:443").unwrap(),
-        Url::parse_url("stun:stun.mit.de:3478").unwrap(),
+        Url::parse_url("stun:stun.relay.metered.ca:80").unwrap(),
     ];
+    let turn_urls = vec![
+        Url::parse_url("turn:a.relay.metered.ca:80").unwrap(),
+        Url::parse_url("turn:a.relay.metered.ca:80?transport=tcp").unwrap(),
+        Url::parse_url("turn:a.relay.metered.ca:443").unwrap(),
+        Url::parse_url("turn:a.relay.metered.ca:443?transport=tcp").unwrap(),
+    ]
+    .into_iter()
+    .map(|mut url| {
+        url.username = "8876b56b638342bdae08c95b".to_string();
+        url.password = "fzCwuGJBbeSB8bfw".to_string();
+        url
+    });
+    config.urls.extend(turn_urls);
+
     Ok(Agent::new(config).await?)
 }
 
