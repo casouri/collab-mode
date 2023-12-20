@@ -105,6 +105,7 @@ impl DocDesignator {
 pub struct DocInfo {
     pub doc_desc: DocDesc,
     pub file_name: String,
+    pub file_meta: serde_json::Value,
 }
 
 /// Meaning: editor needs to keep trying to get ops until they got
@@ -151,6 +152,7 @@ pub struct Snapshot {
 pub enum DocServerReq {
     ShareFile {
         file_name: String,
+        file_meta: serde_json::Value,
         content: FileContentOrPath,
     },
     ListFiles {

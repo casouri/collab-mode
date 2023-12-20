@@ -50,6 +50,7 @@ impl Doc {
     pub async fn new_share_file(
         mut server: ClientEnum,
         file_name: &str,
+        file_meta: &serde_json::Value,
         file: String,
         external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<Doc> {
@@ -57,7 +58,7 @@ impl Doc {
         let (err_tx, err_rx) = mpsc::channel(2);
         let file_len = file.len() as u64;
         let doc_id = server
-            .share_file(file_name, FileContentOrPath::Content(file))
+            .share_file(file_name, file_meta, FileContentOrPath::Content(file))
             .await?;
 
         let mut doc = make_doc(

@@ -36,9 +36,10 @@ impl DocServer for LocalServer {
     async fn share_file(
         &mut self,
         file_name: &str,
+        file_meta: &serde_json::Value,
         file: FileContentOrPath,
     ) -> CollabResult<DocId> {
-        self.share_file_1(file_name, file, None).await
+        self.share_file_1(file_name, file_meta, file, None).await
     }
     async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
         self.list_files_1(dir_path).await
@@ -87,6 +88,8 @@ pub struct LocalServer {
 struct Doc {
     /// Human-readable name for the doc.
     name: String,
+    /// Metadata for this doc.
+    meta: serde_json::Value,
     /// The local file path, if exists.
     file_path: Option<FilePath>,
     /// The server engine that transforms and stores ops for this doc.
@@ -108,6 +111,8 @@ struct Doc {
 struct Dir {
     /// Human-readable name for the doc.
     name: String,
+    /// Metadata for the directory.
+    meta: serde_json::Value,
     /// Absolute path of the directory on disk.
     path: PathBuf,
 }
@@ -115,7 +120,12 @@ struct Dir {
 // *** Functions for Doc
 
 impl Doc {
-    pub fn new(file_name: &str, content: &str, file_path: Option<FilePath>) -> Doc {
+    pub fn new(
+        file_name: &str,
+        file_meta: &serde_json::Value,
+        content: &str,
+        file_path: Option<FilePath>,
+    ) -> Doc {
         let (tx, rx) = watch::channel(());
         let (tx_info, rx_info) = broadcast::channel(RETAINED_INFO_MSG_MAX);
         let mut buffer = GapBuffer::new();
@@ -123,6 +133,7 @@ impl Doc {
         Doc {
             name: file_name.to_string(),
             file_path,
+            meta: file_meta.clone(),
             engine: ServerEngine::new(content.len() as u64),
             buffer,
             tx,
@@ -219,6 +230,7 @@ impl LocalServer {
         let doc_id = self
             .share_file_1(
                 &file_name,
+                &serde_json::json!({}),
                 FileContentOrPath::Content(buf.clone()),
                 Some((*dir_id, rel_path.to_path_buf())),
             )
@@ -237,6 +249,7 @@ impl LocalServer {
     pub async fn share_file_1(
         &self,
         file_name: &str,
+        file_meta: &serde_json::Value,
         file: FileContentOrPath,
         file_path: Option<FilePath>,
     ) -> CollabResult<DocId> {
@@ -248,7 +261,9 @@ impl LocalServer {
 
                 docs.insert(
                     doc_id.clone(),
-                    Arc::new(Mutex::new(Doc::new(file_name, &content, file_path))),
+                    Arc::new(Mutex::new(Doc::new(
+                        file_name, file_meta, &content, file_path,
+                    ))),
                 );
             }
             FileContentOrPath::Path(path) => {
@@ -259,6 +274,7 @@ impl LocalServer {
                     Arc::new(Mutex::new(Dir {
                         name: file_name.to_string(),
                         path,
+                        meta: serde_json::json!({}),
                     })),
                 );
             }
@@ -358,12 +374,12 @@ impl LocalServer {
         &self,
         docs: &[(u32, Arc<Mutex<Doc>>)],
         path: &FilePath,
-    ) -> Option<DocDesc> {
+    ) -> Option<(DocDesc, serde_json::Value)> {
         for (doc_id, doc) in docs {
             let doc = doc.lock().unwrap();
             if let Some(path1) = &doc.file_path {
                 if path == path1 {
-                    return Some(DocDesc::Doc(doc_id.clone()));
+                    return Some((DocDesc::Doc(doc_id.clone()), doc.meta.clone()));
                 }
             }
         }
@@ -404,10 +420,11 @@ impl LocalServer {
                 let file_name = file_name_raw.to_string_lossy().into();
                 let file_path = (doc_id, rel_path);
 
-                if let Some(doc) = self.get_docs_with_path(&docs, &file_path).await {
+                if let Some((doc, meta)) = self.get_docs_with_path(&docs, &file_path).await {
                     res.push(DocInfo {
                         doc_desc: doc,
                         file_name,
+                        file_meta: meta,
                     });
                 } else {
                     let doc = if meta.is_file() {
@@ -418,6 +435,7 @@ impl LocalServer {
                     res.push(DocInfo {
                         doc_desc: doc,
                         file_name,
+                        file_meta: serde_json::json!({}),
                     });
                 }
             }
@@ -446,10 +464,12 @@ impl LocalServer {
             // TODO permission check.
             // Only include top-level docs.
             let no_path = doc.lock().unwrap().file_path.is_none();
+            let meta = doc.lock().unwrap().meta.clone();
             if no_path {
                 res.push(DocInfo {
                     doc_desc: DocDesc::Doc(doc_id.clone()),
                     file_name: doc.lock().unwrap().name.clone(),
+                    file_meta: meta,
                 })
             };
         }
@@ -464,6 +484,7 @@ impl LocalServer {
             res.push(DocInfo {
                 doc_desc: DocDesc::Dir((dir_id, PathBuf::from("."))),
                 file_name: dir.lock().unwrap().name.clone(),
+                file_meta: dir.lock().unwrap().meta.clone(),
             })
         }
         Ok(res)
@@ -572,13 +593,19 @@ async fn handle_request(
 ) -> CollabResult<Option<DocServerResp>> {
     let req = msg.unpack()?;
     match req {
-        DocServerReq::ShareFile { file_name, content } => {
+        DocServerReq::ShareFile {
+            file_name,
+            file_meta,
+            content,
+        } => {
             if let FileContentOrPath::Path(_) = &content {
                 return Err(CollabError::UnsupportedOperation(
                     "Sharing directory to remote host".to_string(),
                 ));
             }
-            let doc_id = server.share_file_1(&file_name, content, None).await?;
+            let doc_id = server
+                .share_file_1(&file_name, &file_meta, content, None)
+                .await?;
             Ok(Some(DocServerResp::ShareFile(doc_id)))
         }
         DocServerReq::ListFiles { dir_path } => {

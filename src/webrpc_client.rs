@@ -78,6 +78,7 @@ impl DocServer for WebrpcClient {
     async fn share_file(
         &mut self,
         file_name: &str,
+        file_meta: &serde_json::Value,
         file: FileContentOrPath,
     ) -> CollabResult<DocId> {
         if let FileContentOrPath::Path(_) = &file {
@@ -90,6 +91,7 @@ impl DocServer for WebrpcClient {
             .endpoint
             .send_request_oneshot(&DocServerReq::ShareFile {
                 file_name: file_name.to_string(),
+                file_meta: file_meta.clone(),
                 content: file,
             })
             .await?

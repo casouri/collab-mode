@@ -73,6 +73,7 @@ pub struct ShareFileParams {
     pub host_id: ServerId,
     pub file_name: String,
     pub content: String,
+    pub file_meta: serde_json::Value,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -87,6 +88,7 @@ pub struct ShareFileResp {
 pub struct ShareDirParams {
     pub host_id: ServerId,
     pub dir_name: String,
+    pub dir_meta: serde_json::Value,
     pub path: String,
 }
 

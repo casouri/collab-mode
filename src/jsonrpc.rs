@@ -377,6 +377,7 @@ impl JSONRPCServer {
         let doc = Doc::new_share_file(
             client.clone(),
             &params.file_name,
+            &params.file_meta,
             params.content,
             self.notifier_tx.clone(),
         )
@@ -403,6 +404,7 @@ impl JSONRPCServer {
         let doc_id = client
             .share_file(
                 &params.dir_name,
+                &params.dir_meta,
                 FileContentOrPath::Path(PathBuf::from(params.path)),
             )
             .await?;

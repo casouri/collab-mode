@@ -810,16 +810,18 @@ FILE-NAME)."
     ;; Convert vector to a list.
     (seq-map #'identity (plist-get resp :files))))
 
-(defun collab--share-file-req (server filename content)
+(defun collab--share-file-req (server filename file-meta content)
   "Share the file with SERVER (address).
-FILENAME is filename, CONTENT is just the content of the file in
-a string. Return (:docId DOC-ID :siteId SITE-ID). If FORCE is
-non-nil, override existing files."
+FILENAME is filename, FILE-META is a plist-encoded JSON object,
+CONTENT is just the content of the file in a string.
+Return (:docId DOC-ID :siteId SITE-ID). If FORCE is non-nil,
+override existing files."
   (let* ((conn (collab--connect))
          (resp (jsonrpc-request
                 conn 'ShareFile
                 `( :hostId ,server
                    :fileName ,filename
+                   :fileMeta ,file-meta
                    :content ,content)
                 :timeout collab-rpc-timeout)))
     resp))
@@ -1401,7 +1403,7 @@ When called interactively, prompt for the server."
                           (buffer-name)))))
   (collab--catch-error "can’t share the current buffer"
     (let* ((resp (collab--share-file-req
-                  server file-name
+                  server file-name ()
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
