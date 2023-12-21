@@ -811,7 +811,7 @@ FILE-NAME)."
     (seq-map #'identity (plist-get resp :files))))
 
 (defun collab--share-file-req (server filename file-meta content)
-  "Share the file with SERVER (address).
+  "Share the file with SERVER (server id).
 FILENAME is filename, FILE-META is a plist-encoded JSON object,
 CONTENT is just the content of the file in a string.
 Return (:docId DOC-ID :siteId SITE-ID). If FORCE is non-nil,
@@ -1115,21 +1115,21 @@ If INSERT-STATUS, insert a red DOWN symbol."
       (cons (prop-match-beginning backward-prop)
             (prop-match-end forward-prop)))))
 
-(defvar collab--hub-mode-map
+(defvar collab-hub-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab--open-file)
-    (define-key map (kbd "x") #'collab--delete-file)
-    (define-key map (kbd "k") #'collab--disconnect-from-file)
+    (define-key map (kbd "RET") #'collab--open-doc)
+    (define-key map (kbd "x") #'collab--delete-doc)
+    (define-key map (kbd "k") #'collab--disconnect-from-doc)
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "A") #'collab--accept-connection)
-    (define-key map (kbd "C") #'collab-connect-to-file)
+    (define-key map (kbd "C") #'collab-connect)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
     map)
-  "Keymap for ‘collab--hub-mode’.")
+  "Keymap for ‘collab-hub-mode’.")
 
-(define-derived-mode collab--hub-mode special-mode "Collab"
+(define-derived-mode collab-hub-mode special-mode "Collab"
   "Collaboration mode."
   (setq-local line-spacing 0.2
               eldoc-idle-delay 0.8)
@@ -1166,8 +1166,8 @@ Also insert ‘collab--current-message’ if it’s non-nil."
                       (nth 1 collab-local-server-config)
                       (car collab-local-server-config))
               "\n"))
-    (insert "Errors: ")
-    (insert "0" "\n")
+    ;; (insert "Errors: ")
+    ;; (insert "0" "\n")
     (insert "\n")
 
     (when collab--current-message
@@ -1188,22 +1188,22 @@ Also insert ‘collab--current-message’ if it’s non-nil."
                      (car entry) (nth 0 (cdr entry))
                      (nth 1 (cdr entry)))))
           (jsonrpc-error
-           (unless (equal (car entry) "self")
-             (delete-region beg (point))
-             (collab--insert-disconnected-server (car entry) t)
-             (setq collab--most-recent-error
-                   (format "Error connecting to remote peer: %s" err)))))
+           (delete-region beg (point))
+           (collab--insert-disconnected-server (car entry) t)
+           (setq collab--most-recent-error
+                 (format "Error connecting to remote peer:\n%s"
+                         (pp-to-string err)))))
         (setq have-some-file (or have-some-file server-has-some-file)))
       (insert "\n"))
 
     ;; Footer.
     (unless have-some-file
       (insert "\n" (collab--fairy "No shared docs, not here, not now.
-Shall we create one, and if so, how?\n\n\n")))
+Let’s create one, here’s how!\n\n\n")))
 
     (insert (substitute-command-keys
              "PRESS + TO SHARE A FILE
-PRESS \\[collab-connect-to-file] TO CONNECT TO A REMOTE DOC
+PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (when collab--most-recent-error
       (insert
@@ -1270,8 +1270,8 @@ immediately."
     (jsonrpc-shutdown collab--jsonrpc-connection)
     (setq collab--jsonrpc-connection nil)))
 
-(defun collab--refresh ()
-  "Refresh collab buffer."
+(defun collab--hub-refresh ()
+  "Refresh collab hub buffer."
   (interactive)
   (let ((inhibit-read-only t)
         (line (line-number-at-pos)))
@@ -1280,9 +1280,17 @@ immediately."
     (goto-char (point-min))
     (forward-line (1- line))))
 
+(defun collab--refresh ()
+  "Refresh current buffer, works in both hub and dired mode."
+  (interactive)
+  (cond ((derived-mode-p 'collab-hub-mode)
+         (collab--hub-refresh))
+        ((derived-mode-p 'collab-dired-mode)
+         (collab--dired-refresh))))
+
 (defvar collab--dired-rel-path)
 (defvar collab--dired-root-name)
-(defun collab--open-file (&optional doc-id host-id)
+(defun collab--open-doc (&optional doc-id host-id)
   "Open the file at point.
 There should be three text properties at point:
 
@@ -1304,6 +1312,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
     (cond
      ((buffer-live-p buf)
       (display-buffer buf))
+     ;; Open a directory.
      ((collab--doc-desc-dir-p doc-desc)
       (let ((root-name collab--dired-root-name))
         (select-window
@@ -1320,6 +1329,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
           (setq collab--dired-root-name root-name
                 collab--dired-rel-path (collab--doc-desc-path doc-desc)))
         (collab--dired-refresh)))
+     ;; Open a file.
      (t
       (collab--catch-error (format "can’t connect to %s" doc-desc)
         (let* ((resp (collab--connect-to-file-req doc-desc host-id))
@@ -1334,7 +1344,8 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                                     'collab-status t)))
           (select-window
            (display-buffer
-            (generate-new-buffer (concat "*collab: " file-name "*"))))
+            (generate-new-buffer
+             (format "*collab: %s (%s)*" file-name doc-id))))
           (collab-monitored-mode -1)
           (erase-buffer)
           (insert content)
@@ -1343,7 +1354,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
             (set-auto-mode))
           (collab--enable doc-id host-id site-id)))))))
 
-(defun collab--disconnect-from-file ()
+(defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
   (interactive)
   (let* ((doc-desc (get-text-property (point) 'collab-doc-desc))
@@ -1365,10 +1376,11 @@ If HOST-ID and DOC-ID non-nil, use them instead."
         (when (looking-back " •" 2)
           (delete-char -2))))))
 
-(defun collab--delete-file ()
+(defun collab--delete-doc ()
   "Delete the file at point."
   (interactive)
-  (when-let ((doc-id (get-text-property (point) 'collab-doc-id))
+  (when-let ((doc-id (collab--doc-desc-id
+                      (get-text-property (point) 'collab-doc-desc)))
              (host-id (get-text-property (point) 'collab-host-id)))
     (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
       (collab--delete-file-req doc-id host-id))
@@ -1382,27 +1394,27 @@ If HOST-ID and DOC-ID non-nil, use them instead."
     (collab--catch-error "can’t accept connection "
       (collab--accept-connection-req host-id signaling-addr))
     (setq-local collab--accepting-connection t)
-    (collab--refresh)))
+    (collab--hub-refresh)))
 
 (defun collab-hub ()
   "Pop up the collab hub interface."
   (interactive)
   (switch-to-buffer (collab--hub-buffer))
-  (collab--hub-mode)
-  (collab--refresh))
+  (collab-hub-mode)
+  (collab--hub-refresh))
 
-(defun collab-share-buffer (server file-name)
-  "Share the current buffer to SERVER under FILE-NAME.
+(defun collab-share-buffer (file-name)
+  "Share the current buffer with FILE-NAME.
 When called interactively, prompt for the server."
-  ;; For the moment, always share to local server.
-  (interactive (list "self"
-                     (read-string
+  (interactive (list (read-string
                       "File name: "
                       (or (and buffer-file-name
                                (file-name-nondirectory buffer-file-name))
                           (buffer-name)))))
   (collab--catch-error "can’t share the current buffer"
-    (let* ((resp (collab--share-file-req
+    ;; For the moment, always share to local server.
+    (let* ((server "self")
+           (resp (collab--share-file-req
                   server file-name ()
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
@@ -1423,7 +1435,19 @@ When called interactively, prompt for the server."
                 (collab--fairy "Your file is shared, and here’s the link
 Anyone can connect with just a click!
 LINK: %s" (propertize link 'face 'link))))
-          (collab--refresh))))))
+          (collab--hub-refresh))))))
+
+(defun collab-share-file (file file-name)
+  "Share FILE with FILE-NAME."
+  (interactive (let* ((path (read-file-name "Share: "))
+                      (file-name (file-name-nondirectory path)))
+                 (list path file-name)))
+  (if (or (file-symlink-p file)
+          (file-regular-p file))
+      (progn
+        (find-file file)
+        (collab-share-buffer file-name))
+    (collab-share-dir file file-name)))
 
 (defun collab-share-dir (dir dir-name)
   "Share DIR to collab process under DIR-NAME."
@@ -1489,7 +1513,7 @@ its name rather than doc id) to connect."
           (when (y-or-n-p "Save buffer before merging?")
             (save-buffer)))
 
-        ;; Same as in ‘collab--open-file’.
+        ;; Same as in ‘collab--open-doc’.
         (collab-monitored-mode -1)
         (erase-buffer)
         (insert content)
@@ -1510,7 +1534,7 @@ its name rather than doc id) to connect."
   (collab--disable)
   (message "Disconnected"))
 
-(defun collab-connect-to-file (share-link)
+(defun collab-connect (share-link)
   "Connect to the file at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
   (interactive (list (read-string "Share link: ")))
@@ -1526,10 +1550,10 @@ SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
     (collab--catch-error (format "can’t connect to Server %s" host-id)
       (collab--list-files-req nil host-id signaling-addr ""))
 
-    (collab--open-file doc-id host-id)
+    (collab--open-doc doc-id host-id)
     (save-excursion
       (with-current-buffer (collab--hub-buffer)
-        (collab--refresh)))))
+        (collab--hub-refresh)))))
 
 (defun collab--print-history (&optional debug)
   "Print debugging history for the current buffer.
@@ -1561,8 +1585,8 @@ detailed history."
           (end-of-line)
           (insert (propertize "  <--- UNDO TIP" 'face 'error)))))))
 
-(defun collab-mode ()
-  "The main entry point of collab-mode, select an operation to perform."
+(defun collab ()
+  "The main entry point of ‘collab-mode’."
   (interactive)
   (unless collab-display-name
     (collab-mode--initial-setup))
@@ -1582,7 +1606,7 @@ detailed history."
       (?q (collab-disconnect-buffer))
       (?h (collab-hub)))))
 
-;;; Collab-dired
+;;;; Collab-dired
 
 (defvar-local collab--dired-rel-path nil
   "Relative path of this directory in the top-level shared directory.")
@@ -1592,9 +1616,9 @@ detailed history."
 
 (defvar collab-dired-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab--open-file)
-    (define-key map (kbd "x") #'collab--delete-file)
-    (define-key map (kbd "k") #'collab--disconnect-from-file)
+    (define-key map (kbd "RET") #'collab--open-doc)
+    (define-key map (kbd "x") #'collab--delete-doc)
+    (define-key map (kbd "k") #'collab--disconnect-from-doc)
     (define-key map (kbd "g") #'collab--dired-refresh)
 
     (define-key map (kbd "n") #'next-line)
