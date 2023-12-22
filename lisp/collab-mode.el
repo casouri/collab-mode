@@ -1453,6 +1453,8 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                (content (plist-get resp :content))
                (doc-id (plist-get resp :docId))
                (file-name (plist-get resp :fileName))
+               (meta (plist-get resp :fileMeta))
+               (suggested-major-mode (plist-get meta :emacs.majorMode))
                (inhibit-read-only t))
           (end-of-line)
           (unless (get-text-property (1- (point)) 'collab-status)
@@ -1466,8 +1468,11 @@ If HOST-ID and DOC-ID non-nil, use them instead."
           (erase-buffer)
           (insert content)
           (goto-char (point-min))
-          (let ((buffer-file-name file-name))
-            (set-auto-mode))
+          (if (and (stringp suggested-major-mode)
+                   (functionp (intern-soft suggested-major-mode)))
+              (funcall (intern-soft suggested-major-mode))
+            (let ((buffer-file-name file-name))
+              (set-auto-mode)))
           (collab--enable doc-id host-id site-id)))))))
 
 (defun collab--disconnect-from-doc ()
@@ -1545,7 +1550,9 @@ When called interactively, prompt for the server."
     ;; For the moment, always share to local server.
     (let* ((server "self")
            (resp (collab--share-file-req
-                  server file-name `(:reserved.source "emacs")
+                  server file-name `( :reserved.hostEditor "emacs"
+                                      :emacs.majorMode
+                                      (symbol-name major-mode))
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
