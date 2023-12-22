@@ -962,7 +962,7 @@ impl GlobalHistory {
             EditorOpKind::Redo => {
                 if let Some(idx) = self.undo_tip {
                     let idx_of_inverse = self.undo_queue[idx];
-                    if idx == self.undo_queue.len() - 1 {
+                    if idx + 1 == self.undo_queue.len() {
                         self.undo_tip = None;
                     } else {
                         self.undo_tip = Some(idx + 1);
@@ -1220,20 +1220,25 @@ impl ClientEngine {
             converted_ops.push(converted_op);
         }
 
-        // Now we need to reverse the affect of applying those ops.
-        // Suppose ops = [1 2 3 4], now minI_history is [1 2 3 4], we
-        // start from inverting 4 and applying I(4). Now mini_history
-        // is [1 2 3 4 I(4)], then we inverse 3, transform it against
-        // 3 4 I(4), now mini_history is [1 2 3 4 I(4) I(3)], and so on.
-        let mut mini_history = ops.clone();
-        for idx in (mini_history.len() - 1)..0 {
-            let mut op = mini_history[idx].clone();
-            op.inverse();
-            op.batch_transform(&mini_history[idx + 1..]);
-            self.gh
-                .full_doc
-                .convert_internal_op_and_apply(op.op.clone());
-            mini_history.push(op);
+        // If the user press "undo" where there's no more ops to undo,
+        // we return an empty list.
+        if ops.len() > 0 {
+            // Now we need to reverse the affect of applying those
+            // ops. Suppose ops = [1 2 3 4], now mini_history is [1 2
+            // 3 4], we start from inverting 4 and applying I(4). Now
+            // mini_history is [1 2 3 4 I(4)], then we inverse 3,
+            // transform it against 3 4 I(4), now mini_history is [1 2
+            // 3 4 I(4) I(3)], and so on.
+            let mut mini_history = ops.clone();
+            for idx in (mini_history.len() - 1)..0 {
+                let mut op = mini_history[idx].clone();
+                op.inverse();
+                op.batch_transform(&mini_history[idx + 1..]);
+                self.gh
+                    .full_doc
+                    .convert_internal_op_and_apply(op.op.clone());
+                mini_history.push(op);
+            }
         }
         converted_ops
     }
