@@ -73,7 +73,7 @@ pub struct ShareFileParams {
     pub host_id: ServerId,
     pub file_name: String,
     pub content: String,
-    pub file_meta: serde_json::Value,
+    pub file_meta: JsonMap,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -88,7 +88,7 @@ pub struct ShareFileResp {
 pub struct ShareDirParams {
     pub host_id: ServerId,
     pub dir_name: String,
-    pub dir_meta: serde_json::Value,
+    pub dir_meta: JsonMap,
     pub path: String,
 }
 
@@ -116,7 +116,7 @@ pub struct SendOpResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendInfoParams {
-    pub info: serde_json::Value,
+    pub info: JsonMap,
     pub doc_id: DocId,
     pub host_id: ServerId,
 }

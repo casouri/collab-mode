@@ -24,7 +24,8 @@ use crate::webrpc_client::WebrpcClient;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::process::exit;
 
 pub mod types;
 use types::*;
@@ -97,7 +98,7 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
                 log::error!("Error sending jsonrpc notification to editor: {:#}", err);
-                panic!();
+                exit(-1);
             }
         }
     });
@@ -107,7 +108,7 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
         let err: Option<CollabError> = async_err_rx.blocking_recv();
         if err.is_none() {
             log::error!("JSONRPC server error channel broke");
-            panic!();
+            exit(-1);
         }
         let msg = match err.unwrap() {
             CollabError::SignalingTimesUp(time) => lsp_server::Notification {
@@ -135,7 +136,7 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
             let res = req_tx.blocking_send(msg);
             if res.is_err() {
                 log::error!("JSONRPC request channel broke: {:?}", res);
-                panic!();
+                exit(-1);
             }
         }
     });
@@ -145,7 +146,7 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
         let resp = resp_rx.blocking_recv();
         if resp.is_none() {
             log::error!("JSONRPC response channel broke");
-            panic!();
+            exit(-1);
         }
         connection_2.sender.send(resp.unwrap()).unwrap();
     });
@@ -175,7 +176,7 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
                     let res = resp_tx.send(msg).await;
                     if res.is_err() {
                         log::error!("JSONRPC response channel broke: {:?}", res);
-                        panic!();
+                        exit(-1);
                     }
                 }
                 Message::Response(_) => {
@@ -311,7 +312,7 @@ impl JSONRPCServer {
     async fn handle_notification(
         &mut self,
         notif: Notification,
-        server: LocalServer,
+        _server: LocalServer,
     ) -> CollabResult<()> {
         if notif.method == "SendInfo" {
             let params: SendInfoParams = serde_json::from_value(notif.params)?;
@@ -433,7 +434,7 @@ impl JSONRPCServer {
     pub async fn handle_send_info_notif(&mut self, params: SendInfoParams) -> CollabResult<()> {
         let client = self.get_client(&params.host_id)?;
         client
-            .send_info(&params.doc_id, params.info.to_string())
+            .send_info(&params.doc_id, serde_json::to_string(&params.info)?)
             .await?;
         Ok(())
     }

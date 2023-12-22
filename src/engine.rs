@@ -1509,7 +1509,6 @@ impl ServerEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::op::Op;
 
     fn apply_editor_op(doc: &mut String, op: &EditorOp) {
         match op {

@@ -36,7 +36,7 @@ impl DocServer for LocalServer {
     async fn share_file(
         &mut self,
         file_name: &str,
-        file_meta: &serde_json::Value,
+        file_meta: &JsonMap,
         file: FileContentOrPath,
     ) -> CollabResult<DocId> {
         self.share_file_1(file_name, file_meta, file, None).await
@@ -89,7 +89,7 @@ struct Doc {
     /// Human-readable name for the doc.
     name: String,
     /// Metadata for this doc.
-    meta: serde_json::Value,
+    meta: JsonMap,
     /// The local file path, if exists.
     file_path: Option<FilePath>,
     /// The server engine that transforms and stores ops for this doc.
@@ -112,7 +112,7 @@ struct Dir {
     /// Human-readable name for the doc.
     name: String,
     /// Metadata for the directory.
-    meta: serde_json::Value,
+    meta: JsonMap,
     /// Absolute path of the directory on disk.
     path: PathBuf,
 }
@@ -122,7 +122,7 @@ struct Dir {
 impl Doc {
     pub fn new(
         file_name: &str,
-        file_meta: &serde_json::Value,
+        file_meta: &JsonMap,
         content: &str,
         file_path: Option<FilePath>,
     ) -> Doc {
@@ -230,7 +230,7 @@ impl LocalServer {
         let doc_id = self
             .share_file_1(
                 &file_name,
-                &serde_json::json!({}),
+                &empty_json_map(),
                 FileContentOrPath::Content(buf.clone()),
                 Some((*dir_id, rel_path.to_path_buf())),
             )
@@ -249,7 +249,7 @@ impl LocalServer {
     pub async fn share_file_1(
         &self,
         file_name: &str,
-        file_meta: &serde_json::Value,
+        file_meta: &JsonMap,
         file: FileContentOrPath,
         file_path: Option<FilePath>,
     ) -> CollabResult<DocId> {
@@ -274,7 +274,7 @@ impl LocalServer {
                     Arc::new(Mutex::new(Dir {
                         name: file_name.to_string(),
                         path,
-                        meta: serde_json::json!({}),
+                        meta: empty_json_map(),
                     })),
                 );
             }
@@ -374,7 +374,7 @@ impl LocalServer {
         &self,
         docs: &[(u32, Arc<Mutex<Doc>>)],
         path: &FilePath,
-    ) -> Option<(DocDesc, serde_json::Value)> {
+    ) -> Option<(DocDesc, JsonMap)> {
         for (doc_id, doc) in docs {
             let doc = doc.lock().unwrap();
             if let Some(path1) = &doc.file_path {
@@ -435,7 +435,7 @@ impl LocalServer {
                     res.push(DocInfo {
                         doc_desc: doc,
                         file_name,
-                        file_meta: serde_json::json!({}),
+                        file_meta: empty_json_map(),
                     });
                 }
             }
@@ -603,6 +603,7 @@ async fn handle_request(
                     "Sharing directory to remote host".to_string(),
                 ));
             }
+            let file_meta = serde_json::from_str(&file_meta).unwrap();
             let doc_id = server
                 .share_file_1(&file_name, &file_meta, content, None)
                 .await?;
@@ -610,7 +611,9 @@ async fn handle_request(
         }
         DocServerReq::ListFiles { dir_path } => {
             let doc_info = server.list_files_1(dir_path).await?;
-            Ok(Some(DocServerResp::ListFiles(doc_info)))
+            Ok(Some(DocServerResp::ListFiles(
+                doc_info.into_iter().map(|info| info.into()).collect(),
+            )))
         }
         DocServerReq::SendOp(ops) => {
             server.send_op_1(ops).await?;

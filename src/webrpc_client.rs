@@ -69,7 +69,9 @@ impl DocServer for WebrpcClient {
             .unpack()?;
         log::debug!("list_files() => {:?}", &resp);
         match resp {
-            DocServerResp::ListFiles(doc_info) => Ok(doc_info),
+            DocServerResp::ListFiles(doc_info) => {
+                Ok(doc_info.into_iter().map(|info| info.into()).collect())
+            }
             DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
             resp => Err(unexpected_resp("ListFiles", resp)),
         }
@@ -78,7 +80,7 @@ impl DocServer for WebrpcClient {
     async fn share_file(
         &mut self,
         file_name: &str,
-        file_meta: &serde_json::Value,
+        file_meta: &JsonMap,
         file: FileContentOrPath,
     ) -> CollabResult<DocId> {
         if let FileContentOrPath::Path(_) = &file {
@@ -91,7 +93,7 @@ impl DocServer for WebrpcClient {
             .endpoint
             .send_request_oneshot(&DocServerReq::ShareFile {
                 file_name: file_name.to_string(),
-                file_meta: file_meta.clone(),
+                file_meta: serde_json::to_string(&file_meta)?,
                 content: file,
             })
             .await?

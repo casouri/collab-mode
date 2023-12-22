@@ -23,6 +23,11 @@
   "The display name of the user."
   :type 'string)
 
+(defcustom collab-local-server-config nil
+  "A list storing configuration for the local server.
+The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
+  :type '(list string))
+
 (defface collab-success-background
   '((t . (:inherit diff-refine-added :extend t)))
   "The highlight used for indicating a success.")
@@ -42,10 +47,6 @@
 The value can be ‘pipe’, meaning use stdio for connection,
 or (socket PORT), meaning using a socket connection, and PORT
 should be the port number.")
-
-(defvar collab-local-server-config '("#1" "ws://linode:8822")
-  "A list storing configuration for the local server.
-The list should be (HOST-ID SIGNALING-SERVER-ADDR).")
 
 (defvar collab-server-alist '(("#2" . ("ws://linode:8822" "")))
   "An alist of server configurations.
@@ -264,9 +265,9 @@ If MARK non-nil, show active region."
         (collab--send-info-req
          doc-id host-id
          (if (region-active-p)
-             `( :type "_pos" :point ,(point)
+             `( :type "reserved.pos" :point ,(point)
                 :mark ,(mark) :siteId ,site-id)
-           `(:type "_pos" :point ,(point) :siteId ,site-id)))))
+           `(:type "reserved.pos" :point ,(point) :siteId ,site-id)))))
 
     (remhash collab--doc-and-host
              collab--sync-cursor-timer-table)))
@@ -666,7 +667,7 @@ If DOC-DESC is at the top-level, return itself."
 (defvar collab--jsonrpc-connection nil
   "The JSONRPC connection to the collab server.")
 
-(defun collab--connect ()
+(defun collab--connect-process ()
   "Get existing JSONRPC connection or create one."
   (or (and collab--jsonrpc-connection
            (jsonrpc-running-p collab--jsonrpc-connection)
@@ -756,15 +757,15 @@ If we receive a ServerError notification, just display a warning."
             (host-id (plist-get params :hostId))
             (value (plist-get params :value)))
        (pcase (plist-get value :type)
-         ("_pos" (let* (
-                        (pos (plist-get value :point))
-                        (mark (plist-get value :mark))
-                        (site-id (plist-get value :siteId))
-                        (buf (gethash (cons doc-id host-id)
-                                      collab--buffer-table)))
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (collab--move-cursor site-id pos mark)))))))
+         ("reserved.pos" (let* (
+                                (pos (plist-get value :point))
+                                (mark (plist-get value :mark))
+                                (site-id (plist-get value :siteId))
+                                (buf (gethash (cons doc-id host-id)
+                                              collab--buffer-table)))
+                           (when (buffer-live-p buf)
+                             (with-current-buffer buf
+                               (collab--move-cursor site-id pos mark)))))))
      )
     ('ServerError
      (display-warning
@@ -772,7 +773,7 @@ If we receive a ServerError notification, just display a warning."
       (format "Local server errored, you might want to restart collab process. Cause: %s"
               params)))
     ('SignalingTimesUp
-     (run-with-timer
+     (run-with-idle-timer
       0 nil
       (lambda ()
         (with-current-buffer (collab--hub-buffer)
@@ -780,12 +781,14 @@ If we receive a ServerError notification, just display a warning."
           (collab--refresh)
           (message "Collab process stopped accepting connections")))))
     ('AcceptConnectionErr
-     (run-with-timer
+     ;; If we use ‘run-with-timer’, this handler might interfer with
+     ;; the condition-case handler in ‘collab--render’.
+     (run-with-idle-timer
       0 nil
       (lambda ()
         (with-current-buffer (collab--hub-buffer)
           (setq collab--accepting-connection nil)
-          (collab--refresh)
+          (collab--hub-refresh)
           (display-warning
            'collab
            (format "Error accepting remote peer connections: %s" params))))))))
@@ -799,7 +802,7 @@ If DIR is non-nil, it should be the DOC-DESC of the directory we
 want to list. SIGNALING-SERVER is the address of the signaling
 server. Each file is of the form (:docDesc DOC-DESC :fileName
 FILE-NAME)."
-  (let* ((conn (collab--connect))
+  (let* ((conn (collab--connect-process))
          (resp (jsonrpc-request
                 conn 'ListFiles
                 (append `( :hostId ,server
@@ -816,7 +819,7 @@ FILENAME is filename, FILE-META is a plist-encoded JSON object,
 CONTENT is just the content of the file in a string.
 Return (:docId DOC-ID :siteId SITE-ID). If FORCE is non-nil,
 override existing files."
-  (let* ((conn (collab--connect))
+  (let* ((conn (collab--connect-process))
          (resp (jsonrpc-request
                 conn 'ShareFile
                 `( :hostId ,server
@@ -831,7 +834,7 @@ override existing files."
 DIR-NAME is the given name for the directory, PATH is the
 absolute path of the directory. Return (:docId DOC-ID). If FORCE
 is non-nil, override existing directories."
-  (let* ((conn (collab--connect))
+  (let* ((conn (collab--connect-process))
          (resp (jsonrpc-request
                 conn 'ShareDir
                 `( :hostId ,server
@@ -843,7 +846,7 @@ is non-nil, override existing directories."
 (defun collab--connect-to-file-req (doc-desc server)
   "Connect to DOC-DESC on SERVER (server address).
 Return (:siteId SITE-ID :content CONTENT)."
-  (let* ((conn (collab--connect))
+  (let* ((conn (collab--connect-process))
          (resp (jsonrpc-request
                 conn 'ConnectToFile
                 `( :hostId ,server
@@ -853,7 +856,7 @@ Return (:siteId SITE-ID :content CONTENT)."
 
 (defun collab--disconnect-from-file-req (doc server)
   "Disconnect from DOC on SERVER."
-  (let ((conn (collab--connect)))
+  (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'DisconnectFromFile
                      `( :hostId ,server
                         :docId ,doc)
@@ -861,7 +864,7 @@ Return (:siteId SITE-ID :content CONTENT)."
 
 (defun collab--delete-file-req (doc server)
   "Delete DOC on SERVER."
-  (let ((conn (collab--connect)))
+  (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'DeleteFile
                      `( :hostId ,server
                         :docId ,doc)
@@ -869,7 +872,7 @@ Return (:siteId SITE-ID :content CONTENT)."
 
 (defun collab--accept-connection-req (host-id signaling-addr)
   "Accept connections as HOST-ID on SIGNALING-ADDR."
-  (let ((conn (collab--connect)))
+  (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'AcceptConnection
                      `( :hostId ,host-id
                         :signalingAddr ,signaling-addr)
@@ -878,7 +881,7 @@ Return (:siteId SITE-ID :content CONTENT)."
 (defun collab--print-history-req (doc server debug)
   "Print debugging history for (DOC SERVER).
 If DEBUG non-nil, print debug version."
-  (let ((conn (collab--connect)))
+  (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'PrintHistory
                      `( :docId ,doc
                         :hostId ,server
@@ -888,7 +891,7 @@ If DEBUG non-nil, print debug version."
 (defun collab--send-info-req (doc server info)
   "Send INFO to DOC on SERVER.
 INFO should be a plist JSON object. This request is async."
-  (let ((conn (collab--connect)))
+  (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'SendInfo
                     `( :hostId ,server
                        :docId ,doc
@@ -1147,7 +1150,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (insert "Connection: ")
     (condition-case err
         (progn
-          (collab--connect)
+          (collab--connect-process)
           (insert (propertize "UP" 'face 'success) "\n")
           (setq connection-up t))
       (error
@@ -1178,17 +1181,19 @@ Also insert ‘collab--current-message’ if it’s non-nil."
 
     ;; Insert each server and files.
     (dolist (entry (collab--server-alist))
-      (let ((beg (point))
+      (let ((server-beg (point))
             (server-has-some-file nil))
         (condition-case err
-            (if (not connection-up)
-                (collab--insert-disconnected-server (car entry))
-              (setq server-has-some-file
-                    (collab--insert-server
-                     (car entry) (nth 0 (cdr entry))
-                     (nth 1 (cdr entry)))))
+            (progn
+              (setq server-beg (point))
+              (if (not connection-up)
+                  (collab--insert-disconnected-server (car entry))
+                (setq server-has-some-file
+                      (collab--insert-server
+                       (car entry) (nth 0 (cdr entry))
+                       (nth 1 (cdr entry))))))
           (jsonrpc-error
-           (delete-region beg (point))
+           (delete-region server-beg (point))
            (collab--insert-disconnected-server (car entry) t)
            (setq collab--most-recent-error
                  (format "Error connecting to remote peer:\n%s"
@@ -1403,6 +1408,20 @@ If HOST-ID and DOC-ID non-nil, use them instead."
   (collab-hub-mode)
   (collab--hub-refresh))
 
+(defun collab--notify-newly-shared-doc (doc-id)
+  "In collab hub, insert a notice of the newly shared doc (DOC-ID)."
+  (with-current-buffer (collab--hub-buffer)
+    (collab--accept-connection)
+    (let* ((link (format "%s/%s/%s"
+                         (nth 1 collab-local-server-config)
+                         (nth 0 collab-local-server-config)
+                         doc-id))
+           (collab--current-message
+            (collab--fairy "Your file is shared, and here’s the link
+Anyone can connect with just a click!
+LINK: %s" (propertize link 'face 'link))))
+      (collab--hub-refresh))))
+
 (defun collab-share-buffer (file-name)
   "Share the current buffer with FILE-NAME.
 When called interactively, prompt for the server."
@@ -1415,7 +1434,7 @@ When called interactively, prompt for the server."
     ;; For the moment, always share to local server.
     (let* ((server "self")
            (resp (collab--share-file-req
-                  server file-name ()
+                  server file-name `(:reserved.source "emacs")
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
@@ -1423,19 +1442,7 @@ When called interactively, prompt for the server."
       (collab--enable doc-id server site-id)
       (display-buffer (collab--hub-buffer)
                       '(() . ((inhibit-same-window . t))))
-      (with-current-buffer (collab--hub-buffer)
-        (collab--accept-connection)
-        (let* ((link (format "%s/%s/%s"
-                             (string-trim-left
-                              (nth 1 collab-local-server-config)
-                              (rx "ws://"))
-                             (nth 0 collab-local-server-config)
-                             doc-id))
-               (collab--current-message
-                (collab--fairy "Your file is shared, and here’s the link
-Anyone can connect with just a click!
-LINK: %s" (propertize link 'face 'link))))
-          (collab--hub-refresh))))))
+      (collab--notify-newly-shared-doc doc-id))))
 
 (defun collab-share-file (file file-name)
   "Share FILE with FILE-NAME."
@@ -1457,9 +1464,7 @@ LINK: %s" (propertize link 'face 'link))))
   (collab--catch-error "can’t share the directory"
     (let* ((resp (collab--share-dir-req "self" dir-name dir))
            (doc-id (plist-get resp :docId)))
-      ;; TODO: Should we refresh the collab hub, or even pop up the
-      ;; collab hub?
-      (ignore doc-id))))
+      (collab--notify-newly-shared-doc doc-id))))
 
 (defun collab-reconnect-buffer (server doc-id)
   "Reconnect current buffer to a remote document SERVER.
@@ -1588,8 +1593,8 @@ detailed history."
 (defun collab ()
   "The main entry point of ‘collab-mode’."
   (interactive)
-  (unless collab-display-name
-    (collab-mode--initial-setup))
+  (unless (and collab-display-name collab-local-server-config)
+    (collab-initial-setup))
   (let ((resp (read-multiple-choice
                (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do? ")
                '((?s "share this buffer" "Share this buffer to a server")
@@ -1679,10 +1684,14 @@ detailed history."
 
 ;;; Setup
 
-(defun collab-mode--initial-setup ()
+(defun collab-initial-setup ()
   "Initial setup wizard. Set display name, download binary, etc."
-  (let ((display-name (read-string (collab--fairy "Heya! I’m dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name)))
+  (let ((display-name (read-string (collab--fairy "Heya! I’m dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name))
+        (local-host-id (collab--uuid))
+        (default-signal-server "wss://signal.collab-mode.org"))
     (customize-set-variable 'collab-display-name display-name)
+    (customize-set-variable 'collab-local-server-config
+                            (list local-host-id default-signal-server))
     (customize-save-customized)
 
     (when (and (not (executable-find "collab-mode"))
@@ -1695,14 +1704,6 @@ detailed history."
         (ignore choice)
         (message "TODO download binary")))))
 
-;;; Debug
-
-(defun collab--setup-2 ()
-  "Setup test session #2."
-  (interactive)
-  (setq collab-server-alist '(("#1" . ("ws://linode:8822" "blah"))))
-  (setq collab-local-server-config '("#2" "ws://linode:8822"))
-  (setq collab-connection-type '(socket 7702)))
 
 (provide 'collab-mode)
 

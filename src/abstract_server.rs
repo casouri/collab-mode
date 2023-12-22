@@ -25,7 +25,7 @@ pub trait DocServer: Send {
     async fn share_file(
         &mut self,
         file_name: &str,
-        file_meta: &serde_json::Value,
+        file_meta: &JsonMap,
         file: FileContentOrPath,
     ) -> CollabResult<DocId>;
     async fn list_files(&mut self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>>;

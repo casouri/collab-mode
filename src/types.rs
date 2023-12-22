@@ -18,6 +18,8 @@ pub type FilePath = (DocId, PathBuf);
 
 pub type FatOp = crate::op::FatOp<Op>;
 
+pub type JsonMap = serde_json::Map<String, serde_json::Value>;
+
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
     Ins(u64, String),
@@ -98,14 +100,42 @@ impl DocDesignator {
     }
 }
 
-/// File name plus doc id for a document. We might later add more meta
-/// info to a doc.
+/// File name plus doc id for a document.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocInfo {
     pub doc_desc: DocDesc,
     pub file_name: String,
-    pub file_meta: serde_json::Value,
+    pub file_meta: JsonMap,
+}
+
+/// DocInfo with JsonMap encoded in string.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcDocInfo {
+    pub doc_desc: DocDesc,
+    pub file_name: String,
+    pub file_meta: String,
+}
+
+impl From<DocInfo> for RpcDocInfo {
+    fn from(value: DocInfo) -> Self {
+        RpcDocInfo {
+            doc_desc: value.doc_desc,
+            file_name: value.file_name,
+            file_meta: serde_json::to_string(&value.file_meta).unwrap(),
+        }
+    }
+}
+
+impl From<RpcDocInfo> for DocInfo {
+    fn from(value: RpcDocInfo) -> Self {
+        DocInfo {
+            doc_desc: value.doc_desc,
+            file_name: value.file_name,
+            file_meta: serde_json::from_str(&value.file_meta).unwrap(),
+        }
+    }
 }
 
 /// Meaning: editor needs to keep trying to get ops until they got
@@ -114,7 +144,7 @@ pub struct DocInfo {
 #[serde(rename_all = "camelCase")]
 pub struct NewOpNotification {
     pub doc_id: DocId,
-    pub server_id: ServerId,
+    pub host_id: ServerId,
     pub last_seq: GlobalSeq,
 }
 
@@ -122,8 +152,8 @@ pub struct NewOpNotification {
 #[serde(rename_all = "camelCase")]
 pub struct InfoNotification {
     pub doc_id: DocId,
-    pub server_id: ServerId,
-    pub value: serde_json::Value,
+    pub host_id: ServerId,
+    pub value: JsonMap,
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +182,7 @@ pub struct Snapshot {
 pub enum DocServerReq {
     ShareFile {
         file_name: String,
-        file_meta: serde_json::Value,
+        file_meta: String,
         content: FileContentOrPath,
     },
     ListFiles {
@@ -176,7 +206,7 @@ pub enum DocServerReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DocServerResp {
     ShareFile(DocId),
-    ListFiles(Vec<DocInfo>),
+    ListFiles(Vec<RpcDocInfo>),
     SendOp,
     RecvOp(Vec<FatOp>),
     RequestFile(Snapshot),
@@ -195,3 +225,7 @@ pub enum DocServerResp {
 //         }
 //     }
 // }
+
+pub fn empty_json_map() -> JsonMap {
+    serde_json::Map::new()
+}

@@ -50,7 +50,7 @@ impl Doc {
     pub async fn new_share_file(
         mut server: ClientEnum,
         file_name: &str,
-        file_meta: &serde_json::Value,
+        file_meta: &JsonMap,
         file: String,
         external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<Doc> {
@@ -325,7 +325,7 @@ fn spawn_thread_receive_remote_op(
                         external_notifier_1
                             .send(CollabNotification::Info(InfoNotification {
                                 doc_id: doc_id_1.clone(),
-                                server_id: server_id_1.clone(),
+                                host_id: server_id_1.clone(),
                                 value,
                             }))
                             .unwrap();
@@ -403,7 +403,7 @@ fn spawn_thread_receive_remote_op(
             if truly_remote_op_arrived {
                 let res = external_notifier.send(CollabNotification::Op(NewOpNotification {
                     doc_id: doc_id.clone(),
-                    server_id: server_id.clone(),
+                    host_id: server_id.clone(),
                     last_seq: last_global_seq,
                 }));
                 if let Err(err) = res {

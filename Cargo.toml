@@ -32,7 +32,7 @@ tokio-util = "0.7.8"
 futures = "0.3"
 futures-util = "0.3"
 
-tokio-tungstenite = "0.20.0"
+tokio-tungstenite = { version = "0.20.0", features = ["native-tls"]}
 webrtc-ice = "0.9.1"
 webrtc-data = "0.7.0"
 webrtc-util = "0.7.0"
