@@ -48,7 +48,7 @@ The value can be ‘pipe’, meaning use stdio for connection,
 or (socket PORT), meaning using a socket connection, and PORT
 should be the port number.")
 
-(defvar collab-server-alist '(("#2" . ("ws://linode:8822" "")))
+(defvar collab-server-alist nil
   "An alist of server configurations.
 Each key is HOST-ID, each value is (SIGNALING-SERVER-ADDR
 CREDENTIAL).")
@@ -1204,7 +1204,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     ;; Footer.
     (unless have-some-file
       (insert "\n" (collab--fairy "No shared docs, not here, not now.
-Let’s create one, here’s how!\n\n\n")))
+Let’s create one, and here’s how!\n\n\n")))
 
     (insert (substitute-command-keys
              "PRESS + TO SHARE A FILE
@@ -1266,7 +1266,78 @@ immediately."
      (t
       (funcall callback "g → Refresh")))))
 
-;;;; Interactive commands
+;;;; Collab-dired
+
+(defvar-local collab--dired-rel-path nil
+  "Relative path of this directory in the top-level shared directory.")
+
+(defvar-local collab--dired-root-name nil
+  "Name of the top-level shared directory this directory is in.")
+
+(defvar collab-dired-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'collab--open-doc)
+    (define-key map (kbd "x") #'collab--delete-doc)
+    (define-key map (kbd "k") #'collab--disconnect-from-doc)
+    (define-key map (kbd "g") #'collab--dired-refresh)
+
+    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "p") #'previous-line)
+    map)
+  "Keymap for ‘collab-dired-mode’.")
+
+(define-derived-mode collab-dired-mode special-mode "Collab Dired"
+  "Mode showing a shared directory.")
+
+(defun collab--dired-refresh ()
+  "Refresh the current ‘collab-dired-mode’ buffer."
+  (interactive)
+  (let ((inhibit-read-only t)
+        (line (line-number-at-pos)))
+    (erase-buffer)
+    (collab--dired-render)
+    (goto-char (point-min))
+    (forward-line (1- line))))
+
+(defun collab--dired-render ()
+  "Draw the current ‘collab-dired-mode’ buffer from scratch."
+  (when (and (derived-mode-p 'collab-dired-mode) collab--doc-and-host)
+    (cl-labels ((root-dir-p (path) (equal path ".")))
+      (collab--catch-error (format "can’t connect to %s"
+                                   (car collab--doc-and-host))
+        (let* ((doc-desc (car collab--doc-and-host))
+               (host-id (cdr collab--doc-and-host))
+               (info (alist-get host-id (collab--server-alist)
+                                nil nil #'equal))
+               (file-list (collab--list-files-req
+                           doc-desc host-id (nth 0 info) (nth 1 info)))
+               (parent-doc-desc (collab--doc-desc-parent doc-desc)))
+          (insert "Collab ( " collab--dired-root-name " / "
+                  (if (root-dir-p collab--dired-rel-path)
+                      ""
+                    collab--dired-rel-path)
+                  " ):\n")
+          (insert ".\n")
+          (if (root-dir-p collab--dired-rel-path)
+              (insert "..")
+            (collab--insert-file
+             parent-doc-desc
+             (string-trim-right
+              (or (file-name-directory collab--dired-rel-path) ".") "/")
+             host-id ".."))
+          (insert "\n")
+          (if (null file-list)
+              (insert (collab--fairy "It’s so empty here!\n"))
+            (dolist (file file-list)
+              (let* ((doc (plist-get file :docDesc))
+                     (file-name (plist-get file :fileName)))
+                (collab--insert-file
+                 doc (if (equal file-name "") "." file-name) host-id)
+                (insert "\n"))))
+          (put-text-property (point-min) (point-max)
+                             'collab-host-id host-id))))))
+
+;;; Interactive commands
 
 (defun collab-shutdown ()
   "Shutdown the connection to the collab process."
@@ -1293,8 +1364,6 @@ immediately."
         ((derived-mode-p 'collab-dired-mode)
          (collab--dired-refresh))))
 
-(defvar collab--dired-rel-path)
-(defvar collab--dired-root-name)
 (defun collab--open-doc (&optional doc-id host-id)
   "Open the file at point.
 There should be three text properties at point:
@@ -1539,14 +1608,32 @@ its name rather than doc id) to connect."
   (collab--disable)
   (message "Disconnected"))
 
+(defun collab-share-link ()
+  "Copy the share link of current doc to clipboard."
+  (interactive)
+  (if-let* ((doc-id (car collab--doc-and-host))
+            (link (format "%s/%s/%s"
+                          (nth 1 collab-local-server-config)
+                          (nth 0 collab-local-server-config)
+                          doc-id)))
+      (progn
+        (kill-new link)
+        (message "Copied to clipboard: %s" link))
+    (message "Couldn’t find the doc id of this buffer")))
+
 (defun collab-connect (share-link)
   "Connect to the file at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
   (interactive (list (read-string "Share link: ")))
-  (let* ((segments (split-string share-link "/" nil " "))
-         (signaling-addr (concat "ws://" (nth 0 segments)))
-         (host-id (nth 1 segments))
-         (doc-id (string-to-number (nth 2 segments))))
+  (let* ((share-link (string-trim-right share-link "/"))
+         doc-id host-id signaling-addr)
+    (setq doc-id (string-to-number (file-name-nondirectory share-link)))
+    (setq share-link (string-trim-right
+                      (file-name-directory share-link) "/"))
+    (setq host-id (file-name-nondirectory share-link))
+    (setq share-link (string-trim-right
+                      (file-name-directory share-link) "/"))
+    (setq signaling-addr share-link)
     (unless (alist-get host-id collab-server-alist nil nil #'equal)
       (push (cons host-id (list signaling-addr ""))
             collab-server-alist))
@@ -1610,77 +1697,6 @@ detailed history."
       (?r (call-interactively #'collab-reconnect-buffer))
       (?q (collab-disconnect-buffer))
       (?h (collab-hub)))))
-
-;;;; Collab-dired
-
-(defvar-local collab--dired-rel-path nil
-  "Relative path of this directory in the top-level shared directory.")
-
-(defvar-local collab--dired-root-name nil
-  "Name of the top-level shared directory this directory is in.")
-
-(defvar collab-dired-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab--open-doc)
-    (define-key map (kbd "x") #'collab--delete-doc)
-    (define-key map (kbd "k") #'collab--disconnect-from-doc)
-    (define-key map (kbd "g") #'collab--dired-refresh)
-
-    (define-key map (kbd "n") #'next-line)
-    (define-key map (kbd "p") #'previous-line)
-    map)
-  "Keymap for ‘collab-dired-mode’.")
-
-(define-derived-mode collab-dired-mode special-mode "Collab Dired"
-  "Mode showing a shared directory.")
-
-(defun collab--dired-refresh ()
-  "Refresh the current ‘collab-dired-mode’ buffer."
-  (interactive)
-  (let ((inhibit-read-only t)
-        (line (line-number-at-pos)))
-    (erase-buffer)
-    (collab--dired-render)
-    (goto-char (point-min))
-    (forward-line (1- line))))
-
-(defun collab--dired-render ()
-  "Draw the current ‘collab-dired-mode’ buffer from scratch."
-  (when (and (derived-mode-p 'collab-dired-mode) collab--doc-and-host)
-    (cl-labels ((root-dir-p (path) (equal path ".")))
-      (collab--catch-error (format "can’t connect to %s"
-                                   (car collab--doc-and-host))
-        (let* ((doc-desc (car collab--doc-and-host))
-               (host-id (cdr collab--doc-and-host))
-               (info (alist-get host-id (collab--server-alist)
-                                nil nil #'equal))
-               (file-list (collab--list-files-req
-                           doc-desc host-id (nth 0 info) (nth 1 info)))
-               (parent-doc-desc (collab--doc-desc-parent doc-desc)))
-          (insert "Collab ( " collab--dired-root-name " / "
-                  (if (root-dir-p collab--dired-rel-path)
-                      ""
-                    collab--dired-rel-path)
-                  " ):\n")
-          (insert ".\n")
-          (if (root-dir-p collab--dired-rel-path)
-              (insert "..")
-            (collab--insert-file
-             parent-doc-desc
-             (string-trim-right
-              (or (file-name-directory collab--dired-rel-path) ".") "/")
-             host-id ".."))
-          (insert "\n")
-          (if (null file-list)
-              (insert (collab--fairy "It’s so empty here!\n"))
-            (dolist (file file-list)
-              (let* ((doc (plist-get file :docDesc))
-                     (file-name (plist-get file :fileName)))
-                (collab--insert-file
-                 doc (if (equal file-name "") "." file-name) host-id)
-                (insert "\n"))))
-          (put-text-property (point-min) (point-max)
-                             'collab-host-id host-id))))))
 
 ;;; Setup
 
