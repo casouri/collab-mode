@@ -19,7 +19,7 @@ session-2:
 	$(RUST_ENV) cargo run --bin collab-mode -- run --socket --socket-port 7702
 
 signaling:
-	$(RUST_ENV) cargo run --bin collab-signal -- run
+	$(RUST_ENV) cargo run --bin collab-signal -- run --port 6001
 
 doc:
 	cargo doc --document-private-items --open

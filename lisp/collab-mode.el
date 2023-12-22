@@ -1184,14 +1184,13 @@ Also insert ‘collab--current-message’ if it’s non-nil."
       (let ((server-beg (point))
             (server-has-some-file nil))
         (condition-case err
-            (progn
-              (setq server-beg (point))
-              (if (not connection-up)
-                  (collab--insert-disconnected-server (car entry))
-                (setq server-has-some-file
-                      (collab--insert-server
-                       (car entry) (nth 0 (cdr entry))
-                       (nth 1 (cdr entry))))))
+            (if (not connection-up)
+                (when (not (equal (car entry) "self"))
+                  (collab--insert-disconnected-server (car entry)))
+              (setq server-has-some-file
+                    (collab--insert-server
+                     (car entry) (nth 0 (cdr entry))
+                     (nth 1 (cdr entry)))))
           (jsonrpc-error
            (delete-region server-beg (point))
            (collab--insert-disconnected-server (car entry) t)
