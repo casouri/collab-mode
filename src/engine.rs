@@ -433,9 +433,14 @@ impl FullDoc {
         let mut flipped_ranges = vec![];
 
         let mut push_wo_dup = |range: (u64, u64)| {
-            if flipped_ranges.last().is_none() || *flipped_ranges.last().unwrap() != range {
-                flipped_ranges.push(range);
+            if let Some(last_range) = flipped_ranges.last() {
+                let (lbeg, llen) = *last_range;
+                let lend = lbeg + llen;
+                let (beg, len) = range;
+                let end = beg + len;
+                assert!(!(beg <= lend && lbeg <= end));
             }
+            flipped_ranges.push(range);
         };
 
         // Ensure that the cursor is at the right range.
@@ -502,9 +507,12 @@ impl FullDoc {
                         final_ranges.push(Range::Dead(len));
                         final_ranges.push(Range::Live(suffix_len));
 
-                        let flipped_beg = max(iter.range_beg, marked_range_initial_beg);
-                        let flipped_len = marked_range_initial_end - flipped_beg;
-                        push_wo_dup((flipped_beg, flipped_len));
+                        if !(iter.range_beg < marked_range_initial_beg) {
+                            let flipped_beg = max(iter.range_beg, marked_range_initial_beg);
+                            let flipped_len = marked_range_initial_end - flipped_beg;
+                            push_wo_dup((flipped_beg, flipped_len));
+                        }
+
                         break;
                     }
                 }
@@ -512,11 +520,9 @@ impl FullDoc {
                 //    [      marked range     ]
                 if iter.range_end == marked_range_initial_end {
                     if range.is_live() {
-                        let flipped_range = (iter.range_beg, iter.range_len());
-                        if flipped_ranges.last().is_none()
-                            || *flipped_ranges.last().unwrap() != flipped_range
-                        {
-                            flipped_ranges.push(flipped_range);
+                        if !(iter.range_beg < marked_range_initial_beg) {
+                            let flipped_range = (iter.range_beg, iter.range_len());
+                            push_wo_dup(flipped_range);
                         }
                     }
                     if iter.range_idx + 1 < self.ranges.len() {
@@ -534,9 +540,14 @@ impl FullDoc {
                 // or
                 //    [ range ]
                 //    [      marked range     ]
+                // or
+                //  [  range  ]
+                //    [      marked range     ]
                 // Do nothing and go to next iteration.
                 if range.is_live() {
-                    push_wo_dup((iter.range_beg, iter.range_len()));
+                    if !(iter.range_beg < marked_range_initial_beg) {
+                        push_wo_dup((iter.range_beg, iter.range_len()));
+                    }
                 }
             }
 
@@ -773,6 +784,9 @@ impl FullDoc {
     fn convert_editor_op_and_apply(&mut self, op: EditorOp, site: SiteId) -> Op {
         let mut cursor = self.get_cursor(&site);
 
+        log::debug!("convert_editor_op_and_apply(op={:?})", &op);
+        log::debug!("ranges_before={:?}", &self.ranges);
+
         let converted_op = match op.clone() {
             EditorOp::Ins(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
@@ -801,6 +815,10 @@ impl FullDoc {
             }
             _ => panic!(),
         };
+
+        log::debug!("ranges_after={:?}", &self.ranges,);
+        log::debug!("converted_op={:?}", &converted_op);
+
         // Put it back.
         self.cursors.insert(site, cursor);
         converted_op
@@ -1974,8 +1992,10 @@ mod tests {
         cursor.range_idx = Some(0);
 
         // Case 1.
-        // [   Live   ][Dead][   Live   ][Dead][   Live   ]
-        //      [              Marked               ]
+        // 0           10    15    20          30          40
+        // [   Live   ][Dead][Live][   Dead   ][   Live   ]
+        //       [              Marked               ]
+        //       6                                    36
         doc.ranges = vec![
             Range::Live(10),
             Range::Dead(5),
@@ -2000,13 +2020,14 @@ mod tests {
             },
         );
 
-        doc.apply_mark_dead(6, 30, &mut cursor);
+        let flipped_ranges = doc.apply_mark_dead(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
             &vec![Range::Live(6), Range::Dead(30), Range::Live(4)]
         ));
+        assert!(vec_eq(&flipped_ranges, &vec![(6, 4), (15, 5), (30, 6)]));
         let cursor1 = doc.get_cursor(&1);
         assert!(cursor1.full_pos == cursor.full_pos);
         assert!(cursor1.editor_pos == cursor.editor_pos);
@@ -2017,8 +2038,10 @@ mod tests {
         assert!(cursor2.range_idx == cursor.range_idx);
 
         // Case 2.
+        // 0           10    15          25    30          40
         // [   Dead   ][Live][   Dead   ][Live][   Dead   ]
-        //      [              Marked               ]
+        //       [              Marked               ]
+        //       6                                    36
         doc.ranges = vec![
             Range::Dead(10),
             Range::Live(5),
@@ -2027,10 +2050,11 @@ mod tests {
             Range::Dead(10),
         ];
 
-        doc.apply_mark_dead(6, 30, &mut cursor);
+        let flipped_ranges = doc.apply_mark_dead(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(40)]));
+        assert!(vec_eq(&flipped_ranges, &vec![(10, 5), (25, 5)]));
 
         // Case 3.
         // [   Dead   ]
@@ -2040,10 +2064,11 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_dead(0, 10, &mut cursor);
+        let flipped_ranges = doc.apply_mark_dead(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(10)]));
+        assert!(vec_eq(&flipped_ranges, &vec![]));
 
         // Case 4.
         // [   Live   ]
@@ -2053,10 +2078,11 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_dead(0, 10, &mut cursor);
+        let flipped_ranges = doc.apply_mark_dead(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(10)]));
+        assert!(vec_eq(&flipped_ranges, &vec![(0, 10)]));
 
         // Case 5.
         // [      Live      ]
@@ -2066,13 +2092,14 @@ mod tests {
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
-        doc.apply_mark_dead(6, 10, &mut cursor);
+        let flipped_ranges = doc.apply_mark_dead(6, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
             &vec![Range::Live(6), Range::Dead(10), Range::Live(4)]
         ));
+        assert!(vec_eq(&flipped_ranges, &vec![(6, 10)]));
         assert!(cursor.full_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
@@ -2084,10 +2111,9 @@ mod tests {
         cursor.full_pos = 10;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(1);
-        doc.apply_mark_dead(10, 10, &mut cursor);
-        dbg!(&doc.ranges);
-        dbg!(&cursor);
+        let flipped_ranges = doc.apply_mark_dead(10, 10, &mut cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(30)]));
+        assert!(vec_eq(&flipped_ranges, &vec![(10, 10)]));
         assert!(cursor.full_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
@@ -2100,8 +2126,10 @@ mod tests {
         cursor.range_idx = Some(0);
 
         // Case 1.
+        // 0           10    15    20          30          40
         // [   Live   ][Dead][Live][   Dead   ][   Live   ]
-        //      [              Marked               ]
+        //       [              Marked               ]
+        //       6                                    36
         doc.ranges = vec![
             Range::Live(10),
             Range::Dead(5),
@@ -2141,8 +2169,10 @@ mod tests {
         assert!(cursor2.range_idx == cursor.range_idx);
 
         // Case 2.
+        // 0           10    15          25    30          40
         // [   Dead   ][Live][   Dead   ][Live][   Dead   ]
-        //      [              Marked               ]
+        //       [              Marked               ]
+        //       6                                    36
         doc.ranges = vec![
             Range::Dead(10),
             Range::Live(5),
