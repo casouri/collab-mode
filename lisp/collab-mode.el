@@ -35,12 +35,12 @@ The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   "Cursor color ring."
   :type '(list string))
 
-(defcustom collab-send-ops-delay 0.8
+(defcustom collab-send-ops-delay 0.6
   "Collab waits for this much of idle time before sending ops.
 Ops are sent immediately when user has typed ~20 characters."
   :type 'number)
 
-(defcustom collab-receive-ops-delay 0.5
+(defcustom collab-receive-ops-delay 0.6
   "Delay for getting arrived remote ops.
 When there are remote ops, collab waits for this long before
 grabbing them and applying them to buffer. We don’t need to get
@@ -1005,12 +1005,16 @@ collab process."
         (pcase last-op
           (`(:op (:Ins ,edits) :siteId ,site-id)
            (when (> (length edits) 0)
-             (collab--move-cursor
-              site-id (1+ (aref (aref edits (1- (length edits))) 0)))))
+             (let* ((last-edit (aref edits (1- (length edits))))
+                    (edit-start (aref last-edit 0))
+                    (edit-str (aref last-edit 1)))
+               (collab--move-cursor
+                site-id (+ 1 edit-start (length edit-str))))))
           (`(:op (:Del ,edits) :siteId ,site-id)
            (when (> (length edits) 0)
-             (collab--move-cursor
-              site-id (1+ (aref (aref edits 0) 0))))))
+             (let ((last-edit (aref edits (1- (length edits)))))
+               (collab--move-cursor
+                site-id (1+ (aref last-edit 0)))))))
         ;; Return the largest global seq received from collab process.
         last-seq))))
 
