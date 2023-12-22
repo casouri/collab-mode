@@ -28,13 +28,36 @@
 The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   :type '(list string))
 
+;; Generated with seaborn.color_palette("colorblind").as_hex()
+(defcustom collab-cursor-colors
+  '( "#0173b2" "#de8f05" "#029e73" "#d55e00" "#cc78bc" "#ca9161"
+     "#fbafe4" "#949494" "#ece133" "#56b4e9")
+  "Cursor color ring."
+  :type '(list string))
+
+(defcustom collab-send-ops-delay 0.8
+  "Collab waits for this much of idle time before sending ops.
+Ops are sent immediately when user has typed ~20 characters."
+  :type 'number)
+
+(defcustom collab-receive-ops-delay 0.5
+  "Delay for getting arrived remote ops.
+When there are remote ops, collab waits for this long before
+grabbing them and applying them to buffer. We don’t need to get
+remote ops immediately since whenever user generates new ops, we
+send our ops and get remote ops in one go."
+  :type 'number)
+
 (defface collab-success-background
   '((t . (:inherit diff-refine-added :extend t)))
-  "The highlight used for indicating a success.")
+  "The highlight used for indicating a success.
+Collab uses this face to flash the screen when connected to a doc.")
 
 (defface collab-failure-background
   '((t . (:inherit diff-refine-removed :extend t)))
-  "The highlight used for indicating a failure.")
+  "The highlight used for indicating a failure.
+Collab uses this face to flash the screen when disconnected from
+a doc.")
 
 (defvar collab-rpc-timeout 1
   "Timeout in seconds to wait for connection to collab process.")
@@ -53,14 +76,13 @@ should be the port number.")
 Each key is HOST-ID, each value is (SIGNALING-SERVER-ADDR
 CREDENTIAL).")
 
-(defvar collab-hasty-p t
-  "If non-nil, buffer changes are sent to collab process immediately.")
+(defvar collab-hasty-p nil
+  "If t, buffer changes are sent to collab process immediately.
+For changes to this variable to take affect, you need to
+reconnect to the doc.")
 
-;; Generated with seaborn.color_palette("colorblind").as_hex()
-(defvar collab-cursor-colors
-  '( "#0173b2" "#de8f05" "#029e73" "#d55e00" "#cc78bc" "#ca9161"
-     "#fbafe4" "#949494" "#ece133" "#56b4e9")
-  "Cursor color ring.")
+(defvar collab--verbose nil
+  "If non-nil, print debugging information.")
 
 ;;; Generic helpers
 
@@ -320,14 +342,14 @@ If MARK non-nil, show active region."
 ;;
 ;; Amalgamation is done in post-command-hook. If the current command
 ;; only created one op (usually inserting or deleting one character),
-;; we try to amalgamate it with the last op.
+;; we try to amalgamate it with the previous op.
 ;;
 ;; Because future op might be able to amalgamate with the current op,
 ;; we delay sending ops to the collab process until a) user created an
 ;; op that can’t amalgamate with the pending ops, in which case we
 ;; send the pending ops and keep the new op to be amalgamated in the
-;; future; or b) 1s passed, in which case we send the op regardless.
-;; Case b) uses an idle timer.
+;; future; or b) 1s (‘collab-send-ops-delay’ passed, in which case we
+;; send the op regardless. Case b) uses an idle timer.
 
 (defvar-local collab--doc-and-host nil
   "(DOC-ID . HOST-ID) for the current buffer.
@@ -361,12 +383,12 @@ content between BEG and END.")
 Group sequence is used to mark undo groups. consecutive ops with
 the same group sequence are undone together.")
 
-(defvar collab--edit-tracking-timer nil
-  "An idle timer that sends pending ops to collab process.")
-
-(defvar collab--idle-timer-registered-buffer nil
-  "If a buffer has pending ops, it adds itself to this list.
-So that the idle timer can send its pending ops.")
+(defvar-local collab--send-ops-timer nil
+  "Timer used to send ops to collab process.
+When a user typed enough text, we immediately send them out, but
+even if the user only typed a few characters and stopped, we
+still want to send them out after a short idle
+delay (‘collab-send-ops-delay’).")
 
 (defun collab--server-alist ()
   "Return ‘collab--server-alist’ plus “self”."
@@ -434,54 +456,67 @@ So that the idle timer can send its pending ops.")
       (collab--send-ops (nreverse collab--ops-current-command))
       (setq collab--ops-current-command nil))))
 
+(defun collab--cancel-send-ops-timer ()
+  "Cancel the send ops timer."
+  (when collab--send-ops-timer
+    (cancel-timer collab--send-ops-timer)
+    (setq collab--send-ops-timer nil)))
+
+(defun collab--send-ops-shortly ()
+  "Send pending ops after a short delay."
+  ;; TODO: We can extend unactivated timer instead of cancel and
+  ;; re-create. I don’t know how much time it saves tho.
+  (collab--cancel-send-ops-timer)
+  (setq collab--send-ops-timer
+        (run-with-timer collab-send-ops-delay nil
+                        #'collab--send-ops-now (current-buffer))))
+
 (defun collab--post-command ()
   "Convert ops in the buffer and send them to the collab process.
 Then apply the returned remote ops."
   (when (not collab--inhibit-hooks)
     (if (not collab--ops-current-command)
         (collab--send-cursor-pos)
-      (if-let ((amalgamated-op
-                (and (eq 1 (length collab--ops-current-command))
-                     (let ((this-op
-                            (car collab--ops-current-command))
-                           (last-op (car collab--pending-ops)))
-                       (and last-op
-                            (collab--maybe-amalgamate
-                             last-op this-op))))))
-          ;; Amalgamated, don’t send ops yet.
-          (progn
-            (setcar collab--pending-ops amalgamated-op)
-            (message "Amalgamate, %s" collab--pending-ops))
-        ;; Didn’t amalgamate, send ops.
-        (message "No amalgamate, %s %s"
-                 collab--pending-ops
-                 collab--ops-current-command)
+      (unwind-protect
+          (if-let ((amalgamated-op
+                    (and (eq 1 (length collab--ops-current-command))
+                         (let ((this-op
+                                (car collab--ops-current-command))
+                               (last-op (car collab--pending-ops)))
+                           (and last-op
+                                (collab--maybe-amalgamate
+                                 last-op this-op))))))
+              ;; Amalgamated, don’t send ops yet.
+              (progn
+                (setcar collab--pending-ops amalgamated-op)
+                (when collab--verbose
+                  (message "%s "
+                           (string-replace
+                            "\n" "\\n"
+                            (format "Amalgamate, %s" collab--pending-ops))))
+                (collab--send-ops-shortly))
+            ;; Didn’t amalgamate, send ops.
+            (when collab--verbose
+              (message "%s" (string-replace
+                             "\n" "\\n"
+                             (format "No amalgamate, %s %s"
+                                     collab--pending-ops
+                                     collab--ops-current-command))))
+            (unwind-protect
+                (collab--send-ops (nreverse collab--pending-ops))
+              (setq collab--pending-ops collab--ops-current-command))
+            (when collab--pending-ops
+              (collab--send-ops-shortly)))
+        (setq collab--ops-current-command nil)))))
 
-        (collab--send-ops (nreverse collab--pending-ops))
-        (setq collab--pending-ops collab--ops-current-command))
-
-      (setq collab--ops-current-command nil)
-
-      ;; Register this buffer so the idle timer will send pending ops.
-      (when (not (memq (current-buffer)
-                       collab--idle-timer-registered-buffer))
-        (push (current-buffer)
-              collab--idle-timer-registered-buffer)))))
-
-(defun collab--send-ops-now ()
-  "Immediately send any pending ops to the collab process."
+(defun collab--send-ops-now (&optional buffer)
+  "Immediately send any pending ops to the collab process.
+Run in BUFFER, if non-nil."
   (cl-assert (null collab--ops-current-command))
-  (message "Sending pending ops: %s" collab--pending-ops)
-  (let ((ops (nreverse collab--pending-ops)))
-    (collab--send-ops ops)
-    (setq collab--pending-ops nil)))
-
-(defun collab--timer-send-ops ()
-  "Send all pending ops to collab process."
-  (dolist (buffer collab--idle-timer-registered-buffer)
-    (with-current-buffer buffer
-      (collab--send-ops-now)))
-  (setq collab--idle-timer-registered-buffer nil))
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((ops (nreverse collab--pending-ops)))
+      (setq collab--pending-ops nil)
+      (collab--send-ops ops))))
 
 ;; https://stackoverflow.com/questions/6590889
 ;; TODO: Support for overwrite-mode, abbrev-mode, auto-fill.
@@ -543,10 +578,6 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
             (add-hook 'post-command-hook
                       #'collab--post-command-hasty 0 t)
           (add-hook 'post-command-hook #'collab--post-command 0 t))
-
-        (unless collab--edit-tracking-timer
-          (setq collab--edit-tracking-timer
-                (run-with-idle-timer 1 t #'collab--timer-send-ops)))
 
         (unless (member collab--mode-line mode-line-misc-info)
           (setq-local mode-line-misc-info
@@ -700,25 +731,31 @@ If DOC-DESC is at the top-level, return itself."
   "Hash table mapping (doc-id . host-id) to dispatcher timers.")
 
 
-(defun collab--request-remote-ops-before-seq (doc server buffer seq)
+(defun collab--request-remote-ops (_doc _server buffer seq)
   "Request for remote ops for (DOC SERVER) in BUFFER.
-Keep requesting for ops until we get all the ops before and
-including SEQ."
+We expect to get all the ops before and including SEQ."
   (let ((received-largest-seq nil))
     (unwind-protect
         (with-current-buffer buffer
           (setq received-largest-seq (collab--send-ops nil)))
-      (let ((timer (if (or (null received-largest-seq)
-                           (>= received-largest-seq seq))
-                       nil
-                     ;; If we didn’t get enough ops that we expect,
-                     ;; schedule another fetch.
-                     (run-with-timer
-                      0 nil
-                      #'collab--request-remote-ops-before-seq
-                      doc server buffer seq))))
-        (puthash (cons doc server) timer
-                 collab--dispatcher-timer-table)))))
+      (when (and received-largest-seq
+                 (< received-largest-seq seq))
+        (with-current-buffer buffer
+          (when collab-monitored-mode
+            (collab--disable))
+          (display-warning 'collab (format "Received less ops than expected, expecting op(%s), received op(%s)" seq received-largest-seq))))
+      ;; (let ((timer (if (or (null received-largest-seq)
+      ;;                      (>= received-largest-seq seq))
+      ;;                  nil
+      ;;                ;; If we didn’t get enough ops that we expect,
+      ;;                ;; schedule another fetch.
+      ;;                (run-with-timer
+      ;;                 0 nil
+      ;;                 #'collab--request-remote-ops
+      ;;                 doc server buffer seq))))
+      ;;   (puthash (cons doc server) timer
+      ;;            collab--dispatcher-timer-table))
+      )))
 
 (defun collab--dispatch-notification (_conn method params)
   "Dispatch JSONRPC notifications.
@@ -747,8 +784,8 @@ If we receive a ServerError notification, just display a warning."
          (when timer (cancel-timer timer))
          (when (buffer-live-p buffer)
            (setq timer (run-with-timer
-                        0 nil
-                        #'collab--request-remote-ops-before-seq
+                        collab-receive-ops-delay nil
+                        #'collab--request-remote-ops
                         doc server buffer last-seq))
            (puthash (cons doc server) timer
                     collab--dispatcher-timer-table)))))
@@ -773,8 +810,8 @@ If we receive a ServerError notification, just display a warning."
       (format "Local server errored, you might want to restart collab process. Cause: %s"
               params)))
     ('SignalingTimesUp
-     (run-with-idle-timer
-      0 nil
+     (run-with-timer
+      0.5 nil
       (lambda ()
         (with-current-buffer (collab--hub-buffer)
           (setq collab--accepting-connection nil)
@@ -783,8 +820,8 @@ If we receive a ServerError notification, just display a warning."
     ('AcceptConnectionErr
      ;; If we use ‘run-with-timer’, this handler might interfer with
      ;; the condition-case handler in ‘collab--render’.
-     (run-with-idle-timer
-      0 nil
+     (run-with-timer
+      0.0001 nil
       (lambda ()
         (with-current-buffer (collab--hub-buffer)
           (setq collab--accepting-connection nil)
@@ -940,6 +977,8 @@ format (a list of EditorOp, probably the Undo or Redo variant).
 Return the largest global seq of all the ops received from the
 collab process."
   (collab--check-precondition)
+  (when collab--verbose
+    (message "Sending pending ops: %s" collab--pending-ops))
   (let ((conn collab--jsonrpc-connection)
         resp)
     (collab--catch-error "can’t send local edits to remote"
@@ -1021,7 +1060,7 @@ If REDO is non-nil, redo the most recent undo instead."
 
 (defun collab--hub-buffer ()
   "Return the hub buffer."
-  (get-buffer-create "*collab*"))
+  (get-buffer-create "*collab hub*"))
 
 (defvar collab--current-message nil
   "If non-nil, collab hub will show this message in the UI.

@@ -347,7 +347,8 @@ fn spawn_thread_receive_remote_op(
     //
     // Draining remote_op_stream and storing ops into a buffer seems
     // redundant, but is easier to write and understand in the big
-    // picture.
+    // picture. Also, make sure we add the remote op into the vector
+    // before sending signal to editor.
     tokio::spawn(async move {
         loop {
             let new_remote_ops = remote_op_stream.next().await;
