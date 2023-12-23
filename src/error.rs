@@ -91,6 +91,8 @@ pub enum WebrpcError {
     DataChannelError(String),
     #[error("The other end stopped listening for responses for this request")]
     RequestClosed(),
+    #[error("Sync request timed out after {0}s")]
+    Timeout(u8),
 }
 
 impl From<bincode::Error> for WebrpcError {

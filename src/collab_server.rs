@@ -253,6 +253,13 @@ impl LocalServer {
         file: FileContentOrPath,
         file_path: Option<FilePath>,
     ) -> CollabResult<DocId> {
+        log::debug!(
+            "share_file_1(file_name={}, file_meta={:?}, file={:?}, file_path={:?})",
+            file_name,
+            file_meta,
+            &file,
+            file_path,
+        );
         // TODO permission check.
         let doc_id: DocId = rand::random();
         match file {
@@ -284,6 +291,7 @@ impl LocalServer {
 
     /// Send local ops to the server. TODO: access control.
     pub async fn send_op_1(&self, ops: ContextOps) -> CollabResult<()> {
+        log::debug!("send_op_1(ops={:?})", &ops);
         let doc_id = ops.doc();
         if let Some(doc) = self.get_doc(&doc_id) {
             let mut doc = doc.lock().unwrap();
@@ -315,6 +323,7 @@ impl LocalServer {
         doc_id: &DocId,
         mut after: GlobalSeq,
     ) -> CollabResult<(ReceiverStream<Vec<FatOp>>, ReceiverStream<String>)> {
+        log::debug!("recv_op_1(doc={}, after={})", doc_id, after);
         let (tx_op, rx_op) = mpsc::channel(1);
         let (tx_info, rx_info) = mpsc::channel(1);
         // Clone a notification channel and a reference to the doc,
@@ -446,6 +455,7 @@ impl LocalServer {
     }
 
     pub async fn list_files_1(&self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
+        log::debug!("list_files_1(dir_path={:?})", &dir_path);
         if let Some(dir_path) = dir_path {
             return self.list_directory(dir_path).await;
         }
@@ -491,6 +501,7 @@ impl LocalServer {
     }
 
     pub async fn request_file_1(&self, doc_file: &DocDesc) -> CollabResult<Snapshot> {
+        log::debug!("request_file_1(doc={:?})", doc_file);
         match doc_file {
             DocDesc::Doc(doc_id) => {
                 if let Some(doc) = self.get_doc(doc_id) {
@@ -515,12 +526,14 @@ impl LocalServer {
     }
 
     async fn delete_file_1(&self, doc_id: &DocId) -> CollabResult<()> {
+        log::debug!("delete_file_1(doc={})", doc_id);
         let mut docs = self.docs.lock().unwrap();
         docs.remove(doc_id);
         Ok(())
     }
 
     async fn send_info_1(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
+        log::debug!("send_info_1(doc={}, info={:?})", doc_id, &info);
         if let Some(doc) = self.get_doc(doc_id) {
             doc.lock().unwrap().tx_info.send(info).unwrap();
             Ok(())
@@ -592,6 +605,7 @@ async fn handle_request(
     endpoint: &mut Endpoint,
 ) -> CollabResult<Option<DocServerResp>> {
     let req = msg.unpack()?;
+    log::debug!("handle_request(req={:?})", &req);
     match req {
         DocServerReq::ShareFile {
             file_name,

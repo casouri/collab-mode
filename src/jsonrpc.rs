@@ -68,6 +68,19 @@ pub fn run_socket(addr: &str, runtime: tokio::runtime::Runtime) -> anyhow::Resul
 }
 
 // Handles JSONRPC requests, blocks.
+//
+// Overview of all the threads:
+//
+//        Sync world                         Async world
+//
+// +------------+ <--(1)-- rx notifier tx <--- Doc threads
+// |            |
+// |            | <--(2)-- rx errors   tx <--- Doc threads
+// | Connection |
+// |            | ---(3)-> tx request  rx ---> (5)
+// |            |
+// +------------+ <--(4)-- rx response tx <--- (5)
+//
 fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::runtime::Runtime) {
     let (notifier_tx, notifier_rx) = std::sync::mpsc::channel();
     let (req_tx, mut req_rx) = tokio::sync::mpsc::channel(1);

@@ -52,6 +52,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::mpsc;
+use tokio::time;
 use webrtc_data::data_channel::{DataChannel, PollDataChannel};
 
 pub use crate::signaling::EndpointId;
@@ -169,11 +170,15 @@ impl Endpoint {
     /// Like `send_request` but expects only one response.
     pub async fn send_request_oneshot<T: Serialize>(&self, message: &T) -> WebrpcResult<Message> {
         let mut rx = self.send_request(message).await?;
-        let resp = rx.recv().await.unwrap_or_else(|| {
-            Err(WebrpcError::DataChannelError(
-                "Unexpected channel close when waiting for response".to_string(),
-            ))
-        })?;
+        let rx_recv = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv());
+        let resp = rx_recv
+            .await
+            .map_err(|_err| WebrpcError::Timeout(3))?
+            .unwrap_or_else(|| {
+                Err(WebrpcError::DataChannelError(
+                    "Unexpected channel close when waiting for response".to_string(),
+                ))
+            })?;
         Ok(resp)
     }
 
