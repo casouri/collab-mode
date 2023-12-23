@@ -93,7 +93,8 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
     let connection_2 = std::sync::Arc::clone(&connection);
     let connection_3 = std::sync::Arc::clone(&connection);
 
-    // Instead of using select, just start four in the sync world.
+    // Instead of using select, just start four threads in the sync
+    // world.
 
     // 1. Send remote op notifications. TODO: Maybe we should
     // throttle-control notifications?

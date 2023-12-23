@@ -169,11 +169,14 @@ impl Endpoint {
 
     /// Like `send_request` but expects only one response.
     pub async fn send_request_oneshot<T: Serialize>(&self, message: &T) -> WebrpcResult<Message> {
-        let mut rx = self.send_request(message).await?;
+        let (mut rx, req_id) = self.send_request(message).await?;
         let rx_recv = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv());
         let resp = rx_recv
             .await
-            .map_err(|_err| WebrpcError::Timeout(3))?
+            .map_err(|_err| {
+                self.resp_channel_map.write().unwrap().remove(&req_id);
+                WebrpcError::Timeout(3)
+            })?
             .unwrap_or_else(|| {
                 Err(WebrpcError::DataChannelError(
                     "Unexpected channel close when waiting for response".to_string(),
@@ -188,7 +191,7 @@ impl Endpoint {
     pub async fn send_request<T: Serialize>(
         &self,
         message: &T,
-    ) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
+    ) -> WebrpcResult<(mpsc::UnboundedReceiver<WebrpcResult<Message>>, RequestId)> {
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_1 = tx.clone();
 
@@ -221,7 +224,7 @@ impl Endpoint {
             req_id,
         };
         write_message(&self.data_channel, &self.current_msg_id, msg).await?;
-        Ok(rx)
+        Ok((rx, req_id))
     }
 
     /// Send a response `message` for the request with `id`.
@@ -477,6 +480,8 @@ async fn handle_new_message(
                 }
             } else {
                 channel_unavailable = true;
+                // It might be because we timed out waitinf for this
+                // response.
                 log::warn!(
                     "Cannot find the channel for request #{} in data channel [{}]",
                     request_id,
