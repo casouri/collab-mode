@@ -143,7 +143,7 @@ impl DocServer for WebrpcClient {
         doc_id: &DocId,
         after: GlobalSeq,
     ) -> CollabResult<(OpStream, InfoStream)> {
-        let mut rx = self
+        let (mut rx, _req_id) = self
             .endpoint
             .send_request(&DocServerReq::RecvOpAndInfo {
                 doc_id: doc_id.clone(),
