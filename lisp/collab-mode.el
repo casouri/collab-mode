@@ -1759,15 +1759,16 @@ detailed history."
                             (list local-host-id default-signal-server))
     (customize-save-customized)
 
-    (when (and (not (executable-find "collab-mode"))
-               (y-or-n-p (collab--fairy "No binary here, a tiny regret. Shall we fetch from the internet? ")))
-      (let ((choice (car (read-multiple-choice
-                          (collab--fairy "Which one suits you the best? ")
-                          '((?l "linux_x64" "Linux x86_64")
-                            (?m "mac_x64" "Mac x86_64")
-                            (?a "mac_arm" "Mac ARM"))))))
-        (ignore choice)
-        (message "TODO download binary")))))
+    ;; (when (and (not (executable-find "collab-mode"))
+    ;;            (y-or-n-p (collab--fairy "No binary here, a tiny regret. Shall we fetch from the internet? ")))
+    ;;   (let ((choice (car (read-multiple-choice
+    ;;                       (collab--fairy "Which one suits you the best? ")
+    ;;                       '((?l "linux_x64" "Linux x86_64")
+    ;;                         (?m "mac_x64" "Mac x86_64")
+    ;;                         (?a "mac_arm" "Mac ARM"))))))
+    ;;     (ignore choice)
+    ;;     (message "TODO download binary")))
+    ))
 
 
 (provide 'collab-mode)
