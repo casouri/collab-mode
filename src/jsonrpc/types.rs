@@ -193,6 +193,6 @@ pub struct AcceptConnectionParams {
 #[serde(rename_all = "camelCase")]
 pub struct PrintHistoryParams {
     pub doc_id: DocId,
-    pub server_id: ServerId,
+    pub host_id: ServerId,
     pub debug: bool,
 }

@@ -591,7 +591,7 @@ impl JSONRPCServer {
         &mut self,
         params: PrintHistoryParams,
     ) -> CollabResult<String> {
-        let doc = self.get_doc(&params.doc_id, &params.server_id)?;
+        let doc = self.get_doc(&params.doc_id, &params.host_id)?;
         Ok(doc.print_history(params.debug))
     }
 }
