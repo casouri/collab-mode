@@ -59,7 +59,7 @@ Collab uses this face to flash the screen when connected to a doc.")
 Collab uses this face to flash the screen when disconnected from
 a doc.")
 
-(defvar collab-rpc-timeout 1
+(defvar collab-rpc-timeout 3
   "Timeout in seconds to wait for connection to collab process.")
 
 (defvar collab-command "~/p/collab/target/debug/collab"
@@ -547,16 +547,27 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
                  '(:inherit (bold success))))
   "Mode-line indicator for ‘collab-monitored-mode’.")
 
+(defun collab--warn-for-unsupported-undo (&rest _)
+  "This is bound to undo commands that we don’t support.
+To prevent them from being invoked."
+  (interactive)
+  (message (collab--fairy "Other undo won’t work in this mode, use ‘collab-undo/redo’ is what I was told: (undo → \\[collab-undo], redo → \\[collab-redo])")))
+
 (defvar collab-monitored-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [remap undo-only] #'collab-undo)
     (define-key map [remap undo-redo] #'collab-redo)
     (define-key map (kbd "C-/") #'collab-undo)
     (define-key map (kbd "C-.") #'collab-redo)
-    (define-key map [remap undo]
-                (lambda (&rest _)
-                  (interactive)
-                  (message (collab--fairy "Emacs-undo won’t work in this mode, use ‘collab-undo/redo’ is what I was told! (undo → \\[collab-undo], redo → \\[collab-redo])"))))
+    (define-key map [remap undo] #'collab--warn-for-unsupported-undo)
+    ;; Masks.
+    (define-key map [remap vundo] #'collab--warn-for-unsupported-undo)
+    (define-key map [remap undo-tree-undo]
+                #'collab--warn-for-unsupported-undo)
+    (define-key map [remap undo-tree-redo]
+                #'collab--warn-for-unsupported-undo)
+    (define-key map [remap undo-tree-visualize]
+                #'collab--warn-for-unsupported-undo)
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
@@ -1169,6 +1180,7 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
+    (define-key map (kbd "+") #'collab-share-file)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1249,7 +1261,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
 Let’s create one, and here’s how!\n\n\n")))
 
     (insert (substitute-command-keys
-             "PRESS + TO SHARE A FILE
+             "PRESS \\[collab-share-file] TO SHARE A FILE
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (when collab--most-recent-error
@@ -1732,12 +1744,12 @@ detailed history."
   (unless (and collab-display-name collab-local-server-config)
     (collab-initial-setup))
   (let ((resp (read-multiple-choice
-               (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do? ")
+               (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do?\n")
                '((?s "share this buffer" "Share this buffer to a server")
                  (?d "share a directory" "Share a directory")
                  (?r "reconnect to doc" "Reconnect to a document")
                  (?q "quit (disconnect)" "Disconnect and stop collaboration")
-                 (?h "hub" "Open collab hub")))))
+                 (?h "open hub" "Open collab hub")))))
     (pcase (car resp)
       (?s (when (or (null collab-monitored-mode)
                     (y-or-n-p (collab--fairy "Buffer in collab-mode, already quite set. Share it as new doc, confirm without regret? ")))
