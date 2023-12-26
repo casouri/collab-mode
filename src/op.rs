@@ -153,13 +153,15 @@ impl Operation for Op {
     }
 }
 
+pub fn replace_whitespace_char(string: String) -> String {
+    string.replace("\n", "⮐").replace("\t", "⭾")
+}
+
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::Ins((pos, content), _) => {
-                let mut content = content.to_string();
-                content = content.replace("\t", "⭾");
-                content = content.replace("\n", "⮐");
+                let content = replace_whitespace_char(content.to_string());
                 write!(f, "ins({pos}, {content})")
             }
             Op::Mark(ops, live, _) => {
@@ -168,10 +170,11 @@ impl std::fmt::Display for Op {
                     out += "[]";
                 }
                 for op in ops {
+                    let content = replace_whitespace_char(op.1.clone());
                     if *live {
-                        out += format!("mark_live({}, {}) ", op.0, op.1).as_str();
+                        out += format!("mark_live({}, {}) ", op.0, content).as_str();
                     } else {
-                        out += format!("mark_dead({}, {}) ", op.0, op.1).as_str();
+                        out += format!("mark_dead({}, {}) ", op.0, content).as_str();
                     }
                 }
                 write!(f, "{}", out)
@@ -190,10 +193,11 @@ impl std::fmt::Debug for Op {
             Op::Mark(ops, live, _) => {
                 let mut out = String::new();
                 for op in ops {
+                    let content = replace_whitespace_char(op.1.clone());
                     if *live {
-                        out += format!("mark_live({}, {}) ", op.0, op.1).as_str();
+                        out += format!("mark_live({}, {}) ", op.0, content).as_str();
                     } else {
-                        out += format!("mark_dead({}, {}) ", op.0, op.1).as_str();
+                        out += format!("mark_dead({}, {}) ", op.0, content).as_str();
                     }
                 }
                 write!(f, "{}", out)

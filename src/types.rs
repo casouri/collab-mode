@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
-pub use crate::op::{DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId};
+pub use crate::op::{
+    replace_whitespace_char, DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId,
+};
 
 pub type ServerId = String;
 pub const SERVER_ID_SELF: &str = "self";
@@ -20,12 +22,29 @@ pub type FatOp = crate::op::FatOp<Op>;
 
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;
 
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
     Ins(u64, String),
     Del(u64, String),
     Undo,
     Redo,
+}
+
+impl std::fmt::Debug for EditorOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undo => write!(f, "undo"),
+            Self::Redo => write!(f, "redo"),
+            Self::Ins(pos, content) => {
+                let content = replace_whitespace_char(content.to_string());
+                write!(f, "ins({pos}, {content})")
+            }
+            Self::Del(pos, content) => {
+                let content = replace_whitespace_char(content.to_string());
+                write!(f, "ins({pos}, {content})")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
