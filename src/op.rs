@@ -155,7 +155,7 @@ impl Operation for Op {
 
 pub fn replace_whitespace_char(string: String) -> String {
     // Other return symbols aren't well supported by terminals.
-    string.replace("\n", "⏎").replace("\t", "    ")
+    string.replace("\n", "\\n")
 }
 
 impl std::fmt::Display for Op {
