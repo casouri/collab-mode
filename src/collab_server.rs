@@ -145,17 +145,17 @@ impl Doc {
 
     /// Apply `op` to the document.
     pub fn apply_op(&mut self, op: FatOp) -> CollabResult<()> {
-        let instr = self.engine.convert_internal_op_and_apply(op);
+        let instr = self.engine.convert_internal_op_and_apply(op)?;
         match instr {
             EditInstruction::Ins(edits) => {
-                for (pos, str) in edits.iter().rev() {
-                    self.buffer.insert_many(*pos as usize, str.chars());
+                for (pos, str) in edits.into_iter().rev() {
+                    self.buffer.insert_many(pos as usize, str.chars());
                 }
             }
             EditInstruction::Del(edits) => {
-                for (pos, str) in edits.iter().rev() {
+                for (pos, str) in edits.into_iter().rev() {
                     self.buffer
-                        .drain((*pos as usize)..(*pos as usize + str.len()));
+                        .drain((pos as usize)..(pos as usize + str.len()));
                 }
             }
         }

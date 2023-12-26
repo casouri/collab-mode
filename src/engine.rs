@@ -1,6 +1,7 @@
 //! This module provides [ClientEngine] and [ServerEngine] that
 //! implements the client and server part of the OT control algorithm.
 
+use crate::error::{CollabError, CollabResult};
 use crate::{op::quatradic_transform, types::*};
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
@@ -222,6 +223,19 @@ impl FullDoc {
             },
             cursors: HashMap::new(),
         }
+    }
+
+    /// Return the total length of the editor document. Note that this
+    /// function don't use any optimization and goes through every
+    /// range front-to-back.
+    fn editor_len(&self) -> usize {
+        let mut len = 0;
+        for range in self.ranges.iter() {
+            if let Range::Live(range_len) = range {
+                len += *range_len as usize;
+            }
+        }
+        len
     }
 
     /// Return a copy of the cursor for `site`.
@@ -1121,6 +1135,10 @@ pub struct ServerEngine {
     gh: GlobalHistory,
     /// The largest global sequence number we've assigned.
     current_seq: GlobalSeq,
+    /// The length of the document. This is used to check that after
+    /// applying every op, the length of the document and the length
+    /// of the FullDoc matches.
+    doc_len: usize,
 }
 
 impl ServerEngine {
@@ -1493,17 +1511,39 @@ impl ServerEngine {
         ServerEngine {
             gh: GlobalHistory::new(init_len),
             current_seq: 0,
+            doc_len: init_len as usize,
         }
     }
 
     /// Convert `op` from an internal op (with full doc positions) to
     /// an editor op. Also apply the `op` to the full doc.
-    pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> EditInstruction {
+    pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> CollabResult<EditInstruction> {
         let converted_op = self
             .gh
             .full_doc
             .convert_internal_op_and_apply(op.op.clone());
-        converted_op
+        let internal_editor_len = self.gh.full_doc.editor_len();
+        match &converted_op {
+            EditInstruction::Ins(edits) => {
+                for edit in edits {
+                    self.doc_len += edit.1.len();
+                }
+            }
+            EditInstruction::Del(edits) => {
+                for edit in edits {
+                    self.doc_len -= edit.1.len();
+                }
+            }
+        }
+        // FIXME: Remove this potentially expensive test once we are
+        // confident there's no position-bugs anymore.
+        if internal_editor_len != self.doc_len {
+            return Err(CollabError::DocFatal(format!(
+                "Editor doc & internal doc length mismatch, editor: {}, internal: {}",
+                self.doc_len, internal_editor_len
+            )));
+        }
+        Ok(converted_op)
     }
 
     /// Process `op` from a client, return the transformed `ops`.
