@@ -1564,7 +1564,7 @@ When called interactively, prompt for the server."
            (resp (collab--share-file-req
                   server file-name `( :reserved.hostEditor "emacs"
                                       :emacs.majorMode
-                                      (symbol-name major-mode))
+                                      ,(symbol-name major-mode))
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
