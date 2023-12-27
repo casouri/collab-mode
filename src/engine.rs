@@ -859,16 +859,12 @@ impl InternalDoc {
             Op::Mark(edits, live, _) => {
                 let mut new_edits = vec![];
                 let mut new_edits_bare = vec![];
-                // Go back-to-front so that we don't mess up editor
-                // positions.
-                for (pos, text) in edits.into_iter().rev() {
+                for (pos, text) in edits.into_iter() {
+                    new_edits_bare.push((pos, text.len() as u64));
                     // Move cursor to the right position.
                     self.convert_pos(pos, &mut cursor, false);
-                    new_edits_bare.push((pos, text.len() as u64));
                     self.mark_to_ins_or_del(pos, text, &cursor, &mut new_edits, live);
                 }
-                // Forwards/backwards don't matter for internal
-                // positions.
                 for (pos, len) in new_edits_bare.into_iter() {
                     self.convert_pos(pos, &mut cursor, false);
                     if live {
