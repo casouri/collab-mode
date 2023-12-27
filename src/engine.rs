@@ -796,11 +796,10 @@ impl FullDoc {
     // Convert the position of `op` to full doc position, and apply it
     // to the full doc.
     fn convert_editor_op_and_apply(&mut self, op: EditorOp, site: SiteId) -> Op {
-        let mut cursor = self.get_cursor(&site);
-
         log::debug!("convert_editor_op_and_apply(op={:?})", &op);
         log::debug!("ranges_before={:?}", &self.ranges);
 
+        let mut cursor = self.get_cursor(&site);
         let converted_op = match op.clone() {
             EditorOp::Ins(pos, text) => {
                 let full_pos = self.convert_pos(pos, &mut cursor, true);
@@ -838,12 +837,15 @@ impl FullDoc {
         converted_op
     }
 
-    /// Convert internal `op` from full pos to editor pos, and also
-    /// apply it to the full_doc.
+    /// Convert internal `op` from full pos to editor pos, and apply
+    /// it to the full_doc.
     fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
+        log::debug!("convert_internal_op_and_apply(op={:?})", &op);
+        log::debug!("ranges_before={:?}", &self.ranges);
+
         let site = op.site();
         let mut cursor = self.get_cursor(&site);
-        match op {
+        let instr = match op {
             Op::Ins((pos, text), _) => {
                 let editor_pos = self.convert_pos(pos, &mut cursor, false);
                 self.apply_ins(pos, text.len() as u64, &mut cursor);
@@ -853,12 +855,15 @@ impl FullDoc {
             Op::Mark(edits, live, _) => {
                 let mut new_edits = vec![];
                 let mut new_edits_bare = vec![];
-                for (pos, text) in edits.into_iter() {
+                // Go back-to-front so that we don't mess up editor
+                // positions.
+                for (pos, text) in edits.into_iter().rev() {
                     // Move cursor to the right position.
                     self.convert_pos(pos, &mut cursor, false);
                     new_edits_bare.push((pos, text.len() as u64));
                     self.mark_to_ins_or_del(pos, text, &cursor, &mut new_edits, live);
                 }
+                // Forwards/backwards don't matter for full positions.
                 for (pos, len) in new_edits_bare.into_iter() {
                     self.convert_pos(pos, &mut cursor, false);
                     if live {
@@ -874,7 +879,12 @@ impl FullDoc {
                     EditInstruction::Del(new_edits)
                 }
             }
-        }
+        };
+
+        log::debug!("ranges_after={:?}", &self.ranges,);
+        log::debug!("converted_op={:?}", &instr);
+
+        instr
     }
 }
 
@@ -1535,6 +1545,7 @@ impl ServerEngine {
                 }
             }
         }
+
         // FIXME: Remove this potentially expensive test once we are
         // confident there's no position-bugs anymore.
         if internal_editor_len != self.doc_len {
