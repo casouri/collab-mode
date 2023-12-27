@@ -34,9 +34,9 @@ impl ContextOps {
     }
 }
 
-// *** FullDoc
+// *** InternalDoc
 
-/// A range in the full document. Each range is either a live text
+/// A range in the internal document. Each range is either a live text
 /// (not deleted) or dead text (deleted). All the ranges should be in
 /// order, connect, and don't overlap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,36 +78,37 @@ impl Range {
     }
 }
 
-/// A cursor in the full document (which contains tombstones). This
-/// cursor also tracks the editor document's position. Translating
-/// between editor position and full document position around a cursor
-/// is very fast.
+/// A cursor in the internal document (which contains tombstones).
+/// This cursor also tracks the editor document's position.
+/// Translating between editor position and internal document position
+/// around a cursor is very fast.
 #[derive(Debug, Clone, Copy)]
 struct Cursor {
     /// The position of this cursor in the editor's document. This
     /// position doesn't account for the tombstones.
     editor_pos: u64,
-    /// The actual position in the full document containing tombstones.
-    full_pos: u64,
+    /// The actual position in the internal document containing
+    /// tombstones.
+    internal_pos: u64,
     /// The index of the range in which this cursor is. range.start <=
-    /// cursor.full_pos < range.end.
+    /// cursor.internal_pos < range.end.
     range_idx: Option<usize>,
 }
 
 impl Cursor {
-    // Return the editor_pos if `editor_pos` is true; return full_pos
-    // otherwise.
+    // Return the editor_pos if `editor_pos` is true; return
+    // internal_pos otherwise.
     fn pos(&self, editor_pos: bool) -> u64 {
         if editor_pos {
             self.editor_pos
         } else {
-            self.full_pos
+            self.internal_pos
         }
     }
 
     /// Move cursor to the beginning of `iter`.
     fn move_to_beg(&mut self, iter: &RangeIterator) {
-        self.full_pos = iter.range_beg;
+        self.internal_pos = iter.range_beg;
         self.editor_pos = iter.editor_range_beg;
         self.range_idx = Some(iter.range_idx);
     }
@@ -115,7 +116,7 @@ impl Cursor {
     /// Move cursor to the position of `cursor`.
     fn move_to_cursor(&mut self, cursor: &Cursor) {
         self.range_idx = cursor.range_idx;
-        self.full_pos = cursor.full_pos;
+        self.internal_pos = cursor.internal_pos;
         self.editor_pos = cursor.editor_pos;
     }
 }
@@ -139,8 +140,8 @@ impl RangeIterator {
         let editor_range_len = if range.is_live() { range.len() } else { 0 };
         RangeIterator {
             range_idx,
-            range_beg: cursor.full_pos,
-            range_end: cursor.full_pos + range.len(),
+            range_beg: cursor.internal_pos,
+            range_end: cursor.internal_pos + range.len(),
             is_live: range.is_live(),
             affected_ranges_idx_beg: range_idx,
             editor_range_beg: cursor.editor_pos,
@@ -201,9 +202,10 @@ impl RangeIterator {
     }
 }
 
-/// The full document that contains both live text and tombstones.
+/// The internal full document that contains both live text and
+/// tombstones.
 #[derive(Debug, Clone)]
-struct FullDoc {
+struct InternalDoc {
     /// Ranges fully covering the document. The ranges are coalesced
     /// after every insertion and deletion, so there should never be
     /// two consecutive ranges that has the same liveness.
@@ -212,10 +214,11 @@ struct FullDoc {
     cursors: HashMap<SiteId, Cursor>,
 }
 
-impl FullDoc {
-    /// Create a full doc with initial document length at `init_len`.
-    fn new(init_len: u64) -> FullDoc {
-        FullDoc {
+impl InternalDoc {
+    /// Create a internal doc with initial document length at
+    /// `init_len`.
+    fn new(init_len: u64) -> InternalDoc {
+        InternalDoc {
             ranges: if init_len > 0 {
                 vec![Range::Live(init_len)]
             } else {
@@ -243,7 +246,7 @@ impl FullDoc {
         if self.cursors.get(site).is_none() {
             let cursor = Cursor {
                 editor_pos: 0,
-                full_pos: 0,
+                internal_pos: 0,
                 range_idx: None,
             };
             self.cursors.insert(site.clone(), cursor);
@@ -251,7 +254,7 @@ impl FullDoc {
         self.cursors.get(site).unwrap().clone()
     }
 
-    /// Convert a editor pos to a full doc pos if `editor_pos` is
+    /// Convert a editor pos to a internal doc pos if `editor_pos` is
     /// true, and the other way around if false. This also moves the
     /// cursor to around editor pos. Unless there is no ranges in the
     /// doc, `cursor` must points to a range after this function
@@ -261,14 +264,14 @@ impl FullDoc {
             // `cursor` must points to a range after this function
             // returns.
             if self.ranges.len() > 0 {
-                cursor.full_pos = 0;
+                cursor.internal_pos = 0;
                 cursor.editor_pos = 0;
                 cursor.range_idx = Some(0);
             }
             return 0;
         }
         if pos == cursor.pos(editor_pos) {
-            return cursor.full_pos;
+            return cursor.internal_pos;
         }
         if self.ranges.len() == 0 {
             return 0;
@@ -276,7 +279,7 @@ impl FullDoc {
         let mut range_idx = cursor.range_idx.unwrap_or(0);
         if range_idx == 0 {
             cursor.editor_pos = 0;
-            cursor.full_pos = 0;
+            cursor.internal_pos = 0;
         }
         let mut range = &self.ranges[range_idx];
 
@@ -294,7 +297,7 @@ impl FullDoc {
                         range.len()
                     }
             {
-                cursor.full_pos += range.len();
+                cursor.internal_pos += range.len();
                 if range.is_live() {
                     cursor.editor_pos += range.len();
                 }
@@ -304,7 +307,7 @@ impl FullDoc {
             }
         } else {
             while (pos < cursor.pos(editor_pos))
-                // To make editor pos -> full pos is not
+                // To make editor pos -> internal pos is not
                 // deterministic, we always pick the beg of a dead
                 // range over the end of one.
                 || (editor_pos && pos == cursor.pos(editor_pos) && range.is_live() && range_idx > 0)
@@ -313,7 +316,7 @@ impl FullDoc {
                 range = &self.ranges[range_idx];
                 cursor.range_idx = Some(range_idx);
 
-                cursor.full_pos -= range.len();
+                cursor.internal_pos -= range.len();
                 if range.is_live() {
                     cursor.editor_pos -= range.len();
                 }
@@ -325,10 +328,10 @@ impl FullDoc {
         // At this point, `pos` should be within `range`. And
         // `cursor` is at the beginning of `range`.
         if editor_pos {
-            // Editor pos -> full pos.
+            // Editor pos -> internal pos.
             cursor.pos(!editor_pos) + (pos - cursor.pos(editor_pos))
         } else {
-            // Full pos -> editor pos.
+            // Internal pos -> editor pos.
             cursor.pos(!editor_pos)
                 + if range.is_live() {
                     pos - cursor.pos(editor_pos)
@@ -345,7 +348,7 @@ impl FullDoc {
         for (_site, cursor) in self.cursors.iter_mut() {
             if let Some(cursor_idx) = cursor.range_idx {
                 if cursor_idx >= idx {
-                    cursor.full_pos += delta;
+                    cursor.internal_pos += delta;
                     cursor.editor_pos += delta;
                     cursor.range_idx = Some(cursor_idx + range_idx_delta);
                 }
@@ -353,9 +356,9 @@ impl FullDoc {
         }
     }
 
-    /// Apply an insertion as full position `pos` of `len` characters.
-    /// `cursor` should point to the range that receives the
-    /// insertion.
+    /// Apply an insertion as internal position `pos` of `len`
+    /// characters. `cursor` should point to the range that receives
+    /// the insertion.
     fn apply_ins(&mut self, pos: u64, len: u64, cursor: &mut Cursor) {
         if self.ranges.len() == 0 {
             // (a)
@@ -364,7 +367,7 @@ impl FullDoc {
         }
         let range_idx = cursor.range_idx.unwrap();
         let range = &mut self.ranges[range_idx];
-        let range_beg = cursor.full_pos;
+        let range_beg = cursor.internal_pos;
         let range_end = range_beg + range.len();
 
         assert!(range_beg <= pos);
@@ -384,13 +387,13 @@ impl FullDoc {
                 assert!(range_before.is_live());
                 *range_before = Range::Live(range_before.len() + len);
                 self.shift_cursors_right(range_idx, len, 0);
-                cursor.full_pos += len;
+                cursor.internal_pos += len;
                 cursor.editor_pos += len;
             } else {
                 // (d)
                 self.ranges.insert(range_idx, Range::Live(len));
                 self.shift_cursors_right(range_idx, len, 1);
-                cursor.full_pos += len;
+                cursor.internal_pos += len;
                 cursor.editor_pos += len;
                 cursor.range_idx = Some(range_idx + 1);
             }
@@ -425,7 +428,7 @@ impl FullDoc {
             self.ranges.insert(range_idx, middle);
             self.ranges.insert(range_idx, left_half);
             self.shift_cursors_right(range_idx + 1, len, 2);
-            cursor.full_pos = pos;
+            cursor.internal_pos = pos;
             cursor.editor_pos = cursor.editor_pos; // Don't change.
             cursor.range_idx = Some(range_idx + 1);
         } else {
@@ -793,8 +796,8 @@ impl FullDoc {
         }
     }
 
-    // Convert the position of `op` to full doc position, and apply it
-    // to the full doc.
+    // Convert the position of `op` to internal doc position, and
+    // apply it to the internal doc.
     fn convert_editor_op_and_apply(&mut self, op: EditorOp, site: SiteId) -> Op {
         log::debug!("convert_editor_op_and_apply(op={:?})", &op);
         log::debug!("ranges_before={:?}", &self.ranges);
@@ -802,19 +805,20 @@ impl FullDoc {
         let mut cursor = self.get_cursor(&site);
         let converted_op = match op.clone() {
             EditorOp::Ins(pos, text) => {
-                let full_pos = self.convert_pos(pos, &mut cursor, true);
-                self.apply_ins(full_pos, text.len() as u64, &mut cursor);
+                let internal_pos = self.convert_pos(pos, &mut cursor, true);
+                self.apply_ins(internal_pos, text.len() as u64, &mut cursor);
                 self.cursors.insert(site, cursor);
-                Op::Ins((full_pos, text), site)
+                Op::Ins((internal_pos, text), site)
             }
             EditorOp::Del(pos, text) => {
-                let full_pos = self.convert_pos(pos, &mut cursor, true);
+                let internal_pos = self.convert_pos(pos, &mut cursor, true);
                 let editor_end = pos + text.len() as u64;
-                let full_len = self.convert_pos(editor_end, &mut cursor.clone(), true) - full_pos;
+                let internal_len =
+                    self.convert_pos(editor_end, &mut cursor.clone(), true) - internal_pos;
                 // Make sure to skip the already dead ranges. Then
                 // when we undo this op, we only insert the text we
                 // actually deleted.
-                let flipped_ranges = self.apply_mark_dead(full_pos, full_len, &mut cursor);
+                let flipped_ranges = self.apply_mark_dead(internal_pos, internal_len, &mut cursor);
                 let mut text_idx = 0;
                 let mut converted_ops = vec![];
                 for (pos, len) in flipped_ranges {
@@ -837,8 +841,8 @@ impl FullDoc {
         converted_op
     }
 
-    /// Convert internal `op` from full pos to editor pos, and apply
-    /// it to the full_doc.
+    /// Convert internal `op` from internal pos to editor pos, and
+    /// apply it to the internal_doc.
     fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
         log::debug!("convert_internal_op_and_apply(op={:?})", &op);
         log::debug!("ranges_before={:?}", &self.ranges);
@@ -863,7 +867,8 @@ impl FullDoc {
                     new_edits_bare.push((pos, text.len() as u64));
                     self.mark_to_ins_or_del(pos, text, &cursor, &mut new_edits, live);
                 }
-                // Forwards/backwards don't matter for full positions.
+                // Forwards/backwards don't matter for internal
+                // positions.
                 for (pos, len) in new_edits_bare.into_iter() {
                     self.convert_pos(pos, &mut cursor, false);
                     if live {
@@ -908,8 +913,8 @@ struct GlobalHistory {
     undo_queue: Vec<GlobalSeq>,
     /// An index into `local_ops`. Points to the currently undone op.
     undo_tip: Option<usize>,
-    /// The full document.
-    full_doc: FullDoc,
+    /// The internal document.
+    internal_doc: InternalDoc,
 }
 
 impl GlobalHistory {
@@ -921,7 +926,7 @@ impl GlobalHistory {
             local: vec![],
             undo_queue: vec![],
             undo_tip: None,
-            full_doc: FullDoc::new(init_len),
+            internal_doc: InternalDoc::new(init_len),
         }
     }
 
@@ -1147,7 +1152,7 @@ pub struct ServerEngine {
     current_seq: GlobalSeq,
     /// The length of the document. This is used to check that after
     /// applying every op, the length of the document and the length
-    /// of the FullDoc matches.
+    /// of the InternalDoc matches.
     doc_len: usize,
 }
 
@@ -1240,10 +1245,13 @@ impl ClientEngine {
         }
     }
 
-    /// Convert `op` from an internal op (with full doc positions) to
-    /// an editor op. Also apply the `op` to the full doc.
+    /// Convert `op` from an internal op (with internal doc positions)
+    /// to an editor op. Also apply the `op` to the internal doc.
     pub fn convert_internal_op_and_apply(&mut self, op: Op) -> EditorLeanOp {
-        let converted_op = self.gh.full_doc.convert_internal_op_and_apply(op.clone());
+        let converted_op = self
+            .gh
+            .internal_doc
+            .convert_internal_op_and_apply(op.clone());
         EditorLeanOp {
             op: converted_op,
             site_id: op.site(),
@@ -1251,7 +1259,7 @@ impl ClientEngine {
     }
 
     /// Convert `ops` from an internal op to an editor op, but don't
-    /// apply `ops` to the full doc.
+    /// apply `ops` to the internal doc.
     pub fn convert_internal_ops_dont_apply(&mut self, ops: Vec<FatOp>) -> Vec<EditInstruction> {
         // We achieve "don't apply" by applying each op, and then
         // applying their inverse. Because for a series of ops, we
@@ -1261,7 +1269,7 @@ impl ClientEngine {
         for op in ops.iter() {
             let converted_op = self
                 .gh
-                .full_doc
+                .internal_doc
                 .convert_internal_op_and_apply(op.op.clone());
             converted_ops.push(converted_op);
         }
@@ -1281,7 +1289,7 @@ impl ClientEngine {
                 op.inverse();
                 op.batch_transform(&mini_history[idx + 1..]);
                 self.gh
-                    .full_doc
+                    .internal_doc
                     .convert_internal_op_and_apply(op.op.clone());
                 mini_history.push(op);
             }
@@ -1313,10 +1321,16 @@ impl ClientEngine {
 
         let ops = match &op {
             EditorOp::Ins(_, _) => {
-                vec![self.gh.full_doc.convert_editor_op_and_apply(op, self.site)]
+                vec![self
+                    .gh
+                    .internal_doc
+                    .convert_editor_op_and_apply(op, self.site)]
             }
             EditorOp::Del(_, _) => {
-                vec![self.gh.full_doc.convert_editor_op_and_apply(op, self.site)]
+                vec![self
+                    .gh
+                    .internal_doc
+                    .convert_editor_op_and_apply(op, self.site)]
             }
             EditorOp::Undo => self
                 .generate_undo_op_1(false)
@@ -1525,14 +1539,14 @@ impl ServerEngine {
         }
     }
 
-    /// Convert `op` from an internal op (with full doc positions) to
-    /// an editor op. Also apply the `op` to the full doc.
+    /// Convert `op` from an internal op (with internal doc positions)
+    /// to an editor op. Also apply the `op` to the internal doc.
     pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> CollabResult<EditInstruction> {
         let converted_op = self
             .gh
-            .full_doc
+            .internal_doc
             .convert_internal_op_and_apply(op.op.clone());
-        let internal_editor_len = self.gh.full_doc.editor_len();
+        let internal_editor_len = self.gh.internal_doc.editor_len();
         match &converted_op {
             EditInstruction::Ins(edits) => {
                 for edit in edits {
@@ -1645,7 +1659,7 @@ mod tests {
         client_a.process_local_op(op_a1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_a, "bcd");
         assert!(vec_eq(
-            &client_a.gh.full_doc.ranges,
+            &client_a.gh.internal_doc.ranges,
             &vec![Range::Dead(1), Range::Live(3)]
         ));
 
@@ -1653,7 +1667,7 @@ mod tests {
         client_a.process_local_op(op_a2.clone(), doc_id, 2).unwrap();
         assert_eq!(doc_a, "bcxd");
         assert!(vec_eq(
-            &client_a.gh.full_doc.ranges,
+            &client_a.gh.internal_doc.ranges,
             &vec![Range::Dead(1), Range::Live(4)]
         ));
 
@@ -1661,7 +1675,7 @@ mod tests {
         client_b.process_local_op(op_b1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_b, "abd");
         assert!(vec_eq(
-            &client_b.gh.full_doc.ranges,
+            &client_b.gh.internal_doc.ranges,
             &vec![Range::Live(2), Range::Dead(1), Range::Live(1)]
         ));
 
@@ -1846,7 +1860,7 @@ mod tests {
 
     #[test]
     fn test_convert_pos() {
-        let mut doc = FullDoc::new(0);
+        let mut doc = InternalDoc::new(0);
         doc.ranges = vec![Range::Live(10), Range::Dead(10), Range::Live(10)];
         let mut cursor = doc.get_cursor(&0);
 
@@ -1854,33 +1868,45 @@ mod tests {
         assert!(doc.convert_pos(10, &mut cursor, true) == 10);
         // The cursor must point to a range after calling
         // `convert_pos`.
-        assert!(cursor.editor_pos == 0 && cursor.full_pos == 0 && cursor.range_idx == Some(0));
+        assert!(cursor.editor_pos == 0 && cursor.internal_pos == 0 && cursor.range_idx == Some(0));
 
         assert!(doc.convert_pos(11, &mut cursor, true) == 21);
-        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+        assert!(
+            cursor.editor_pos == 10 && cursor.internal_pos == 20 && cursor.range_idx == Some(2)
+        );
 
         assert!(doc.convert_pos(20, &mut cursor, true) == 30);
-        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+        assert!(
+            cursor.editor_pos == 10 && cursor.internal_pos == 20 && cursor.range_idx == Some(2)
+        );
 
         // Cursor go back.
         assert!(doc.convert_pos(15, &mut cursor, true) == 25);
-        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+        assert!(
+            cursor.editor_pos == 10 && cursor.internal_pos == 20 && cursor.range_idx == Some(2)
+        );
 
         assert!(doc.convert_pos(9, &mut cursor, true) == 9);
-        assert!(cursor.editor_pos == 0 && cursor.full_pos == 0 && cursor.range_idx == Some(0));
+        assert!(cursor.editor_pos == 0 && cursor.internal_pos == 0 && cursor.range_idx == Some(0));
 
-        // Full pos to editor pos.
+        // Internal pos to editor pos.
         assert!(doc.convert_pos(1, &mut cursor, false) == 1);
-        assert!(cursor.editor_pos == 0 && cursor.full_pos == 0 && cursor.range_idx == Some(0));
+        assert!(cursor.editor_pos == 0 && cursor.internal_pos == 0 && cursor.range_idx == Some(0));
 
         assert!(doc.convert_pos(15, &mut cursor, false) == 10);
-        assert!(cursor.editor_pos == 10 && cursor.full_pos == 10 && cursor.range_idx == Some(1));
+        assert!(
+            cursor.editor_pos == 10 && cursor.internal_pos == 10 && cursor.range_idx == Some(1)
+        );
 
         assert!(doc.convert_pos(20, &mut cursor, false) == 10);
-        assert!(cursor.editor_pos == 10 && cursor.full_pos == 10 && cursor.range_idx == Some(1));
+        assert!(
+            cursor.editor_pos == 10 && cursor.internal_pos == 10 && cursor.range_idx == Some(1)
+        );
 
         assert!(doc.convert_pos(21, &mut cursor, false) == 11);
-        assert!(cursor.editor_pos == 10 && cursor.full_pos == 20 && cursor.range_idx == Some(2));
+        assert!(
+            cursor.editor_pos == 10 && cursor.internal_pos == 20 && cursor.range_idx == Some(2)
+        );
     }
 
     fn vec_eq<T: Eq>(vec1: &Vec<T>, vec2: &Vec<T>) -> bool {
@@ -1893,14 +1919,14 @@ mod tests {
 
     #[test]
     fn test_apply_ins() {
-        let mut doc = FullDoc::new(0);
+        let mut doc = InternalDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
 
         doc.cursors.insert(
             1,
             Cursor {
                 editor_pos: 0,
-                full_pos: 0,
+                internal_pos: 0,
                 range_idx: None,
             },
         );
@@ -1909,11 +1935,11 @@ mod tests {
         doc.convert_pos(0, &mut cursor, true);
         doc.apply_ins(0, 10, &mut cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(10)]));
-        assert!(cursor.full_pos == 0);
+        assert!(cursor.internal_pos == 0);
         assert!(cursor.editor_pos == 0);
         // [Live(10)]
         let cursor1 = doc.cursors.get(&1).unwrap();
-        assert!(cursor1.full_pos == 0);
+        assert!(cursor1.internal_pos == 0);
         assert!(cursor1.editor_pos == 0);
         assert!(cursor1.range_idx == None);
 
@@ -1923,7 +1949,7 @@ mod tests {
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(20)]));
-        assert!(cursor.full_pos == 0);
+        assert!(cursor.internal_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
         // [Live(20)]
@@ -1932,7 +1958,7 @@ mod tests {
             2,
             Cursor {
                 editor_pos: 20,
-                full_pos: 20,
+                internal_pos: 20,
                 range_idx: Some(1),
             },
         );
@@ -1940,40 +1966,40 @@ mod tests {
         // (c)
         doc.ranges.push(Range::Dead(10));
         // [Live(20) Dead(10)]
-        cursor.full_pos = 20;
+        cursor.internal_pos = 20;
         cursor.editor_pos = 20;
         cursor.range_idx = Some(1);
         doc.apply_ins(20, 10, &mut cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(30), Range::Dead(10)]));
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
-        assert!(cursor.full_pos == 30);
+        assert!(cursor.internal_pos == 30);
         assert!(cursor.editor_pos == 30);
         assert!(cursor.range_idx == Some(1));
         // [Live(30) Dead(10)]
 
         let cursor2 = doc.cursors.get(&2).unwrap();
-        assert!(cursor2.full_pos == 30);
+        assert!(cursor2.internal_pos == 30);
         assert!(cursor2.editor_pos == 30);
         assert!(cursor2.range_idx == Some(1));
 
         // (d)
         doc.ranges.remove(0);
         // [Dead(10)]
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
         doc.apply_ins(0, 10, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(10), Range::Dead(10)]));
-        assert!(cursor.full_pos == 10);
+        assert!(cursor.internal_pos == 10);
         assert!(cursor.editor_pos == 10);
         assert!(cursor.range_idx == Some(1));
         // [Live(10) Dead(10)];
 
         // (f)
-        cursor.full_pos = 10;
+        cursor.internal_pos = 10;
         cursor.editor_pos = 10;
         cursor.range_idx = Some(1);
         doc.apply_ins(20, 10, &mut cursor);
@@ -2006,7 +2032,7 @@ mod tests {
             3,
             Cursor {
                 editor_pos: 30,
-                full_pos: 40,
+                internal_pos: 40,
                 range_idx: Some(3),
             },
         );
@@ -2026,19 +2052,19 @@ mod tests {
                 Range::Dead(10),
             ]
         ));
-        assert!(cursor.full_pos == 16);
+        assert!(cursor.internal_pos == 16);
         assert!(cursor.editor_pos == 10);
         assert!(cursor.range_idx == Some(2));
 
         let cursor3 = doc.cursors.get(&3).unwrap();
-        assert!(cursor3.full_pos == 50);
+        assert!(cursor3.internal_pos == 50);
         assert!(cursor3.editor_pos == 40);
         assert!(cursor3.range_idx == Some(5));
     }
 
     #[test]
     fn test_apply_mark_dead() {
-        let mut doc = FullDoc::new(0);
+        let mut doc = InternalDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
         cursor.range_idx = Some(0);
 
@@ -2058,7 +2084,7 @@ mod tests {
             1,
             Cursor {
                 editor_pos: 10,
-                full_pos: 10,
+                internal_pos: 10,
                 range_idx: Some(1),
             },
         );
@@ -2066,7 +2092,7 @@ mod tests {
             2,
             Cursor {
                 editor_pos: 15,
-                full_pos: 30,
+                internal_pos: 30,
                 range_idx: Some(4),
             },
         );
@@ -2080,11 +2106,11 @@ mod tests {
         ));
         assert!(vec_eq(&flipped_ranges, &vec![(6, 4), (15, 5), (30, 6)]));
         let cursor1 = doc.get_cursor(&1);
-        assert!(cursor1.full_pos == cursor.full_pos);
+        assert!(cursor1.internal_pos == cursor.internal_pos);
         assert!(cursor1.editor_pos == cursor.editor_pos);
         assert!(cursor1.range_idx == cursor.range_idx);
         let cursor2 = doc.get_cursor(&2);
-        assert!(cursor2.full_pos == cursor.full_pos);
+        assert!(cursor2.internal_pos == cursor.internal_pos);
         assert!(cursor2.editor_pos == cursor.editor_pos);
         assert!(cursor2.range_idx == cursor.range_idx);
 
@@ -2111,7 +2137,7 @@ mod tests {
         // [   Dead   ]
         // [  Marked  ]
         doc.ranges = vec![Range::Dead(10)];
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
@@ -2125,7 +2151,7 @@ mod tests {
         // [   Live   ]
         // [  Marked  ]
         doc.ranges = vec![Range::Live(10)];
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
@@ -2139,7 +2165,7 @@ mod tests {
         // [      Live      ]
         //    [  Marked  ]
         doc.ranges = vec![Range::Live(20)];
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
@@ -2151,7 +2177,7 @@ mod tests {
             &vec![Range::Live(6), Range::Dead(10), Range::Live(4)]
         ));
         assert!(vec_eq(&flipped_ranges, &vec![(6, 10)]));
-        assert!(cursor.full_pos == 0);
+        assert!(cursor.internal_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
 
@@ -2159,20 +2185,20 @@ mod tests {
         // [ Dead ][ Live ][ Dead ]
         //         [ Dead ]
         doc.ranges = vec![Range::Dead(10), Range::Live(10), Range::Dead(10)];
-        cursor.full_pos = 10;
+        cursor.internal_pos = 10;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(1);
         let flipped_ranges = doc.apply_mark_dead(10, 10, &mut cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Dead(30)]));
         assert!(vec_eq(&flipped_ranges, &vec![(10, 10)]));
-        assert!(cursor.full_pos == 0);
+        assert!(cursor.internal_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
     }
 
     #[test]
     fn test_apply_mark_live() {
-        let mut doc = FullDoc::new(0);
+        let mut doc = InternalDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
         cursor.range_idx = Some(0);
 
@@ -2192,7 +2218,7 @@ mod tests {
             1,
             Cursor {
                 editor_pos: 10,
-                full_pos: 10,
+                internal_pos: 10,
                 range_idx: Some(1),
             },
         );
@@ -2200,7 +2226,7 @@ mod tests {
             2,
             Cursor {
                 editor_pos: 15,
-                full_pos: 30,
+                internal_pos: 30,
                 range_idx: Some(4),
             },
         );
@@ -2211,11 +2237,11 @@ mod tests {
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(40)]));
 
         let cursor1 = doc.get_cursor(&1);
-        assert!(cursor1.full_pos == cursor.full_pos);
+        assert!(cursor1.internal_pos == cursor.internal_pos);
         assert!(cursor1.editor_pos == cursor.editor_pos);
         assert!(cursor1.range_idx == cursor.range_idx);
         let cursor2 = doc.get_cursor(&2);
-        assert!(cursor2.full_pos == cursor.full_pos);
+        assert!(cursor2.internal_pos == cursor.internal_pos);
         assert!(cursor2.editor_pos == cursor.editor_pos);
         assert!(cursor2.range_idx == cursor.range_idx);
 
@@ -2244,7 +2270,7 @@ mod tests {
         // [   Dead   ]
         // [  Marked  ]
         doc.ranges = vec![Range::Dead(10)];
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
@@ -2257,7 +2283,7 @@ mod tests {
         // [   Live   ]
         // [  Marked  ]
         doc.ranges = vec![Range::Live(10)];
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
@@ -2270,7 +2296,7 @@ mod tests {
         // [      Dead      ]
         //    [  Marked  ]
         doc.ranges = vec![Range::Dead(20)];
-        cursor.full_pos = 0;
+        cursor.internal_pos = 0;
         cursor.editor_pos = 0;
         cursor.range_idx = Some(0);
 
@@ -2281,7 +2307,7 @@ mod tests {
             &doc.ranges,
             &vec![Range::Dead(6), Range::Live(10), Range::Dead(4)]
         ));
-        assert!(cursor.full_pos == 0);
+        assert!(cursor.internal_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
 
@@ -2289,19 +2315,19 @@ mod tests {
         // [ Live ][ Dead ][ Live ]
         //         [ Live ]
         doc.ranges = vec![Range::Live(10), Range::Dead(10), Range::Live(10)];
-        cursor.full_pos = 10;
+        cursor.internal_pos = 10;
         cursor.editor_pos = 10;
         cursor.range_idx = Some(1);
         doc.apply_mark_live(10, 10, &mut cursor);
         assert!(vec_eq(&doc.ranges, &vec![Range::Live(30)]));
-        assert!(cursor.full_pos == 0);
+        assert!(cursor.internal_pos == 0);
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
     }
 
     #[test]
     fn test_mark_to_ins_or_del() {
-        let mut doc = FullDoc::new(0);
+        let mut doc = InternalDoc::new(0);
         let mut cursor = doc.get_cursor(&0);
         cursor.range_idx = Some(0);
 
