@@ -134,7 +134,7 @@ impl Doc {
             name: file_name.to_string(),
             file_path,
             meta: file_meta.clone(),
-            engine: ServerEngine::new(content.len() as u64),
+            engine: ServerEngine::new(content.chars().count() as u64),
             buffer,
             tx,
             rx,
@@ -155,7 +155,7 @@ impl Doc {
             EditInstruction::Del(edits) => {
                 for (pos, str) in edits.into_iter().rev() {
                     self.buffer
-                        .drain((pos as usize)..(pos as usize + str.len()));
+                        .drain((pos as usize)..(pos as usize + str.chars().count()));
                 }
             }
         }

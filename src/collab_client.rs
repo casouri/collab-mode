@@ -56,7 +56,7 @@ impl Doc {
     ) -> CollabResult<Doc> {
         // At most 2 errors from two worker threads.
         let (err_tx, err_rx) = mpsc::channel(2);
-        let file_len = file.len() as u64;
+        let file_len = file.chars().count() as u64;
         let doc_id = server
             .share_file(file_name, file_meta, FileContentOrPath::Content(file))
             .await?;
@@ -127,7 +127,7 @@ impl Doc {
             site_id.clone(),
             doc_id.clone(),
             snapshot.file_name,
-            snapshot.buffer.len() as u64,
+            snapshot.buffer.chars().count() as u64,
             snapshot.seq,
             err_rx,
         );

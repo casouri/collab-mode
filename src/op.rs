@@ -81,7 +81,7 @@ fn transform_ii(
     } else {
         // If both pos and site are equal, the op is pushed forward
         // (pos + 1), and base stays the same.
-        let new_pos = pos1 + content2.len() as u64;
+        let new_pos = pos1 + content2.chars().count() as u64;
         (new_pos, content1.clone())
     }
 }
@@ -96,15 +96,15 @@ fn transform_di(
     let pos2 = base.0;
     let content1 = &op.1;
     let content2 = &base.1;
-    let end1 = pos1 + content1.len() as u64;
-    let end2 = pos2 + content2.len() as u64;
+    let end1 = pos1 + content1.chars().count() as u64;
+    let end2 = pos2 + content2.chars().count() as u64;
 
     if pos_less_than(end1, pos2, op_site, base_site) {
         // op completely before base.
         vec![(pos1, content1.clone())]
     } else if pos_less_than(pos2, pos1, base_site, op_site) {
         // op completely after base.
-        let new_pos = pos1 + content2.len() as u64;
+        let new_pos = pos1 + content2.chars().count() as u64;
         vec![(new_pos, content1.clone())]
     } else {
         // base inside op.
@@ -114,10 +114,10 @@ fn transform_di(
         // let del_after_ins = (end2, content1[((pos2 - pos1) as usize)..].to_string());
         let del_after_ins = (end2, content1.chars().skip(mid).collect::<String>());
         let mut res = vec![];
-        if del_before_ins.1.len() > 0 {
+        if del_before_ins.1.chars().count() > 0 {
             res.push(del_before_ins)
         }
-        if del_after_ins.1.len() > 0 {
+        if del_after_ins.1.chars().count() > 0 {
             res.push(del_after_ins)
         }
         res

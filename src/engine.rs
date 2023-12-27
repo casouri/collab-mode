@@ -727,7 +727,7 @@ impl InternalDoc {
             return;
         }
         let marked_beg = pos;
-        let marked_end = pos + text.len() as u64;
+        let marked_end = pos + text.chars().count() as u64;
         let mut iter = RangeIterator::new(&self.ranges, cursor);
 
         loop {
@@ -758,7 +758,7 @@ impl InternalDoc {
                 // [  marked   ]
                 //    [  cap   ]
                 let captured_start = (max(iter.range_beg, marked_beg) - marked_beg) as usize;
-                let captured_end = text.len();
+                let captured_end = text.chars().count();
                 // let captured_text = text[captured_start..captured_end].to_string();
                 let captured_text = text
                     .chars()
@@ -806,13 +806,13 @@ impl InternalDoc {
         let converted_op = match op.clone() {
             EditorOp::Ins(pos, text) => {
                 let internal_pos = self.convert_pos(pos, &mut cursor, true);
-                self.apply_ins(internal_pos, text.len() as u64, &mut cursor);
+                self.apply_ins(internal_pos, text.chars().count() as u64, &mut cursor);
                 self.cursors.insert(site, cursor);
                 Op::Ins((internal_pos, text), site)
             }
             EditorOp::Del(pos, text) => {
                 let internal_pos = self.convert_pos(pos, &mut cursor, true);
-                let editor_end = pos + text.len() as u64;
+                let editor_end = pos + text.chars().count() as u64;
                 let internal_len =
                     self.convert_pos(editor_end, &mut cursor.clone(), true) - internal_pos;
                 // Make sure to skip the already dead ranges. Then
@@ -852,7 +852,7 @@ impl InternalDoc {
         let instr = match op {
             Op::Ins((pos, text), _) => {
                 let editor_pos = self.convert_pos(pos, &mut cursor, false);
-                self.apply_ins(pos, text.len() as u64, &mut cursor);
+                self.apply_ins(pos, text.chars().count() as u64, &mut cursor);
                 self.cursors.insert(site.clone(), cursor);
                 EditInstruction::Ins(vec![(editor_pos, text)])
             }
@@ -860,7 +860,7 @@ impl InternalDoc {
                 let mut new_edits = vec![];
                 let mut new_edits_bare = vec![];
                 for (pos, text) in edits.into_iter() {
-                    new_edits_bare.push((pos, text.len() as u64));
+                    new_edits_bare.push((pos, text.chars().count() as u64));
                     // Move cursor to the right position.
                     self.convert_pos(pos, &mut cursor, false);
                     self.mark_to_ins_or_del(pos, text, &cursor, &mut new_edits, live);
@@ -1546,12 +1546,12 @@ impl ServerEngine {
         match &converted_op {
             EditInstruction::Ins(edits) => {
                 for edit in edits {
-                    self.doc_len += edit.1.len();
+                    self.doc_len += edit.1.chars().count();
                 }
             }
             EditInstruction::Del(edits) => {
                 for edit in edits {
-                    self.doc_len -= edit.1.len();
+                    self.doc_len -= edit.1.chars().count();
                 }
             }
         }
@@ -1600,7 +1600,7 @@ mod tests {
                 doc.insert_str(*pos as usize, text);
             }
             EditorOp::Del(pos, text) => {
-                doc.replace_range(*pos as usize..(*pos as usize) + text.len(), "");
+                doc.replace_range(*pos as usize..(*pos as usize) + text.chars().count(), "");
             }
             _ => panic!(),
         }
@@ -1615,7 +1615,7 @@ mod tests {
             }
             EditInstruction::Del(edits) => {
                 for (pos, str) in edits.iter().rev() {
-                    doc.replace_range((*pos as usize)..(*pos as usize + str.len()), "");
+                    doc.replace_range((*pos as usize)..(*pos as usize + str.chars().count()), "");
                 }
             }
         }
