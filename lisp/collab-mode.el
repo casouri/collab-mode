@@ -462,11 +462,10 @@ delay (‘collab-send-ops-delay’).")
     (cancel-timer collab--send-ops-timer)
     (setq collab--send-ops-timer nil)))
 
-(defun collab--send-ops-shortly ()
+(defsubst collab--send-ops-shortly ()
   "Send pending ops after a short delay."
   ;; TODO: We can extend unactivated timer instead of cancel and
   ;; re-create. I don’t know how much time it saves tho.
-  (collab--cancel-send-ops-timer)
   (setq collab--send-ops-timer
         (run-with-timer collab-send-ops-delay nil
                         #'collab--send-ops-now (current-buffer))))
@@ -494,6 +493,7 @@ Then apply the returned remote ops."
                            (string-replace
                             "\n" "\\n"
                             (format "Amalgamate, %s" collab--pending-ops))))
+                (collab--cancel-get-ops-timer)
                 (collab--send-ops-shortly))
             ;; Didn’t amalgamate, send ops.
             (when collab--verbose
@@ -503,7 +503,9 @@ Then apply the returned remote ops."
                                      collab--pending-ops
                                      collab--ops-current-command))))
             (unwind-protect
-                (collab--send-ops (nreverse collab--pending-ops))
+                (progn
+                  (collab--cancel-get-ops-timer)
+                  (collab--send-ops (nreverse collab--pending-ops)))
               (setq collab--pending-ops collab--ops-current-command))
             (when collab--pending-ops
               (collab--send-ops-shortly)))
@@ -514,6 +516,7 @@ Then apply the returned remote ops."
 Run in BUFFER, if non-nil."
   (cl-assert (null collab--ops-current-command))
   (with-current-buffer (or buffer (current-buffer))
+    (collab--cancel-get-ops-timer)
     (let ((ops (nreverse collab--pending-ops)))
       (setq collab--pending-ops nil)
       (collab--send-ops ops))))
@@ -741,6 +744,14 @@ If DOC-DESC is at the top-level, return itself."
   (make-hash-table :test #'equal)
   "Hash table mapping (doc-id . host-id) to dispatcher timers.")
 
+(defun collab--cancel-get-ops-timer ()
+  "If there’s a timer for getting remote ops, cancel it.
+The purpose of this function is to cancel get ops timer when we
+know that we’re gonna send ops (which gets remotes ops too) very
+soon."
+  (when-let ((timer (gethash collab--doc-and-host
+                             collab--dispatcher-timer-table)))
+    (cancel-timer timer))  )
 
 (defun collab--request-remote-ops (_doc _server buffer seq)
   "Request for remote ops for (DOC SERVER) in BUFFER.
@@ -1313,12 +1324,16 @@ immediately."
         (host-id (get-text-property (point) 'collab-host-id)))
     (cond
      (doc-desc
-      (funcall callback
-               "RET → Open File  x → Delete File  k → Disconnect"))
+      (funcall
+       callback
+       (substitute-command-keys
+        "\\[collab--open-doc] → Open Doc  \\[collab--delete-doc] → Delete File  \\[collab--disconnect-from-doc] → Disconnect")))
      (host-id
-      (funcall callback "s → Share File"))
+      (funcall callback (substitute-command-keys
+                         "\\[collab-share-file] → Share File")))
      (t
-      (funcall callback "g → Refresh")))))
+      (funcall callback (substitute-command-keys
+                         "\\[collab--refresh] → Refresh"))))))
 
 ;;;; Collab-dired
 
