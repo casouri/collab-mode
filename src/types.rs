@@ -41,7 +41,7 @@ impl std::fmt::Debug for EditorOp {
             }
             Self::Del(pos, content) => {
                 let content = replace_whitespace_char(content.to_string());
-                write!(f, "ins({pos}, {content})")
+                write!(f, "del({pos}, {content})")
             }
         }
     }
