@@ -327,28 +327,6 @@ pub fn quatradic_transform<O: Operation>(
 mod tests {
     use super::*;
 
-    fn make_fatop<O: Operation>(op: O, site: SiteId) -> FatOp<O> {
-        FatOp {
-            seq: None,
-            site_seq: 1, // Dummy value.
-            doc: 0,
-            op,
-            kind: OpKind::Original,
-            group_seq: 1, // Dummy value.
-        }
-    }
-
-    fn make_undo_fatop<O: Operation>(op: O, site: SiteId, undo_delta: usize) -> FatOp<O> {
-        FatOp {
-            seq: None,
-            site_seq: 1, // Dummy value.
-            doc: 0,
-            op,
-            kind: OpKind::Undo(undo_delta),
-            group_seq: 1, // Dummy value.
-        }
-    }
-
     fn test<O: Operation>(op: O, base: O, result: O) {
         let new_op = op.transform(&base);
         assert_eq!(new_op, result);
