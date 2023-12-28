@@ -119,6 +119,22 @@ impl Cursor {
         self.internal_pos = cursor.internal_pos;
         self.editor_pos = cursor.editor_pos;
     }
+
+    /// Shift the editor position and range idx.
+    fn shift(&mut self, editor_pos_delta: i64, range_idx_delta: isize) {
+        if editor_pos_delta > 0 {
+            self.editor_pos += editor_pos_delta.abs() as u64;
+        } else {
+            self.editor_pos -= editor_pos_delta.abs() as u64;
+        }
+        if let Some(range_idx) = self.range_idx {
+            if range_idx_delta > 0 {
+                self.range_idx = Some(range_idx + range_idx_delta.abs() as usize)
+            } else {
+                self.range_idx = Some(range_idx - range_idx_delta.abs() as usize)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,14 +244,46 @@ impl InternalDoc {
         }
     }
 
+    /// Check that the position of each cursor is correct.
+    /// Only use this for debugging.
+    fn check_cursor_positions(&self) {
+        for (site, cursor) in self.cursors.iter() {
+            if cursor.range_idx.is_none() {
+                continue;
+            }
+            let mut editor_pos = 0;
+            let mut internal_pos = 0;
+            for range in self.ranges.iter() {
+                if internal_pos == cursor.internal_pos {
+                    if editor_pos != cursor.editor_pos {
+                        log::error!("Cursor has wrong editor position, should be {}, cursor={:?}, site={site}, ranges={:?}",
+                            editor_pos,
+                        cursor, self.ranges);
+                        std::process::exit(-1);
+                    }
+                    break;
+                }
+                match range {
+                    Range::Live(len) => {
+                        editor_pos += len;
+                        internal_pos += len;
+                    }
+                    Range::Dead(len) => {
+                        internal_pos += len;
+                    }
+                }
+            }
+        }
+    }
+
     /// Return the total length of the editor document. Note that this
     /// function don't use any optimization and goes through every
     /// range front-to-back.
-    fn editor_len(&self) -> usize {
+    fn editor_len(&self) -> u64 {
         let mut len = 0;
         for range in self.ranges.iter() {
             if let Range::Live(range_len) = range {
-                len += *range_len as usize;
+                len += *range_len;
             }
         }
         len
@@ -261,7 +309,7 @@ impl InternalDoc {
     /// returns (unless there's no range).
     fn convert_pos(&self, pos: u64, cursor: &mut Cursor, editor_pos: bool) -> u64 {
         if pos == 0 {
-            // `cursor` must points to a range after this function
+            // `cursor` must point to a range after this function
             // returns.
             if self.ranges.len() > 0 {
                 cursor.internal_pos = 0;
@@ -271,7 +319,7 @@ impl InternalDoc {
             return 0;
         }
         if pos == cursor.pos(editor_pos) {
-            return cursor.internal_pos;
+            return cursor.pos(!editor_pos);
         }
         if self.ranges.len() == 0 {
             return 0;
@@ -448,6 +496,7 @@ impl InternalDoc {
         let mut range = iter.range(&self.ranges);
         let mut final_ranges = vec![];
         let mut flipped_ranges = vec![];
+        let mut flipped_ranges_len = 0;
 
         let mut push_wo_dup = |range: (u64, u64)| {
             if let Some(last_range) = flipped_ranges.last() {
@@ -458,6 +507,7 @@ impl InternalDoc {
                 assert!(!(beg <= lend && lbeg <= end));
             }
             flipped_ranges.push(range);
+            flipped_ranges_len += range.1;
         };
 
         // Ensure that the cursor is at the right range.
@@ -481,6 +531,8 @@ impl InternalDoc {
             else if iter.range_end == marked_range_initial_beg {
                 if range.is_dead() {
                     len += iter.range_len();
+                    // When we extend marked range left, we need to
+                    // move cursor.
                     cursor.move_to_beg(&iter);
                 } else {
                     iter.contract_affected_range_right();
@@ -494,11 +546,17 @@ impl InternalDoc {
                 // or
                 // [           range              ]
                 //    [      marked range     ]
+                // or
+                //  [           range           ]
+                //        [     marked range    ]
                 if iter.range_beg < marked_range_initial_beg {
                     let prefix_len = marked_range_initial_beg - iter.range_beg;
                     if range.is_dead() {
                         // Extend the marked range.
                         len += prefix_len;
+                        // When we extend marked range left, we need to
+                        // move cursor.
+                        cursor.move_to_beg(&iter);
                     } else {
                         let prefix_range = Range::Live(prefix_len);
                         final_ranges.push(prefix_range);
@@ -513,6 +571,9 @@ impl InternalDoc {
                 // or
                 //  [           range           ]
                 //    [      marked range     ]
+                // or
+                //  [           range           ]
+                //  [     marked range    ]
                 if iter.range_end > marked_range_initial_end {
                     let suffix_len = iter.range_end - marked_range_initial_end;
                     if range.is_dead() {
@@ -533,7 +594,13 @@ impl InternalDoc {
                         break;
                     }
                 }
-                //                    [ range ]
+                //  [           range         ]
+                //        [    marked range   ]
+                // or
+                //    [         range         ]
+                //    [      marked range     ]
+                // or
+                //                [   range   ]
                 //    [      marked range     ]
                 if iter.range_end == marked_range_initial_end {
                     if range.is_live() {
@@ -544,7 +611,7 @@ impl InternalDoc {
                     }
                     if iter.range_idx + 1 < self.ranges.len() {
                         let next_range = iter.move_right(&self.ranges);
-                        if !next_range.is_live() {
+                        if next_range.is_dead() {
                             len += iter.range_len();
                             iter.extend_affected_range_right();
                         }
@@ -576,6 +643,10 @@ impl InternalDoc {
 
         // At this point, `final_ranges` contains 1-3 ranges that are
         // going to replace the affected ranges.
+        let affected_ranges_count = iter.affected_ranges_idx_end - iter.affected_ranges_idx_beg;
+        let range_idx_delta = (final_ranges.len() as isize) - (affected_ranges_count as isize);
+        let editor_pos_delta = -(flipped_ranges_len as i64);
+
         self.ranges.splice(
             iter.affected_ranges_idx_beg..iter.affected_ranges_idx_end,
             final_ranges,
@@ -586,6 +657,8 @@ impl InternalDoc {
                     && other_cursor_range_idx < iter.affected_ranges_idx_end
                 {
                     other_cursor.move_to_cursor(cursor);
+                } else if other_cursor_range_idx >= iter.affected_ranges_idx_end {
+                    other_cursor.shift(editor_pos_delta, range_idx_delta);
                 }
             }
         }
@@ -601,6 +674,21 @@ impl InternalDoc {
         let mut iter = RangeIterator::new(&self.ranges, cursor);
         let mut range = iter.range(&self.ranges);
         let mut final_ranges = vec![];
+
+        let mut flipped_ranges = vec![];
+        let mut flipped_ranges_len = 0;
+
+        let mut push_wo_dup = |range: (u64, u64)| {
+            if let Some(last_range) = flipped_ranges.last() {
+                let (lbeg, llen) = *last_range;
+                let lend = lbeg + llen;
+                let (beg, len) = range;
+                let end = beg + len;
+                assert!(!(beg <= lend && lbeg <= end));
+            }
+            flipped_ranges.push(range);
+            flipped_ranges_len += range.1;
+        };
 
         // Ensure that the cursor is at the right range.
         assert!(iter.range_beg <= marked_range_initial_beg);
@@ -623,6 +711,8 @@ impl InternalDoc {
             else if iter.range_end == marked_range_initial_beg {
                 if range.is_live() {
                     len += iter.range_len();
+                    // When we extend marked range left, we need to
+                    // move cursor.
                     cursor.move_to_beg(&iter);
                 } else {
                     iter.contract_affected_range_right();
@@ -638,12 +728,18 @@ impl InternalDoc {
                 //    [      marked range     ]
                 if iter.range_beg < marked_range_initial_beg {
                     let prefix_len = marked_range_initial_beg - iter.range_beg;
-                    if let Range::Dead(_) = range {
+                    if range.is_dead() {
                         let prefix_range = Range::Dead(prefix_len);
                         final_ranges.push(prefix_range);
+
+                        let flipped_beg = marked_range_initial_beg;
+                        let flipped_end = min(marked_range_initial_end, iter.range_end);
+                        push_wo_dup((flipped_beg, flipped_end - flipped_beg));
                     } else {
                         // Extend the marked range.
                         len += prefix_len;
+                        // When we extend marked range left, we need
+                        // to move cursor.
                         cursor.move_to_beg(&iter);
                     }
                 }
@@ -658,6 +754,12 @@ impl InternalDoc {
                         let suffix_range = Range::Dead(range_len - suffix_mid);
                         final_ranges.push(Range::Live(len));
                         final_ranges.push(suffix_range);
+
+                        if !(iter.range_beg < marked_range_initial_beg) {
+                            let flipped_beg = max(iter.range_beg, marked_range_initial_beg);
+                            let flipped_len = marked_range_initial_end - flipped_beg;
+                            push_wo_dup((flipped_beg, flipped_len));
+                        }
                         break;
                     } else {
                         // Extend the marked range.
@@ -669,6 +771,12 @@ impl InternalDoc {
                 //                    [ range ]
                 //    [      marked range     ]
                 if iter.range_end == marked_range_initial_end {
+                    if range.is_dead() {
+                        if !(iter.range_beg < marked_range_initial_beg) {
+                            let flipped_range = (iter.range_beg, iter.range_len());
+                            push_wo_dup(flipped_range);
+                        }
+                    }
                     if iter.range_idx + 1 < self.ranges.len() {
                         let next_range = iter.move_right(&self.ranges);
                         if next_range.is_live() {
@@ -685,6 +793,11 @@ impl InternalDoc {
                 //    [ range ]
                 //    [      marked range     ]
                 // Do nothing and go to next iteration.
+                if range.is_dead() {
+                    if !(iter.range_beg < marked_range_initial_beg) {
+                        push_wo_dup((iter.range_beg, iter.range_len()));
+                    }
+                }
             }
 
             range = iter.move_right(&self.ranges);
@@ -695,6 +808,10 @@ impl InternalDoc {
 
         // At this point, `final_ranges` contains 1-3 ranges that are
         // going to replace the affected ranges.
+        let affected_ranges_count = iter.affected_ranges_idx_end - iter.affected_ranges_idx_beg;
+        let range_idx_delta = (final_ranges.len() as isize) - (affected_ranges_count as isize);
+        let editor_pos_delta = flipped_ranges_len as i64;
+
         self.ranges.splice(
             iter.affected_ranges_idx_beg..iter.affected_ranges_idx_end,
             final_ranges,
@@ -705,6 +822,8 @@ impl InternalDoc {
                     && other_cursor_range_idx < iter.affected_ranges_idx_end
                 {
                     other_cursor.move_to_cursor(cursor);
+                } else if other_cursor_range_idx >= iter.affected_ranges_idx_end {
+                    other_cursor.shift(editor_pos_delta, range_idx_delta);
                 }
             }
         }
@@ -838,6 +957,7 @@ impl InternalDoc {
 
         // Put it back.
         self.cursors.insert(site, cursor);
+        self.check_cursor_positions();
         converted_op
     }
 
@@ -846,6 +966,7 @@ impl InternalDoc {
     fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
         log::debug!("convert_internal_op_and_apply(op={:?})", &op);
         log::debug!("ranges_before={:?}", &self.ranges);
+        log::debug!("cursors={:?}", &self.cursors);
 
         let site = op.site();
         let mut cursor = self.get_cursor(&site);
@@ -881,6 +1002,7 @@ impl InternalDoc {
                 }
             }
         };
+        self.check_cursor_positions();
 
         log::debug!("ranges_after={:?}", &self.ranges,);
         log::debug!("converted_op={:?}", &instr);
@@ -1149,7 +1271,7 @@ pub struct ServerEngine {
     /// The length of the document. This is used to check that after
     /// applying every op, the length of the document and the length
     /// of the InternalDoc matches.
-    doc_len: usize,
+    mock_doc_len: u64,
 }
 
 impl ServerEngine {
@@ -1531,7 +1653,7 @@ impl ServerEngine {
         ServerEngine {
             gh: GlobalHistory::new(init_len),
             current_seq: 0,
-            doc_len: init_len as usize,
+            mock_doc_len: init_len,
         }
     }
 
@@ -1542,26 +1664,41 @@ impl ServerEngine {
             .gh
             .internal_doc
             .convert_internal_op_and_apply(op.op.clone());
-        let internal_editor_len = self.gh.internal_doc.editor_len();
+
+        let mut new_mock_doc_len = self.mock_doc_len;
         match &converted_op {
             EditInstruction::Ins(edits) => {
                 for edit in edits {
-                    self.doc_len += edit.1.chars().count();
+                    if edit.0 > self.mock_doc_len as u64 {
+                        return Err(CollabError::DocFatal(format!(
+                            "Op out-of-range, editor_doc_len: {}, op: {:?}",
+                            self.mock_doc_len, &converted_op
+                        )));
+                    }
+                    new_mock_doc_len += edit.1.chars().count() as u64;
                 }
             }
             EditInstruction::Del(edits) => {
                 for edit in edits {
-                    self.doc_len -= edit.1.chars().count();
+                    if edit.0 + edit.1.chars().count() as u64 > self.mock_doc_len as u64 {
+                        return Err(CollabError::DocFatal(format!(
+                            "Op out-of-range, editor_doc_len: {}, op: {:?}",
+                            self.mock_doc_len, &converted_op
+                        )));
+                    }
+                    new_mock_doc_len -= edit.1.chars().count() as u64;
                 }
             }
         }
+        self.mock_doc_len = new_mock_doc_len;
 
         // FIXME: Remove this potentially expensive test once we are
         // confident there's no position-bugs anymore.
-        if internal_editor_len != self.doc_len {
+        let internal_editor_len = self.gh.internal_doc.editor_len();
+        if internal_editor_len != self.mock_doc_len {
             return Err(CollabError::DocFatal(format!(
                 "Editor doc & internal doc length mismatch, editor: {}, internal: {}",
-                self.doc_len, internal_editor_len
+                self.mock_doc_len, internal_editor_len
             )));
         }
         Ok(converted_op)
