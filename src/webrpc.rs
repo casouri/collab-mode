@@ -605,8 +605,8 @@ mod tests {
 
         endpoint.read_requests().unwrap();
 
-        let mut rx1 = endpoint.send_request(&"req1".to_string()).await?;
-        let mut rx2 = endpoint.send_request(&"req2".to_string()).await?;
+        let (mut rx1, _) = endpoint.send_request(&"req1".to_string()).await?;
+        let (mut rx2, _) = endpoint.send_request(&"req2".to_string()).await?;
 
         let resp1 = rx1.recv().await.unwrap().unwrap();
         let msg1: String = resp1.unpack().unwrap();
