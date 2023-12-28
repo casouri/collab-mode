@@ -466,6 +466,7 @@ delay (‘collab-send-ops-delay’).")
   "Send pending ops after a short delay."
   ;; TODO: We can extend unactivated timer instead of cancel and
   ;; re-create. I don’t know how much time it saves tho.
+  (collab--cancel-send-ops-timer)
   (setq collab--send-ops-timer
         (run-with-timer collab-send-ops-delay nil
                         #'collab--send-ops-now (current-buffer))))
@@ -1000,7 +1001,7 @@ Return the largest global seq of all the ops received from the
 collab process."
   (collab--check-precondition)
   (when collab--verbose
-    (message "Sending pending ops: %s" collab--pending-ops))
+    (message "Sending ops: %s" ops))
   (let ((conn collab--jsonrpc-connection)
         resp)
     (collab--catch-error "can’t send local edits to remote"
