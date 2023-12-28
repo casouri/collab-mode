@@ -2202,8 +2202,8 @@ mod tests {
         cursor.range_idx = Some(0);
 
         // Case 1.
-        // 0           10    15    20          30          40
-        // [   Live   ][Dead][Live][   Dead   ][   Live   ]
+        // 0           10    15    20          30          40    41
+        // [   Live   ][Dead][Live][   Dead   ][   Live   ][dead]
         //       [              Marked               ]
         //       6                                    36
         doc.ranges = vec![
@@ -2212,6 +2212,7 @@ mod tests {
             Range::Live(5),
             Range::Dead(10),
             Range::Live(10),
+            Range::Dead(1),
         ];
         doc.cursors.insert(
             1,
@@ -2229,13 +2230,26 @@ mod tests {
                 range_idx: Some(4),
             },
         );
+        doc.cursors.insert(
+            3,
+            Cursor {
+                editor_pos: 25,
+                internal_pos: 40,
+                range_idx: Some(5),
+            },
+        );
 
         let flipped_ranges = doc.apply_mark_dead(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
         assert!(vec_eq(
             &doc.ranges,
-            &vec![Range::Live(6), Range::Dead(30), Range::Live(4)]
+            &vec![
+                Range::Live(6),
+                Range::Dead(30),
+                Range::Live(4),
+                Range::Dead(1)
+            ]
         ));
         assert!(vec_eq(&flipped_ranges, &vec![(6, 4), (15, 5), (30, 6)]));
         let cursor1 = doc.get_cursor(&1);
@@ -2246,6 +2260,10 @@ mod tests {
         assert!(cursor2.internal_pos == cursor.internal_pos);
         assert!(cursor2.editor_pos == cursor.editor_pos);
         assert!(cursor2.range_idx == cursor.range_idx);
+        let cursor3 = doc.get_cursor(&3);
+        assert!(cursor3.internal_pos == 40);
+        assert!(cursor3.editor_pos == 10);
+        assert!(cursor3.range_idx == Some(3));
 
         // Case 2.
         // 0           10    15          25    30          40
@@ -2336,8 +2354,8 @@ mod tests {
         cursor.range_idx = Some(0);
 
         // Case 1.
-        // 0           10    15    20          30          40
-        // [   Live   ][Dead][Live][   Dead   ][   Live   ]
+        // 0           10    15    20          30          40    41
+        // [   Live   ][Dead][Live][   Dead   ][   Live   ][Dead]
         //       [              Marked               ]
         //       6                                    36
         doc.ranges = vec![
@@ -2346,6 +2364,7 @@ mod tests {
             Range::Live(5),
             Range::Dead(10),
             Range::Live(10),
+            Range::Dead(1),
         ];
         doc.cursors.insert(
             1,
@@ -2363,11 +2382,19 @@ mod tests {
                 range_idx: Some(4),
             },
         );
+        doc.cursors.insert(
+            3,
+            Cursor {
+                editor_pos: 25,
+                internal_pos: 40,
+                range_idx: Some(5),
+            },
+        );
 
         doc.apply_mark_live(6, 30, &mut cursor);
         println!("Ranges {:#?}", doc.ranges);
         println!("{:#?}", cursor);
-        assert!(vec_eq(&doc.ranges, &vec![Range::Live(40)]));
+        assert!(vec_eq(&doc.ranges, &vec![Range::Live(40), Range::Dead(1)]));
 
         let cursor1 = doc.get_cursor(&1);
         assert!(cursor1.internal_pos == cursor.internal_pos);
@@ -2377,6 +2404,10 @@ mod tests {
         assert!(cursor2.internal_pos == cursor.internal_pos);
         assert!(cursor2.editor_pos == cursor.editor_pos);
         assert!(cursor2.range_idx == cursor.range_idx);
+        let cursor3 = doc.get_cursor(&3);
+        assert!(cursor3.internal_pos == 40);
+        assert!(cursor3.editor_pos == 40);
+        assert!(cursor3.range_idx == Some(1));
 
         // Case 2.
         // 0           10    15          25    30          40
