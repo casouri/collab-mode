@@ -35,12 +35,12 @@ The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   "Cursor color ring."
   :type '(list string))
 
-(defcustom collab-send-ops-delay 0.6
+(defcustom collab-send-ops-delay 1
   "Collab waits for this much of idle time before sending ops.
 Ops are sent immediately when user has typed ~20 characters."
   :type 'number)
 
-(defcustom collab-receive-ops-delay 0.6
+(defcustom collab-receive-ops-delay 1
   "Delay for getting arrived remote ops.
 When there are remote ops, collab waits for this long before
 grabbing them and applying them to buffer. We don’t need to get
