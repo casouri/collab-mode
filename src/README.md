@@ -2,17 +2,38 @@
 
 To include private modules in the doc, run
 
-``` shell
+```shell
 cargo doc --document-private-items --open
 ```
 
+# Design goal
+
+I want collab-mode to be:
+- Usable out-of-the-box, so we have builtin NAT traversal and run a
+  signaling server (perhaps even a TURN server?). In the future the
+  editor frontend should auto-download binary and run it, etc, etc.
+- Limited in scope, we focus on realtime, temporary collaboration. For
+  non-realtime collaboration you have Git; for permanent realtime you
+  have Google Docs. Collab-mode would be something that you use for
+  quickly pair-program for a little bit, or collaborate on some notes.
+- p2p, in the sense that I don’t need to maintain a server for other
+  people to use collab-mode. (Well, I still need to set up a signaling
+  server, but the load on a signaling server should be relatively
+  light.)
+- Simple in design and implementation, I’m willing to trade
+  feature/efficiency for simplicity (to a certain degree, of course).
+- Lean, meaning it has a small binary size and doesn’t use much
+  memory. This one has lower priority but is still on the list.
+- Stable and secure. These two are standard requirements, collab-mode
+  isn’t special here.
+
 # Topology
 
-Although collab-mode is p2p, the topology is somewhat centralized:
-there is a “host” that hosts the file and is the source-of-truth. Each
-“client” sends ops to the host and host broadcasts the op to all other
-clients. Clients join the group by contacting host and get a copy of
-the document. Internally we call the “host” collab server.
+For each doc there is a server node that owns the file and is the
+source-of-truth. Each client sends ops to the server and the server
+broadcasts the op to all other clients. Clients join the group by
+contacting server and get a copy of the document. Collab-mode is p2p
+in the sense that every host is both a client and a server.
 
 # Connection and RPC
 
@@ -141,7 +162,7 @@ path of transformation are out of question.
 
 After much struggle, I decided to use tombstones. They solves every
 problem and is relatively simple, at the mere cost of keeping deleted
-characters. collab-mode is for temporary real-time sharing, keeping
+characters. collab-mode is for temporary realtime sharing, keeping
 some deleted charaters is totally acceptable.
 
 Since we have tombstones now, we need to convert between editor
@@ -150,13 +171,18 @@ tombstones). The conversion is sped up with cursors, basically the
 trick used in Yjs [4]; we don’t need to use trees like ST-Undo [5]
 does.
 
+This part of the code ([crate::engine::InternalDoc]) is really the
+part that I’m most unhappy with, it’s not very clean. In the future I
+might revisit this and try to make the logic cleaner and with less
+edge-cases.
+
 # Undo policy
 
 To keep the user interface simple, we only allow undo and redo in a
-linear history. Basically, the default undo/redo behavior anyone would
-expect. Users can undo some operations, and redo them; but once they
-make some original edit, the undone ops are “lost” and can’t be redone
-anymore.
+linear history. Basically, the default undo/redo behavior people
+usually expect. Users can undo some operations, and redo them; but
+once they make some original edit, the undone ops are “lost” and can’t
+be redone anymore.
 
 We also restrict undo and redo to ops created by the user, ie,
 everyone can only undo their own edits.
@@ -179,6 +205,14 @@ complete, and moves the undo tip. It also replaces the pointer in the
 undo queue to point to the undo op just appended to the history; so
 that when the next time when the user redo the op, the redo op will be
 the inverse of this undo op.
+
+# Beta
+
+Right now there’s some (potentially expensive and immediately
+panicking) runtime checks in-place. Obviously we need to remember to
+remove them later:
+[crate::engine::InternalDoc::check_cursor_positions], some check
+in[crate::engine::ServerEngine::convert_internal_op_and_apply].
 
 
 [1] Conditions and Patterns for Achieving Convergence in OT-Based

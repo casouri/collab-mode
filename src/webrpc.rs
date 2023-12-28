@@ -52,7 +52,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::mpsc;
-use tokio::time;
 use webrtc_data::data_channel::{DataChannel, PollDataChannel};
 
 pub use crate::signaling::EndpointId;
