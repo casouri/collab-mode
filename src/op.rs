@@ -286,29 +286,6 @@ impl<O: Operation> FatOp<O> {
 
 // *** Functions for Vec<FatOp>
 
-/// Iterate over `ops`, and finds out all the ops to skip during
-/// transformation. An op is skipped if there is an undo op that
-/// undoes it. Returns a bitmap, if bitmap[i] = true, skip ops[i]
-/// during transformation.
-pub fn find_ops_to_skip<O>(ops: &[FatOp<O>]) -> Vec<bool> {
-    if ops.len() == 0 {
-        return vec![];
-    }
-    let mut bitmap = vec![false; ops.len()];
-    for idx in (0..ops.len()).rev() {
-        if let OpKind::Undo(delta) = ops[idx].kind {
-            if !bitmap[idx] && idx >= delta {
-                // It's possible for delta to be greater than idx, in
-                // that case the inverse is in `ops` but the original
-                // isn't, and we don't need to skip the inverse.
-                bitmap[idx] = true;
-                bitmap[idx - delta] = true;
-            }
-        }
-    }
-    bitmap
-}
-
 /// Transform ops1 against ops2, and transform ops2 against ops1.
 /// Return the transformed ops1 and ops2. Pass the shorter list as
 /// `ops1` because it's copied, and `ops2` are transformed in-place.
