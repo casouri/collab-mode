@@ -104,6 +104,9 @@ struct Doc {
     tx_info: broadcast::Sender<String>,
     /// Retain this receiver so the channel is not closed.
     _rx_info: broadcast::Receiver<String>,
+    /// If this is not None, some error happend to this Doc and any
+    /// further access should simply return an error.
+    error: Option<CollabError>,
 }
 
 /// Stores relevant data for a shared dir, used by the server.
@@ -115,6 +118,9 @@ struct Dir {
     meta: JsonMap,
     /// Absolute path of the directory on disk.
     path: PathBuf,
+    /// If this is not None, some error happend to this Doc and any
+    /// further access should simply return an error.
+    error: Option<CollabError>,
 }
 
 // *** Functions for Doc
@@ -140,6 +146,7 @@ impl Doc {
             rx,
             tx_info,
             _rx_info: rx_info,
+            error: None,
         }
     }
 
@@ -169,6 +176,28 @@ impl Doc {
             file_name: self.name.clone(),
             seq: self.engine.current_seq(),
             doc_id,
+        }
+    }
+
+    /// Check if the doc already has an error, if so, return that
+    /// error.
+    pub fn check_for_existing_error(&self) -> CollabResult<()> {
+        match self.error {
+            Some(ref err) => Err(err.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+// *** Functions for Dir
+
+impl Dir {
+    /// Check if the dir already has an error, if so, return that
+    /// error.
+    pub fn check_for_existing_error(&self) -> CollabResult<()> {
+        match self.error {
+            Some(ref err) => Err(err.clone()),
+            None => Ok(()),
         }
     }
 }
@@ -212,6 +241,28 @@ impl LocalServer {
         }
     }
 
+    /// Attach `err` to doc with `doc_id`.
+    fn attach_error(&mut self, doc_id: &DocId, err: CollabError) {
+        if let Some(doc) = self.get_doc(doc_id) {
+            let mut doc = doc.lock().unwrap();
+            match &mut doc.error {
+                None => doc.error = Some(err),
+                Some(_) => (),
+            }
+        }
+    }
+
+    /// Attach `err` to doc with `doc_id`.
+    fn attach_dir_error(&mut self, dir_id: &DocId, err: CollabError) {
+        if let Some(dir) = self.get_dir(dir_id) {
+            let mut dir = dir.lock().unwrap();
+            match &mut dir.error {
+                None => dir.error = Some(err),
+                Some(_) => (),
+            }
+        }
+    }
+
     /// Create a doc out of the file at `rel_path` in `dir`, and return its
     /// snapshot.
     async fn get_dir_file(
@@ -220,7 +271,11 @@ impl LocalServer {
         dir: &Arc<Mutex<Dir>>,
         rel_path: &Path,
     ) -> CollabResult<Snapshot> {
-        let full_path = dir.lock().unwrap().path.join(rel_path);
+        let full_path = {
+            let dir = dir.lock().unwrap();
+            dir.check_for_existing_error()?;
+            dir.path.join(rel_path)
+        };
         // We return full path here and let clients handle displaying
         // more friendly names.
         let file_name = full_path.to_string_lossy().to_string();
@@ -282,6 +337,7 @@ impl LocalServer {
                         name: file_name.to_string(),
                         path,
                         meta: empty_json_map(),
+                        error: None,
                     })),
                 );
             }
@@ -295,6 +351,7 @@ impl LocalServer {
         let doc_id = ops.doc();
         if let Some(doc) = self.get_doc(&doc_id) {
             let mut doc = doc.lock().unwrap();
+            doc.check_for_existing_error()?;
 
             log::debug!("send_op() Local server receive ops, processing: {:?}", &ops);
             let ops = doc.engine.process_ops(ops.ops, ops.context)?;
@@ -337,6 +394,7 @@ impl LocalServer {
         let doc = maybe_doc.unwrap();
         let doc1 = doc.clone();
         let locked_doc = doc.lock().unwrap();
+        locked_doc.check_for_existing_error()?;
         let mut notifier = locked_doc.rx.clone();
         let mut inner_rx_info = locked_doc.tx_info.subscribe();
         drop(locked_doc);
@@ -400,6 +458,7 @@ impl LocalServer {
         if let Some(dir) = self.get_dir(&doc_id) {
             let path = {
                 let dir = dir.lock().unwrap();
+                dir.check_for_existing_error()?;
                 Path::new(&dir.path).join(rel_path)
             };
 
@@ -505,7 +564,9 @@ impl LocalServer {
         match doc_file {
             DocDesc::Doc(doc_id) => {
                 if let Some(doc) = self.get_doc(doc_id) {
-                    Ok(doc.lock().unwrap().snapshot(*doc_id))
+                    let doc = doc.lock().unwrap();
+                    doc.check_for_existing_error()?;
+                    Ok(doc.snapshot(*doc_id))
                 } else {
                     Err(CollabError::DocNotFound(doc_id.clone()))
                 }
@@ -535,7 +596,9 @@ impl LocalServer {
     async fn send_info_1(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
         log::debug!("send_info_1(doc={}, info={:?})", doc_id, &info);
         if let Some(doc) = self.get_doc(doc_id) {
-            doc.lock().unwrap().tx_info.send(info).unwrap();
+            let doc = doc.lock().unwrap();
+            doc.check_for_existing_error()?;
+            doc.tx_info.send(info).unwrap();
             Ok(())
         } else {
             Err(CollabError::DocNotFound(doc_id.clone()))
@@ -586,6 +649,7 @@ async fn handle_connection(mut endpoint: Endpoint, mut server: LocalServer) -> C
         let res = handle_request(msg, &mut server, &mut endpoint).await;
         match res {
             Err(err) => {
+                log::warn!("Non-fatal error handling request: {}", err);
                 endpoint
                     .send_response(req_id, &DocServerResp::Err(err))
                     .await?;
@@ -624,21 +688,46 @@ async fn handle_request(
             Ok(Some(DocServerResp::ShareFile(doc_id)))
         }
         DocServerReq::ListFiles { dir_path } => {
-            let doc_info = server.list_files_1(dir_path).await?;
-            Ok(Some(DocServerResp::ListFiles(
-                doc_info.into_iter().map(|info| info.into()).collect(),
-            )))
+            let dir_id = match dir_path {
+                Some((dir_id, _)) => Some(dir_id),
+                None => None,
+            };
+            let res = server.list_files_1(dir_path).await;
+            match res {
+                Ok(doc_info) => Ok(Some(DocServerResp::ListFiles(
+                    doc_info.into_iter().map(|info| info.into()).collect(),
+                ))),
+                Err(err) => {
+                    if let Some(dir_id) = dir_id {
+                        server.attach_dir_error(&dir_id, err.clone());
+                    }
+                    Err(err)
+                }
+            }
         }
         DocServerReq::SendOp(ops) => {
-            server.send_op_1(ops).await?;
+            let doc_id = ops.doc();
+            let res = server.send_op_1(ops).await;
+            if let Err(err) = res {
+                server.attach_error(&doc_id, err.clone());
+                return Err(err);
+            }
             Ok(Some(DocServerResp::SendOp))
         }
         DocServerReq::SendInfo { doc_id, info } => {
-            server.send_info_1(&doc_id, info).await?;
+            let res = server.send_info_1(&doc_id, info).await;
+            if let Err(err) = res {
+                server.attach_error(&doc_id, err.clone());
+                return Err(err);
+            }
             Ok(Some(DocServerResp::SendInfo))
         }
         DocServerReq::RecvOpAndInfo { doc_id, after } => {
-            let (mut stream_op, mut stream_info) = server.recv_op_1(&doc_id, after).await?;
+            let res = server.recv_op_1(&doc_id, after).await;
+            if let Err(err) = &res {
+                server.attach_error(&doc_id, err.clone());
+            }
+            let (mut stream_op, mut stream_info) = res?;
             let endpoint_1 = endpoint.clone();
             let endpoint_2 = endpoint.clone();
             let req_id = msg.req_id;
