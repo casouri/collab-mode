@@ -679,8 +679,18 @@ MY-SITE-ID is the site if of this editor."
 DOC-DESC := (:Doc DOC-ID)
          | (:File [DOC-ID REL-PATH])
          | (:Dir [DOC-ID REL-PATH])
-"
-  (and (eq (car doc-desc) :Doc) (cadr doc-desc)))
+
+Return DOC-ID if DOC-DESC is a :Doc or a :File, or it’s a :Dir
+but REL-PATH is “.” Basically, return the doc id if the doc id
+actually belongs to DOC-DESC."
+  (pcase (car doc-desc)
+    (:Doc (cadr doc-desc))
+    (:File (aref (cadr doc-desc) 0))
+    (:Dir (let ((doc-id (aref (cadr doc-desc) 0))
+                (path (aref (cadr doc-desc) 1)))
+            (if (equal path ".")
+                doc-id
+              nil)))))
 
 (defun collab--doc-desc-dir-p (doc-desc)
   "Return non-nil if DOC-DESC represents a directory."
