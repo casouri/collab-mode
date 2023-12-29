@@ -80,21 +80,18 @@ pub fn run_socket(addr: &str, runtime: tokio::runtime::Runtime) -> anyhow::Resul
 // |            |
 // |            | <--(2)-- rx errors   tx <--- Doc threads
 // | Connection |
-// |            | ---(3)-> tx request  rx ---> (5)
-// |            |
-// +------------+ <--(4)-- rx response tx <--- (5)
+// |            | ------->
+// |            |           (3)  <---block_on--->
+// +------------+ <-------
 //
 fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::runtime::Runtime) {
     let (notifier_tx, notifier_rx) = std::sync::mpsc::channel();
-    let (req_tx, mut req_rx) = tokio::sync::mpsc::channel(1);
-    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel(1);
     let (async_err_tx, mut async_err_rx) = tokio::sync::mpsc::channel(1);
     let mut jsonrpc_server = JSONRPCServer::new(doc_server.clone(), notifier_tx);
 
     let connection = std::sync::Arc::new(connection);
     let connection_1 = std::sync::Arc::clone(&connection);
     let connection_2 = std::sync::Arc::clone(&connection);
-    let connection_3 = std::sync::Arc::clone(&connection);
 
     // Instead of using select, just start four threads in the sync
     // world.
@@ -120,7 +117,7 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
         }
     });
 
-    // 2. Send fatal server errors.
+    // 2. Send non-fatal server errors.
     std::thread::spawn(move || loop {
         let err: Option<CollabError> = async_err_rx.blocking_recv();
         if err.is_none() {
@@ -141,75 +138,55 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
                 params: serde_json::to_value(err.to_string()).unwrap(),
             },
         };
-        connection_3
+        connection_2
             .sender
             .send(Message::Notification(msg))
             .unwrap();
     });
 
-    // 3. Receive request.
-    std::thread::spawn(move || {
-        for msg in &connection.receiver {
-            let res = req_tx.blocking_send(msg);
-            if res.is_err() {
-                log::error!("JSONRPC request channel broke: {:?}", res);
-                exit(-1);
-            }
+    // 3. Handle requests on the main thread.
+    loop {
+        let msg = connection.receiver.recv();
+        if msg.is_err() {
+            log::error!("JSONRPC request channel broke");
+            // FIXME: Save everything and exit.
+            return;
         }
-    });
+        match msg.unwrap() {
+            Message::Request(req) => {
+                let id = req.id.clone();
+                let res = runtime.block_on(jsonrpc_server.handle_request(
+                    req,
+                    doc_server.clone(),
+                    async_err_tx.clone(),
+                ));
 
-    // 4. Send response.
-    std::thread::spawn(move || loop {
-        let resp = resp_rx.blocking_recv();
-        if resp.is_none() {
-            log::error!("JSONRPC response channel broke");
-            exit(-1);
-        }
-        connection_2.sender.send(resp.unwrap()).unwrap();
-    });
-
-    // 5. Handle requests on the main thread.
-    runtime.block_on(async {
-        loop {
-            let msg = req_rx.recv().await;
-            if msg.is_none() {
-                log::error!("JSONRPC request channel broke");
-                // FIXME: Save everything and exit.
-                return;
+                let msg = match res {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        let code = error_code(&err);
+                        make_err(id, code, format!("{:#}", err))
+                    }
+                };
+                let res = connection.sender.send(msg);
+                if res.is_err() {
+                    log::error!("JSONRPC response channel broke: {:?}", res);
+                    exit(-1);
+                }
             }
-            match msg.unwrap() {
-                Message::Request(req) => {
-                    let id = req.id.clone();
-                    let res = jsonrpc_server
-                        .handle_request(req, doc_server.clone(), async_err_tx.clone())
-                        .await;
-                    let msg = match res {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            let code = error_code(&err);
-                            make_err(id, code, format!("{:#}", err))
-                        }
-                    };
-                    let res = resp_tx.send(msg).await;
-                    if res.is_err() {
-                        log::error!("JSONRPC response channel broke: {:?}", res);
-                        exit(-1);
-                    }
-                }
-                Message::Response(_) => {
-                    log::info!("Received a response");
-                }
-                Message::Notification(notif) => {
-                    let res = jsonrpc_server
-                        .handle_notification(notif.clone(), doc_server.clone())
-                        .await;
-                    if let Err(err) = res {
-                        log::error!("Error handling notification {:?}: {:?}", &notif, err);
-                    }
+            Message::Response(_) => {
+                log::info!("Received a response");
+            }
+            Message::Notification(notif) => {
+                let res = runtime.block_on(
+                    jsonrpc_server.handle_notification(notif.clone(), doc_server.clone()),
+                );
+                if let Err(err) = res {
+                    log::error!("Error handling notification {:?}: {:?}", &notif, err);
                 }
             }
         }
-    });
+    }
 }
 
 // *** Helper functions
