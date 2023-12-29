@@ -212,18 +212,18 @@ Right now there’s some (potentially expensive and immediately
 panicking) runtime checks in-place. Obviously we need to remember to
 remove them later:
 [crate::engine::InternalDoc::check_cursor_positions], some check
-in[crate::engine::ServerEngine::convert_internal_op_and_apply].
+in [crate::engine::ServerEngine::convert_internal_op_and_apply].
 
 
 [1] Conditions and Patterns for Achieving Convergence in OT-Based
 Co-Editors
 
-[2] https://people.apache.org/~al/wave_docs/ApacheWaveProtocol-0.4.pdf
+[2] <https://people.apache.org/~al/wave_docs/ApacheWaveProtocol-0.4.pdf>
 
 [3] Context-Based Operational Transformation in Distributed
 Collaborative Editing Systems
 
-[4] https://josephg.com/blog/crdts-go-brrr/
+[4] <https://josephg.com/blog/crdts-go-brrr/>
 
 [5] A semi-transparent selective undo algorithm for multi-user
 collaborative editors
