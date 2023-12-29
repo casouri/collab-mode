@@ -276,12 +276,6 @@ async fn send_receive_stream(
     loop {
         tokio::select! {
             _ = shutdown_tx.closed() => {
-                if !stream.is_terminated() {
-                    let res = stream.close(None).await;
-                    if let Err(err) = res {
-                        log::warn!("Error closing connection to the signaling server: {:?}", err);
-                    }
-                }
                 return;
             }
             msg = stream.next() => {
