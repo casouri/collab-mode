@@ -65,7 +65,14 @@ impl DocServer for LocalServer {
         ))
     }
     async fn send_info(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
-        self.send_info_1(doc_id, info).await
+        self.send_info_1(
+            doc_id,
+            Info {
+                sender: self.self_site_id,
+                value: info,
+            },
+        )
+        .await
     }
 }
 
@@ -101,9 +108,9 @@ struct Doc {
     /// Clone a rx from this rx, and check for new op notification.
     rx: watch::Receiver<()>,
     /// Incoming info are sent to this channel.
-    tx_info: broadcast::Sender<String>,
+    tx_info: broadcast::Sender<Info>,
     /// Retain this receiver so the channel is not closed.
-    _rx_info: broadcast::Receiver<String>,
+    _rx_info: broadcast::Receiver<Info>,
     /// If this is not None, some error happend to this Doc and any
     /// further access should simply return an error.
     error: Option<CollabError>,
@@ -395,7 +402,7 @@ impl LocalServer {
         &self,
         doc_id: &DocId,
         mut after: GlobalSeq,
-    ) -> CollabResult<(ReceiverStream<Vec<FatOp>>, ReceiverStream<String>)> {
+    ) -> CollabResult<(ReceiverStream<Vec<FatOp>>, ReceiverStream<Info>)> {
         log::debug!("recv_op_1(doc={}, after={})", doc_id, after);
         let (tx_op, rx_op) = mpsc::channel(1);
         let (tx_info, rx_info) = mpsc::channel(1);
@@ -603,7 +610,7 @@ impl LocalServer {
         Ok(())
     }
 
-    async fn send_info_1(&mut self, doc_id: &DocId, info: String) -> CollabResult<()> {
+    async fn send_info_1(&mut self, doc_id: &DocId, info: Info) -> CollabResult<()> {
         log::debug!("send_info_1(doc={}, info={:?})", doc_id, &info);
         if let Some(doc) = self.get_doc(doc_id) {
             let doc = doc.lock().unwrap();

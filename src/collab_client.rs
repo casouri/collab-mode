@@ -320,21 +320,27 @@ fn spawn_thread_receive_remote_op(
                     error_channel_1.send(err).await.unwrap();
                     return;
                 }
-                Ok(info) => match serde_json::from_str(&info) {
-                    Ok(value) => {
-                        external_notifier_1
-                            .send(CollabNotification::Info(InfoNotification {
-                                doc_id: doc_id_1.clone(),
-                                host_id: server_id_1.clone(),
-                                value,
-                            }))
-                            .unwrap();
+                Ok(info) => {
+                    if info.sender == site_id {
+                        continue;
                     }
-                    Err(err) => {
-                        error_channel_1.send(err.into()).await.unwrap();
-                        // Not fatal, don't need to return.
+                    match serde_json::from_str(&info.value) {
+                        Ok(value) => {
+                            external_notifier_1
+                                .send(CollabNotification::Info(InfoNotification {
+                                    doc_id: doc_id_1.clone(),
+                                    host_id: server_id_1.clone(),
+                                    sender_site_id: info.sender,
+                                    value,
+                                }))
+                                .unwrap();
+                        }
+                        Err(err) => {
+                            error_channel_1.send(err.into()).await.unwrap();
+                            // Not fatal, don't need to return.
+                        }
                     }
-                },
+                }
             }
         }
         let err = CollabError::DocFatal(format!(

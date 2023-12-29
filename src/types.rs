@@ -22,6 +22,12 @@ pub type FatOp = crate::op::FatOp<Op>;
 
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Info {
+    pub sender: SiteId,
+    pub value: String,
+}
+
 #[derive(Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
     Ins(u64, String),
@@ -172,6 +178,7 @@ pub struct NewOpNotification {
 pub struct InfoNotification {
     pub doc_id: DocId,
     pub host_id: ServerId,
+    pub sender_site_id: SiteId,
     pub value: JsonMap,
 }
 
@@ -217,7 +224,7 @@ pub enum DocServerReq {
     Login(Credential),
     SendInfo {
         doc_id: DocId,
-        info: String,
+        info: Info,
     },
 }
 
@@ -232,7 +239,7 @@ pub enum DocServerResp {
     DeleteFile,
     Login(SiteId),
     SendInfo,
-    RecvInfo(String),
+    RecvInfo(Info),
     Err(CollabError),
 }
 

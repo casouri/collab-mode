@@ -282,14 +282,13 @@ If MARK non-nil, show active region."
     (collab--check-precondition)
     (collab--catch-error "can’t send cursor position to remote"
       (let* ((doc-id (car collab--doc-and-host))
-             (host-id (cdr collab--doc-and-host))
-             (site-id collab--my-site-id))
+             (host-id (cdr collab--doc-and-host)))
         (collab--send-info-req
          doc-id host-id
          (if (region-active-p)
              `( :type "reserved.pos" :point ,(point)
-                :mark ,(mark) :siteId ,site-id)
-           `(:type "reserved.pos" :point ,(point) :siteId ,site-id)))))
+                :mark ,(mark))
+           `(:type "reserved.pos" :point ,(point))))))
 
     (remhash collab--doc-and-host
              collab--sync-cursor-timer-table)))
@@ -813,18 +812,17 @@ If we receive a ServerError notification, just display a warning."
     ('Info
      (let* ((doc-id (plist-get params :docId))
             (host-id (plist-get params :hostId))
+            (site-id (plist-get params :senderSiteId))
             (value (plist-get params :value)))
        (pcase (plist-get value :type)
-         ("reserved.pos" (let* (
-                                (pos (plist-get value :point))
-                                (mark (plist-get value :mark))
-                                (site-id (plist-get value :siteId))
-                                (buf (gethash (cons doc-id host-id)
-                                              collab--buffer-table)))
-                           (when (buffer-live-p buf)
-                             (with-current-buffer buf
-                               (collab--move-cursor site-id pos mark)))))))
-     )
+         ("reserved.pos"
+          (let* ((pos (plist-get value :point))
+                 (mark (plist-get value :mark))
+                 (buf (gethash (cons doc-id host-id)
+                               collab--buffer-table)))
+            (when (buffer-live-p buf)
+              (with-current-buffer buf
+                (collab--move-cursor site-id pos mark))))))))
     ('ServerError
      (display-warning
       'collab
@@ -1274,7 +1272,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
 Let’s create one, and here’s how!\n\n\n")))
 
     (insert (substitute-command-keys
-             "PRESS \\[collab-share] TO SHARE A FILE
+             "PRESS \\[collab-share] TO SHARE A FILE/DIR
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (when collab--most-recent-error

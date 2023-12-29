@@ -12,7 +12,7 @@ use std::pin::Pin;
 use tokio_stream::Stream;
 
 pub type OpStream = Pin<Box<dyn Stream<Item = CollabResult<Vec<FatOp>>> + Send>>;
-pub type InfoStream = Pin<Box<dyn Stream<Item = CollabResult<String>> + Send>>;
+pub type InfoStream = Pin<Box<dyn Stream<Item = CollabResult<Info>> + Send>>;
 
 /// Functions one can expect from a server, implemented by both
 /// [crate::collab_server::LocalServer] and

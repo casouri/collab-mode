@@ -152,7 +152,7 @@ impl DocServer for WebrpcClient {
             .await?;
 
         let (tx_op, rx_op) = mpsc::channel::<CollabResult<Vec<FatOp>>>(1);
-        let (tx_info, rx_info) = mpsc::channel::<CollabResult<String>>(1);
+        let (tx_info, rx_info) = mpsc::channel::<CollabResult<Info>>(1);
         let doc_id = doc_id.clone();
         let _ = tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
@@ -217,7 +217,10 @@ impl DocServer for WebrpcClient {
             .endpoint
             .send_request_oneshot(&DocServerReq::SendInfo {
                 doc_id: doc_id.clone(),
-                info,
+                info: Info {
+                    sender: self.site_id,
+                    value: info,
+                },
             })
             .await?
             .unpack()?;
