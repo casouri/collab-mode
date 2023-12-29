@@ -204,6 +204,22 @@ impl Dir {
 
 // *** Functions for CollabServer
 
+/// Return the doc id of the doc if there is a doc with `path`.
+fn get_docs_with_path(
+    docs: &[(u32, Arc<Mutex<Doc>>)],
+    path: &FilePath,
+) -> Option<(DocDesc, JsonMap)> {
+    for (doc_id, doc) in docs {
+        let doc = doc.lock().unwrap();
+        if let Some(path1) = &doc.file_path {
+            if path == path1 {
+                return Some((DocDesc::Doc(doc_id.clone()), doc.meta.clone()));
+            }
+        }
+    }
+    None
+}
+
 impl LocalServer {
     pub fn new() -> LocalServer {
         LocalServer {
@@ -263,8 +279,8 @@ impl LocalServer {
         }
     }
 
-    /// Create a doc out of the file at `rel_path` in `dir`, and return its
-    /// snapshot.
+    /// Create a doc out of the file at `rel_path` in `dir`, and
+    /// return its snapshot.
     async fn get_dir_file(
         &self,
         dir_id: &DocId,
@@ -436,23 +452,6 @@ impl LocalServer {
         Ok((ReceiverStream::from(rx_op), ReceiverStream::from(rx_info)))
     }
 
-    /// Return the doc id of the doc if there is a doc with `path`.
-    async fn get_docs_with_path(
-        &self,
-        docs: &[(u32, Arc<Mutex<Doc>>)],
-        path: &FilePath,
-    ) -> Option<(DocDesc, JsonMap)> {
-        for (doc_id, doc) in docs {
-            let doc = doc.lock().unwrap();
-            if let Some(path1) = &doc.file_path {
-                if path == path1 {
-                    return Some((DocDesc::Doc(doc_id.clone()), doc.meta.clone()));
-                }
-            }
-        }
-        None
-    }
-
     async fn list_directory(&self, dir_path: FilePath) -> CollabResult<Vec<DocInfo>> {
         let (doc_id, rel_path) = dir_path;
         if let Some(dir) = self.get_dir(&doc_id) {
@@ -471,6 +470,7 @@ impl LocalServer {
                 ));
             }
             let mut res = vec![];
+            // TODO: Add a map from file path to doc id.
             let docs: Vec<(u32, Arc<Mutex<Doc>>)> = self
                 .docs
                 .lock()
@@ -488,7 +488,7 @@ impl LocalServer {
                 let file_name = file_name_raw.to_string_lossy().into();
                 let file_path = (doc_id, rel_path);
 
-                if let Some((doc, meta)) = self.get_docs_with_path(&docs, &file_path).await {
+                if let Some((doc, meta)) = get_docs_with_path(&docs, &file_path) {
                     res.push(DocInfo {
                         doc_desc: doc,
                         file_name,
@@ -532,16 +532,18 @@ impl LocalServer {
         for (doc_id, doc) in docs {
             // TODO permission check.
             // Only include top-level docs.
-            let no_path = doc.lock().unwrap().file_path.is_none();
-            let meta = doc.lock().unwrap().meta.clone();
+            let doc = doc.lock().unwrap();
+            let no_path = doc.file_path.is_none();
+            let meta = doc.meta.clone();
             if no_path {
                 res.push(DocInfo {
                     doc_desc: DocDesc::Doc(doc_id.clone()),
-                    file_name: doc.lock().unwrap().name.clone(),
+                    file_name: doc.name.clone(),
                     file_meta: meta,
                 })
             };
         }
+        log::debug!("list_files_1() got docs");
         let dirs: Vec<(u32, Arc<Mutex<Dir>>)> = self
             .dirs
             .lock()
@@ -549,11 +551,13 @@ impl LocalServer {
             .iter()
             .map(|(dir_id, dir)| (*dir_id, dir.clone()))
             .collect();
+        log::debug!("list_files_1() got dirs");
         for (dir_id, dir) in dirs {
+            let dir = dir.lock().unwrap();
             res.push(DocInfo {
                 doc_desc: DocDesc::Dir((dir_id, PathBuf::from("."))),
-                file_name: dir.lock().unwrap().name.clone(),
-                file_meta: dir.lock().unwrap().meta.clone(),
+                file_name: dir.name.clone(),
+                file_meta: dir.meta.clone(),
             })
         }
         Ok(res)
@@ -588,8 +592,14 @@ impl LocalServer {
 
     async fn delete_file_1(&self, doc_id: &DocId) -> CollabResult<()> {
         log::debug!("delete_file_1(doc={})", doc_id);
-        let mut docs = self.docs.lock().unwrap();
-        docs.remove(doc_id);
+        {
+            let mut docs = self.docs.lock().unwrap();
+            docs.remove(doc_id);
+        }
+        {
+            let mut dirs = self.dirs.lock().unwrap();
+            dirs.remove(doc_id);
+        }
         Ok(())
     }
 

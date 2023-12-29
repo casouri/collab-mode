@@ -26,6 +26,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::exit;
+use tokio::task::JoinHandle;
 
 pub mod types;
 use types::*;
@@ -45,6 +46,8 @@ pub struct JSONRPCServer {
     /// notification to the notification channel, which JSONRPCServer
     /// will receive and send notification to the editor.
     notifier_tx: std::sync::mpsc::Sender<CollabNotification>,
+    /// The webrpc server that handles remote requests.
+    rpc_server: Option<JoinHandle<()>>,
 }
 
 // *** Entry functions
@@ -264,6 +267,7 @@ impl JSONRPCServer {
             doc_map: HashMap::new(),
             client_map,
             notifier_tx,
+            rpc_server: None,
         }
     }
 
@@ -574,7 +578,12 @@ impl JSONRPCServer {
         server: LocalServer,
         async_err_tx: tokio::sync::mpsc::Sender<CollabError>,
     ) -> CollabResult<()> {
-        let _ = tokio::spawn(async move {
+        if let Some(rpc_server) = &self.rpc_server {
+            if !rpc_server.is_finished() {
+                return Ok(());
+            }
+        }
+        let handle = tokio::spawn(async move {
             let res = run_webrpc_server(params.host_id, params.signaling_addr, server).await;
             if let Err(err) = res {
                 let err = match err {
@@ -584,6 +593,7 @@ impl JSONRPCServer {
                 async_err_tx.send(err).await.unwrap();
             }
         });
+        self.rpc_server = Some(handle);
         Ok(())
     }
 
