@@ -1193,7 +1193,7 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
-    (define-key map (kbd "+") #'collab-share-file)
+    (define-key map (kbd "+") #'collab-share)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1274,7 +1274,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
 Let’s create one, and here’s how!\n\n\n")))
 
     (insert (substitute-command-keys
-             "PRESS \\[collab-share-file] TO SHARE A FILE
+             "PRESS \\[collab-share] TO SHARE A FILE
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (when collab--most-recent-error
@@ -1329,10 +1329,10 @@ immediately."
       (funcall
        callback
        (substitute-command-keys
-        "\\[collab--open-doc] → Open Doc  \\[collab--delete-doc] → Delete File  \\[collab--disconnect-from-doc] → Disconnect")))
+        "\\[collab--open-doc] → Open Doc  \\[collab--delete-doc] → Delete  \\[collab--disconnect-from-doc] → Disconnect")))
      (host-id
       (funcall callback (substitute-command-keys
-                         "\\[collab-share-file] → Share File")))
+                         "\\[collab-share] → Share File/directory")))
      (t
       (funcall callback (substitute-command-keys
                          "\\[collab--refresh] → Refresh"))))))
@@ -1591,23 +1591,22 @@ When called interactively, prompt for the host."
                       '(() . ((inhibit-same-window . t))))
       (collab--notify-newly-shared-doc doc-id))))
 
-(defun collab-share-file (file file-name)
-  "Share FILE with FILE-NAME."
+(defun collab-share (file file-name)
+  "Share FILE with FILE-NAME.
+FILE can be either a file or a directory."
   (interactive (let* ((path (read-file-name "Share: "))
                       (file-name (file-name-nondirectory path)))
                  (list path file-name)))
-  (if (or (file-symlink-p file)
+  (if (or (when-let ((target (file-symlink-p file)))
+            (file-regular-p target))
           (file-regular-p file))
       (progn
         (find-file file)
         (collab-share-buffer file-name))
-    (collab-share-dir file file-name)))
+    (collab--share-dir file file-name)))
 
-(defun collab-share-dir (dir dir-name)
+(defun collab--share-dir (dir dir-name)
   "Share DIR to collab process under DIR-NAME."
-  (interactive (let ((dir (read-directory-name "Share directory: ")))
-                 (list (expand-file-name dir)
-                       (read-string "Name: " dir))))
   (collab--catch-error "can’t share the directory"
     (let* ((resp (collab--share-dir-req
                   "self" dir-name dir '(:reserved.hostEditor "emacs")))
@@ -1763,18 +1762,18 @@ detailed history."
     (collab-initial-setup))
   (let ((resp (read-multiple-choice
                (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do?\n")
-               '((?s "share this buffer" "Share this buffer to a host")
-                 (?d "share a directory" "Share a directory")
+               '((?s "share this buffer" "Share this buffer")
+                 (?S "share a file/directory" "Share a file or directory")
                  (?r "reconnect to doc" "Reconnect to a document")
-                 (?q "quit (disconnect)" "Disconnect and stop collaboration")
+                 (?k "kill (disconnect)" "Disconnect and stop collaboration")
                  (?h "open hub" "Open collab hub")))))
     (pcase (car resp)
       (?s (when (or (null collab-monitored-mode)
                     (y-or-n-p (collab--fairy "Buffer in collab-mode, already quite set. Share it as new doc, confirm without regret? ")))
             (call-interactively #'collab-share-buffer)))
-      (?d (call-interactively #'collab-share-dir))
+      (?S (call-interactively #'collab-share))
       (?r (call-interactively #'collab-reconnect-buffer))
-      (?q (collab-disconnect-buffer))
+      (?k (collab-disconnect-buffer))
       (?h (collab-hub)))))
 
 ;;; Setup
