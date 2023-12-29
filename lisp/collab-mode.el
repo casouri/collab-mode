@@ -815,7 +815,7 @@ If we receive a ServerError notification, just display a warning."
             (site-id (plist-get params :senderSiteId))
             (value (plist-get params :value)))
        (pcase (plist-get value :type)
-         ("reserved.pos"
+         ("common.pos"
           (let* ((pos (plist-get value :point))
                  (mark (plist-get value :mark))
                  (buf (gethash (cons doc-id host-id)
@@ -1577,7 +1577,7 @@ When called interactively, prompt for the host."
     ;; For the moment, always share to local host.
     (let* ((host "self")
            (resp (collab--share-file-req
-                  host file-name `( :reserved.hostEditor "emacs"
+                  host file-name `( :common.hostEditor "emacs"
                                     :emacs.majorMode
                                     ,(symbol-name major-mode))
                   (buffer-substring-no-properties
@@ -1607,7 +1607,7 @@ FILE can be either a file or a directory."
   "Share DIR to collab process under DIR-NAME."
   (collab--catch-error "can’t share the directory"
     (let* ((resp (collab--share-dir-req
-                  "self" dir-name dir '(:reserved.hostEditor "emacs")))
+                  "self" dir-name dir '(:common.hostEditor "emacs")))
            (doc-id (plist-get resp :docId)))
       (collab--notify-newly-shared-doc doc-id))))
 
