@@ -60,9 +60,12 @@ mod data;
 mod ice;
 
 /// Max size of a webrpc frame body in bytes.
-const MAX_FRAME_BODY_SIZE: usize = 64 * 1024 * 1024;
+const MAX_FRAME_BODY_SIZE: usize = 48 * 1024;
 /// Max size of a webrpc frame header line in bytes.
 const MAX_FRAME_HEADER_LINE_SIZE: usize = 1024;
+/// This is passed to SCTP and should be larger than
+/// MAX_FRAME_BODY_SIZE + MAX_FRAME_HEADER_LINE_SIZE.
+const MAX_FRAME_SIZE: usize = 64 * 1024;
 
 type RequestId = u32;
 type MessageId = u32;
@@ -536,7 +539,8 @@ async fn write_message(
         let mut buf = header_str.as_bytes().to_vec();
 
         if total_len == body_len {
-            log::debug!("write_message(): body={:02X?}", &message_bytes);
+            // log::debug!("write_message(): body={:02X?}", &message_bytes);
+            log::debug!("write_message(): body={}", &message_bytes.len());
             buf.append(&mut message_bytes);
             // Sending the whole message in one go.
             data_channel.write(&bytes::Bytes::from(buf)).await?;
@@ -545,8 +549,9 @@ async fn write_message(
             // Sending chunks.
             let mut chunk = message_bytes[start..chunk_end].to_vec();
             buf.append(&mut chunk);
-            log::debug!("write_message(): chunk={:02X?}", &buf);
-            data_channel.write(&bytes::Bytes::from(chunk)).await?;
+            // log::debug!("write_message(): chunk={:02X?}", &buf);
+            log::debug!("write_message(): chunk={}B", &buf.len());
+            data_channel.write(&bytes::Bytes::from(buf)).await?;
             start += body_len;
         };
     }

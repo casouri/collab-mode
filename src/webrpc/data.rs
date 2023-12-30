@@ -1,4 +1,5 @@
 use super::ice;
+use super::MAX_FRAME_SIZE;
 use crate::error::WebrpcResult;
 use crate::signaling;
 use std::sync::Arc;
@@ -36,8 +37,8 @@ pub async fn data_accept(
 
     let assoc_config = association::Config {
         net_conn: conn,
-        max_receive_buffer_size: 16 * 1024,
-        max_message_size: 16 * 1024,
+        max_receive_buffer_size: MAX_FRAME_SIZE as u32,
+        max_message_size: MAX_FRAME_SIZE as u32,
         name: "channel".to_string(),
     };
     let assoc = Arc::new(association::Association::server(assoc_config).await?);
