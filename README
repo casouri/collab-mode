@@ -1,0 +1,180 @@
+This is a collaborative editing package that I've been working
+on-and-off for a while. It’s far from complete but I want to gather
+some early feedback (and find some people to test it).
+
+Yes, another collab editing package. I know there’s a pile of
+abandoned collab editing packages already, and whether it’s really
+very useful is questionable in the age of google docs. Nevertheless,
+there seems to be some niche use-cases and I want to make something
+original.
+
+It is still very much a WIP so expect it to break a lot and maybe
+don’t post it on Reddit or HN :-) After all, I might never complete
+and publish it.
+
+My goal for collab-mode is for it to be a p2p, cross-editor, real-time
+collab editing package (Emacs collab with Vim!). It works kind of like
+language servers (LSP): a local “collab server” (called collab
+process) talks to the editor over JSONRPC, and collab processes talk
+among themselves over the internet. Most of the hard work is done by
+the collab process and the editor end should be relatively easy to
+implement.
+
+As of right now, collab-mode has these features:
+- Sharing a plain text file
+- Sharing a directory (still have rough edges)
+- Undo & redo (linear)
+- Builtin NAT traversal
+
+And it lacks:
+- Authentication and access control
+- Auto-resume from network breakage
+- Follow mode
+- Better error message and error handling in general
+- Documentation for writing a editor frontend
+- Any form of API stability whatsoever
+
+And obviously there’s no support for other editors yet.
+
+
+Getting started
+===============
+
+I hope I didn’t scare everyone away, here’s how to try it out:
+
+You can find the project at https://github.com/casouri/collab-mode
+
+You can either clone the repo and
+
+    make session-1
+
+to run the collab process (you need rust toolchain to compile it). Or
+download the pre-built binary from Releases [1], and run the server
+with
+
+    RUST_BACKTRACE=1 RUST_LOG=debug ./collab-mode run --socket
+
+Then, load lisp/collab-mode.el, and
+
+    M-x collab RET
+
+It’ll prompt for your name, and give you some options to continue.
+Press:
+
+  h  to open the dashboard (hub)
+  s  to share the current buffer
+  S  to share a file or directory
+
+Let’s go to the hub first. The dashboard should look like this:
+
++-----------------------------------------------------------+
+|Connection: UP                                             |
+|Connection type: (socket 7701)                             |
+|Accepting remote peer connections: NO                      |
+|                                                           |
+|                                                           |
+|                                                           |
+|🧚 No shared docs, not here, not now.                      |
+|Let’s create one, and here’s how!                          |
+|                                                           |
+|                                                           |
+|PRESS + TO SHARE A FILE                                    |
+|PRESS C TO CONNECT TO A REMOTE DOC                         |
+|PRESS A TO ACCEPT REMOTE CONNECTIONS (for 180s)            |
+|                                                           |
+------------------------------------------------------------+
+
+You can share a file by pressing "+". It’ll open that file, start
+collab-monitored-mode (which should flash green on success), and
+present the share link in the hub:
+
++-----------------------------------------------------------+
+|Connection: UP                                             |
+|Connection type: (socket 7701)                             |
+|Accepting remote peer connections: YES                     |
+|Server at: wss://signal.collab-mode.org/c28c65c2-a02a-11e..|
+|                                                           |
+|                                                           |
+|🧚 Your file is shared, and here’s the link                |
+|Anyone can connect with just a click!                      |
+|LINK: wss://signal.collab-mode.org/c28c65c2-a02a-11ee-b1e..|
+|                                                           |
+|                                                           |
+|self                                                       |
+|shared-file.txt *                                          |
+|                                                           |
+|PRESS + TO SHARE A FILE                                    |
+|PRESS C TO CONNECT TO A REMOTE DOC                         |
+|PRESS A TO ACCEPT REMOTE CONNECTIONS (for 180s)            |
+|                                                           |
++-----------------------------------------------------------+
+
+You’ll notice that the link starts with signal.collab-mode.org. Does
+that mean your file is hosted on that server? No. The sharer hosts the
+file. This server is a _signaling_ server that I set up for NAT
+traversal, ie, to help setup the connection between collab processes.
+
+On another editor, go to the hub, type "C", and enter the link;
+collab-mode will connect to the other editor and open the shared file.
+It’ll open the buffer and start collab-monitored-mode (followed by a
+green flash on success).
+
+Note that, when you share a file, your local collab process will be
+open for public connection for 3 minutes. During this time, since
+there’s no authentication right now, anyone that knows your address
+(wss://signal.collab-mode.org/c28c65c2-...) can connect to you.
+
+If you want to accept remote connection again, press "A" in the hub.
+That’ll give you another 3 minutes.
+
+
+In the shared buffer
+====================
+
+In the shared buffer, you can only use collab-mode’s undo and redo
+function, which are bound to "C-/" and "C-.", respectively. You can
+also use undo-only and undo-redo, they are remapped to collab-mode’s
+undo/redo commands.
+
+In the shared buffer, use collab-share-link to copy the share link to
+clipboard.
+
+
+In the hub buffer
+=================
+
+I’ve setup eldoc for the hub buffer. When you leave point on a doc,
+eldoc will show you the available commands for this doc.
+
+
+When things go wrong
+====================
+
+When refreshing in the hub buffer (pressing "g"), if something goes
+wrong (can’t connect to local or remote collab process), the error
+will be printed in the bottom.
+
+When in a shared buffer, if something goes wrong, the screen will
+flash red, and Emacs will show a warning detailing the error. In that
+case, if you can, please collect the warning and terminal logs and
+send them to me, so I can try to debug it.
+
+
+For the curious minds
+=====================
+
+There’s a README in src/README.md, it’s mostly for myself so it’ll be
+hard to read for others. And before you ask, collab-mode doesn’t use
+CRDT, it uses OT with tombstones.
+
+
+Help with rhymes
+================
+
+I hope you don’t find the fairy and her bad rhymes annoying. I’m not
+very good at rhymes, chatgpt is even worse. If you can come up with
+better ones, please do send them along :-)
+
+
+[1] The prebuilt binaries are debug build, which are pretty large; the
+release build is much smaller (~6MB).
