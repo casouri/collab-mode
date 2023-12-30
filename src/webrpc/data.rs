@@ -37,7 +37,7 @@ pub async fn data_accept(
 
     let assoc_config = association::Config {
         net_conn: conn,
-        max_receive_buffer_size: MAX_FRAME_SIZE as u32,
+        max_receive_buffer_size: MAX_FRAME_SIZE as u32 * 128,
         max_message_size: MAX_FRAME_SIZE as u32,
         name: "channel".to_string(),
     };
