@@ -1274,7 +1274,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     ;; Footer.
     (unless have-some-file
       (insert "\n" (collab--fairy "No shared docs, not here, not now.
-Let’s create one, and here’s how!\n\n\n")))
+Let’s create one, here’s how.\n\n\n")))
 
     (insert (substitute-command-keys
              "PRESS \\[collab--refresh] TO REFRESH
@@ -1568,7 +1568,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                          doc-id))
            (collab--current-message
             (collab--fairy "Your file is shared, and here’s the link
-Anyone can connect with just a click!
+All can connect with just a click.
 LINK: %s" (propertize link 'face 'link))))
       (collab--hub-refresh))))
 
@@ -1773,7 +1773,7 @@ detailed history."
   (unless (and collab-display-name collab-local-host-config)
     (collab-initial-setup))
   (let ((resp (read-multiple-choice
-               (collab--fairy "Heya! It’s nice to see you! Tell me, what do you want to do?\n")
+               (collab--fairy "Heya! It’s nice to see you. Tell me, what do you want to do?\n")
                '((?s "share this buffer" "Share this buffer")
                  (?S "share a file/directory" "Share a file or directory")
                  (?r "reconnect to doc" "Reconnect to a document")
