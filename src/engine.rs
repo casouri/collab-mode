@@ -219,7 +219,8 @@ impl RangeIterator {
 }
 
 /// The internal full document that contains both live text and
-/// tombstones.
+/// tombstones. This is used to convert between editor positions (no
+/// tombstone) and internal positions (includes tombstone).
 #[derive(Debug, Clone)]
 struct InternalDoc {
     /// Ranges fully covering the document. The ranges are coalesced
@@ -1031,20 +1032,17 @@ struct GlobalHistory {
     undo_queue: Vec<GlobalSeq>,
     /// An index into `local_ops`. Points to the currently undone op.
     undo_tip: Option<usize>,
-    /// The internal document.
-    internal_doc: InternalDoc,
 }
 
 impl GlobalHistory {
     /// Create a global history where `init_len` is the initial length
     /// of the document it will be tracking.
-    fn new(init_len: u64) -> GlobalHistory {
+    fn new() -> GlobalHistory {
         GlobalHistory {
             global: vec![],
             local: vec![],
             undo_queue: vec![],
             undo_tip: None,
-            internal_doc: InternalDoc::new(init_len),
         }
     }
 
@@ -1245,6 +1243,8 @@ impl GlobalHistory {
 pub struct ClientEngine {
     /// History storing the global timeline (seen by the server).
     gh: GlobalHistory,
+    /// The internal document.
+    internal_doc: InternalDoc,
     /// The id of this site.
     site: SiteId,
     /// The largest global sequence number we've seen. Any remote op
@@ -1266,6 +1266,8 @@ pub struct ClientEngine {
 pub struct ServerEngine {
     /// Global history.
     gh: GlobalHistory,
+    /// The internal document.
+    internal_doc: InternalDoc,
     /// The largest global sequence number we've assigned.
     current_seq: GlobalSeq,
     /// The length of the document. This is used to check that after
@@ -1312,7 +1314,8 @@ impl ClientEngine {
     /// starting document.
     pub fn new(site: SiteId, base_seq: GlobalSeq, init_len: u64) -> ClientEngine {
         ClientEngine {
-            gh: GlobalHistory::new(init_len),
+            gh: GlobalHistory::new(),
+            internal_doc: InternalDoc::new(init_len),
             site,
             current_seq: base_seq,
             current_site_seq: 0,
@@ -1366,10 +1369,7 @@ impl ClientEngine {
     /// Convert `op` from an internal op (with internal doc positions)
     /// to an editor op. Also apply the `op` to the internal doc.
     pub fn convert_internal_op_and_apply(&mut self, op: Op) -> EditorLeanOp {
-        let converted_op = self
-            .gh
-            .internal_doc
-            .convert_internal_op_and_apply(op.clone());
+        let converted_op = self.internal_doc.convert_internal_op_and_apply(op.clone());
         EditorLeanOp {
             op: converted_op,
             site_id: op.site(),
@@ -1386,7 +1386,6 @@ impl ClientEngine {
         let mut converted_ops = vec![];
         for op in ops.iter() {
             let converted_op = self
-                .gh
                 .internal_doc
                 .convert_internal_op_and_apply(op.op.clone());
             converted_ops.push(converted_op);
@@ -1406,8 +1405,7 @@ impl ClientEngine {
                 let mut op = mini_history[idx].clone();
                 op.inverse();
                 op.batch_transform(&mini_history[idx + 1..]);
-                self.gh
-                    .internal_doc
+                self.internal_doc
                     .convert_internal_op_and_apply(op.op.clone());
                 mini_history.push(op);
             }
@@ -1439,16 +1437,10 @@ impl ClientEngine {
 
         let ops = match &op {
             EditorOp::Ins(_, _) => {
-                vec![self
-                    .gh
-                    .internal_doc
-                    .convert_editor_op_and_apply(op, self.site)]
+                vec![self.internal_doc.convert_editor_op_and_apply(op, self.site)]
             }
             EditorOp::Del(_, _) => {
-                vec![self
-                    .gh
-                    .internal_doc
-                    .convert_editor_op_and_apply(op, self.site)]
+                vec![self.internal_doc.convert_editor_op_and_apply(op, self.site)]
             }
             EditorOp::Undo => self
                 .generate_undo_op_1(false)
@@ -1651,7 +1643,8 @@ impl ServerEngine {
     /// `init_len` is the length of the starting document.
     pub fn new(init_len: u64) -> ServerEngine {
         ServerEngine {
-            gh: GlobalHistory::new(init_len),
+            gh: GlobalHistory::new(),
+            internal_doc: InternalDoc::new(init_len),
             current_seq: 0,
             mock_doc_len: init_len,
         }
@@ -1661,7 +1654,6 @@ impl ServerEngine {
     /// to an editor op. Also apply the `op` to the internal doc.
     pub fn convert_internal_op_and_apply(&mut self, op: FatOp) -> CollabResult<EditInstruction> {
         let converted_op = self
-            .gh
             .internal_doc
             .convert_internal_op_and_apply(op.op.clone());
 
@@ -1694,7 +1686,7 @@ impl ServerEngine {
 
         // FIXME: Remove this potentially expensive test once we are
         // confident there's no position-bugs anymore.
-        let internal_editor_len = self.gh.internal_doc.editor_len();
+        let internal_editor_len = self.internal_doc.editor_len();
         if internal_editor_len != self.mock_doc_len {
             return Err(CollabError::DocFatal(format!(
                 "Editor doc & internal doc length mismatch, editor: {}, internal: {}",
@@ -1792,7 +1784,7 @@ mod tests {
         client_a.process_local_op(op_a1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_a, "bcd");
         assert!(vec_eq(
-            &client_a.gh.internal_doc.ranges,
+            &client_a.internal_doc.ranges,
             &vec![Range::Dead(1), Range::Live(3)]
         ));
 
@@ -1800,7 +1792,7 @@ mod tests {
         client_a.process_local_op(op_a2.clone(), doc_id, 2).unwrap();
         assert_eq!(doc_a, "bcxd");
         assert!(vec_eq(
-            &client_a.gh.internal_doc.ranges,
+            &client_a.internal_doc.ranges,
             &vec![Range::Dead(1), Range::Live(4)]
         ));
 
@@ -1808,7 +1800,7 @@ mod tests {
         client_b.process_local_op(op_b1.clone(), doc_id, 1).unwrap();
         assert_eq!(doc_b, "abd");
         assert!(vec_eq(
-            &client_b.gh.internal_doc.ranges,
+            &client_b.internal_doc.ranges,
             &vec![Range::Live(2), Range::Dead(1), Range::Live(1)]
         ));
 

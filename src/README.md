@@ -10,8 +10,9 @@ cargo doc --document-private-items --open
 
 I want collab-mode to be:
 - Usable out-of-the-box, so we have builtin NAT traversal and run a
-  signaling server (perhaps even a TURN server?). In the future the
-  editor frontend should auto-download binary and run it, etc, etc.
+  signaling server (perhaps even a TURN server in the future?). In the
+  future the editor frontend should auto-download binary and run it,
+  etc, etc.
 - Limited in scope, we focus on realtime, temporary collaboration. For
   non-realtime collaboration you have Git; for permanent realtime you
   have Google Docs. Collab-mode would be something that you use for

@@ -24,7 +24,6 @@
 //! webrtc connection is established.
 
 use super::{EndpointId, ICECandidate, SignalingError, SignalingMessage, SignalingResult, SDP};
-use futures::stream::FusedStream;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
