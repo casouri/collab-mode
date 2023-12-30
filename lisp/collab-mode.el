@@ -245,35 +245,37 @@ command that acts on a collab-monitored buffer."
 If MARK non-nil, show active region."
   (when (and (not (eq site-id collab--my-site-id))
              (<= (point-min) pos (point-max)))
-    (let* ((idx (mod site-id
-                     (length collab-cursor-colors)))
-           (color (nth idx collab-cursor-colors))
-           (region-color (collab--blend-color
-                          (face-attribute 'default :background)
-                          color 0.2))
-           (face `(:background ,color))
-           (region-face `(:background ,region-color))
-           (ov (or (alist-get site-id collab--cursor-ov-alist)
-                   (let ((ov (make-overlay (min (1+ pos) (point-max))
-                                           (min (+ pos 2) (point-max))
-                                           nil t nil)))
-                     (overlay-put ov 'face face)
-                     (push (cons site-id ov) collab--cursor-ov-alist)
-                     ov))))
+    (save-restriction
+      (widen)
+      (let* ((idx (mod site-id
+                       (length collab-cursor-colors)))
+             (color (nth idx collab-cursor-colors))
+             (region-color (collab--blend-color
+                            (face-attribute 'default :background)
+                            color 0.2))
+             (face `(:background ,color))
+             (region-face `(:background ,region-color))
+             (ov (or (alist-get site-id collab--cursor-ov-alist)
+                     (let ((ov (make-overlay (min (1+ pos) (point-max))
+                                             (min (+ pos 2) (point-max))
+                                             nil t nil)))
+                       (overlay-put ov 'face face)
+                       (push (cons site-id ov) collab--cursor-ov-alist)
+                       ov))))
 
-      (if (not mark)
-          (progn
-            (overlay-put ov 'face face)
-            (if (eq pos (point-max))
-                (progn
-                  (overlay-put ov 'after-string (propertize " " 'face face))
-                  (move-overlay ov pos (min (1+ pos) (point-max))))
-              (overlay-put ov 'after-string nil)
-              (move-overlay ov pos (1+ pos))))
+        (if (not mark)
+            (progn
+              (overlay-put ov 'face face)
+              (if (eq pos (point-max))
+                  (progn
+                    (overlay-put ov 'after-string (propertize " " 'face face))
+                    (move-overlay ov pos (min (1+ pos) (point-max))))
+                (overlay-put ov 'after-string nil)
+                (move-overlay ov pos (1+ pos))))
 
-        (move-overlay ov (min pos mark) (max pos mark))
-        (overlay-put ov 'face region-face)
-        (overlay-put ov 'after-string nil)))))
+          (move-overlay ov (min pos mark) (max pos mark))
+          (overlay-put ov 'face region-face)
+          (overlay-put ov 'after-string nil))))))
 
 (defvar collab-monitored-mode)
 (defun collab--send-cursor-pos-1 (buffer)
@@ -286,9 +288,9 @@ If MARK non-nil, show active region."
         (collab--send-info-req
          doc-id host-id
          (if (region-active-p)
-             `( :type "reserved.pos" :point ,(point)
+             `( :type "common.pos" :point ,(point)
                 :mark ,(mark))
-           `(:type "reserved.pos" :point ,(point))))))
+           `(:type "common.pos" :point ,(point))))))
 
     (remhash collab--doc-and-host
              collab--sync-cursor-timer-table)))
@@ -806,7 +808,7 @@ If we receive a ServerError notification, just display a warning."
            (setq timer (run-with-timer
                         collab-receive-ops-delay nil
                         #'collab--request-remote-ops
-                        doc host buffer last-seq))
+                        buffer last-seq))
            (puthash (cons doc host) timer
                     collab--dispatcher-timer-table)))))
     ('Info
@@ -972,20 +974,22 @@ If MOVE-POINT non-nil, move point as the edit would."
   (let ((inhibit-modification-hooks t)
         (collab--inhibit-hooks t)
         (start (point-marker)))
-    (pcase instr
-      (`(:Ins ,edits)
-       (mapc (lambda (edit)
-               (let ((pos (aref edit 0))
-                     (text (aref edit 1)))
-                 (goto-char (1+ pos))
-                 (insert text)))
-             (reverse edits)))
-      (`(:Del ,edits)
-       (mapc (lambda (edit)
-               (let ((pos (aref edit 0))
-                     (text (aref edit 1)))
-                 (delete-region (1+ pos) (+ 1 pos (length text)))))
-             (reverse edits))))
+    (save-restriction
+      (widen)
+      (pcase instr
+        (`(:Ins ,edits)
+         (mapc (lambda (edit)
+                 (let ((pos (aref edit 0))
+                       (text (aref edit 1)))
+                   (goto-char (1+ pos))
+                   (insert text)))
+               (reverse edits)))
+        (`(:Del ,edits)
+         (mapc (lambda (edit)
+                 (let ((pos (aref edit 0))
+                       (text (aref edit 1)))
+                   (delete-region (1+ pos) (+ 1 pos (length text)))))
+               (reverse edits)))))
     (unless move-point
       (goto-char start))))
 
@@ -1188,6 +1192,7 @@ If INSERT-STATUS, insert a red DOWN symbol."
     (define-key map (kbd "RET") #'collab--open-doc)
     (define-key map (kbd "x") #'collab--delete-doc)
     (define-key map (kbd "k") #'collab--disconnect-from-doc)
+    (define-key map (kbd "l") #'collab-share-link)
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
@@ -1272,7 +1277,8 @@ Also insert ‘collab--current-message’ if it’s non-nil."
 Let’s create one, and here’s how!\n\n\n")))
 
     (insert (substitute-command-keys
-             "PRESS \\[collab-share] TO SHARE A FILE/DIR
+             "PRESS \\[collab--refresh] TO REFRESH
+PRESS \\[collab-share] TO SHARE A FILE/DIR
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (when collab--most-recent-error
@@ -1327,7 +1333,7 @@ immediately."
       (funcall
        callback
        (substitute-command-keys
-        "\\[collab--open-doc] → Open Doc  \\[collab--delete-doc] → Delete  \\[collab--disconnect-from-doc] → Disconnect")))
+        "\\[collab--open-doc] → Open Doc  \\[collab--delete-doc] → Delete  \\[collab--disconnect-from-doc] → Disconnect  \\[collab-share-link] → Copy share link")))
      (host-id
       (funcall callback (substitute-command-keys
                          "\\[collab-share] → Share File/directory")))
@@ -1544,6 +1550,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
     (setq-local collab--accepting-connection t)
     (collab--hub-refresh)))
 
+;;;###autoload
 (defun collab-hub ()
   "Pop up the collab hub interface."
   (interactive)
@@ -1565,6 +1572,7 @@ Anyone can connect with just a click!
 LINK: %s" (propertize link 'face 'link))))
       (collab--hub-refresh))))
 
+;;;###autoload
 (defun collab-share-buffer (file-name)
   "Share the current buffer with FILE-NAME.
 When called interactively, prompt for the host."
@@ -1589,6 +1597,7 @@ When called interactively, prompt for the host."
                       '(() . ((inhibit-same-window . t))))
       (collab--notify-newly-shared-doc doc-id))))
 
+;;;###autoload
 (defun collab-share (file file-name)
   "Share FILE with FILE-NAME.
 FILE can be either a file or a directory."
@@ -1687,16 +1696,20 @@ its name rather than doc id) to connect."
 (defun collab-share-link ()
   "Copy the share link of current doc to clipboard."
   (interactive)
-  (if-let* ((doc-id (car collab--doc-and-host))
-            (link (format "%s/%s/%s"
+  (if-let ((doc-id
+            (if (derived-mode-p 'collab-hub-mode)
+                (collab--doc-desc-id
+                 (get-text-property (point) 'collab-doc-desc))
+              (car collab--doc-and-host))))
+      (let ((link (format "%s/%s/%s"
                           (nth 1 collab-local-host-config)
                           (nth 0 collab-local-host-config)
                           doc-id)))
-      (progn
         (kill-new link)
         (message "Copied to clipboard: %s" link))
-    (message "Couldn’t find the doc id of this buffer")))
+    (message "Couldn’t find the doc id of this doc")))
 
+;;;###autoload
 (defun collab-connect (share-link)
   "Connect to the file at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
@@ -1753,6 +1766,7 @@ detailed history."
           (end-of-line)
           (insert (propertize "  <--- UNDO TIP" 'face 'error)))))))
 
+;;;###autoload
 (defun collab ()
   "The main entry point of ‘collab-mode’."
   (interactive)
@@ -1764,6 +1778,7 @@ detailed history."
                  (?S "share a file/directory" "Share a file or directory")
                  (?r "reconnect to doc" "Reconnect to a document")
                  (?k "kill (disconnect)" "Disconnect and stop collaboration")
+                 (?l "share link" "Copy the share link")
                  (?h "open hub" "Open collab hub")))))
     (pcase (car resp)
       (?s (when (or (null collab-monitored-mode)
@@ -1772,6 +1787,7 @@ detailed history."
       (?S (call-interactively #'collab-share))
       (?r (call-interactively #'collab-reconnect-buffer))
       (?k (collab-disconnect-buffer))
+      (? (collab-share-link))
       (?h (collab-hub)))))
 
 ;;; Setup
