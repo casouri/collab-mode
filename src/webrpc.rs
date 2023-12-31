@@ -44,28 +44,23 @@
 //! fatal errors are sent to every response channel.
 
 use crate::error::{WebrpcError, WebrpcResult};
-use data::{data_accept, data_bind, data_connect};
+use ice::{ice_accept, ice_bind, ice_connect};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::mpsc;
-use webrtc_data::data_channel::{DataChannel, PollDataChannel};
+use webrtc_sctp::{association, chunk::chunk_payload_data::PayloadProtocolIdentifier, stream};
+use webrtc_util::Conn;
 
 pub use crate::signaling::EndpointId;
 
-mod data;
 mod ice;
 
-/// Max size of a webrpc frame body in bytes.
-const MAX_FRAME_BODY_SIZE: usize = 48 * 1024;
-/// Max size of a webrpc frame header line in bytes.
-const MAX_FRAME_HEADER_LINE_SIZE: usize = 1024;
-/// This is passed to SCTP and should be larger than
-/// MAX_FRAME_BODY_SIZE + MAX_FRAME_HEADER_LINE_SIZE.
+const MAX_FRAME_BODY_SIZE: usize = 32 * 1024;
 const MAX_FRAME_SIZE: usize = 64 * 1024;
+const RECEIVE_BUFFER_SIZE: u32 = 1024 * 1024;
 
 type RequestId = u32;
 type MessageId = u32;
@@ -73,22 +68,55 @@ type MessageId = u32;
 type ResponseChannelMap = RwLock<HashMap<RequestId, mpsc::UnboundedSender<WebrpcResult<Message>>>>;
 type LiveRequestMap = RwLock<HashMap<RequestId, ()>>;
 
+type DataChannel = stream::Stream;
+
 #[derive(Debug)]
 pub struct Listener {
     inner: crate::signaling::client::Listener,
 }
 
+async fn create_sctp_server(
+    conn: Arc<dyn Conn + Send + Sync>,
+) -> WebrpcResult<Arc<association::Association>> {
+    let assoc_config = association::Config {
+        net_conn: conn,
+        max_receive_buffer_size: RECEIVE_BUFFER_SIZE,
+        max_message_size: MAX_FRAME_SIZE as u32,
+        name: "rpc data channel".to_string(),
+    };
+    let assoc = association::Association::server(assoc_config).await?;
+    Ok(Arc::new(assoc))
+}
+
+async fn create_sctp_client(
+    conn: Arc<dyn Conn + Send + Sync>,
+) -> WebrpcResult<Arc<association::Association>> {
+    let assoc_config = association::Config {
+        net_conn: conn,
+        max_receive_buffer_size: RECEIVE_BUFFER_SIZE,
+        max_message_size: MAX_FRAME_SIZE as u32,
+        name: "rpc data channel".to_string(),
+    };
+    let assoc = association::Association::client(assoc_config).await?;
+    Ok(Arc::new(assoc))
+}
+
 impl Listener {
     pub async fn bind(id: String, signaling_addr: &str) -> WebrpcResult<Listener> {
-        let listener = data_bind(id, signaling_addr).await?;
+        let listener = ice_bind(id, signaling_addr).await?;
         Ok(Listener { inner: listener })
     }
 
     pub async fn accept(&mut self) -> WebrpcResult<Endpoint> {
         let sock = self.inner.accept().await?;
         let name = format!("connection to {}", sock.id());
-        let data_channel = data_accept(sock, None).await?;
-        Ok(Endpoint::new(name, Arc::new(data_channel)))
+        let conn = ice_accept(sock, None).await?;
+        let sctp_connection = create_sctp_server(conn).await?;
+        if let Some(stream) = sctp_connection.accept_stream().await {
+            Ok(Endpoint::new(name, stream))
+        } else {
+            Err(WebrpcError::SCTPError("Can't accept stream".to_string()))
+        }
     }
 }
 
@@ -139,6 +167,7 @@ impl Message {
 }
 
 /// A frame. One or more frames make up a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Frame<'a> {
     message_id: MessageId,
     body: &'a [u8],
@@ -148,8 +177,12 @@ struct Frame<'a> {
 impl Endpoint {
     /// Connect to the endpoint with `id` registered on the signaling server.
     pub async fn connect(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Endpoint> {
-        let data_channel = data_connect(id.clone(), signaling_addr, None).await?;
-        let endpoint = Endpoint::new(format!("Connection to {id}"), Arc::new(data_channel));
+        let conn = ice_connect(id.clone(), signaling_addr, None).await?;
+        let sctp_conn = create_sctp_client(conn).await?;
+        let stream = sctp_conn
+            .open_stream(1, PayloadProtocolIdentifier::Binary)
+            .await?;
+        let endpoint = Endpoint::new(format!("Connection to {id}"), stream);
 
         let mut rx = endpoint.read_requests()?;
         rx.close();
@@ -286,96 +319,24 @@ impl Endpoint {
 /// [MAX_FRAME_BODY_SIZE] large. Return the request id and a slice of
 /// the `body_buf` that contains the frame body.
 async fn read_frame<'a>(
-    reader: &mut tokio::io::BufReader<PollDataChannel>,
-    header_buf: &mut Vec<u8>,
-    body_buf: &'a mut Vec<u8>,
+    reader: &DataChannel,
+    packet_buf: &'a mut Vec<u8>,
 ) -> WebrpcResult<Frame<'a>> {
-    // Read header.
-    let mut body_len = None;
-    let mut message_id = None;
-    let mut last = false;
-    loop {
-        header_buf.clear();
-        match reader.read_until(b'\n', header_buf).await {
-            Ok(len) => {
-                if len == 0 {
-                    return Err(WebrpcError::DataChannelError(
-                        "Unexpected EOF when reading from data channel".to_string(),
-                    ));
-                } else if len == 1 {
-                    break;
-                } else {
-                    let line = std::str::from_utf8(&header_buf[..header_buf.len() - 1]).map_err(
-                        |err| {
-                            WebrpcError::ParseError(format!("Can't parse frame header: {:?}", err))
-                        },
-                    )?;
-                    log::debug!("read_frame(): line = {line}");
-                    let mut iter = line.split(":");
-                    let key = iter.next().ok_or_else(|| {
-                        WebrpcError::ParseError(format!("Malformed frame header: {}", line))
-                    })?;
-                    let value = iter.next().ok_or_else(|| {
-                        WebrpcError::ParseError(format!("Malformed frame header: {}", line))
-                    })?;
-                    match key {
-                        "CL" => {
-                            let len: usize = value.parse().map_err(|err| {
-                                WebrpcError::ParseError(format!(
-                                    "Cannot parse the value of CL (content-length) to a number: {:?}",
-                                    err
-                                ))
-                            })?;
-                            body_len = Some(len);
-                        }
-                        "MI" => {
-                            let id: u32 = value.parse().map_err(|err| {
-                                WebrpcError::ParseError(format!(
-                                    "Cannot parse the value of MI (message-id) to a number: {:?}",
-                                    err
-                                ))
-                            })?;
-                            message_id = Some(id)
-                        }
-                        "L" => last = true,
-                        _ => log::warn!("Unrecognized RPC frame header: {}", line),
-                    }
-                }
-            }
-            Err(err) => return Err(WebrpcError::DataChannelError(err.to_string())),
+    packet_buf.fill(0);
+    match reader.read(packet_buf).await {
+        Ok(0) => Err(WebrpcError::SCTPError("Connection closed".to_string())),
+        Ok(packet_len) => {
+            let frame: Frame = bincode::deserialize(&packet_buf[..packet_len])?;
+            log::debug!(
+                "read_frame() message_id={}, last={}, len={}",
+                frame.message_id,
+                frame.last,
+                frame.body.len()
+            );
+            Ok(frame)
         }
+        Err(err) => Err(err.into()),
     }
-
-    // Read body.
-    let body_len = body_len.ok_or_else(|| {
-        WebrpcError::ParseError(
-            "The webrpc frame's header doesn't contain CL (content-length)".to_string(),
-        )
-    })?;
-    let message_id = message_id.ok_or_else(|| {
-        WebrpcError::ParseError(
-            "The webrpc frame's header doesn't contain MI (message-id)".to_string(),
-        )
-    })?;
-    if body_len > MAX_FRAME_BODY_SIZE {
-        return Err(WebrpcError::DataChannelError(format!(
-            "The frame we read has a body that's too large: {} bytes, while the max size we allow is {} bytes",
-            body_len, MAX_FRAME_BODY_SIZE
-        )));
-    }
-    reader
-        .read_exact(&mut body_buf[..body_len])
-        .await
-        .map_err(|err| {
-            WebrpcError::DataChannelError(format!("Error reading RPC frame: {:?}", err))
-        })?;
-
-    log::debug!("read_frame() body={:02X?}", &body_buf[..body_len]);
-    Ok(Frame {
-        message_id,
-        body: &body_buf[..body_len],
-        last,
-    })
 }
 
 // Read incoming messages and send them to corresponding receiving
@@ -391,17 +352,15 @@ async fn read_messages(
     // Read frames from `data_channel` in a loop, assemble them into
     // messages, and send messages to their corresponding channels in
     // `resp_channel_map`.
-    let mut reader = tokio::io::BufReader::new(PollDataChannel::new(data_channel.clone()));
     let mut msg_map: HashMap<MessageId, Vec<u8>> = HashMap::new();
-    let mut header_buf = vec![0u8; MAX_FRAME_HEADER_LINE_SIZE];
-    let mut body_buf = vec![0u8; MAX_FRAME_BODY_SIZE];
+    let mut body_buf = vec![0u8; MAX_FRAME_SIZE * 2];
 
     loop {
-        let frame = read_frame(&mut reader, &mut header_buf, &mut body_buf).await?;
+        let frame = read_frame(&data_channel, &mut body_buf).await?;
 
         // Append this frame to the incomplete message.
         if let Some(incomplete_msg) = msg_map.get_mut(&frame.message_id) {
-            incomplete_msg.copy_from_slice(frame.body);
+            incomplete_msg.extend_from_slice(frame.body);
         } else {
             msg_map.insert(frame.message_id, frame.body.to_vec());
         }
@@ -522,36 +481,57 @@ async fn write_message(
     message: Message,
 ) -> WebrpcResult<()> {
     let message_id = current_msg_id.fetch_add(1, Ordering::SeqCst) + 1;
-    let mut message_bytes = bincode::serialize(&message).unwrap();
+    let message_bytes = bincode::serialize(&message).unwrap();
     let total_len = message_bytes.len();
     let mut start = 0;
 
     while start < total_len {
         let chunk_end = std::cmp::min(start + MAX_FRAME_BODY_SIZE, total_len);
         let body_len = chunk_end - start;
-        let last = if chunk_end == total_len {
-            format!("L:\n")
-        } else {
-            "".to_string()
-        };
-        let header_str = format!("CL:{body_len}\nMI:{message_id}\n{last}\n");
-        log::debug!("write_message(): header=\n{}", &header_str);
-        let mut buf = header_str.as_bytes().to_vec();
+        let last = chunk_end == total_len;
 
         if total_len == body_len {
-            // log::debug!("write_message(): body={:02X?}", &message_bytes);
-            log::debug!("write_message(): body={}", &message_bytes.len());
-            buf.append(&mut message_bytes);
+            log::debug!(
+                "write_message(): message_id={}, last={}, body={}B",
+                message_id,
+                last,
+                &message_bytes.len()
+            );
+            log::trace!("write_message(): body={:02X?}", &message_bytes);
+            let frame = Frame {
+                message_id,
+                last,
+                body: &message_bytes[..],
+            };
+            let packet = bincode::serialize(&frame).unwrap();
+            if packet.len() > MAX_FRAME_SIZE {
+                return Err(WebrpcError::SCTPError("Package too large".to_string()));
+            }
             // Sending the whole message in one go.
-            data_channel.write(&bytes::Bytes::from(buf)).await?;
+            log::debug!("write_message(): body={}B", &message_bytes.len());
+            log::trace!("write_message(): body={:02X?}", &message_bytes);
+            data_channel.write(&bytes::Bytes::from(packet)).await?;
             return Ok(());
         } else {
             // Sending chunks.
-            let mut chunk = message_bytes[start..chunk_end].to_vec();
-            buf.append(&mut chunk);
-            // log::debug!("write_message(): chunk={:02X?}", &buf);
-            log::debug!("write_message(): chunk={}B", &buf.len());
-            data_channel.write(&bytes::Bytes::from(buf)).await?;
+            let chunk = &message_bytes[start..chunk_end];
+            let frame = Frame {
+                message_id,
+                last,
+                body: chunk,
+            };
+            let packet = bincode::serialize(&frame).unwrap();
+            if packet.len() > MAX_FRAME_SIZE {
+                return Err(WebrpcError::SCTPError("Package too large".to_string()));
+            }
+            log::debug!(
+                "write_message(): message_id={}, last={}, body={}B",
+                message_id,
+                last,
+                &message_bytes.len()
+            );
+            log::trace!("write_message(): chunk={:02X?}", &chunk);
+            data_channel.write(&bytes::Bytes::from(packet)).await?;
             start += body_len;
         };
     }
@@ -560,16 +540,19 @@ async fn write_message(
 
 #[cfg(test)]
 mod tests {
-    use super::data::{data_accept, data_bind, data_connect};
+    use super::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
+    use super::{create_sctp_client, create_sctp_server};
     use crate::signaling::server::run_signaling_server;
-    use std::sync::Arc;
+    use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 
     async fn test_server(id: String) -> anyhow::Result<()> {
-        let mut listener = data_bind(id, "ws://127.0.0.1:9000").await?;
+        let mut listener = ice_bind(id, "ws://127.0.0.1:9000").await?;
         let sock = listener.accept().await?;
-        let data_channel = data_accept(sock, None).await?;
-        let endpoint = Endpoint::new("server endpoint".to_string(), Arc::new(data_channel));
+        let conn = ice_accept(sock, None).await?;
+        let sctp_conn = create_sctp_server(conn).await?;
+        let stream = sctp_conn.accept_stream().await.unwrap();
+        let endpoint = Endpoint::new("server endpoint".to_string(), stream);
 
         let mut rx = endpoint.read_requests().unwrap();
 
@@ -604,8 +587,13 @@ mod tests {
     }
 
     async fn test_client(id: String) -> anyhow::Result<()> {
-        let data_channel = data_connect(id, "ws://127.0.0.1:9000", None).await?;
-        let endpoint = Endpoint::new("client endpoint".to_string(), Arc::new(data_channel));
+        let conn = ice_connect(id, "ws://127.0.0.1:9000", None).await?;
+        let sctp_conn = create_sctp_client(conn).await?;
+        let stream = sctp_conn
+            .open_stream(1, PayloadProtocolIdentifier::Binary)
+            .await
+            .unwrap();
+        let endpoint = Endpoint::new("client endpoint".to_string(), stream);
 
         endpoint.read_requests().unwrap();
 
