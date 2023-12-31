@@ -17,15 +17,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Build
-      run: |
-        cargo build --verbose
-        strip target/debug/collab-mode
-        mv target/debug/collab-mode collab-mode_debug_x86_64_unknown-linux-gnu
+      run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
-    - name: Release
-      uses: softprops/action-gh-release@v1
-      with:
-        draft: true
-        files: |
-          collab-mode-debug-x86_64-unknown-linux-gnu
