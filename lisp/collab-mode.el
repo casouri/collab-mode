@@ -860,14 +860,13 @@ If we receive a ServerError notification, just display a warning."
 
 (defun collab--list-files-req
     (dir host signaling-server credential &optional callback)
-  "Return a list of files on HOST with CREDENTIAL.
+  "Request for files on HOST with CREDENTIAL.
 
 If DIR is non-nil, it should be the DOC-DESC of the directory we
 want to list. SIGNALING-SERVER is the address of the signaling
 server.
 
-Each file in the returned list is of the form (:docDesc DOC-DESC
-:fileName FILE-NAME).
+Return a plist (:files [(:docDesc DOC-DESC :fileName FILE-NAME) ...]).
 
 If CALLBACK is non-nil, this request is async and returns nil
 immediately, when the response returns, CALLBACK is called with
@@ -892,12 +891,10 @@ response)."
                        (funcall callback :timeout resp))
          :timeout collab-connection-timeout)
       ;; Sync request.
-      (let ((resp (jsonrpc-request
-                   conn 'ListFiles
-                   request-object
-                   :timeout collab-rpc-timeout)))
-        ;; Turn vector into a list.
-        (seq-map #'identity (plist-get resp :files))))))
+      (jsonrpc-request
+       conn 'ListFiles
+       request-object
+       :timeout collab-rpc-timeout))))
 
 (defun collab--share-file-req (host filename file-meta content)
   "Share the file with HOST.
@@ -1143,10 +1140,16 @@ Point is not restored in the face of non-local exit."
 
 ;;;; Drawing the hub UI
 
-(defvar collab--list-files-cache nil
+(defvar-local collab--list-files-cache (make-hash-table :test #'equal)
   "A cache of response of ListFiles.
-An alist, where keys are host ids and values are ListFiles reply
+A hash table; keys are host ids and values are ListFiles reply
 objects.")
+
+(defvar-local collab--open-this-doc nil
+  "When non-nil, open this doc when we finish refresh.
+It should be a cons (HOST-ID . DOC-ID).
+‘collab--insert-host-callback’ will open this doc if it’s in the
+listed files.")
 
 (defun collab--replace-section (prop value content-fn)
   "Replace a section of the buffer with new content.
@@ -1197,17 +1200,18 @@ See ‘collab--doc-desc-id’ for the shape of DOC-DESC."
       (insert " " (propertize (icon-string 'collab-status-on)
                               'collab-status t)))))
 
-(defun collab--insert-host-1 (host files status &optional error)
-  "Insert HOST, its STATUS, and its FILES.
+(defun collab--insert-host-1 (host resp status &optional error)
+  "Insert HOST, its STATUS, and its files in RESP.
 
 STATUS can be ‘up’, ‘down’, ‘delayed’, or nil.
 
-FILES can be the response object of ListFiles request or nil.
-Insert (empty) if FILES is nil; insert ... if STATUS is not ‘up’.
+RESP can be the response object of ListFiles request or nil.
+Insert (empty) if RESP is nil; insert ... if STATUS is not ‘up’.
 
 If ERROR (string) is non-nil, also insert the error. ERROR
 shouldn’t end with a newline."
-  (let ((beg (point)))
+  (let ((beg (point))
+        (files (seq-map #'identity (plist-get resp :files))))
     ;; 1. Insert host line.
     (insert (propertize host
                         'face 'collab-host
@@ -1246,19 +1250,33 @@ STATUS should be one of ‘:success’, ‘:error’, or ‘:timeout’. For
 ‘:error’, RESP is an error object that contains ‘code’,
 ‘message’, ‘data’. For ‘:timeout’, resp is nil.
 
-This function finds the section for the host in the current
-buffer, and populates the file list."
+This function finds the section for the host in the CURRENT
+BUFFER (make sure it’s the hub buffer), and populates the file
+list."
   (pcase status
     (:success
+     (puthash host resp collab--list-files-cache)
      ;; Turn vector into list.
-     (let ((files (seq-map #'identity (plist-get resp :files))))
-       (collab--replace-section
-        'collab-host-id host
-        (lambda ()
-          (collab--insert-host-1 host files 'up)))
-       (when files
-         (collab--replace-section 'collab-fairy-chatter t #'ignore))))
+     ;; Update the hub buffer.
+     (collab--replace-section
+      'collab-host-id host
+      (lambda ()
+        (collab--insert-host-1 host resp 'up)))
+     ;; Remove fairy chatter about having no docs.
+     (when resp
+       (collab--replace-section 'collab-fairy-chatter t #'ignore))
+     ;; Open the doc we were trying to open before fetching files.
+     (when (and collab--open-this-doc
+                (equal host (car collab--open-this-doc)))
+       (let ((doc-id (cdr collab--open-this-doc)))
+         (setq collab--open-this-doc nil)
+         (collab--open-doc doc-id host)
+         ;; Refresh the hub buffer with cached file list, just to
+         ;; add the green dot after just-opened doc.
+         (with-current-buffer (collab--hub-buffer)
+           (collab--hub-refresh t)))))
     (:error
+     (puthash host nil collab--list-files-cache)
      (collab--replace-section
       'collab-host-id host
       (lambda ()
@@ -1267,6 +1285,7 @@ buffer, and populates the file list."
          (or (plist-get resp :message)
              "Error connecting to the host")))))
     (:timeout
+     (puthash host nil collab--list-files-cache)
      (collab--replace-section
       'collab-host-id host
       (lambda ()
@@ -1284,8 +1303,9 @@ signaling server. Return t if the server has some file to list.
 Return t if inserted a host section into the buffer."
   (if (equal host "self")
       ;; Get local host files synchronously.
-      (let ((files (collab--list-files-req
-                    nil host signaling-server credential)))
+      (let* ((resp (collab--list-files-req
+                    nil host signaling-server credential))
+             (files (seq-map #'identity (plist-get resp :files))))
         ;; Don’t insert local host if there’s no files on it.
         (if (null files)
             nil
@@ -1367,33 +1387,36 @@ If USE-CACHE is t, don’t refetch file list, use the cached file list."
     (when collab--current-message
       (delete-char -1)
       (let ((beg (point)))
-        (insert "\n" collab--current-message "\n\n")
+        (insert "\n" (string-trim collab--current-message) "\n\n")
         (font-lock-append-text-property beg (point) 'face 'diff-added))
-      (insert "\n\n"))
+      (insert "\n"))
 
     ;; 3. Insert each host and files.
-    (dolist (entry (collab--host-alist))
-      (let* ((host-id (car entry))
-             (signaling-server (nth 0 (cdr entry)))
-             (credential (nth 1 (cdr entry)))
-             (cached-files (alist-get host-id collab--list-files-cache))
-             (inserted-host nil))
-        (cond
-         (use-cache
-          (when cached-files
-            (collab--insert-host-1 host-id cached-files 'up)
-            (setq inserted-host t)))
-         ((not connection-up)
-          (unless (equal host-id "self")
-            (collab--insert-host-1 host-id nil nil)
-            (setq inserted-host t)))
-         (connection-up
-          (setq inserted-host
-                (collab--insert-host
-                 host-id signaling-server credential))))
-        (when inserted-host
-          (insert "\n"))))
-    (insert "\n")
+    (let ((inserted-any-host nil))
+      (dolist (entry (collab--host-alist))
+        (let* ((host-id (car entry))
+               (signaling-server (nth 0 (cdr entry)))
+               (credential (nth 1 (cdr entry)))
+               (cached-resp (gethash host-id collab--list-files-cache))
+               (inserted-host nil))
+          (cond
+           (use-cache
+            (when cached-resp
+              (collab--insert-host-1 host-id cached-resp 'up)
+              (setq inserted-host t)))
+           ((not connection-up)
+            (unless (equal host-id "self")
+              (collab--insert-host-1 host-id nil nil)
+              (setq inserted-host t)))
+           (connection-up
+            (setq inserted-host
+                  (collab--insert-host
+                   host-id signaling-server credential))))
+          (when inserted-host
+            (insert "\n")
+            (setq inserted-any-host t))))
+      (when inserted-any-host
+        (insert "\n")))
 
     ;; 4. Fairy chatter.
     (let ((has-some-doc
@@ -1404,10 +1427,10 @@ If USE-CACHE is t, don’t refetch file list, use the cached file list."
            (propertize
             (concat
              (collab--fairy "No shared docs, not here, not now.
-Let’s create one, here’s how!\n"))
+Let’s create one, here’s how!\n\n\n"))
             'collab-fairy-chatter t)))
       (when (not has-some-doc)
-        (insert fairy-chatter "\n\n")))
+        (insert fairy-chatter)))
 
     ;; 5. Footer.
     (insert (substitute-command-keys
@@ -1558,13 +1581,15 @@ immediately."
     (jsonrpc-shutdown collab--jsonrpc-connection)
     (setq collab--jsonrpc-connection nil)))
 
-(defun collab--hub-refresh ()
-  "Refresh collab hub buffer."
+(defun collab--hub-refresh (&optional use-cache)
+  "Refresh collab hub buffer.
+If USE-CACHE is t, don’t fetch for file list and use cached file
+list."
   (interactive)
   (let ((inhibit-read-only t)
         (line (line-number-at-pos)))
     (erase-buffer)
-    (collab--render)
+    (collab--render use-cache)
     (goto-char (point-min))
     (forward-line (1- line))))
 
@@ -1626,10 +1651,6 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                (meta (plist-get resp :fileMeta))
                (suggested-major-mode (plist-get meta :emacs.majorMode))
                (inhibit-read-only t))
-          (end-of-line)
-          (unless (get-text-property (1- (point)) 'collab-status)
-            (insert " " (propertize (icon-string 'collab-status-on)
-                                    'collab-status t)))
           (select-window
            (display-buffer
             (generate-new-buffer
@@ -1705,7 +1726,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                          doc-id))
            (collab--current-message
             (collab--fairy "Your file is shared, and here’s the link
-All can connect with just a click.
+All can connect with just a click!
 LINK: %s" (propertize link 'face 'link))))
       (collab--hub-refresh))))
 
@@ -1848,7 +1869,7 @@ its name rather than doc id) to connect."
 
 ;;;###autoload
 (defun collab-connect (share-link)
-  "Connect to the file at SHARE-LINK.
+  "Connect to the doc at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
   (interactive (list (read-string "Share link: ")))
   (let* ((share-link (string-trim-right share-link "/"))
@@ -1864,14 +1885,13 @@ SHARE-LINK should be in the form of signaling-server/host-id/doc-id."
       (push (cons host-id (list signaling-addr ""))
             collab-host-alist))
 
-    ;; TODO Only connect to host if we haven’t yet.
-    (collab--catch-error (format "can’t connect to Host %s" host-id)
-      (collab--list-files-req nil host-id signaling-addr ""))
-
-    (collab--open-doc doc-id host-id)
-    (save-excursion
-      (with-current-buffer (collab--hub-buffer)
-        (collab--hub-refresh)))))
+    (if (equal host-id "self")
+        ;; TODO fairy.
+        (message "You don’t need to connect to a local doc, just open it in the hub")
+      (switch-to-buffer (collab--hub-buffer))
+      (collab-hub-mode)
+      (setq collab--open-this-doc (cons host-id doc-id))
+      (collab--hub-refresh))))
 
 (defun collab--print-history (&optional debug)
   "Print debugging history for the current buffer.
