@@ -1300,12 +1300,11 @@ Return t if inserted a host section into the buffer."
   (if (equal host "self")
       ;; Get local host files synchronously.
       (let* ((resp (collab--list-files-req
-                    nil host signaling-server credential))
-             (files (seq-map #'identity (plist-get resp :files))))
+                    nil host signaling-server credential)))
         ;; Don’t insert local host if there’s no files on it.
-        (if (null files)
+        (if (eq (length (plist-get resp :files)) 0)
             nil
-          (collab--insert-host-1 host files 'up)
+          (collab--insert-host-1 host resp 'up)
           t))
     ;; Get remote host files asynchronously.
     (collab--insert-host-1 host nil 'delayed)
