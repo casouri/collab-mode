@@ -62,6 +62,11 @@ a doc.")
 (defvar collab-rpc-timeout 3
   "Timeout in seconds to wait for connection to collab process.")
 
+(defvar collab-connection-timeout 30
+  "Timeout in seconds to wait for connection to remote hosts.
+Connecting to remote hosts might be slow since hosts might need
+to perform NAT traversal.")
+
 (defvar collab-command "~/p/collab/target/debug/collab"
   "Path to the collab process executable.")
 
@@ -853,23 +858,46 @@ If we receive a ServerError notification, just display a warning."
 
 ;;;; Requests
 
-(defun collab--list-files-req (dir host signaling-server credential)
+(defun collab--list-files-req
+    (dir host signaling-server credential &optional callback)
   "Return a list of files on HOST with CREDENTIAL.
 
 If DIR is non-nil, it should be the DOC-DESC of the directory we
 want to list. SIGNALING-SERVER is the address of the signaling
-server. Each file is of the form (:docDesc DOC-DESC :fileName
-FILE-NAME)."
-  (let* ((conn (collab--connect-process))
-         (resp (jsonrpc-request
-                conn 'ListFiles
-                (append `( :hostId ,host
-                           :signalingAddr ,signaling-server
-                           :credential ,credential)
-                        (and dir `(:dir ,dir)))
-                :timeout collab-rpc-timeout)))
-    ;; Convert vector to a list.
-    (seq-map #'identity (plist-get resp :files))))
+server.
+
+Each file in the returned list is of the form (:docDesc DOC-DESC
+:fileName FILE-NAME).
+
+If CALLBACK is non-nil, this request is async and returns nil
+immediately, when the response returns, CALLBACK is called with
+the response object (not a list of files, but the full plist
+response)."
+  (let ((conn (collab--connect-process))
+        (request-object
+         (append `( :hostId ,host
+                    :signalingAddr ,signaling-server
+                    :credential ,credential)
+                 (and dir `(:dir ,dir)))))
+    (if callback
+        ;; Async request.
+        (jsonrpc-async-request
+         conn 'ListFiles
+         request-object
+         :success-fn (lambda (resp)
+                       (funcall callback :success resp))
+         :error-fn (lambda (resp)
+                     (funcall callback :error resp))
+         :timeout-fn (lambda (resp)
+                       (funcall callback :timeout resp))
+         :timeout collab-connection-timeout)
+      ;; Sync request.
+      (let ((resp (jsonrpc-request
+                   conn 'ListFiles
+                   request-object
+                   :timeout collab-rpc-timeout)))
+        ;; Turn vector into a list.
+        (seq-map #'identity (plist-get resp :files))))))
 
 (defun collab--share-file-req (host filename file-meta content)
   "Share the file with HOST.
@@ -1115,6 +1143,40 @@ Point is not restored in the face of non-local exit."
 
 ;;;; Drawing the hub UI
 
+(defvar collab--list-files-cache nil
+  "A cache of response of ListFiles.
+An alist, where keys are host ids and values are ListFiles reply
+objects.")
+
+(defun collab--replace-section (prop value content-fn)
+  "Replace a section of the buffer with new content.
+
+In the current buffer, search for the section which has text
+property PROP with VALUE, and replace that secion with the
+content of CONTENT-FN. CONTENT-FN should be a function that
+inserts text at point and should leave point at the end of the
+new text when it returns. This function re-applies PROP and VALUE
+to the new text.
+
+VALUE is compared with ‘equal’.
+
+If there are multiple secions that has PROP and VALUE, only
+replace the first such section in the buffer.
+
+If no such section is found, do nothing."
+  (let ((inhibit-read-only t)
+        match)
+    (save-excursion
+      (goto-char (point-min))
+      (catch 'done
+        (while (setq match (text-property-search-forward prop))
+          (when (equal (prop-match-value match) value)
+            (delete-region (prop-match-beginning match)
+                           (prop-match-end match))
+            (let ((beg (point)))
+              (funcall content-fn)
+              (put-text-property beg (point) prop value)
+              (throw 'done nil))))))))
 (defun collab--insert-file
     (doc-desc file-name server &optional display-name)
   "Insert DOC-DESC with FILE-NAME.
@@ -1135,49 +1197,104 @@ See ‘collab--doc-desc-id’ for the shape of DOC-DESC."
       (insert " " (propertize (icon-string 'collab-status-on)
                               'collab-status t)))))
 
+(defun collab--insert-host-1 (host files status &optional error)
+  "Insert HOST, its STATUS, and its FILES.
+
+STATUS can be ‘up’, ‘down’, ‘delayed’, or nil.
+
+FILES can be the response object of ListFiles request or nil.
+Insert (empty) if FILES is nil; insert ... if STATUS is not ‘up’.
+
+If ERROR (string) is non-nil, also insert the error. ERROR
+shouldn’t end with a newline."
+  (let ((beg (point)))
+    ;; 1. Insert host line.
+    (insert (propertize host
+                        'face 'collab-host
+                        'collab-host-line t))
+    ;; 1.1 Insert status.
+    (unless (equal host "self")
+      (insert (pcase status
+                ('nil "")
+                ('delayed (propertize " CONNECTING" 'face 'shadow))
+                ('up (propertize " UP" 'face 'success))
+                ('down (propertize " DOWN" 'face 'error)))))
+    (insert (propertize "\n" 'line-spacing 0.4))
+    ;; 2. Insert files.
+    (pcase status
+      ('up (if (null files)
+               (insert (propertize "(empty)\n" 'face 'shadow))
+             ;; FILE is in DocInfo type.
+             (dolist (file files)
+               (let ((doc (plist-get file :docDesc))
+                     (file-name (plist-get file :fileName)))
+                 (collab--insert-file doc file-name host)
+                 (insert "\n")))))
+      (_ (insert (propertize "...\n" 'face 'shadow))))
+    ;; 3. Insert error.
+    (when error
+      (insert (propertize (string-trim error) 'face 'shadow) "\n"))
+    ;; 4. Mark host section.
+    (add-text-properties beg (point)
+                         `(collab-host-id ,host))))
+
+(defun collab--insert-host-callback (host status resp)
+  "The callback function for inserting HOST and its files.
+
+STATUS should be one of ‘:success’, ‘:error’, or ‘:timeout’. For
+‘:success’, RESP is the plist response object of ListFiles. For
+‘:error’, RESP is an error object that contains ‘code’,
+‘message’, ‘data’. For ‘:timeout’, resp is nil.
+
+This function finds the section for the host in the current
+buffer, and populates the file list."
+  (pcase status
+    (:success
+     ;; Turn vector into list.
+     (let ((files (seq-map #'identity (plist-get resp :files))))
+       (collab--replace-section
+        'collab-host-id host
+        (lambda ()
+          (collab--insert-host-1 host files 'up)))
+       (when files
+         (collab--replace-section 'collab-fairy-chatter t #'ignore))))
+    (:error
+     (collab--replace-section
+      'collab-host-id host
+      (lambda ()
+        (collab--insert-host-1
+         host nil 'down
+         (or (plist-get resp :message)
+             "Error connecting to the host")))))
+    (:timeout
+     (collab--replace-section
+      'collab-host-id host
+      (lambda ()
+        (collab--insert-host-1
+         host nil 'down
+         (format "Timed out connecting to the host after %ss"
+                 collab-connection-timeout)))))))
+
 (defun collab--insert-host (host signaling-server credential)
   "Insert HOST on SIGNALING-SERVER and its files.
 Server has CREDENTIAL. SIGNALING-SERVER is the address of the
 signaling server. Return t if the server has some file to list."
-  (let ((beg (point)))
-    ;; 1. Insert server line.
-    (insert (propertize host
-                        'face 'collab-host
-                        'collab-host-line t))
-    (unless (equal host "self")
-      (insert (propertize " UP" 'face 'success)))
-    (insert (propertize "\n" 'line-spacing 0.4))
-    (let ((files (collab--list-files-req
-                  nil host signaling-server credential)))
-      ;; 2. Insert files.
-      (if files
-          ;; FILE is in DocInfo type.
-          (dolist (file files)
-            (let ((doc (plist-get file :docDesc))
-                  (file-name (plist-get file :fileName)))
-              (collab--insert-file doc file-name host)
-              (insert "\n")))
-        (insert (propertize "(empty)\n" 'face 'shadow)))
-      ;; 4. Mark server section.
-      (add-text-properties beg (point)
-                           `(collab-host-id ,host))
-      ;; Don’t show the local server if there’s no hosted files.
-      (when (and (equal host "self") (null files))
-        (delete-region beg (point)))
-      (if files t nil))))
-
-(defun collab--insert-disconnected-host
-    (host &optional insert-status)
-  "Insert a disconnected HOST.
-If INSERT-STATUS, insert a red DOWN symbol."
-  (let ((beg (point)))
-    (insert (propertize host 'face 'bold))
-    (when insert-status
-      (insert (propertize " DOWN" 'face 'error)))
-    (insert (propertize "\n" 'line-spacing 0.4))
-    (insert "...\n")
-    (add-text-properties beg (point)
-                         `(collab-host-id ,host))))
+  (if (equal host "self")
+      ;; Get local host files synchronously.
+      (let ((files (collab--list-files-req
+                    nil host signaling-server credential)))
+        ;; Don’t insert local host if there’s no files on it.
+        (when files
+          (collab--insert-host-1 host files 'up)))
+    ;; Get remote host files asynchronously.
+    (collab--insert-host-1 host nil 'delayed)
+    (let ((collab-hub-buf (current-buffer)))
+      (collab--list-files-req
+       nil host signaling-server credential
+       (lambda (status resp)
+         (when (buffer-live-p collab-hub-buf)
+           (with-current-buffer collab-hub-buf
+             (collab--insert-host-callback host status resp))))))))
 
 (defun collab--prop-section (prop)
   "Return the (BEG . END) of the range that has PROP."
@@ -1211,13 +1328,12 @@ If INSERT-STATUS, insert a red DOWN symbol."
   (add-hook 'post-command-hook #'collab--dynamic-highlight)
   (eldoc-mode))
 
-(defun collab--render ()
+(defun collab--render (&optional use-cache)
   "Render collab mode buffer.
-
-Also insert ‘collab--current-message’ if it’s non-nil."
-  (let ((connection-up nil)
-        (have-some-file nil))
-    ;; Insert headers.
+Also insert ‘collab--current-message’ if it’s non-nil.
+If USE-CACHE is t, don’t refetch file list, use the cached file list."
+  (let ((connection-up nil))
+    ;; 1. Insert headers.
     (insert "Connection: ")
     (condition-case err
         (progn
@@ -1240,47 +1356,53 @@ Also insert ‘collab--current-message’ if it’s non-nil."
                       (nth 1 collab-local-host-config)
                       (car collab-local-host-config))
               "\n"))
-    ;; (insert "Errors: ")
-    ;; (insert "0" "\n")
     (insert "\n")
 
+    ;; 2. Insert notice message, if any.
     (when collab--current-message
       (let ((beg (point)))
         (insert "\n" collab--current-message "\n\n")
         (font-lock-append-text-property beg (point) 'face 'diff-added)
         (insert "\n")))
 
-    ;; Insert each host and files.
+    ;; 3. Insert each host and files.
     (dolist (entry (collab--host-alist))
-      (let ((host-beg (point))
-            (host-has-some-file nil))
-        (condition-case err
-            (if (not connection-up)
-                (when (not (equal (car entry) "self"))
-                  (collab--insert-disconnected-host (car entry)))
-              (setq host-has-some-file
-                    (collab--insert-host
-                     (car entry) (nth 0 (cdr entry))
-                     (nth 1 (cdr entry)))))
-          (jsonrpc-error
-           (delete-region host-beg (point))
-           (collab--insert-disconnected-host (car entry) t)
-           (setq collab--most-recent-error
-                 (format "Error connecting to remote peer:\n%s"
-                         (pp-to-string err)))))
-        (setq have-some-file (or have-some-file host-has-some-file)))
+      (let* ((host-id (car entry))
+             (signaling-server (nth 0 (cdr entry)))
+             (credential (nth 1 (cdr entry)))
+             (cached-files (alist-get host-id collab--list-files-cache)))
+        (cond
+         (use-cache
+          (when cached-files
+            (collab--insert-host-1 host-id cached-files 'up)))
+         ((not connection-up)
+          (collab--insert-host-1 host-id nil 'delayed))
+         (connection-up
+          (collab--insert-host host-id signaling-server credential))))
       (insert "\n"))
 
-    ;; Footer.
-    (unless have-some-file
-      (insert "\n" (collab--fairy "No shared docs, not here, not now.
-Let’s create one, here’s how.\n\n\n")))
+    ;; 4. Fairy chatter.
+    (let ((has-some-doc
+           (save-excursion
+             (goto-char (point-min))
+             (text-property-search-forward 'collab-doc-desc)))
+          (fairy-chatter
+           (propertize
+            (concat
+             "\n" (collab--fairy "No shared docs, not here, not now.
+Let’s create one, here’s how!\n\n\n"))
+            'collab-fairy-chatter t)))
+      (when (not has-some-doc)
+        (insert fairy-chatter)))
 
+    ;; 5. Footer.
     (insert (substitute-command-keys
              "PRESS \\[collab--refresh] TO REFRESH
 PRESS \\[collab-share] TO SHARE A FILE/DIR
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
+
+    ;; 6. Error.
     (when collab--most-recent-error
       (insert
        (propertize (concat "\n\nMost recent error:\n\n"
