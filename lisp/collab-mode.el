@@ -1277,15 +1277,20 @@ buffer, and populates the file list."
 
 (defun collab--insert-host (host signaling-server credential)
   "Insert HOST on SIGNALING-SERVER and its files.
+
 Server has CREDENTIAL. SIGNALING-SERVER is the address of the
-signaling server. Return t if the server has some file to list."
+signaling server. Return t if the server has some file to list.
+
+Return t if inserted a host section into the buffer."
   (if (equal host "self")
       ;; Get local host files synchronously.
       (let ((files (collab--list-files-req
                     nil host signaling-server credential)))
         ;; Don’t insert local host if there’s no files on it.
-        (when files
-          (collab--insert-host-1 host files 'up)))
+        (if (null files)
+            nil
+          (collab--insert-host-1 host files 'up)
+          t))
     ;; Get remote host files asynchronously.
     (collab--insert-host-1 host nil 'delayed)
     (let ((collab-hub-buf (current-buffer)))
@@ -1294,7 +1299,8 @@ signaling server. Return t if the server has some file to list."
        (lambda (status resp)
          (when (buffer-live-p collab-hub-buf)
            (with-current-buffer collab-hub-buf
-             (collab--insert-host-callback host status resp))))))))
+             (collab--insert-host-callback host status resp))))))
+    t))
 
 (defun collab--prop-section (prop)
   "Return the (BEG . END) of the range that has PROP."
@@ -1352,34 +1358,42 @@ If USE-CACHE is t, don’t refetch file list, use the cached file list."
               (propertize "NO" 'face 'shadow))
             "\n")
     (when (and connection-up collab--accepting-connection)
-      (insert (format "Host at: %s/%s"
+      (insert (format "Host at: %s/%s\n"
                       (nth 1 collab-local-host-config)
-                      (car collab-local-host-config))
-              "\n"))
-    (insert "\n")
+                      (car collab-local-host-config))))
+    (insert "\n\n")
 
     ;; 2. Insert notice message, if any.
     (when collab--current-message
+      (delete-char -1)
       (let ((beg (point)))
         (insert "\n" collab--current-message "\n\n")
-        (font-lock-append-text-property beg (point) 'face 'diff-added)
-        (insert "\n")))
+        (font-lock-append-text-property beg (point) 'face 'diff-added))
+      (insert "\n\n"))
 
     ;; 3. Insert each host and files.
     (dolist (entry (collab--host-alist))
       (let* ((host-id (car entry))
              (signaling-server (nth 0 (cdr entry)))
              (credential (nth 1 (cdr entry)))
-             (cached-files (alist-get host-id collab--list-files-cache)))
+             (cached-files (alist-get host-id collab--list-files-cache))
+             (inserted-host nil))
         (cond
          (use-cache
           (when cached-files
-            (collab--insert-host-1 host-id cached-files 'up)))
+            (collab--insert-host-1 host-id cached-files 'up)
+            (setq inserted-host t)))
          ((not connection-up)
-          (collab--insert-host-1 host-id nil 'delayed))
+          (unless (equal host-id "self")
+            (collab--insert-host-1 host-id nil nil)
+            (setq inserted-host t)))
          (connection-up
-          (collab--insert-host host-id signaling-server credential))))
-      (insert "\n"))
+          (setq inserted-host
+                (collab--insert-host
+                 host-id signaling-server credential))))
+        (when inserted-host
+          (insert "\n"))))
+    (insert "\n")
 
     ;; 4. Fairy chatter.
     (let ((has-some-doc
@@ -1389,11 +1403,11 @@ If USE-CACHE is t, don’t refetch file list, use the cached file list."
           (fairy-chatter
            (propertize
             (concat
-             "\n" (collab--fairy "No shared docs, not here, not now.
-Let’s create one, here’s how!\n\n\n"))
+             (collab--fairy "No shared docs, not here, not now.
+Let’s create one, here’s how!\n"))
             'collab-fairy-chatter t)))
       (when (not has-some-doc)
-        (insert fairy-chatter)))
+        (insert fairy-chatter "\n\n")))
 
     ;; 5. Footer.
     (insert (substitute-command-keys
@@ -1401,15 +1415,16 @@ Let’s create one, here’s how!\n\n\n"))
 PRESS \\[collab-share] TO SHARE A FILE/DIR
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
+    (insert "\n\n")
 
     ;; 6. Error.
     (when collab--most-recent-error
       (insert
-       (propertize (concat "\n\nMost recent error:\n\n"
-                           collab--most-recent-error
-                           "\n")
+       (propertize (concat "Most recent error:\n\n"
+                           collab--most-recent-error)
                    'face 'shadow))
-      (setq collab--most-recent-error nil))))
+      (setq collab--most-recent-error nil))
+    (insert "\n")))
 
 ;;;; Dynamic highlight
 
