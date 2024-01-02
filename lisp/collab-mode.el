@@ -1270,11 +1270,7 @@ list."
                 (equal host (car collab--open-this-doc)))
        (let ((doc-id (cdr collab--open-this-doc)))
          (setq collab--open-this-doc nil)
-         (collab--open-doc doc-id host)
-         ;; Refresh the hub buffer with cached file list, just to
-         ;; add the green dot after just-opened doc.
-         (with-current-buffer (collab--hub-buffer)
-           (collab--hub-refresh t)))))
+         (collab--open-doc doc-id host))))
     (:error
      (puthash host nil collab--list-files-cache)
      (collab--replace-section
@@ -1664,7 +1660,11 @@ If HOST-ID and DOC-ID non-nil, use them instead."
               (funcall (intern-soft suggested-major-mode))
             (let ((buffer-file-name file-name))
               (set-auto-mode)))
-          (collab--enable doc-id host-id site-id)))))))
+          (collab--enable doc-id host-id site-id)))))
+    ;; Refresh the hub buffer with cached file list, just to
+    ;; add the green dot after just-opened doc.
+    (with-current-buffer (collab--hub-buffer)
+      (collab--hub-refresh t))))
 
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
