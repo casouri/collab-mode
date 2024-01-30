@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use webrtc_dtls::{self, conn::DTLSConn};
 use webrtc_sctp::{association, chunk::chunk_payload_data::PayloadProtocolIdentifier, stream};
 use webrtc_util::Conn;
 
@@ -73,6 +74,36 @@ type DataChannel = stream::Stream;
 #[derive(Debug)]
 pub struct Listener {
     inner: crate::signaling::client::Listener,
+}
+
+async fn create_dtls_server(conn: Arc<dyn Conn + Send + Sync>) -> WebrpcResult<Arc<DTLSConn>> {
+    let config = webrtc_dtls::config::Config {
+        // FIXME
+        certificates: vec![webrtc_dtls::crypto::Certificate::generate_self_signed(
+            vec!["xxx".to_string()],
+        )?],
+        // FIXME
+        insecure_skip_verify: true,
+        ..Default::default()
+    };
+
+    let conn = DTLSConn::new(conn, config, false, None).await?;
+    Ok(Arc::new(conn))
+}
+
+async fn create_dtls_client(conn: Arc<dyn Conn + Send + Sync>) -> WebrpcResult<Arc<DTLSConn>> {
+    let config = webrtc_dtls::config::Config {
+        // FIXME
+        certificates: vec![webrtc_dtls::crypto::Certificate::generate_self_signed(
+            vec!["xxx".to_string()],
+        )?],
+        // FIXME
+        insecure_skip_verify: true,
+        ..Default::default()
+    };
+
+    let conn = DTLSConn::new(conn, config, true, None).await?;
+    Ok(Arc::new(conn))
 }
 
 async fn create_sctp_server(
@@ -111,7 +142,8 @@ impl Listener {
         let sock = self.inner.accept().await?;
         let name = format!("connection to {}", sock.id());
         let conn = ice_accept(sock, None).await?;
-        let sctp_connection = create_sctp_server(conn).await?;
+        let dtls_connection = create_dtls_server(conn).await?;
+        let sctp_connection = create_sctp_server(dtls_connection).await?;
         if let Some(stream) = sctp_connection.accept_stream().await {
             Ok(Endpoint::new(name, stream))
         } else {
@@ -178,7 +210,8 @@ impl Endpoint {
     /// Connect to the endpoint with `id` registered on the signaling server.
     pub async fn connect(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Endpoint> {
         let conn = ice_connect(id.clone(), signaling_addr, None).await?;
-        let sctp_conn = create_sctp_client(conn).await?;
+        let dtls_conn = create_dtls_client(conn).await?;
+        let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
             .open_stream(1, PayloadProtocolIdentifier::Binary)
             .await?;

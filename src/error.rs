@@ -85,6 +85,8 @@ pub enum WebrpcError {
     ICEError(String),
     #[error("SCTP error {0}")]
     SCTPError(String),
+    #[error("DTLS error {0}")]
+    DTLSError(String),
     #[error("Can't parse message: {0}")]
     ParseError(String),
     #[error("Data channel error {0}")]
@@ -122,8 +124,8 @@ impl From<webrtc_sctp::Error> for WebrpcError {
     }
 }
 
-impl From<webrtc_data::Error> for WebrpcError {
-    fn from(value: webrtc_data::Error) -> Self {
-        Self::DataChannelError(value.to_string())
+impl From<webrtc_dtls::Error> for WebrpcError {
+    fn from(value: webrtc_dtls::Error) -> Self {
+        Self::DTLSError(value.to_string())
     }
 }

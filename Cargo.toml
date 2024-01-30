@@ -33,11 +33,15 @@ futures = "0.3"
 futures-util = "0.3"
 
 tokio-tungstenite = { version = "0.20.0", features = ["native-tls"]}
-webrtc-ice = "0.9.1"
-webrtc-data = "0.7.0"
-webrtc-util = "0.7.0"
-webrtc-sctp = "0.8.0"
+# Make sure the version of webrtc-util matches the one that's used by
+# webrtc-ice, webrtc-sctp, and webrtc-dtls.
+webrtc-ice = "0.10.0"
+webrtc-util = "0.8.0"
+webrtc-sctp = "0.9.0"
+webrtc-dtls = "0.8.0"
 bytes = "1.4.0"
+# This is the version used by webrtc-dtls.
+rcgen = {version = "0.11.1", features = ["pem", "x509-parser"]}
 
 
 # https://github.com/johnthagen/min-sized-rust

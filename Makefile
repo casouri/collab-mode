@@ -23,3 +23,7 @@ signaling:
 
 doc:
 	cargo doc --document-private-items --open
+
+run-2:
+	$(RUST_ENV) cargo run --bin collab-mode -- run --socket --socket-port 7702 &
+	~/emacs-head/src/emacs -f collab--setup-2
