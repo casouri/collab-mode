@@ -71,6 +71,8 @@ type LiveRequestMap = RwLock<HashMap<RequestId, ()>>;
 
 type DataChannel = stream::Stream;
 
+// *** DTLS & SCTP
+
 #[derive(Debug)]
 pub struct Listener {
     inner: crate::signaling::client::Listener,
@@ -132,6 +134,8 @@ async fn create_sctp_client(
     Ok(Arc::new(assoc))
 }
 
+// *** Listener
+
 impl Listener {
     pub async fn bind(id: String, signaling_addr: &str) -> WebrpcResult<Listener> {
         let listener = ice_bind(id, signaling_addr).await?;
@@ -151,6 +155,8 @@ impl Listener {
         }
     }
 }
+
+// *** Endpoint
 
 /// An RPC endpoint. It can be used as either a client or a server.
 #[derive(Debug, Clone)]
@@ -345,6 +351,8 @@ impl Endpoint {
         Ok(rx)
     }
 }
+
+// *** Utilities
 
 /// Read a webrpc frame from `reader`, `header_buf` is for reading
 /// header lines and should be [MAX_FRAME_HEADER_LINE_SIZE] large,
@@ -571,19 +579,23 @@ async fn write_message(
     Ok(())
 }
 
+// *** Tests
+
 #[cfg(test)]
 mod tests {
     use super::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
     use super::{create_sctp_client, create_sctp_server};
     use crate::signaling::server::run_signaling_server;
+    use crate::webrpc::{create_dtls_client, create_dtls_server};
     use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 
     async fn test_server(id: String) -> anyhow::Result<()> {
         let mut listener = ice_bind(id, "ws://127.0.0.1:9000").await?;
         let sock = listener.accept().await?;
         let conn = ice_accept(sock, None).await?;
-        let sctp_conn = create_sctp_server(conn).await?;
+        let dtls_conn = create_dtls_server(conn).await?;
+        let sctp_conn = create_sctp_server(dtls_conn).await?;
         let stream = sctp_conn.accept_stream().await.unwrap();
         let endpoint = Endpoint::new("server endpoint".to_string(), stream);
 
@@ -621,7 +633,8 @@ mod tests {
 
     async fn test_client(id: String) -> anyhow::Result<()> {
         let conn = ice_connect(id, "ws://127.0.0.1:9000", None).await?;
-        let sctp_conn = create_sctp_client(conn).await?;
+        let dtls_conn = create_dtls_client(conn).await?;
+        let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
             .open_stream(1, PayloadProtocolIdentifier::Binary)
             .await
