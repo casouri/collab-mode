@@ -23,7 +23,9 @@
 //! [Socket::send_candidate] and [Socket::recv_candidate], until the
 //! webrtc connection is established.
 
-use super::{EndpointId, ICECandidate, SignalingError, SignalingMessage, SignalingResult, SDP};
+use super::{
+    EndpointId, ICECandidate, PubKeyPem, SignalingError, SignalingMessage, SignalingResult, SDP,
+};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
@@ -49,6 +51,8 @@ fn expect_text(msg: Message) -> SignalingResult<String> {
 pub struct Listener {
     /// The id for this endpoint.
     my_id: EndpointId,
+    /// The publick key for this endpoint.
+    my_key: PubKeyPem,
     /// Channel used to send messages out to the signal server.
     out_tx: mpsc::Sender<Message>,
     /// When the listener receives a `BindResponse(their_id,
@@ -66,6 +70,7 @@ pub struct Socket {
     their_sdp: SDP,
     their_id: EndpointId,
     my_id: EndpointId,
+    my_key: PubKeyPem,
 }
 
 #[derive(Debug, Clone)]
@@ -82,8 +87,9 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    /// Connect to the signaling server at `addr`.
-    pub async fn new(addr: &str, id: EndpointId) -> SignalingResult<Listener> {
+    /// Create a listener that connects to the signaling server at
+    /// `addr`. This endpoint has `id` and `key`.
+    pub async fn new(addr: &str, id: EndpointId, key: PubKeyPem) -> SignalingResult<Listener> {
         let (stream, _addr) = tung::connect_async(addr).await?;
 
         let (in_tx, mut in_rx) = mpsc::channel(1);
@@ -95,6 +101,7 @@ impl Listener {
 
         let listener = Listener {
             my_id: id.clone(),
+            my_key: key.clone(),
             sock_rx,
             out_tx: out_tx.clone(),
             shutdown_rx,
@@ -105,6 +112,7 @@ impl Listener {
             while let Some(msg) = in_rx.recv().await {
                 // Ignore errors as long as in_rx hasn't closed.
                 let _todo = listener_process_message(
+                    key.clone(),
                     msg,
                     out_tx.clone(),
                     sock_tx.clone(),
@@ -119,7 +127,7 @@ impl Listener {
     /// Share `sdp` on the signal server under `id`, and start
     /// listening for incoming connections.
     pub async fn bind(&mut self) -> SignalingResult<()> {
-        let msg = SignalingMessage::Bind(self.my_id.clone());
+        let msg = SignalingMessage::Bind(self.my_id.clone(), self.my_key.clone());
         self.out_tx
             .send(msg.into())
             .await
@@ -130,8 +138,7 @@ impl Listener {
     /// Share our `sdp`, connect to the endpoint that has the id
     /// `their_id`.
     pub async fn connect(&mut self, their_id: EndpointId, sdp: SDP) -> SignalingResult<Socket> {
-        let my_id = uuid::Uuid::new_v4().to_string();
-        let msg = SignalingMessage::Connect(my_id, their_id, sdp);
+        let msg = SignalingMessage::Connect(self.my_id.clone(), their_id, sdp, self.my_key.clone());
         self.out_tx
             .send(msg.into())
             .await
@@ -154,7 +161,12 @@ impl Socket {
     /// Send the answer SDP to the other endpoint. This should happend
     /// immediately after accepting a connection request.
     pub async fn send_sdp(&self, sdp: SDP) -> SignalingResult<()> {
-        let msg = SignalingMessage::Connect(self.my_id.clone(), self.their_id.clone(), sdp);
+        let msg = SignalingMessage::Connect(
+            self.my_id.clone(),
+            self.their_id.clone(),
+            sdp,
+            self.my_key.clone(),
+        );
         self.msg_tx
             .send(msg.into())
             .await
@@ -213,6 +225,7 @@ impl CandidateSender {
 // *** Subroutines
 
 async fn listener_process_message(
+    my_key: PubKeyPem,
     msg: Result<Message, tung::tungstenite::Error>,
     out_tx: mpsc::Sender<Message>,
     sock_tx: mpsc::UnboundedSender<SignalingResult<Socket>>,
@@ -222,11 +235,12 @@ async fn listener_process_message(
     let msg: SignalingMessage =
         serde_json::from_str(&msg).map_err(|err| SignalingError::ParseError(err.to_string()))?;
     match msg {
-        SignalingMessage::Connect(their_id, my_id, their_sdp) => {
+        SignalingMessage::Connect(their_id, my_id, their_sdp, their_key) => {
             let (msg_tx, msg_rx) = mpsc::unbounded_channel();
             endpoint_map.insert(their_id.clone(), msg_tx);
             let sock = Socket {
                 my_id: my_id.clone(),
+                my_key,
                 their_id,
                 their_sdp,
                 msg_rx,

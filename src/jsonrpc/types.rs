@@ -13,6 +13,9 @@ pub enum ErrorCode {
     ServerErrorStart = -32099,
     ServerErrorEnd = -32000,
 
+    // LSP
+    NotInitialized = -32002,
+
     // Collab-mode errors.
     //
     /// Transient error, retry again later.
@@ -63,8 +66,8 @@ impl Into<String> for NotificationCode {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HelloParams {
-    pub site_id: SiteId,
+pub struct InitParams {
+    pub host_id: ServerId,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

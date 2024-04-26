@@ -1,4 +1,5 @@
 use crate::error::{WebrpcError, WebrpcResult};
+use crate::signaling::PubKeyPem;
 use crate::signaling::{
     client::{Listener, Socket as SignalSocket},
     EndpointId,
@@ -23,10 +24,15 @@ struct ICECredential {
     pwd: String,
 }
 
-/// Bind to `id` on the signaling server at `signaling_addr`.
-/// `signaling_addr` should be a valid websocket url.
-pub async fn ice_bind(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Listener> {
-    let mut listener = Listener::new(signaling_addr, id).await?;
+/// Bind to `id` with `key` on the signaling server at
+/// `signaling_addr`. `signaling_addr` should be a valid websocket
+/// url.
+pub async fn ice_bind(
+    id: EndpointId,
+    key: PubKeyPem,
+    signaling_addr: &str,
+) -> WebrpcResult<Listener> {
+    let mut listener = Listener::new(signaling_addr, id, key).await?;
     listener.bind().await?;
     Ok(listener)
 }
@@ -63,12 +69,13 @@ pub async fn ice_accept(
     }
 }
 
-/// Connect to the endpoint with `id` on the signaling server at
-/// signaling_addr`. `signaling_addr` should be a valid websocket url.
-/// If `progress_tx` isn't None, report progress to it while
-/// establishing connection.
+/// Connect to the endpoint with `id` and `key` on the signaling
+/// server at signaling_addr`. `signaling_addr` should be a valid
+/// websocket url. If `progress_tx` isn't None, report progress to it
+/// while establishing connection.
 pub async fn ice_connect(
     id: EndpointId,
+    key: PubKeyPem,
     signaling_addr: &str,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
 ) -> WebrpcResult<Arc<impl Conn + Send + Sync>> {
@@ -77,7 +84,7 @@ pub async fn ice_connect(
     let (connected_tx, connected_rx) = watch::channel(());
 
     let my_id = uuid::Uuid::new_v4().to_string();
-    let mut listener = Listener::new(signaling_addr, my_id).await?;
+    let mut listener = Listener::new(signaling_addr, my_id, key).await?;
     let agent = Arc::new(make_ice_agent(true).await?);
     let cred = ice_credential(&agent).await;
     let sock = listener
@@ -226,12 +233,12 @@ fn ice_exchange_candidates(
 mod tests {
     use super::{ice_accept, ice_connect};
     use crate::signaling::{client::Listener, server::run_signaling_server};
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
     use webrtc_util::Conn;
 
     async fn test_server(id: String) -> anyhow::Result<()> {
         // Connect to the signaling server.
-        let mut listener = Listener::new("ws://127.0.0.1:9000", id).await?;
+        let mut listener = Listener::new("ws://127.0.0.1:9000", id, "key".to_string()).await?;
         listener.bind().await?;
         let sock = listener.accept().await?;
 
@@ -262,7 +269,7 @@ mod tests {
     }
 
     async fn test_client(server_id: String) -> anyhow::Result<()> {
-        let conn = ice_connect(server_id, "ws://127.0.0.1:9000", None).await?;
+        let conn = ice_connect(server_id, "key".to_string(), "ws://127.0.0.1:9000", None).await?;
         let conn_tx = Arc::clone(&conn);
 
         // Send and receive message.
@@ -292,7 +299,9 @@ mod tests {
     #[ignore]
     fn webrtc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000"));
+        let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
+        std::fs::remove_file(&db_path);
+        let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000", &db_path));
 
         let handle = runtime.spawn(async {
             let res = test_server("1".to_string()).await;

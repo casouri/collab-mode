@@ -24,6 +24,7 @@ use thiserror::Error;
 use tokio_tungstenite as tung;
 
 pub mod client;
+mod key_store;
 pub mod server;
 
 /// We treat SDP as a black box.
@@ -32,6 +33,8 @@ pub type SDP = String;
 pub type ICECandidate = String;
 /// Id of an endpoint, should be an UUID string.
 pub type EndpointId = String;
+/// Public key in PEM format.
+pub type PubKeyPem = String;
 
 pub type SignalingResult<T> = Result<T, SignalingError>;
 
@@ -57,6 +60,8 @@ pub enum SignalingError {
     NoEndpointForId(EndpointId),
     #[error("This id is already binded: {0}")]
     IdTaken(EndpointId),
+    #[error("Databse error: {0}")]
+    DBError(String),
 }
 
 impl From<tung::tungstenite::Error> for SignalingError {
@@ -69,18 +74,25 @@ impl From<tung::tungstenite::Error> for SignalingError {
     }
 }
 
+impl From<rusqlite::Error> for SignalingError {
+    fn from(value: rusqlite::Error) -> Self {
+        SignalingError::DBError(value.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SignalingMessage {
     /// An endpoint sends this message to bind to the id on the
-    /// signaling server.
-    Bind(EndpointId),
-    /// Connect request. (sender_id, receiver_id, sender_sdp).
-    Connect(EndpointId, EndpointId, SDP),
+    /// signaling server. The second argument is the public key in PEM
+    /// format.
+    Bind(EndpointId, PubKeyPem),
+    /// Connect request. (sender_id, receiver_id, sender_sdp, sender_key).
+    Connect(EndpointId, EndpointId, SDP, PubKeyPem),
     /// Send candidate. (sender_id, receiver_id, sender_candidate).
     Candidate(EndpointId, EndpointId, ICECandidate),
     /// Cannot find the corresponding endpoint for the provided id.
     NoEndpointForId(String),
-    /// Id is already binded.
+    /// Id is already binded, or the public key doesn't match.
     IdTaken(EndpointId),
     /// Allocated time (3min) is up.
     TimesUp(u16),
@@ -94,6 +106,8 @@ impl Into<tung::tungstenite::Message> for SignalingMessage {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use crate::signaling::{client, server};
 
     #[test]
@@ -104,13 +118,18 @@ mod tests {
         let candidate_server = vec!["cs1".to_string(), "cs2".to_string()];
         let candidate_client = vec!["cc1".to_string(), "cc2".to_string()];
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _ = runtime.spawn(server::run_signaling_server("127.0.0.1:9000"));
+
+        let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
+        std::fs::remove_file(&db_path);
+
+        let _ = runtime.spawn(server::run_signaling_server("127.0.0.1:9000", &db_path));
 
         // Server
         let handle = runtime.spawn(async move {
-            let mut listener = client::Listener::new("ws://127.0.0.1:9000", "1".to_string())
-                .await
-                .unwrap();
+            let mut listener =
+                client::Listener::new("ws://127.0.0.1:9000", "1".to_string(), "key".to_string())
+                    .await
+                    .unwrap();
             listener.bind().await.unwrap();
             println!("Server binded to id = 1");
             if let Ok(mut sock) = listener.accept().await {
@@ -136,9 +155,10 @@ mod tests {
 
         runtime.block_on(async move {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let mut listener = client::Listener::new("ws://127.0.0.1:9000", "2".to_string())
-                .await
-                .unwrap();
+            let mut listener =
+                client::Listener::new("ws://127.0.0.1:9000", "2".to_string(), "key".to_string())
+                    .await
+                    .unwrap();
             let mut sock = listener.connect("1".to_string(), sdp_client).await.unwrap();
             assert!(sock.sdp() == "server sdp");
             for candidate in candidate_client {

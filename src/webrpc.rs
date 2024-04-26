@@ -44,6 +44,7 @@
 //! fatal errors are sent to every response channel.
 
 use crate::error::{WebrpcError, WebrpcResult};
+use crate::signaling::PubKeyPem;
 use ice::{ice_accept, ice_bind, ice_connect};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -137,8 +138,8 @@ async fn create_sctp_client(
 // *** Listener
 
 impl Listener {
-    pub async fn bind(id: String, signaling_addr: &str) -> WebrpcResult<Listener> {
-        let listener = ice_bind(id, signaling_addr).await?;
+    pub async fn bind(id: String, key: PubKeyPem, signaling_addr: &str) -> WebrpcResult<Listener> {
+        let listener = ice_bind(id, key, signaling_addr).await?;
         Ok(Listener { inner: listener })
     }
 
@@ -214,8 +215,12 @@ struct Frame<'a> {
 
 impl Endpoint {
     /// Connect to the endpoint with `id` registered on the signaling server.
-    pub async fn connect(id: EndpointId, signaling_addr: &str) -> WebrpcResult<Endpoint> {
-        let conn = ice_connect(id.clone(), signaling_addr, None).await?;
+    pub async fn connect(
+        id: EndpointId,
+        key: PubKeyPem,
+        signaling_addr: &str,
+    ) -> WebrpcResult<Endpoint> {
+        let conn = ice_connect(id.clone(), key, signaling_addr, None).await?;
         let dtls_conn = create_dtls_client(conn).await?;
         let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
@@ -583,6 +588,8 @@ async fn write_message(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
     use super::{create_sctp_client, create_sctp_server};
@@ -591,7 +598,7 @@ mod tests {
     use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 
     async fn test_server(id: String) -> anyhow::Result<()> {
-        let mut listener = ice_bind(id, "ws://127.0.0.1:9000").await?;
+        let mut listener = ice_bind(id, "key".to_string(), "ws://127.0.0.1:9000").await?;
         let sock = listener.accept().await?;
         let conn = ice_accept(sock, None).await?;
         let dtls_conn = create_dtls_server(conn).await?;
@@ -632,7 +639,7 @@ mod tests {
     }
 
     async fn test_client(id: String) -> anyhow::Result<()> {
-        let conn = ice_connect(id, "ws://127.0.0.1:9000", None).await?;
+        let conn = ice_connect(id, "key".to_string(), "ws://127.0.0.1:9000", None).await?;
         let dtls_conn = create_dtls_client(conn).await?;
         let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
@@ -675,7 +682,9 @@ mod tests {
     #[ignore]
     fn webrpc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000"));
+        let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
+        std::fs::remove_file(&db_path);
+        let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000", &db_path));
 
         let handle = runtime.spawn(async {
             let res = test_server("1".to_string()).await;

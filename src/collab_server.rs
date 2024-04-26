@@ -9,6 +9,7 @@
 
 use crate::abstract_server::{DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
+use crate::signaling::PubKeyPem;
 use crate::types::*;
 use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
@@ -627,10 +628,11 @@ impl LocalServer {
 
 pub async fn run_webrpc_server(
     server_id: ServerId,
+    server_key: PubKeyPem,
     signaling_addr: String,
     server: LocalServer,
 ) -> CollabResult<()> {
-    let mut listener = Listener::bind(server_id.clone(), &signaling_addr).await?;
+    let mut listener = Listener::bind(server_id.clone(), server_key, &signaling_addr).await?;
     log::info!(
         "Registered as {} at signaling server {}",
         server_id,

@@ -17,6 +17,7 @@
 use crate::abstract_server::{ClientEnum, DocServer};
 use crate::collab_client::Doc;
 use crate::collab_server::{run_webrpc_server, LocalServer};
+use crate::config_man::ConfigManager;
 use crate::error::{CollabError, CollabResult};
 // use crate::grpc_client::GrpcClient;
 use crate::types::*;
@@ -35,6 +36,12 @@ use types::*;
 
 /// Stores data that the jsonrpc frontend uses.
 pub struct JSONRPCServer {
+    /// The host id (server uuid) for this host.
+    host_id: String,
+    /// Private and public key for this host.
+    key_pair: rcgen::KeyPair,
+    /// Self-signed certificate for this host.
+    cert: rcgen::Certificate,
     /// Maps (Doc, Server) to the Doc object.
     doc_map: HashMap<DocDesignator, Doc>,
     /// Maps ServerId (URL) to the server object, which can be either
@@ -53,19 +60,26 @@ pub struct JSONRPCServer {
 // *** Entry functions
 
 /// Run the JSONRPC server on stdio.
-pub fn run_stdio(runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
+pub fn run_stdio(
+    runtime: tokio::runtime::Runtime,
+    config_man: ConfigManager,
+) -> anyhow::Result<()> {
     let server = LocalServer::new();
     let (connection, io_threads) = Connection::stdio();
-    main_loop(connection, server, runtime);
+    main_loop(connection, server, runtime, config_man);
     io_threads.join()?;
     Ok(())
 }
 
 /// Run the JSONRPC server on a socket listening on `addr` (host:port).
-pub fn run_socket(addr: &str, runtime: tokio::runtime::Runtime) -> anyhow::Result<()> {
+pub fn run_socket(
+    addr: &str,
+    runtime: tokio::runtime::Runtime,
+    config_man: ConfigManager,
+) -> anyhow::Result<()> {
     let server = LocalServer::new();
     let (connection, io_threads) = Connection::listen(addr)?;
-    main_loop(connection, server, runtime);
+    main_loop(connection, server, runtime, config_man);
     io_threads.join()?;
     Ok(())
 }
@@ -84,10 +98,15 @@ pub fn run_socket(addr: &str, runtime: tokio::runtime::Runtime) -> anyhow::Resul
 // |            |           (3)  <---block_on--->
 // +------------+ <-------
 //
-fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::runtime::Runtime) {
+fn main_loop(
+    connection: Connection,
+    doc_server: LocalServer,
+    runtime: tokio::runtime::Runtime,
+    config_man: ConfigManager,
+) {
     let (notifier_tx, notifier_rx) = std::sync::mpsc::channel();
     let (async_err_tx, mut async_err_rx) = tokio::sync::mpsc::channel(1);
-    let mut jsonrpc_server = JSONRPCServer::new(doc_server.clone(), notifier_tx);
+    let mut jsonrpc_server = None;
 
     let connection = std::sync::Arc::new(connection);
     let connection_1 = std::sync::Arc::clone(&connection);
@@ -155,19 +174,46 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
         match msg.unwrap() {
             Message::Request(req) => {
                 let id = req.id.clone();
-                let res = runtime.block_on(jsonrpc_server.handle_request(
-                    req,
-                    doc_server.clone(),
-                    async_err_tx.clone(),
-                ));
+                let msg: Message;
+                if req.method == "Initialize" {
+                    let res = handle_init_request(
+                        req,
+                        doc_server.clone(),
+                        notifier_tx.clone(),
+                        &config_man,
+                    );
+                    msg = match res {
+                        Ok(server) => {
+                            jsonrpc_server = Some(server);
+                            make_resp(id, ())
+                        }
+                        Err(err) => {
+                            let code = error_code(&err);
+                            make_err(id, code, format!("{:#}", err))
+                        }
+                    };
+                } else if let Some(ref mut jsonrpc_server) = jsonrpc_server {
+                    let res = runtime.block_on(jsonrpc_server.handle_request(
+                        req,
+                        doc_server.clone(),
+                        async_err_tx.clone(),
+                    ));
 
-                let msg = match res {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        let code = error_code(&err);
-                        make_err(id, code, format!("{:#}", err))
-                    }
-                };
+                    msg = match res {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            let code = error_code(&err);
+                            make_err(id, code, format!("{:#}", err))
+                        }
+                    };
+                } else {
+                    msg = make_err(
+                        req.id,
+                        error_code(&CollabError::NotInitialized),
+                        "Server not initialized".to_string(),
+                    );
+                }
+
                 let res = connection.sender.send(msg);
                 if res.is_err() {
                     log::error!("JSONRPC response channel broke: {:?}", res);
@@ -175,14 +221,16 @@ fn main_loop(connection: Connection, doc_server: LocalServer, runtime: tokio::ru
                 }
             }
             Message::Response(_) => {
-                log::info!("Received a response");
+                log::warn!("Received a response");
             }
             Message::Notification(notif) => {
-                let res = runtime.block_on(
-                    jsonrpc_server.handle_notification(notif.clone(), doc_server.clone()),
-                );
-                if let Err(err) = res {
-                    log::error!("Error handling notification {:?}: {:?}", &notif, err);
+                if let Some(ref mut jsonrpc_server) = jsonrpc_server {
+                    let res = runtime.block_on(
+                        jsonrpc_server.handle_notification(notif.clone(), doc_server.clone()),
+                    );
+                    if let Err(err) = res {
+                        log::error!("Error handling notification {:?}: {:?}", &notif, err);
+                    }
                 }
             }
         }
@@ -220,6 +268,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::NotRegularFile(_) => ErrorCode::NotRegularFile,
         CollabError::NotDirectory(_) => ErrorCode::NotDirectory,
         CollabError::UnsupportedOperation(_) => ErrorCode::UnsupportedOperation,
+        CollabError::NotInitialized => ErrorCode::NotInitialized,
 
         CollabError::RemoteErr(_) => ErrorCode::ServerNonFatalDocFatal,
         CollabError::IOErr(_) => ErrorCode::IOError,
@@ -237,10 +286,16 @@ impl JSONRPCServer {
     pub fn new(
         server: LocalServer,
         notifier_tx: std::sync::mpsc::Sender<CollabNotification>,
+        host_id: String,
+        key_pair: rcgen::KeyPair,
+        cert: rcgen::Certificate,
     ) -> JSONRPCServer {
         let mut client_map = HashMap::new();
         client_map.insert(SERVER_ID_SELF.to_string(), server.into());
         JSONRPCServer {
+            host_id,
+            key_pair,
+            cert,
             doc_map: HashMap::new(),
             client_map,
             notifier_tx,
@@ -321,17 +376,29 @@ impl JSONRPCServer {
 
 // *** Subroutines for handle_request
 
+fn handle_init_request(
+    req: Request,
+    doc_server: LocalServer,
+    notifier_tx: std::sync::mpsc::Sender<CollabNotification>,
+    config_man: &ConfigManager,
+) -> CollabResult<JSONRPCServer> {
+    let params: InitParams = serde_json::from_value(req.params)?;
+    let host_id = params.host_id;
+    let (key_pair, cert) = config_man.get_key_and_cert(host_id.clone())?;
+
+    Ok(JSONRPCServer::new(
+        doc_server,
+        notifier_tx,
+        host_id,
+        key_pair,
+        cert,
+    ))
+}
+
 // Request handler that operates on documents must handle errors by
 // removing the doc from doc_map, and returning the error.
 
 impl JSONRPCServer {
-    // fn handle_hello_request(&self, request: Request) -> anyhow::Result<Message> {
-    //     let params: HelloParams =
-    //         serde_json::from_value(request.params).context("Parse Hello params")?;
-    //     self.site_id = Some(params.site_id);
-    //     Ok(make_resp(request.id, ()))
-    // }
-
     pub fn get_client(&mut self, server_id: &ServerId) -> CollabResult<&mut ClientEnum> {
         if let Some(cli) = self.client_map.get_mut(server_id) {
             Ok(cli)
@@ -454,6 +521,7 @@ impl JSONRPCServer {
         } else {
             let client = WebrpcClient::new(
                 params.host_id.clone(),
+                self.cert.serialize_pem()?,
                 &params.signaling_addr,
                 params.credential,
             )
@@ -560,8 +628,10 @@ impl JSONRPCServer {
                 return Ok(());
             }
         }
+        let key_pem = self.key_pair.public_key_pem();
         let handle = tokio::spawn(async move {
-            let res = run_webrpc_server(params.host_id, params.signaling_addr, server).await;
+            let res =
+                run_webrpc_server(params.host_id, key_pem, params.signaling_addr, server).await;
             if let Err(err) = res {
                 let err = match err {
                     CollabError::SignalingTimesUp(time) => CollabError::SignalingTimesUp(time),

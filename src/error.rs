@@ -30,6 +30,8 @@ pub enum CollabError {
     NotDirectory(String),
     #[error("{0} is not supported")]
     UnsupportedOperation(String),
+    #[error("The first request must be Initialize request")]
+    NotInitialized,
 
     // Notification.
     #[error("Error accepting remote connections ({0})")]
@@ -61,6 +63,12 @@ impl From<crate::engine::EngineError> for CollabError {
 impl From<serde_json::Error> for CollabError {
     fn from(value: serde_json::Error) -> Self {
         CollabError::RpcError(format!("{:#}", value))
+    }
+}
+
+impl From<rcgen::RcgenError> for CollabError {
+    fn from(value: rcgen::RcgenError) -> Self {
+        CollabError::ServerFatal(format!("Key error: {:#}", value))
     }
 }
 
