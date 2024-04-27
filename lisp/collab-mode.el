@@ -184,6 +184,8 @@ substitutes command keys like docstring, see
     (-32602 . InvalidParams)
     (-32603 . InternalError)
 
+    (-32002 . NotInitialized)
+
     (100 . NetworkError)
     (101 . ServerNonFatalDocFatal)
     (102 . ServerFatalError)
@@ -750,6 +752,9 @@ If DOC-DESC is at the top-level, return itself."
                                    :process process
                                    :notification-dispatcher
                                    #'collab--dispatch-notification)))
+
+          (jsonrpc-request conn 'Initialize
+                           `(:hostId ,(car collab-local-host-config)))
 
           (when collab--jsonrpc-connection
             (jsonrpc-shutdown collab--jsonrpc-connection))
