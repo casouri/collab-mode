@@ -27,7 +27,7 @@ impl PubKeyStore {
             "CREATE TABLE IF NOT EXISTS PubKeys (
     uuid TEXT PRIMARY KEY,
     key TEXT NOT NULL,
-    atime INTEGER NOT NULL,
+    atime INTEGER NOT NULL
 )",
             (),
         )?;

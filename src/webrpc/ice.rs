@@ -309,23 +309,30 @@ mod tests {
     fn webrtc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
-        let _ = std::fs::remove_file(&db_path);
-        let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000", &db_path));
+        std::fs::remove_file(&db_path).unwrap();
+        let _ = runtime.spawn(async move {
+            let res = run_signaling_server("127.0.0.1:9000", &db_path).await;
+            println!("Signaling server: {:?}", res);
+            res.unwrap();
+        });
 
         let server_id = "server#1".to_string();
         let client_id = "client#1".to_string();
         let server_key_cert = create_key_cert(&server_id);
         let client_key_cert = create_key_cert(&client_id);
 
+        let server_id_1 = server_id.clone();
         let handle = runtime.spawn(async {
-            let res = test_server(server_id, server_key_cert).await;
+            let res = test_server(server_id_1, server_key_cert).await;
             println!("Server: {:?}", res);
+            res.unwrap();
         });
         let _ =
             runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_secs(1)).await });
         let _ = runtime.block_on(async {
-            let res = test_client(client_id, client_key_cert).await;
+            let res = test_client(server_id, client_key_cert).await;
             println!("Client: {:?}", res);
+            res.unwrap();
         });
 
         let _ = runtime.block_on(async { handle.await });
