@@ -1,9 +1,10 @@
 use crate::error::{WebrpcError, WebrpcResult};
-use crate::signaling::PubKeyPem;
+use crate::signaling::CertDerHash;
 use crate::signaling::{
     client::{Listener, Socket as SignalSocket},
     EndpointId,
 };
+use crate::types::ArcKeyCert;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -29,10 +30,10 @@ struct ICECredential {
 /// url.
 pub async fn ice_bind(
     id: EndpointId,
-    key: PubKeyPem,
+    my_key_cert: ArcKeyCert,
     signaling_addr: &str,
 ) -> WebrpcResult<Listener> {
-    let mut listener = Listener::new(signaling_addr, id, key).await?;
+    let mut listener = Listener::new(signaling_addr, id, my_key_cert).await?;
     listener.bind().await?;
     Ok(listener)
 }
@@ -75,22 +76,23 @@ pub async fn ice_accept(
 /// while establishing connection.
 pub async fn ice_connect(
     id: EndpointId,
-    key: PubKeyPem,
+    my_key_cert: ArcKeyCert,
     signaling_addr: &str,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
-) -> WebrpcResult<Arc<impl Conn + Send + Sync>> {
+) -> WebrpcResult<(Arc<impl Conn + Send + Sync>, CertDerHash)> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
     let (connected_tx, connected_rx) = watch::channel(());
 
     let my_id = uuid::Uuid::new_v4().to_string();
-    let mut listener = Listener::new(signaling_addr, my_id, key).await?;
+    let mut listener = Listener::new(signaling_addr, my_id, my_key_cert).await?;
     let agent = Arc::new(make_ice_agent(true).await?);
     let cred = ice_credential(&agent).await;
     let sock = listener
         .connect(id, serde_json::to_string(&cred).unwrap())
         .await?;
     let (ufrag, pwd) = get_ice_credential(&sock)?;
+    let their_cert = sock.cert_hash();
 
     ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone());
     ice_exchange_candidates(agent.clone(), sock, error_tx.clone(), connected_rx)?;
@@ -105,7 +107,7 @@ pub async fn ice_connect(
         conn = agent.dial(cancel_rx, ufrag, pwd) => {
             drop(connected_tx);
             let conn = conn?;
-            Ok(conn)
+            Ok((conn, their_cert))
         }
     }
 }
@@ -232,13 +234,17 @@ fn ice_exchange_candidates(
 #[cfg(test)]
 mod tests {
     use super::{ice_accept, ice_connect};
-    use crate::signaling::{client::Listener, server::run_signaling_server};
+    use crate::{
+        config_man::create_key_cert,
+        signaling::{client::Listener, server::run_signaling_server},
+        types::ArcKeyCert,
+    };
     use std::{path::Path, sync::Arc};
     use webrtc_util::Conn;
 
-    async fn test_server(id: String) -> anyhow::Result<()> {
+    async fn test_server(id: String, server_key_cert: ArcKeyCert) -> anyhow::Result<()> {
         // Connect to the signaling server.
-        let mut listener = Listener::new("ws://127.0.0.1:9000", id, "key".to_string()).await?;
+        let mut listener = Listener::new("ws://127.0.0.1:9000", id, server_key_cert).await?;
         listener.bind().await?;
         let sock = listener.accept().await?;
 
@@ -268,8 +274,11 @@ mod tests {
         Ok(())
     }
 
-    async fn test_client(server_id: String) -> anyhow::Result<()> {
-        let conn = ice_connect(server_id, "key".to_string(), "ws://127.0.0.1:9000", None).await?;
+    async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
+        // We don't verify server_cert until DTLS connection is
+        // established. So no use for the server_cert at this layer.
+        let (conn, _server_cert) =
+            ice_connect(server_id, client_key_cert, "ws://127.0.0.1:9000", None).await?;
         let conn_tx = Arc::clone(&conn);
 
         // Send and receive message.
@@ -300,17 +309,22 @@ mod tests {
     fn webrtc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
-        std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&db_path);
         let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000", &db_path));
 
+        let server_id = "server#1".to_string();
+        let client_id = "client#1".to_string();
+        let server_key_cert = create_key_cert(&server_id);
+        let client_key_cert = create_key_cert(&client_id);
+
         let handle = runtime.spawn(async {
-            let res = test_server("1".to_string()).await;
+            let res = test_server(server_id, server_key_cert).await;
             println!("Server: {:?}", res);
         });
         let _ =
             runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_secs(1)).await });
         let _ = runtime.block_on(async {
-            let res = test_client("1".to_string()).await;
+            let res = test_client(client_id, client_key_cert).await;
             println!("Client: {:?}", res);
         });
 

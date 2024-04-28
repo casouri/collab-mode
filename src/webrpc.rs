@@ -43,8 +43,9 @@
 //! For a server, fatal errors are sent to the request channel; for a client
 //! fatal errors are sent to every response channel.
 
+use crate::config_man::{hash_der, ArcKeyCert};
 use crate::error::{WebrpcError, WebrpcResult};
-use crate::signaling::PubKeyPem;
+use crate::signaling::CertDerHash;
 use ice::{ice_accept, ice_bind, ice_connect};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -74,38 +75,71 @@ type DataChannel = stream::Stream;
 
 // *** DTLS & SCTP
 
-#[derive(Debug)]
+/// Create a DTLS certificate object from rcgen key and certificate.
+fn create_dtls_cert(
+    key_pair: &rcgen::KeyPair,
+    cert: &rcgen::Certificate,
+) -> webrtc_dtls::crypto::Certificate {
+    let dtls_cert = webrtc_dtls::crypto::Certificate {
+        certificate: vec![rustls::Certificate(cert.serialize_der().unwrap())],
+        private_key: webrtc_dtls::crypto::CryptoPrivateKey::from_key_pair(&key_pair).unwrap(),
+    };
+    dtls_cert
+}
+
 pub struct Listener {
     inner: crate::signaling::client::Listener,
 }
 
-async fn create_dtls_server(conn: Arc<dyn Conn + Send + Sync>) -> WebrpcResult<Arc<DTLSConn>> {
+/// Signal Error if `conn` doesn't provide the same certificate as `cert`.
+async fn verify_dtls_cert(cert: CertDerHash, conn: &DTLSConn) -> WebrpcResult<()> {
+    let certs = conn.connection_state().await.peer_certificates;
+    if certs.is_empty() {
+        return Err(WebrpcError::CryptoError(format!(
+            "Remote host provided empty certificate"
+        )));
+    }
+    let provided_cert_hash = hash_der(&certs[0]);
+    if provided_cert_hash != cert {
+        return Err(WebrpcError::CryptoError(format!("Certificate hash mismatch, cert from signaling server = {cert}, cert provided by DTLS = {provided_cert_hash}")));
+    }
+    Ok(())
+}
+
+async fn create_dtls_server(
+    conn: Arc<dyn Conn + Send + Sync>,
+    my_key_cert: ArcKeyCert,
+    their_cert: CertDerHash,
+) -> WebrpcResult<Arc<DTLSConn>> {
     let config = webrtc_dtls::config::Config {
-        // FIXME
-        certificates: vec![webrtc_dtls::crypto::Certificate::generate_self_signed(
-            vec!["xxx".to_string()],
-        )?],
-        // FIXME
+        certificates: vec![create_dtls_cert(&my_key_cert.key, &my_key_cert.cert)],
+        client_auth: webrtc_dtls::config::ClientAuthType::RequireAnyClientCert,
+        // We accept any certificate, and then verifies the provided
+        // certificate with the cert we got from signaling server.
         insecure_skip_verify: true,
         ..Default::default()
     };
 
     let conn = DTLSConn::new(conn, config, false, None).await?;
+    verify_dtls_cert(their_cert, &conn).await?;
     Ok(Arc::new(conn))
 }
 
-async fn create_dtls_client(conn: Arc<dyn Conn + Send + Sync>) -> WebrpcResult<Arc<DTLSConn>> {
+async fn create_dtls_client(
+    conn: Arc<dyn Conn + Send + Sync>,
+    my_key_cert: ArcKeyCert,
+    their_cert: CertDerHash,
+) -> WebrpcResult<Arc<DTLSConn>> {
     let config = webrtc_dtls::config::Config {
-        // FIXME
-        certificates: vec![webrtc_dtls::crypto::Certificate::generate_self_signed(
-            vec!["xxx".to_string()],
-        )?],
-        // FIXME
+        certificates: vec![create_dtls_cert(&my_key_cert.key, &my_key_cert.cert)],
+        // We accept any certificate, and then verifies the provided
+        // certificate with the cert we got from signaling server.
         insecure_skip_verify: true,
         ..Default::default()
     };
 
     let conn = DTLSConn::new(conn, config, true, None).await?;
+    verify_dtls_cert(their_cert, &conn).await?;
     Ok(Arc::new(conn))
 }
 
@@ -138,16 +172,22 @@ async fn create_sctp_client(
 // *** Listener
 
 impl Listener {
-    pub async fn bind(id: String, key: PubKeyPem, signaling_addr: &str) -> WebrpcResult<Listener> {
-        let listener = ice_bind(id, key, signaling_addr).await?;
+    pub async fn bind(
+        id: String,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+    ) -> WebrpcResult<Listener> {
+        let listener = ice_bind(id, my_key_cert, signaling_addr).await?;
         Ok(Listener { inner: listener })
     }
 
     pub async fn accept(&mut self) -> WebrpcResult<Endpoint> {
         let sock = self.inner.accept().await?;
         let name = format!("connection to {}", sock.id());
+        let their_cert = sock.cert_hash();
         let conn = ice_accept(sock, None).await?;
-        let dtls_connection = create_dtls_server(conn).await?;
+        let dtls_connection =
+            create_dtls_server(conn, self.inner.my_key_cert.clone(), their_cert).await?;
         let sctp_connection = create_sctp_server(dtls_connection).await?;
         if let Some(stream) = sctp_connection.accept_stream().await {
             Ok(Endpoint::new(name, stream))
@@ -217,11 +257,12 @@ impl Endpoint {
     /// Connect to the endpoint with `id` registered on the signaling server.
     pub async fn connect(
         id: EndpointId,
-        key: PubKeyPem,
+        my_key_cert: ArcKeyCert,
         signaling_addr: &str,
     ) -> WebrpcResult<Endpoint> {
-        let conn = ice_connect(id.clone(), key, signaling_addr, None).await?;
-        let dtls_conn = create_dtls_client(conn).await?;
+        let (conn, their_cert) =
+            ice_connect(id.clone(), my_key_cert.clone(), signaling_addr, None).await?;
+        let dtls_conn = create_dtls_client(conn, my_key_cert, their_cert).await?;
         let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
             .open_stream(1, PayloadProtocolIdentifier::Binary)
@@ -433,8 +474,8 @@ async fn read_messages(
             msg,
             &data_channel,
             current_msg_id,
-            resp_channel_map.clone(),
-            live_request_map.clone(),
+            resp_channel_map,
+            live_request_map,
             channel_name,
             &mut req_tx,
         )
@@ -593,15 +634,18 @@ mod tests {
     use super::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
     use super::{create_sctp_client, create_sctp_server};
+    use crate::config_man::create_key_cert;
     use crate::signaling::server::run_signaling_server;
+    use crate::types::ArcKeyCert;
     use crate::webrpc::{create_dtls_client, create_dtls_server};
     use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 
-    async fn test_server(id: String) -> anyhow::Result<()> {
-        let mut listener = ice_bind(id, "key".to_string(), "ws://127.0.0.1:9000").await?;
+    async fn test_server(my_id: String, server_key_cert: ArcKeyCert) -> anyhow::Result<()> {
+        let mut listener = ice_bind(my_id, server_key_cert.clone(), "ws://127.0.0.1:9000").await?;
         let sock = listener.accept().await?;
+        let client_cert = sock.cert_hash();
         let conn = ice_accept(sock, None).await?;
-        let dtls_conn = create_dtls_server(conn).await?;
+        let dtls_conn = create_dtls_server(conn, server_key_cert, client_cert).await?;
         let sctp_conn = create_sctp_server(dtls_conn).await?;
         let stream = sctp_conn.accept_stream().await.unwrap();
         let endpoint = Endpoint::new("server endpoint".to_string(), stream);
@@ -638,9 +682,10 @@ mod tests {
         Ok(())
     }
 
-    async fn test_client(id: String) -> anyhow::Result<()> {
-        let conn = ice_connect(id, "key".to_string(), "ws://127.0.0.1:9000", None).await?;
-        let dtls_conn = create_dtls_client(conn).await?;
+    async fn test_client(my_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
+        let (conn, server_cert) =
+            ice_connect(my_id, client_key_cert.clone(), "ws://127.0.0.1:9000", None).await?;
+        let dtls_conn = create_dtls_client(conn, client_key_cert, server_cert).await?;
         let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
             .open_stream(1, PayloadProtocolIdentifier::Binary)
@@ -683,17 +728,21 @@ mod tests {
     fn webrpc_test() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
-        std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&db_path);
         let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000", &db_path));
+        let server_id = "server#1".to_string();
+        let client_id = "client#1".to_string();
+        let server_key_cert = create_key_cert(&server_id);
+        let client_key_cert = create_key_cert(&client_id);
 
         let handle = runtime.spawn(async {
-            let res = test_server("1".to_string()).await;
+            let res = test_server(server_id, server_key_cert).await;
             println!("Server: {:?}", res);
         });
         let _ =
             runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_secs(1)).await });
         let _ = runtime.block_on(async {
-            let res = test_client("1".to_string()).await;
+            let res = test_client(client_id, client_key_cert).await;
             println!("Client: {:?}", res);
         });
 

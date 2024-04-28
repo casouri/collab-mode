@@ -14,11 +14,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use tokio::time;
 use tokio_tungstenite as tung;
 use tokio_tungstenite::tungstenite::{
     protocol::{frame::coding::CloseCode, CloseFrame},
@@ -27,7 +25,7 @@ use tokio_tungstenite::tungstenite::{
 use tokio_tungstenite::WebSocketStream;
 
 use super::key_store::{self, PubKeyStore};
-use super::{PubKeyPem, SignalingError, SignalingResult, SDP};
+use super::{CertDerHash, SignalingError, SignalingResult, SDP};
 
 /// Run the signaling server on `addr`. Addr should be of the form
 /// "ip:port".
@@ -84,7 +82,7 @@ impl Server {
     async fn bind_endpoint(
         &self,
         id: EndpointId,
-        key: PubKeyPem,
+        key: CertDerHash,
         msg_tx: mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
         // First check pub key.
@@ -94,6 +92,8 @@ impl Server {
                 if saved_key != key {
                     return Err(SignalingError::IdTaken(id));
                 }
+            } else {
+                key_store.set_key_for(&id, &key)?;
             }
         }
         // Then check current connection, as long as we hold the lock
@@ -114,7 +114,7 @@ impl Server {
         sender_id: &EndpointId,
         receiver_id: EndpointId,
         sdp: SDP,
-        sender_key: PubKeyPem,
+        sender_key: CertDerHash,
         resp_tx: &mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
         let endpoint_info = self.get_endpoint_info(&receiver_id).await;

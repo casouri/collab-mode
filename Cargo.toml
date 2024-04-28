@@ -43,6 +43,11 @@ webrtc-dtls = "0.8.0"
 bytes = "1.4.0"
 # This is the version used by webrtc-dtls.
 rcgen = { version = "0.11.1", features = ["pem", "x509-parser"]}
+# This is the version used by webrtc-dtls.
+rustls = "0.21.10"
+rustls-pemfile = "2.1.2"
+
+sha2 = "0.10.8"
 
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 

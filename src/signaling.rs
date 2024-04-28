@@ -33,8 +33,8 @@ pub type SDP = String;
 pub type ICECandidate = String;
 /// Id of an endpoint, should be an UUID string.
 pub type EndpointId = String;
-/// Public key in PEM format.
-pub type PubKeyPem = String;
+/// Certificate in DER format hashed by SHA-256 and printed in hex.
+pub type CertDerHash = String;
 
 pub type SignalingResult<T> = Result<T, SignalingError>;
 
@@ -85,9 +85,9 @@ pub enum SignalingMessage {
     /// An endpoint sends this message to bind to the id on the
     /// signaling server. The second argument is the public key in PEM
     /// format.
-    Bind(EndpointId, PubKeyPem),
+    Bind(EndpointId, CertDerHash),
     /// Connect request. (sender_id, receiver_id, sender_sdp, sender_key).
-    Connect(EndpointId, EndpointId, SDP, PubKeyPem),
+    Connect(EndpointId, EndpointId, SDP, CertDerHash),
     /// Send candidate. (sender_id, receiver_id, sender_candidate).
     Candidate(EndpointId, EndpointId, ICECandidate),
     /// Cannot find the corresponding endpoint for the provided id.
@@ -108,7 +108,10 @@ impl Into<tung::tungstenite::Message> for SignalingMessage {
 mod tests {
     use std::path::Path;
 
-    use crate::signaling::{client, server};
+    use crate::{
+        config_man::create_key_cert,
+        signaling::{client, server},
+    };
 
     #[test]
     #[ignore]
@@ -120,18 +123,24 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
-        std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&db_path);
 
         let _ = runtime.spawn(server::run_signaling_server("127.0.0.1:9000", &db_path));
 
+        let server_id = "server#1".to_string();
+        let client_id = "client#1".to_string();
+        let server_key_cert = create_key_cert(&server_id);
+        let client_key_cert = create_key_cert(&client_id);
+
         // Server
+        let server_id_1 = server_id.clone();
         let handle = runtime.spawn(async move {
             let mut listener =
-                client::Listener::new("ws://127.0.0.1:9000", "1".to_string(), "key".to_string())
+                client::Listener::new("ws://127.0.0.1:9000", server_id_1, server_key_cert)
                     .await
                     .unwrap();
             listener.bind().await.unwrap();
-            println!("Server binded to id = 1");
+            println!("Server binded to id = server#1");
             if let Ok(mut sock) = listener.accept().await {
                 assert!(sock.sdp() == "client sdp");
                 println!("Server received client sdp: {}", sock.sdp());
@@ -156,10 +165,10 @@ mod tests {
         runtime.block_on(async move {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let mut listener =
-                client::Listener::new("ws://127.0.0.1:9000", "2".to_string(), "key".to_string())
+                client::Listener::new("ws://127.0.0.1:9000", client_id, client_key_cert)
                     .await
                     .unwrap();
-            let mut sock = listener.connect("1".to_string(), sdp_client).await.unwrap();
+            let mut sock = listener.connect(server_id, sdp_client).await.unwrap();
             assert!(sock.sdp() == "server sdp");
             for candidate in candidate_client {
                 sock.send_candidate(candidate).await.unwrap();

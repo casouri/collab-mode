@@ -23,8 +23,10 @@
 //! [Socket::send_candidate] and [Socket::recv_candidate], until the
 //! webrtc connection is established.
 
+use crate::config_man::ArcKeyCert;
+
 use super::{
-    EndpointId, ICECandidate, PubKeyPem, SignalingError, SignalingMessage, SignalingResult, SDP,
+    CertDerHash, EndpointId, ICECandidate, SignalingError, SignalingMessage, SignalingResult, SDP,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -47,12 +49,11 @@ fn expect_text(msg: Message) -> SignalingResult<String> {
 
 /// A listener that can be used to either listen for connections from
 /// other endpoints or connect to other endpoints.
-#[derive(Debug)]
 pub struct Listener {
     /// The id for this endpoint.
-    my_id: EndpointId,
-    /// The publick key for this endpoint.
-    my_key: PubKeyPem,
+    pub my_id: EndpointId,
+    /// The private key and self-signed certificate for this endpoint.
+    pub my_key_cert: ArcKeyCert,
     /// Channel used to send messages out to the signal server.
     out_tx: mpsc::Sender<Message>,
     /// When the listener receives a `BindResponse(their_id,
@@ -70,7 +71,8 @@ pub struct Socket {
     their_sdp: SDP,
     their_id: EndpointId,
     my_id: EndpointId,
-    my_key: PubKeyPem,
+    my_cert: CertDerHash,
+    their_cert: CertDerHash,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +91,11 @@ impl Drop for Listener {
 impl Listener {
     /// Create a listener that connects to the signaling server at
     /// `addr`. This endpoint has `id` and `key`.
-    pub async fn new(addr: &str, id: EndpointId, key: PubKeyPem) -> SignalingResult<Listener> {
+    pub async fn new(
+        addr: &str,
+        id: EndpointId,
+        my_key_cert: ArcKeyCert,
+    ) -> SignalingResult<Listener> {
         let (stream, _addr) = tung::connect_async(addr).await?;
 
         let (in_tx, mut in_rx) = mpsc::channel(1);
@@ -99,9 +105,10 @@ impl Listener {
 
         let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx, shutdown_tx));
 
+        let der_hash = my_key_cert.cert_der_hash();
         let listener = Listener {
             my_id: id.clone(),
-            my_key: key.clone(),
+            my_key_cert,
             sock_rx,
             out_tx: out_tx.clone(),
             shutdown_rx,
@@ -112,7 +119,7 @@ impl Listener {
             while let Some(msg) = in_rx.recv().await {
                 // Ignore errors as long as in_rx hasn't closed.
                 let _todo = listener_process_message(
-                    key.clone(),
+                    der_hash.clone(),
                     msg,
                     out_tx.clone(),
                     sock_tx.clone(),
@@ -127,7 +134,7 @@ impl Listener {
     /// Share `sdp` on the signal server under `id`, and start
     /// listening for incoming connections.
     pub async fn bind(&mut self) -> SignalingResult<()> {
-        let msg = SignalingMessage::Bind(self.my_id.clone(), self.my_key.clone());
+        let msg = SignalingMessage::Bind(self.my_id.clone(), self.my_key_cert.cert_der_hash());
         self.out_tx
             .send(msg.into())
             .await
@@ -138,7 +145,12 @@ impl Listener {
     /// Share our `sdp`, connect to the endpoint that has the id
     /// `their_id`.
     pub async fn connect(&mut self, their_id: EndpointId, sdp: SDP) -> SignalingResult<Socket> {
-        let msg = SignalingMessage::Connect(self.my_id.clone(), their_id, sdp, self.my_key.clone());
+        let msg = SignalingMessage::Connect(
+            self.my_id.clone(),
+            their_id,
+            sdp,
+            self.my_key_cert.cert_der_hash(),
+        );
         self.out_tx
             .send(msg.into())
             .await
@@ -165,7 +177,7 @@ impl Socket {
             self.my_id.clone(),
             self.their_id.clone(),
             sdp,
-            self.my_key.clone(),
+            self.my_cert.clone(),
         );
         self.msg_tx
             .send(msg.into())
@@ -208,6 +220,12 @@ impl Socket {
     pub fn id(&self) -> String {
         self.their_id.clone()
     }
+
+    /// Return their certificate in PEM format. The type says PubKey,
+    /// but it's actually certificate (which is kind of a pub key so...)
+    pub fn cert_hash(&self) -> CertDerHash {
+        self.their_cert.clone()
+    }
 }
 
 impl CandidateSender {
@@ -225,7 +243,7 @@ impl CandidateSender {
 // *** Subroutines
 
 async fn listener_process_message(
-    my_key: PubKeyPem,
+    my_cert: CertDerHash,
     msg: Result<Message, tung::tungstenite::Error>,
     out_tx: mpsc::Sender<Message>,
     sock_tx: mpsc::UnboundedSender<SignalingResult<Socket>>,
@@ -235,16 +253,17 @@ async fn listener_process_message(
     let msg: SignalingMessage =
         serde_json::from_str(&msg).map_err(|err| SignalingError::ParseError(err.to_string()))?;
     match msg {
-        SignalingMessage::Connect(their_id, my_id, their_sdp, their_key) => {
+        SignalingMessage::Connect(their_id, my_id, their_sdp, their_cert) => {
             let (msg_tx, msg_rx) = mpsc::unbounded_channel();
             endpoint_map.insert(their_id.clone(), msg_tx);
             let sock = Socket {
                 my_id: my_id.clone(),
-                my_key,
+                my_cert,
                 their_id,
                 their_sdp,
                 msg_rx,
                 msg_tx: out_tx.clone(),
+                their_cert,
             };
             sock_tx.send(Ok(sock)).unwrap(); // Receiver is never dropped.
             Ok(())

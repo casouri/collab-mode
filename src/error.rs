@@ -97,6 +97,8 @@ pub enum WebrpcError {
     DTLSError(String),
     #[error("Can't parse message: {0}")]
     ParseError(String),
+    #[error("Can't parse key or certificate: {0}")]
+    CryptoError(String),
     #[error("Data channel error {0}")]
     DataChannelError(String),
     #[error("The other end stopped listening for responses for this request")]
@@ -135,5 +137,11 @@ impl From<webrtc_sctp::Error> for WebrpcError {
 impl From<webrtc_dtls::Error> for WebrpcError {
     fn from(value: webrtc_dtls::Error) -> Self {
         Self::DTLSError(value.to_string())
+    }
+}
+
+impl From<rustls_pemfile::Error> for WebrpcError {
+    fn from(value: rustls_pemfile::Error) -> Self {
+        Self::CryptoError(format!("{:#?}", value))
     }
 }

@@ -38,10 +38,8 @@ use types::*;
 pub struct JSONRPCServer {
     /// The host id (server uuid) for this host.
     host_id: String,
-    /// Private and public key for this host.
-    key_pair: rcgen::KeyPair,
-    /// Self-signed certificate for this host.
-    cert: rcgen::Certificate,
+    /// Private key and self-signed certificate.
+    key_cert: ArcKeyCert,
     /// Maps (Doc, Server) to the Doc object.
     doc_map: HashMap<DocDesignator, Doc>,
     /// Maps ServerId (URL) to the server object, which can be either
@@ -294,8 +292,10 @@ impl JSONRPCServer {
         client_map.insert(SERVER_ID_SELF.to_string(), server.into());
         JSONRPCServer {
             host_id,
-            key_pair,
-            cert,
+            key_cert: std::sync::Arc::new(KeyCert {
+                key: key_pair,
+                cert,
+            }),
             doc_map: HashMap::new(),
             client_map,
             notifier_tx,
@@ -521,7 +521,7 @@ impl JSONRPCServer {
         } else {
             let client = WebrpcClient::new(
                 params.host_id.clone(),
-                self.cert.serialize_pem()?,
+                self.key_cert.clone(),
                 &params.signaling_addr,
                 params.credential,
             )
@@ -628,10 +628,10 @@ impl JSONRPCServer {
                 return Ok(());
             }
         }
-        let key_pem = self.key_pair.public_key_pem();
+        let key_cert = self.key_cert.clone();
         let handle = tokio::spawn(async move {
             let res =
-                run_webrpc_server(params.host_id, key_pem, params.signaling_addr, server).await;
+                run_webrpc_server(params.host_id, key_cert, params.signaling_addr, server).await;
             if let Err(err) = res {
                 let err = match err {
                     CollabError::SignalingTimesUp(time) => CollabError::SignalingTimesUp(time),

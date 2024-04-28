@@ -5,6 +5,7 @@ use crate::error::CollabError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub use crate::config_man::{ArcKeyCert, KeyCert};
 pub use crate::engine::{ClientEngine, ContextOps, ServerEngine};
 pub use crate::op::{
     replace_whitespace_char, DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId,

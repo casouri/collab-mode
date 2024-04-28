@@ -1,6 +1,5 @@
-use rusqlite::{Connection, Statement};
+use rusqlite::Connection;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::SignalingResult;
@@ -35,7 +34,7 @@ impl PubKeyStore {
         Ok(PubKeyStore { conn })
     }
 
-    /// Return the key PEM for `uuid` if exists.
+    /// Return the certificate hash for `uuid` if it exists.
     pub fn get_key_for(&self, uuid: &str) -> SignalingResult<Option<String>> {
         let res = self
             .conn
@@ -49,8 +48,9 @@ impl PubKeyStore {
         }
     }
 
-    /// Set `key` (public key in PEM format) for `uuid`.
-    /// If a key aready exists for `uuid`, override it.
+    /// Set `key` (certificate in DER format hashed by SHA-256 and
+    /// printed in hex) for `uuid`. If a key aready exists for `uuid`,
+    /// override it.
     pub fn set_key_for(&self, uuid: &str, key: &str) -> SignalingResult<()> {
         let atime = current_unix_epoch_in_secs();
         self.conn.execute(

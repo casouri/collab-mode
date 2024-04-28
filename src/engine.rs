@@ -1708,7 +1708,7 @@ impl ServerEngine {
         (_, ops) = quatradic_transform(l1, ops);
 
         // Assign sequence number for each op in ops.
-        for mut op in &mut ops {
+        for op in &mut ops {
             op.seq = Some(self.current_seq + 1);
             self.current_seq += 1;
         }

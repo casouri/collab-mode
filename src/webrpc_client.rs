@@ -4,7 +4,6 @@
 
 use crate::abstract_server::{DocServer, InfoStream, OpStream};
 use crate::error::{CollabError, CollabResult};
-use crate::signaling::PubKeyPem;
 use crate::types::*;
 use crate::webrpc::Endpoint;
 use async_trait::async_trait;
@@ -31,11 +30,12 @@ impl WebrpcClient {
     // server at `signaling_addr` with `credential`.
     pub async fn new(
         server_id: ServerId,
-        server_key: PubKeyPem,
+        server_key_cert: ArcKeyCert,
         signaling_addr: &str,
         credential: Credential,
     ) -> CollabResult<WebrpcClient> {
-        let endpoint = Endpoint::connect(server_id.clone(), server_key, signaling_addr).await?;
+        let endpoint =
+            Endpoint::connect(server_id.clone(), server_key_cert, signaling_addr).await?;
         let resp = endpoint
             .send_request_oneshot(&DocServerReq::Login(credential.clone()))
             .await?
