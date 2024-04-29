@@ -43,7 +43,7 @@
 //! For a server, fatal errors are sent to the request channel; for a client
 //! fatal errors are sent to every response channel.
 
-use crate::config_man::{hash_der, ArcKeyCert};
+use crate::config_man::{hash_der, ArcKeyCert, KeyCert};
 use crate::error::{WebrpcError, WebrpcResult};
 use crate::signaling::CertDerHash;
 use ice::{ice_accept, ice_bind, ice_connect};
@@ -75,18 +75,6 @@ type DataChannel = stream::Stream;
 
 // *** DTLS & SCTP
 
-/// Create a DTLS certificate object from rcgen key and certificate.
-fn create_dtls_cert(
-    key_pair: &rcgen::KeyPair,
-    cert: &rcgen::Certificate,
-) -> webrtc_dtls::crypto::Certificate {
-    let dtls_cert = webrtc_dtls::crypto::Certificate {
-        certificate: vec![rustls::Certificate(cert.serialize_der().unwrap())],
-        private_key: webrtc_dtls::crypto::CryptoPrivateKey::from_key_pair(&key_pair).unwrap(),
-    };
-    dtls_cert
-}
-
 pub struct Listener {
     inner: crate::signaling::client::Listener,
 }
@@ -112,7 +100,7 @@ async fn create_dtls_server(
     their_cert: CertDerHash,
 ) -> WebrpcResult<Arc<DTLSConn>> {
     let config = webrtc_dtls::config::Config {
-        certificates: vec![create_dtls_cert(&my_key_cert.key, &my_key_cert.cert)],
+        certificates: vec![my_key_cert.create_dtls_cert()],
         client_auth: webrtc_dtls::config::ClientAuthType::RequireAnyClientCert,
         // We accept any certificate, and then verifies the provided
         // certificate with the cert we got from signaling server.
@@ -131,7 +119,7 @@ async fn create_dtls_client(
     their_cert: CertDerHash,
 ) -> WebrpcResult<Arc<DTLSConn>> {
     let config = webrtc_dtls::config::Config {
-        certificates: vec![create_dtls_cert(&my_key_cert.key, &my_key_cert.cert)],
+        certificates: vec![my_key_cert.create_dtls_cert()],
         // We accept any certificate, and then verifies the provided
         // certificate with the cert we got from signaling server.
         insecure_skip_verify: true,
@@ -630,6 +618,7 @@ async fn write_message(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
 
     use super::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
@@ -682,9 +671,14 @@ mod tests {
         Ok(())
     }
 
-    async fn test_client(my_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
-        let (conn, server_cert) =
-            ice_connect(my_id, client_key_cert.clone(), "ws://127.0.0.1:9000", None).await?;
+    async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
+        let (conn, server_cert) = ice_connect(
+            server_id,
+            client_key_cert.clone(),
+            "ws://127.0.0.1:9000",
+            None,
+        )
+        .await?;
         let dtls_conn = create_dtls_client(conn, client_key_cert, server_cert).await?;
         let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
@@ -729,21 +723,28 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
         let _ = std::fs::remove_file(&db_path);
-        let _ = runtime.spawn(run_signaling_server("127.0.0.1:9000", &db_path));
+        let _ = runtime.spawn(async move {
+            let res = run_signaling_server("127.0.0.1:9000", &db_path).await;
+            println!("Signaling server: {:?}", res);
+            res.unwrap();
+        });
         let server_id = "server#1".to_string();
         let client_id = "client#1".to_string();
-        let server_key_cert = create_key_cert(&server_id);
-        let client_key_cert = create_key_cert(&client_id);
+        let server_key_cert = Arc::new(create_key_cert(&server_id));
+        let client_key_cert = Arc::new(create_key_cert(&client_id));
 
+        let server_id_1 = server_id.clone();
         let handle = runtime.spawn(async {
-            let res = test_server(server_id, server_key_cert).await;
+            let res = test_server(server_id_1, server_key_cert).await;
             println!("Server: {:?}", res);
+            res.unwrap();
         });
         let _ =
             runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_secs(1)).await });
         let _ = runtime.block_on(async {
-            let res = test_client(client_id, client_key_cert).await;
+            let res = test_client(server_id, client_key_cert).await;
             println!("Client: {:?}", res);
+            res.unwrap();
         });
 
         let _ = runtime.block_on(async { handle.await });

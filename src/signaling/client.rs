@@ -134,7 +134,8 @@ impl Listener {
     /// Share `sdp` on the signal server under `id`, and start
     /// listening for incoming connections.
     pub async fn bind(&mut self) -> SignalingResult<()> {
-        let msg = SignalingMessage::Bind(self.my_id.clone(), self.my_key_cert.cert_der_hash());
+        let cert_hash = self.my_key_cert.cert_der_hash();
+        let msg = SignalingMessage::Bind(self.my_id.clone(), cert_hash);
         self.out_tx
             .send(msg.into())
             .await
@@ -145,12 +146,8 @@ impl Listener {
     /// Share our `sdp`, connect to the endpoint that has the id
     /// `their_id`.
     pub async fn connect(&mut self, their_id: EndpointId, sdp: SDP) -> SignalingResult<Socket> {
-        let msg = SignalingMessage::Connect(
-            self.my_id.clone(),
-            their_id,
-            sdp,
-            self.my_key_cert.cert_der_hash(),
-        );
+        let cert_hash = self.my_key_cert.cert_der_hash();
+        let msg = SignalingMessage::Connect(self.my_id.clone(), their_id, sdp, cert_hash);
         self.out_tx
             .send(msg.into())
             .await
@@ -221,8 +218,7 @@ impl Socket {
         self.their_id.clone()
     }
 
-    /// Return their certificate in PEM format. The type says PubKey,
-    /// but it's actually certificate (which is kind of a pub key so...)
+    /// Return their certificate hash.
     pub fn cert_hash(&self) -> CertDerHash {
         self.their_cert.clone()
     }

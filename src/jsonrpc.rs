@@ -285,17 +285,13 @@ impl JSONRPCServer {
         server: LocalServer,
         notifier_tx: std::sync::mpsc::Sender<CollabNotification>,
         host_id: String,
-        key_pair: rcgen::KeyPair,
-        cert: rcgen::Certificate,
+        key_cert: KeyCert,
     ) -> JSONRPCServer {
         let mut client_map = HashMap::new();
         client_map.insert(SERVER_ID_SELF.to_string(), server.into());
         JSONRPCServer {
             host_id,
-            key_cert: std::sync::Arc::new(KeyCert {
-                key: key_pair,
-                cert,
-            }),
+            key_cert: std::sync::Arc::new(key_cert),
             doc_map: HashMap::new(),
             client_map,
             notifier_tx,
@@ -384,14 +380,13 @@ fn handle_init_request(
 ) -> CollabResult<JSONRPCServer> {
     let params: InitParams = serde_json::from_value(req.params)?;
     let host_id = params.host_id;
-    let (key_pair, cert) = config_man.get_key_and_cert(host_id.clone())?;
+    let key_cert = config_man.get_key_and_cert(host_id.clone())?;
 
     Ok(JSONRPCServer::new(
         doc_server,
         notifier_tx,
         host_id,
-        key_pair,
-        cert,
+        key_cert,
     ))
 }
 

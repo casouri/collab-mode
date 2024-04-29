@@ -81,6 +81,12 @@ impl From<WebrpcError> for CollabError {
     }
 }
 
+impl From<pem::PemError> for CollabError {
+    fn from(value: pem::PemError) -> Self {
+        Self::ServerFatal(format!("Failed to parse PEM file {:#?}", value))
+    }
+}
+
 pub type WebrpcResult<T> = Result<T, WebrpcError>;
 
 #[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
@@ -140,8 +146,8 @@ impl From<webrtc_dtls::Error> for WebrpcError {
     }
 }
 
-impl From<rustls_pemfile::Error> for WebrpcError {
-    fn from(value: rustls_pemfile::Error) -> Self {
+impl From<pem::PemError> for WebrpcError {
+    fn from(value: pem::PemError) -> Self {
         Self::CryptoError(format!("{:#?}", value))
     }
 }

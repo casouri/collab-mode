@@ -106,7 +106,7 @@ impl Into<tung::tungstenite::Message> for SignalingMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
 
     use crate::{
         config_man::create_key_cert,
@@ -129,8 +129,8 @@ mod tests {
 
         let server_id = "server#1".to_string();
         let client_id = "client#1".to_string();
-        let server_key_cert = create_key_cert(&server_id);
-        let client_key_cert = create_key_cert(&client_id);
+        let server_key_cert = Arc::new(create_key_cert(&server_id));
+        let client_key_cert = Arc::new(create_key_cert(&client_id));
 
         // Server
         let server_id_1 = server_id.clone();

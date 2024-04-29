@@ -4,27 +4,50 @@ use sha2::{Digest, Sha256};
 use crate::error::CollabResult;
 
 pub struct KeyCert {
-    pub key: rcgen::KeyPair,
-    pub cert: rcgen::Certificate,
+    /// The private key. I don't know if the [rcgen::KeyPair] is the
+    /// same story as [rcgen::Certificate] (see below), but let's just
+    /// do the same thing and store the DER instead of
+    /// [rcgen::KeyPair].
+    pub key_der: Vec<u8>,
+    /// The certificate DER. NOTE: DO NOT use a rcgen::Certificate and
+    /// call [rcgen::Certificate::serialize_der] when you need a DER.
+    /// Despite its name [rcgen::Certificate::serialize_der] actually
+    /// _generates_ a new certificate every time you call it, which
+    /// means it's return value are different every time it's invoked.
+    pub cert_der: Vec<u8>,
 }
 
 impl KeyCert {
     /// Return the certificate in DER format, hashed with SHA-256, and
-    /// printed out in hex.
+    /// printed out fingerprint format: each byte in uppercase hex,
+    /// separated by colons.
     pub fn cert_der_hash(&self) -> CertDerHash {
-        let cert_der = self.cert.serialize_der().unwrap();
-        hash_der(&cert_der)
+        hash_der(&self.cert_der)
+    }
+
+    /// Create a DTLS certificate.
+    pub fn create_dtls_cert(&self) -> webrtc_dtls::crypto::Certificate {
+        let dtls_cert = webrtc_dtls::crypto::Certificate {
+            certificate: vec![rustls::Certificate(self.cert_der.clone())],
+            private_key: webrtc_dtls::crypto::CryptoPrivateKey::from_key_pair(
+                &rcgen::KeyPair::from_der(&self.key_der).unwrap(),
+            )
+            .unwrap(),
+        };
+        dtls_cert
     }
 }
 
 pub type ArcKeyCert = std::sync::Arc<KeyCert>;
 
-/// Hash the binary DER file and return the hash in hex string.
+/// Hash the binary DER file and return the hash in fingerprint
+/// format: each byte in uppercase hex, separated by colons.
+/// (ref:rcgen-cert-searlize)
 pub fn hash_der(der: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(der);
-    let hash = hasher.finalize();
-    format!("{hash:02x}")
+    let hash = Sha256::digest(der);
+    // Separate each byte with colon like webrtc does.
+    let bytes: Vec<String> = hash.iter().map(|x| format!("{x:02x}")).collect();
+    bytes.join(":").to_uppercase()
 }
 
 /// Return a clone of `key`.
@@ -34,10 +57,11 @@ pub fn clone_key(key: &rcgen::KeyPair) -> rcgen::KeyPair {
 }
 
 /// Return a freshly generated key and certificate for `name`.
-pub fn create_key_cert(name: &str) -> ArcKeyCert {
+pub fn create_key_cert(name: &str) -> KeyCert {
     let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
-    let key = clone_key(cert.get_key_pair());
-    std::sync::Arc::new(KeyCert { key, cert })
+    let cert_der = cert.serialize_der().unwrap();
+    let key_der = cert.get_key_pair().serialize_der();
+    KeyCert { key_der, cert_der }
 }
 
 #[derive(Debug, Clone)]
@@ -53,37 +77,39 @@ impl ConfigManager {
     /// Either load or create keys and a certificate for `uuid` in
     /// standard (XDG) config location. The subject alt names of the
     /// certificate would be `uuid`.
-    pub fn get_key_and_cert(
-        &self,
-        uuid: String,
-    ) -> CollabResult<(rcgen::KeyPair, rcgen::Certificate)> {
+    pub fn get_key_and_cert(&self, uuid: String) -> CollabResult<KeyCert> {
         let xdg_dirs = xdg::BaseDirectories::with_prefix("collab-mode/secrets").unwrap();
-        let key_file = xdg_dirs.place_config_file("key.pem")?;
-        let ca_file = xdg_dirs.place_config_file(format!("{uuid}.crt"))?;
+        let key_file = xdg_dirs.place_config_file(format!("{uuid}.key.pem"))?;
+        let cert_file = xdg_dirs.place_config_file(format!("{uuid}.cert.pem"))?;
 
-        let key_pair = if key_file.exists() {
-            let key_string = std::fs::read_to_string(key_file)?;
-            rcgen::KeyPair::from_pem(&key_string)?
+        let (key_pair, key_der) = if key_file.exists() {
+            let key_pem = std::fs::read_to_string(key_file)?;
+            let key_der = pem::parse(&key_pem)?.into_contents();
+            let key_pair = rcgen::KeyPair::from_pem(&key_pem)?;
+            (key_pair, key_der)
         } else {
             let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-            std::fs::write(key_file, key_pair.serialize_pem())?;
-            key_pair
+            let key_pem = key_pair.serialize_pem();
+            let key_der = pem::parse(&key_pem).unwrap().into_contents();
+            std::fs::write(key_file, key_pem)?;
+            (key_pair, key_der)
         };
 
-        let key_copy = rcgen::KeyPair::from_der(&key_pair.serialize_der()).unwrap();
-
-        let ca_cert = if ca_file.exists() {
-            let ca_string = std::fs::read_to_string(ca_file)?;
-            let params = rcgen::CertificateParams::from_ca_cert_pem(&ca_string, key_pair)?;
-            rcgen::Certificate::from_params(params)?
+        let cert_der = if cert_file.exists() {
+            let pem = std::fs::read_to_string(cert_file)?;
+            pem::parse(pem)?.into_contents()
         } else {
+            // The alt subject name doesn't really matter, but let's
+            // use the uuid because why not.
             let mut params = rcgen::CertificateParams::new(vec![uuid]);
             params.key_pair = Some(key_pair);
-            let ca_cert = rcgen::Certificate::from_params(params)?;
-            std::fs::write(ca_file, ca_cert.serialize_pem()?)?;
-            ca_cert
+            let cert = rcgen::Certificate::from_params(params).unwrap();
+            let cert_pem = cert.serialize_pem().unwrap();
+            let cert_der = pem::parse(&cert_pem)?.into_contents();
+            std::fs::write(cert_file, &cert_pem)?;
+            cert_der
         };
 
-        Ok((key_copy, ca_cert))
+        Ok(KeyCert { key_der, cert_der })
     }
 }
