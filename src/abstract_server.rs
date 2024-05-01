@@ -4,8 +4,8 @@
 use crate::collab_server::LocalServer;
 use crate::error::CollabResult;
 // use crate::grpc_client::GrpcClient;
+use crate::collab_webrpc_client::WebrpcClient;
 use crate::types::*;
-use crate::webrpc_client::WebrpcClient;
 use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use std::pin::Pin;

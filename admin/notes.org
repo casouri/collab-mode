@@ -12,7 +12,7 @@
 - Add a method in ~collab_server::impl LocalServer~ (the name should be ~xxx_1~).
 - Add a branch in ~collab_server::handle_request~.
 - Add a method in ~collab_server::impl DocServer for LocalServer~.
-- Add a method in ~webrpc_client::impl DocServer for WebrpcClient~.
+- Add a method in ~collab_webrpc_client::impl DocServer for WebrpcClient~.
 - Add JSONRPC types in ~jsonrpc::types~ (~XXParams~, ~XXResp~).
 - Add a new function ~handle_xxx_request~ in ~jsonrpc~.
 - Add a branch in ~jsonrpc::impl JSONRPCServer::handle_request~

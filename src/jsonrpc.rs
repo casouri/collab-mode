@@ -15,13 +15,13 @@
 // the form of JSONRPC notifications.
 
 use crate::abstract_server::{ClientEnum, DocServer};
-use crate::collab_client::Doc;
+use crate::collab_doc::Doc;
 use crate::collab_server::{run_webrpc_server, LocalServer};
 use crate::config_man::ConfigManager;
 use crate::error::{CollabError, CollabResult};
 // use crate::grpc_client::GrpcClient;
+use crate::collab_webrpc_client::WebrpcClient;
 use crate::types::*;
-use crate::webrpc_client::WebrpcClient;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
 use std::collections::HashMap;

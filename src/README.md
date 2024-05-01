@@ -50,10 +50,10 @@ data channel.
 # Communicating with editor
 
 [crate::jsonrpc] provides a jsonrpc server that faces the editor. The
-jsonrpc server creates a [crate::collab_client::Doc] upon editor
+jsonrpc server creates a [crate::collab_doc::Doc] upon editor
 request, by either sharing to the local server or connecting to a
 remote server, and delgates editor requests to
-[crate::collab_client::Doc].
+[crate::collab_doc::Doc].
 
 # OT control algorithm
 

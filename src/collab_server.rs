@@ -440,7 +440,7 @@ impl LocalServer {
                 );
                 if let Err(_) = tx_op.send(ops).await {
                     // When the local or remote
-                    // [crate::collab_client::Doc] is dropped,
+                    // [crate::collab_doc::Doc] is dropped,
                     // its connection to us is dropped. This
                     // is not an error.
                     log::info!("Internal channel (local server --op--> local client or grpc server) closed.");

@@ -1238,7 +1238,7 @@ impl GlobalHistory {
 // *** Client and server engine
 
 /// OT control algorithm engine for client. Used by
-/// [crate::collab_client::Doc].
+/// [crate::collab_doc::Doc].
 #[derive(Debug, Clone)]
 pub struct ClientEngine {
     /// History storing the global timeline (seen by the server).
