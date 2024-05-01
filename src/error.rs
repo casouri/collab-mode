@@ -5,19 +5,34 @@ use crate::types::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Convert remote `err` into a local error.
+pub fn convert_remote_err(err: CollabError) -> CollabError {
+    match &err {
+        CollabError::Fatal(_) => CollabError::DocFatal(format!("Remote fatal error: {:#?}", err)),
+        CollabError::DocFatal(_) => {
+            CollabError::DocFatal(format!("Remote fatal error: {:#?}", err))
+        }
+        CollabError::RpcError(_) => {
+            CollabError::DocFatal(format!("Remote fatal error: {:#?}", err))
+        }
+        _ => err,
+    }
+}
+
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum CollabError {
-    // Program error.
+    // Fatal error for the whole program.
     #[error("Fatal server error ({0})")]
-    ServerFatal(String),
-    #[error("Rpc error ({0})")]
-    RpcError(String),
+    Fatal(String),
+
+    // Fatal doc errors. (Non-fatal for the server.)
+    //
+    // Generic fatal doc error.
     #[error("Doc fatal error ({0})")]
     DocFatal(String),
+    // Specific fatal doc errors.
     #[error("Fatal OT engine error ({0})")]
     EngineError(String),
-
-    // User error.
     #[error("Doc({0}) already exists")]
     DocAlreadyExists(DocId),
     #[error("Cannot find Doc({0})")]
@@ -33,26 +48,24 @@ pub enum CollabError {
     #[error("The first request must be Initialize request")]
     NotInitialized,
 
-    // Notification.
+    // Non-fatal error. (Connection broke.)
+    #[error("Rpc error ({0})")]
+    RpcError(String),
+
+    // Notifications.
     #[error("Error accepting remote connections ({0})")]
     AcceptConnectionErr(String),
-    #[error("Allocated time ({0}s) on the signaling server is up")]
+    #[error("Allocated listening time ({0}h) on the signaling server is up")]
     SignalingTimesUp(u16),
-
-    #[error("Error returned from remote server ({0})")]
-    RemoteErr(Box<CollabError>),
-
-    #[error("IO error ({0})")]
-    IOErr(String),
 }
 
 pub type CollabResult<T> = Result<T, CollabError>;
 
-impl From<std::io::Error> for CollabError {
-    fn from(value: std::io::Error) -> Self {
-        CollabError::IOErr(value.to_string())
-    }
-}
+// impl From<std::io::Error> for CollabError {
+//     fn from(value: std::io::Error) -> Self {
+//         CollabError::IOErr(value.to_string())
+//     }
+// }
 
 impl From<crate::engine::EngineError> for CollabError {
     fn from(value: crate::engine::EngineError) -> Self {
@@ -68,7 +81,7 @@ impl From<serde_json::Error> for CollabError {
 
 impl From<rcgen::RcgenError> for CollabError {
     fn from(value: rcgen::RcgenError) -> Self {
-        CollabError::ServerFatal(format!("Key error: {:#}", value))
+        CollabError::Fatal(format!("Key error: {:#}", value))
     }
 }
 
@@ -83,7 +96,7 @@ impl From<WebrpcError> for CollabError {
 
 impl From<pem::PemError> for CollabError {
     fn from(value: pem::PemError) -> Self {
-        Self::ServerFatal(format!("Failed to parse PEM file {:#?}", value))
+        Self::Fatal(format!("Failed to parse PEM file {:#?}", value))
     }
 }
 
@@ -93,7 +106,7 @@ pub type WebrpcResult<T> = Result<T, WebrpcError>;
 pub enum WebrpcError {
     #[error("Signaling error {0}")]
     SignalingError(String),
-    #[error("Allocated time ({0}s) on the signaling server is up")]
+    #[error("Allocated time ({0}h) on the signaling server is up")]
     SignalingTimesUp(u16),
     #[error("ICE error {0}")]
     ICEError(String),
@@ -111,6 +124,8 @@ pub enum WebrpcError {
     RequestClosed(),
     #[error("Sync request timed out after {0}s")]
     Timeout(u8),
+    #[error("Remote host aren't handling requests")]
+    NotListeningForRequests,
 }
 
 impl From<bincode::Error> for WebrpcError {

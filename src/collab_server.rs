@@ -302,9 +302,13 @@ impl LocalServer {
         // We return full path here and let clients handle displaying
         // more friendly names.
         let file_name = full_path.to_string_lossy().to_string();
-        let mut file = std::fs::File::open(full_path)?;
+        let mut file = std::fs::File::open(full_path).map_err(|err| {
+            CollabError::DocFatal(format!("Can't open file {}: {:#?}", file_name, err))
+        })?;
         let mut buf = String::new();
-        file.read_to_string(&mut buf)?;
+        file.read_to_string(&mut buf).map_err(|err| {
+            CollabError::DocFatal(format!("Can't read file {}: {:#?}", file_name, err))
+        })?;
         let doc_id = self
             .share_file_1(
                 &file_name,
@@ -471,7 +475,13 @@ impl LocalServer {
             if !path.is_dir() {
                 // If there are error access the file, return that
                 // error instead of NotDirectory.
-                path.metadata()?;
+                path.metadata().map_err(|err| {
+                    CollabError::DocFatal(format!(
+                        "Can't access file {}: {:#?}",
+                        path.to_string_lossy(),
+                        err
+                    ))
+                })?;
                 return Err(CollabError::NotDirectory(
                     path.to_string_lossy().to_string(),
                 ));
@@ -485,12 +495,30 @@ impl LocalServer {
                 .iter()
                 .map(|(doc_id, doc)| (*doc_id, doc.clone()))
                 .collect();
-            for file in std::fs::read_dir(&path)? {
-                let file = file?;
+            for file in std::fs::read_dir(&path).map_err(|err| {
+                CollabError::DocFatal(format!(
+                    "Can't read directory {}: {:#?}",
+                    path.to_string_lossy(),
+                    err
+                ))
+            })? {
+                let file = file.map_err(|err| {
+                    CollabError::DocFatal(format!(
+                        "Can't read directory {}: {:#?}",
+                        path.to_string_lossy(),
+                        err
+                    ))
+                })?;
                 let abs_path = file.path();
                 let rel_path = pathdiff::diff_paths(&abs_path, &path).unwrap();
                 // This traverses symlink.
-                let meta = std::fs::metadata(&abs_path)?;
+                let meta = std::fs::metadata(&abs_path).map_err(|err| {
+                    CollabError::DocFatal(format!(
+                        "Can't access file {}: {:#?}",
+                        abs_path.to_string_lossy(),
+                        err
+                    ))
+                })?;
                 let file_name_raw = file.file_name();
                 let file_name = file_name_raw.to_string_lossy().into();
                 let file_path = (doc_id, rel_path);
@@ -660,7 +688,7 @@ pub async fn run_webrpc_server(
 }
 
 async fn handle_connection(mut endpoint: Endpoint, mut server: LocalServer) -> CollabResult<()> {
-    let mut rx = endpoint.read_requests()?;
+    let mut rx = endpoint.process_incoming_messages()?;
     while let Some(msg) = rx.recv().await {
         let msg = msg?;
         let req_id = msg.req_id;

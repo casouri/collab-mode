@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ErrorCode {
-    // Defined by JSON RPC:
+    // Defined by JSON RPC. Generally means editor has programming
+    // error and sent a malformed request.
     ParseError = -32700,
     InvalidRequest = -32600,
     MethodNotFound = -32601,
@@ -13,18 +14,21 @@ pub enum ErrorCode {
     ServerErrorStart = -32099,
     ServerErrorEnd = -32000,
 
-    // LSP
+    /// LSP error. Happens when editor didn't send the initialize
+    /// request before other requests.
     NotInitialized = -32002,
 
     // Collab-mode errors.
     //
-    /// Transient error, retry again later.
-    NetworkError = 100,
-    /// Server fatal error, restart the server.
-    ServerFatalError = 102,
-    /// Server can keep running but if the operation is concerned with
-    /// a doc, the doc must be reconnected.
-    ServerNonFatalDocFatal = 103,
+    /// Doc non-fatal. Transient error, will retry again later, editor
+    /// doesn't need to do anything (except for informing the user).
+    DocNonFatal = 100,
+    /// Server fatal error, editor must restart the server.
+    ServerFatal = 102,
+    /// Server is unaffected, but editor must reconnect/recreate the doc.
+    DocFatal = 103,
+
+    /// For errors below, editor must retry the operation or give up.
 
     /// Permission denied.
     PermissionDenied = 104,
@@ -33,7 +37,7 @@ pub enum ErrorCode {
     /// Doc already exists.
     DocAlreadyExists = 106,
     /// Local IO error.
-    IOError = 107,
+    // IOError = 107,
     /// Not a regular file
     NotRegularFile = 108,
     /// Not a directory
@@ -50,6 +54,7 @@ pub enum NotificationCode {
     SignalingTimesUp,
     AcceptConnectionErr,
     Info,
+    HarmlessErr,
 }
 
 impl Into<String> for NotificationCode {
@@ -60,6 +65,7 @@ impl Into<String> for NotificationCode {
             NotificationCode::SignalingTimesUp => "SignalingTimesUp".to_string(),
             NotificationCode::AcceptConnectionErr => "AcceptConnectionErr".to_string(),
             NotificationCode::Info => "Info".to_string(),
+            NotificationCode::HarmlessErr => "HarmlessErr".to_string(),
         }
     }
 }

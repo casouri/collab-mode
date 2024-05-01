@@ -16,13 +16,52 @@
 //! background threads.
 
 use crate::abstract_server::{ClientEnum, DocServer, InfoStream, OpStream};
-use crate::error::{CollabError, CollabResult};
+use crate::error::{convert_remote_err, CollabError, CollabResult};
 use crate::types::*;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio_stream::StreamExt;
 
 // *** Structs
+
+/// The status of a doc. Usually should be live, when everything is
+/// going fine, if connection broke, doc goes into offline mode, and
+/// can be resurrected from offline mode to live by reconnecting to
+/// remote host. If there's a fatal error, the doc goes into fatal
+/// mode and can't be recovered anymore.
+#[derive(Debug, Clone)]
+pub enum DocStatus {
+    /// Well and good.
+    Live,
+    /// Connection broke due to this error.
+    Offline(CollabError),
+    /// Fatal error.
+    Fatal(CollabError),
+}
+
+impl From<CollabError> for DocStatus {
+    fn from(value: CollabError) -> Self {
+        match &value {
+            CollabError::RpcError(_) => Self::Offline(value),
+            _ => Self::Fatal(value),
+        }
+    }
+}
+
+impl DocStatus {
+    fn is_live(&self) -> bool {
+        match self {
+            Self::Live => true,
+            _ => false,
+        }
+    }
+    fn is_fatal(&self) -> bool {
+        match self {
+            Self::Fatal(_) => true,
+            _ => false,
+        }
+    }
+}
 
 /// A client that connects to the local server and remote server.
 /// Represents a local or remote document.
@@ -38,8 +77,10 @@ pub struct Doc {
     /// Notifier receiver for remote op arrival AND local op arrival.
     new_ops_rx: watch::Receiver<()>,
     /// Channel that receives async errors produced by worker threads.
-    err_rx: mpsc::Receiver<CollabError>,
-    /// Thread handlers used for terminate worker threads.
+    /// If there are errors in this channel, the doc has encountered a
+    /// fatal error and must be removed and recreated.
+    status: Arc<Mutex<DocStatus>>,
+    /// Thread handlers used for terminating worker threads.
     thread_handlers: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -54,8 +95,6 @@ impl Doc {
         file: String,
         external_notifier: std::sync::mpsc::Sender<CollabNotification>,
     ) -> CollabResult<Doc> {
-        // At most 2 errors from two worker threads.
-        let (err_tx, err_rx) = mpsc::channel(2);
         let file_len = file.chars().count() as u64;
         let doc_id = server
             .share_file(file_name, file_meta, FileContentOrPath::Content(file))
@@ -67,7 +106,6 @@ impl Doc {
             file_name.to_string(),
             file_len,
             0,
-            err_rx,
         );
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
@@ -89,7 +127,7 @@ impl Doc {
             info_stream,
             remote_op_buffer,
             notifier_tx,
-            err_tx.clone(),
+            doc.status.clone(),
             external_notifier,
         );
         doc.thread_handlers.push(handle);
@@ -101,7 +139,7 @@ impl Doc {
             Arc::clone(&engine),
             server,
             notifier_rx.clone(),
-            err_tx,
+            doc.status.clone(),
         );
         doc.thread_handlers.push(handle);
 
@@ -121,7 +159,7 @@ impl Doc {
         let (op_stream, info_stream) = server.recv_op_and_info(&doc_id, snapshot.seq).await?;
 
         // At most 2 errors from two worker threads.
-        let (err_tx, err_rx) = mpsc::channel(2);
+
         let site_id = server.site_id();
         let mut doc = make_doc(
             site_id.clone(),
@@ -129,7 +167,6 @@ impl Doc {
             snapshot.file_name,
             snapshot.buffer.chars().count() as u64,
             snapshot.seq,
-            err_rx,
         );
 
         let remote_op_buffer = Arc::clone(&doc.remote_op_buffer);
@@ -146,13 +183,14 @@ impl Doc {
             info_stream,
             Arc::clone(&remote_op_buffer),
             notifier_tx,
-            err_tx.clone(),
+            doc.status.clone(),
             external_notifier,
         );
         doc.thread_handlers.push(handle);
 
         // Spawn a thread that sends local ops.
-        let handle = spawn_thread_send_local_op(doc_id, engine, server, notifier_rx, err_tx);
+        let handle =
+            spawn_thread_send_local_op(doc_id, engine, server, notifier_rx, doc.status.clone());
         doc.thread_handlers.push(handle);
 
         Ok((doc, snapshot.buffer))
@@ -243,12 +281,13 @@ impl Doc {
         Ok(self.engine.lock().unwrap().generate_redo_op())
     }
 
-    /// Handle errors created by worker threads.
+    /// Handle errors created by background threads.
     fn check_async_errors(&mut self) -> CollabResult<()> {
-        if let Ok(err) = self.err_rx.try_recv() {
-            return Err(err);
-        } else {
-            return Ok(());
+        let status = self.status.lock().unwrap();
+        match &*status {
+            DocStatus::Live => Ok(()),
+            DocStatus::Offline(err) => Err(err.clone()),
+            DocStatus::Fatal(err) => Err(err.clone()),
         }
     }
 
@@ -271,7 +310,6 @@ fn make_doc(
     file_name: String,
     init_len: u64,
     base_seq: GlobalSeq,
-    err_rx: mpsc::Receiver<CollabError>,
 ) -> Doc {
     let engine = Arc::new(Mutex::new(ClientEngine::new(
         site_id.clone(),
@@ -289,7 +327,7 @@ fn make_doc(
         site_seq: 0,
         new_ops_tx: Arc::new(notifier_tx),
         new_ops_rx: notifier_rx.clone(),
-        err_rx,
+        status: Arc::new(Mutex::new(DocStatus::Live)),
         thread_handlers,
     }
 }
@@ -305,11 +343,11 @@ fn spawn_thread_receive_remote_op(
     mut remote_info_stream: InfoStream,
     remote_op_buffer: Arc<Mutex<Vec<FatOp>>>,
     notifier_tx: Arc<watch::Sender<()>>,
-    error_channel: mpsc::Sender<CollabError>,
+    mut status: Arc<Mutex<DocStatus>>,
     external_notifier: std::sync::mpsc::Sender<CollabNotification>,
 ) -> tokio::task::JoinHandle<()> {
     // Receive info.
-    let error_channel_1 = error_channel.clone();
+    let mut status_1 = status.clone();
     let external_notifier_1 = external_notifier.clone();
     let doc_id_1 = doc_id.clone();
     let server_id_1 = server_id.clone();
@@ -317,7 +355,7 @@ fn spawn_thread_receive_remote_op(
         while let Some(info) = remote_info_stream.next().await {
             match info {
                 Err(err) => {
-                    error_channel_1.send(err).await.unwrap();
+                    maybe_set_status(&mut status_1, err);
                     return;
                 }
                 Ok(info) => {
@@ -333,45 +371,63 @@ fn spawn_thread_receive_remote_op(
                                     sender_site_id: info.sender,
                                     value,
                                 }))
+                                // external_notifier is never dropped,
+                                // so just unwrap.
                                 .unwrap();
                         }
                         Err(err) => {
-                            error_channel_1.send(err.into()).await.unwrap();
-                            // Not fatal, don't need to return.
+                            // Failure to parse an info isn't a big
+                            // deal, inform the editor about it and
+                            // live on.
+                            let err: CollabError = err.into();
+                            external_notifier_1
+                                .send(CollabNotification::HarmlessErr(format!("{:#?}", err)))
+                                // external_notifier is never dropped,
+                                // so just unwrap.
+                                .unwrap();
                         }
                     }
                 }
             }
         }
-        let err = CollabError::DocFatal(format!(
-            "Doc({}) Internal channel (local server --info--> local client) broke",
-            &doc_id
-        ));
-        error_channel_1.send(err).await.unwrap();
+        // Info stream broke, meaning connection broke.
+        let mut status = status_1.lock().unwrap();
+        if !status.is_live() {
+            let err = CollabError::DocFatal(format!(
+                "Connection for Doc({}) broke: internal channel (local server --info--> local client) broke",
+                &doc_id
+            ));
+            *status = err.into();
+        }
     });
     // Receive op.
     //
     // Draining remote_op_stream and storing ops into a buffer seems
     // redundant, but is easier to write and understand in the big
     // picture. Also, make sure we add the remote op into the vector
-    // before sending signal to editor.
+    // before sending "remote op arrived" signal to editor.
     tokio::spawn(async move {
         loop {
             let new_remote_ops = remote_op_stream.next().await;
             if new_remote_ops.is_none() {
+                // Connection broke.
                 let err = CollabError::DocFatal(format!(
-                    "Doc({}) Internal channel (local server --op--> local client) broke",
+                    "Connection for doc({}) broke: internal channel (local server --op--> local client) broke",
                     &doc_id
                 ));
-                error_channel.send(err).await.unwrap();
+                maybe_set_status(&mut status, err);
                 return;
             };
             let new_remote_ops = new_remote_ops.unwrap();
+
+            // Remove host sent error instead of ops.
             if let Err(err) = new_remote_ops {
-                error_channel.send(err).await.unwrap();
+                let err = convert_remote_err(err);
+                maybe_set_status(&mut status, err);
                 return;
             }
             let ops = new_remote_ops.unwrap();
+
             log::debug!(
                 "Doc({}) Received ops from local server: {:?}",
                 &doc_id,
@@ -386,15 +442,19 @@ fn spawn_thread_receive_remote_op(
             }
             let truly_remote_op_arrived = truly_remote_op_arrived.unwrap();
 
-            let mut last_global_seq = 0;
+            let last_global_seq;
             match get_last_global_seq(&ops) {
                 Err(err) => {
-                    error_channel.send(err).await.unwrap();
+                    // Remote op doesn't have a sequence number, this
+                    // is doc-fatal.
+                    maybe_set_status(&mut status, err);
+                    return;
                 }
                 Ok(seq) => {
                     if let Some(seq) = seq {
                         last_global_seq = seq;
                     } else {
+                        // ops is an empty array, go to next iter.
                         continue;
                     }
                 }
@@ -408,19 +468,15 @@ fn spawn_thread_receive_remote_op(
 
             // Notify JSONRPC server to notify the editor.
             if truly_remote_op_arrived {
-                let res = external_notifier.send(CollabNotification::Op(NewOpNotification {
+                let notification = CollabNotification::Op(NewOpNotification {
                     doc_id: doc_id.clone(),
                     host_id: server_id.clone(),
                     last_seq: last_global_seq,
-                }));
-                if let Err(err) = res {
-                    let err = CollabError::DocFatal(format!(
-                    "Doc({}) Internal notification channel (Doc --(doc,server)--> jsonrpc) broke: {:#}",
-                    &doc_id, err
-                ));
-                    error_channel.send(err).await.unwrap();
-                    return;
-                }
+                });
+                external_notifier
+                    .send(notification)
+                    // external_notifier is never dropped, so just unwrap.
+                    .unwrap();
             }
         }
     })
@@ -435,7 +491,7 @@ fn spawn_thread_send_local_op(
     engine: Arc<Mutex<ClientEngine>>,
     mut server: ClientEnum,
     mut notifier_rx: watch::Receiver<()>,
-    error_channel: mpsc::Sender<CollabError>,
+    mut status: Arc<Mutex<DocStatus>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -447,7 +503,7 @@ fn spawn_thread_send_local_op(
             if let Some(ops) = ops {
                 log::debug!("Doc({}) Sending op to server: {:?}", &doc_id, &ops);
                 if let Err(err) = server.send_op(ops).await {
-                    error_channel.send(err).await.unwrap();
+                    maybe_set_status(&mut status, err);
                     return;
                 }
             }
@@ -466,5 +522,20 @@ fn get_last_global_seq(ops: &[FatOp]) -> CollabResult<Option<GlobalSeq>> {
         }
     } else {
         Ok(None)
+    }
+}
+
+/// Set `status` according to err. But if `status` is already in fatal or offline state, don't change it.
+fn maybe_set_status(status: &mut Arc<Mutex<DocStatus>>, err: CollabError) {
+    let mut status = status.lock().unwrap();
+    if status.is_fatal() {
+        return;
+    }
+    // TODO: log with doc id when tracing is added.
+    let new_status: DocStatus = err.into();
+    // Don't allow going from fatal to offline, but allow going from
+    // offline to fatal.
+    if status.is_live() || new_status.is_fatal() {
+        *status = new_status;
     }
 }

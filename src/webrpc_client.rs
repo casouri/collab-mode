@@ -3,7 +3,7 @@
 //! servers with this client.
 
 use crate::abstract_server::{DocServer, InfoStream, OpStream};
-use crate::error::{CollabError, CollabResult};
+use crate::error::{convert_remote_err, CollabError, CollabResult};
 use crate::types::*;
 use crate::webrpc::Endpoint;
 use async_trait::async_trait;
@@ -74,7 +74,7 @@ impl DocServer for WebrpcClient {
             DocServerResp::ListFiles(doc_info) => {
                 Ok(doc_info.into_iter().map(|info| info.into()).collect())
             }
-            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            DocServerResp::Err(err) => Err(convert_remote_err(err)),
             resp => Err(unexpected_resp("ListFiles", resp)),
         }
     }
@@ -106,7 +106,7 @@ impl DocServer for WebrpcClient {
         );
         match resp {
             DocServerResp::ShareFile(doc_id) => Ok(doc_id),
-            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            DocServerResp::Err(err) => Err(convert_remote_err(err)),
             resp => Err(unexpected_resp("ShareFile", resp)),
         }
     }
@@ -120,7 +120,7 @@ impl DocServer for WebrpcClient {
         log::debug!("request_file(doc_file={:?}) => {:?}", doc_file, &resp);
         match resp {
             DocServerResp::RequestFile(snapshot) => Ok(snapshot),
-            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            DocServerResp::Err(err) => Err(convert_remote_err(err)),
             resp => Err(unexpected_resp("RequestFile", resp)),
         }
     }
@@ -135,7 +135,7 @@ impl DocServer for WebrpcClient {
         log::debug!("send_op(ops={ops_str}) => {:?}", &resp);
         match resp {
             DocServerResp::SendOp => Ok(()),
-            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            DocServerResp::Err(err) => Err(convert_remote_err(err)),
             resp => Err(unexpected_resp("SendOp", resp)),
         }
     }
@@ -208,7 +208,7 @@ impl DocServer for WebrpcClient {
         log::debug!("delete_file(doc_id={doc_id}) => {:?}", &resp);
         match resp {
             DocServerResp::DeleteFile => Ok(()),
-            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            DocServerResp::Err(err) => Err(convert_remote_err(err)),
             resp => Err(unexpected_resp("DeleteFile", resp)),
         }
     }
@@ -229,11 +229,13 @@ impl DocServer for WebrpcClient {
         log::debug!("{debug_msg} => {:?}", &resp);
         match resp {
             DocServerResp::SendInfo => Ok(()),
-            DocServerResp::Err(err) => Err(CollabError::RemoteErr(Box::new(err))),
+            DocServerResp::Err(err) => Err(convert_remote_err(err)),
             resp => Err(unexpected_resp("SendInfo", resp)),
         }
     }
 }
+
+// *** Helper functions
 
 /// Create an error stating that `resp` wasn't the expected type.
 fn unexpected_resp(expected_resp: &str, resp: DocServerResp) -> CollabError {

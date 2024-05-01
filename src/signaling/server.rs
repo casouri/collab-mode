@@ -14,9 +14,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::time;
 use tokio_tungstenite as tung;
 use tokio_tungstenite::tungstenite::{
     protocol::{frame::coding::CloseCode, CloseFrame},
@@ -252,25 +254,25 @@ async fn send_receive_stream(
     req_tx: mpsc::Sender<Result<Message, tung::tungstenite::Error>>,
     mut resp_rx: mpsc::Receiver<Message>,
 ) {
-    // TCP sockets aren't free, close the connection after 3 min.
-    // let (time_tx, mut time_rx) = mpsc::channel(1);
-    // tokio::spawn(async move {
-    //     time::sleep(Duration::from_secs(180)).await;
-    //     if time_tx.send(()).await.is_err() {
-    //         return;
-    //     }
-    // });
+    // TCP sockets aren't free, close the connection after 12h.
+    let (time_tx, mut time_rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        time::sleep(Duration::from_secs(12 * 3600)).await;
+        if time_tx.send(()).await.is_err() {
+            return;
+        }
+    });
 
     loop {
         tokio::select! {
-            // _ = time_rx.recv() => {
-            //     stream.send(SignalingMessage::TimesUp(180).into()).await.unwrap();
-            //     stream.send(Message::Close(Some(CloseFrame {
-            //         code: CloseCode::Policy,
-            //         reason: Cow::Owned("It's been 3 min, time is up".to_string())
-            //     }))).await.unwrap();
-            //     return;
-            // }
+            _ = time_rx.recv() => {
+                stream.send(SignalingMessage::TimesUp(12).into()).await.unwrap();
+                stream.send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: Cow::Owned("It's been 3 min, time is up".to_string())
+                }))).await.unwrap();
+                return;
+            }
             msg = stream.next() => {
                 if let Some(msg) = msg {
                     if req_tx.send(msg).await.is_err() {

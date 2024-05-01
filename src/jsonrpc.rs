@@ -126,6 +126,10 @@ fn main_loop(
                     method: NotificationCode::Info.into(),
                     params: serde_json::to_value(info).unwrap(),
                 },
+                CollabNotification::HarmlessErr(err) => lsp_server::Notification {
+                    method: NotificationCode::HarmlessErr.into(),
+                    params: serde_json::to_value(err).unwrap(),
+                },
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
                 log::error!("Error sending jsonrpc notification to editor: {:#}", err);
@@ -134,7 +138,7 @@ fn main_loop(
         }
     });
 
-    // 2. Send non-fatal server errors.
+    // 2. Send non-fatal collab server errors.
     std::thread::spawn(move || loop {
         let err: Option<CollabError> = async_err_rx.blocking_recv();
         if err.is_none() {
@@ -255,26 +259,23 @@ fn make_err(id: RequestId, code: ErrorCode, message: String) -> Message {
 
 fn error_code(err: &CollabError) -> ErrorCode {
     match err {
-        CollabError::ServerFatal(_) => ErrorCode::ServerFatalError,
-        CollabError::DocFatal(_) => ErrorCode::ServerNonFatalDocFatal,
-        CollabError::RpcError(_) => ErrorCode::NetworkError,
-        CollabError::EngineError(_) => ErrorCode::ServerNonFatalDocFatal,
+        CollabError::Fatal(_) => ErrorCode::ServerFatal,
+        CollabError::DocFatal(_) => ErrorCode::DocFatal,
+        CollabError::EngineError(_) => ErrorCode::DocFatal,
+        CollabError::RpcError(_) => ErrorCode::DocNonFatal,
 
         CollabError::DocNotFound(_) => ErrorCode::DocNotFound,
         CollabError::DocAlreadyExists(_) => ErrorCode::DocAlreadyExists,
-        CollabError::ServerNotConnected(_) => ErrorCode::NetworkError,
+        CollabError::ServerNotConnected(_) => ErrorCode::DocNonFatal,
         CollabError::NotRegularFile(_) => ErrorCode::NotRegularFile,
         CollabError::NotDirectory(_) => ErrorCode::NotDirectory,
         CollabError::UnsupportedOperation(_) => ErrorCode::UnsupportedOperation,
         CollabError::NotInitialized => ErrorCode::NotInitialized,
 
-        CollabError::RemoteErr(_) => ErrorCode::ServerNonFatalDocFatal,
-        CollabError::IOErr(_) => ErrorCode::IOError,
-
         // This shouldn't be ever needed, because they are converted
         // into notifications.
-        CollabError::SignalingTimesUp(_) => ErrorCode::NetworkError,
-        CollabError::AcceptConnectionErr(_) => ErrorCode::NetworkError,
+        CollabError::SignalingTimesUp(_) => ErrorCode::DocNonFatal,
+        CollabError::AcceptConnectionErr(_) => ErrorCode::DocNonFatal,
     }
 }
 

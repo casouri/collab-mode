@@ -94,7 +94,7 @@ pub enum SignalingMessage {
     NoEndpointForId(String),
     /// Id is already binded, or the public key doesn't match.
     IdTaken(EndpointId),
-    /// Allocated time (3min) is up.
+    /// Allocated time of n hours is up.
     TimesUp(u16),
 }
 

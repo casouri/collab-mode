@@ -257,7 +257,7 @@ impl Endpoint {
             .await?;
         let endpoint = Endpoint::new(format!("Connection to {id}"), stream);
 
-        let mut rx = endpoint.read_requests()?;
+        let mut rx = endpoint.process_incoming_messages()?;
         rx.close();
         Ok(endpoint)
     }
@@ -319,11 +319,8 @@ impl Endpoint {
             };
             // Don't need to check if the request is still live.
             // Spurious close message won't hurt. Don't care about
-            // error either, if it errors, oh well.
-            let res = write_message(&data_channel, &msg_id, msg).await;
-            if let Err(err) = res {
-                log::warn!("Cannot send close message to the other endpoint: {:?}", err);
-            }
+            // error either, since we are closing the connection anyway.
+            let _ = write_message(&data_channel, &msg_id, msg).await;
         });
 
         let msg = Message {
@@ -352,8 +349,14 @@ impl Endpoint {
         write_message(&self.data_channel, &self.current_msg_id, msg).await
     }
 
-    // Return a channel that receives requests.
-    pub fn read_requests(&self) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
+    // Read incoming remote messages. The messages can be either a
+    // request or a response; send requests to the request channel;
+    // send responses to the response channel. Request channel is the
+    // channel returned by this function. Response channel is the
+    // channel returned by [webrpc::Endpoint::send_request].
+    pub fn process_incoming_messages(
+        &self,
+    ) -> WebrpcResult<mpsc::UnboundedReceiver<WebrpcResult<Message>>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let data_channel = self.data_channel.clone();
         let current_msg_id = self.current_msg_id.clone();
@@ -374,7 +377,8 @@ impl Endpoint {
             if let Err(err) = res {
                 // Send to request channel.
                 let send_res = tx_1.send(Err(err.clone()));
-                // If can't send to request channel, send to all response channel.
+                // If can't send to request channel, send to all
+                // response channels.
                 if send_res.is_err() {
                     for (_, tx) in resp_channel_map.read().unwrap().iter() {
                         let _ = tx.send(Err(err.clone()));
@@ -490,6 +494,8 @@ async fn handle_new_message(
         // Server gets request message from client.
         MessageKind::Request => {
             live_request_map.write().unwrap().insert(msg.req_id, ());
+            // TODO: if req_tx.is_closed(), send back an error message
+            // explaining that this endpoint is not processing requests.
             let _ = req_tx.send(Ok(msg));
         }
         // Client gets response message from server.
@@ -550,6 +556,7 @@ async fn handle_new_message(
 }
 
 /// Chunkify `message` and send it over the data channel.
+/// `current_msg_id` will be incremented.
 async fn write_message(
     data_channel: &DataChannel,
     current_msg_id: &AtomicU32,
@@ -639,7 +646,7 @@ mod tests {
         let stream = sctp_conn.accept_stream().await.unwrap();
         let endpoint = Endpoint::new("server endpoint".to_string(), stream);
 
-        let mut rx = endpoint.read_requests().unwrap();
+        let mut rx = endpoint.process_incoming_messages().unwrap();
 
         let req1 = rx.recv().await.unwrap().unwrap();
         let msg1: String = req1.unpack().unwrap();
@@ -687,7 +694,7 @@ mod tests {
             .unwrap();
         let endpoint = Endpoint::new("client endpoint".to_string(), stream);
 
-        endpoint.read_requests().unwrap();
+        endpoint.process_incoming_messages().unwrap();
 
         let (mut rx1, _) = endpoint.send_request(&"req1".to_string()).await?;
         let (mut rx2, _) = endpoint.send_request(&"req2".to_string()).await?;

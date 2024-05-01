@@ -1,4 +1,4 @@
-use crate::signaling::CertDerHash;
+use crate::{error::CollabError, signaling::CertDerHash};
 use sha2::{Digest, Sha256};
 
 use crate::error::CollabResult;
@@ -14,6 +14,7 @@ pub struct KeyCert {
     /// Despite its name [rcgen::Certificate::serialize_der] actually
     /// _generates_ a new certificate every time you call it, which
     /// means it's return value are different every time it's invoked.
+    /// See https://github.com/rustls/rcgen/issues/62
     pub cert_der: Vec<u8>,
 }
 
@@ -79,11 +80,24 @@ impl ConfigManager {
     /// certificate would be `uuid`.
     pub fn get_key_and_cert(&self, uuid: String) -> CollabResult<KeyCert> {
         let xdg_dirs = xdg::BaseDirectories::with_prefix("collab-mode/secrets").unwrap();
-        let key_file = xdg_dirs.place_config_file(format!("{uuid}.key.pem"))?;
-        let cert_file = xdg_dirs.place_config_file(format!("{uuid}.cert.pem"))?;
+        let key_file = xdg_dirs
+            .place_config_file(format!("{uuid}.key.pem"))
+            .map_err(|err| {
+                CollabError::Fatal(format!("Failed to find/create private key: {:#?}", err))
+            })?;
+        let cert_file = xdg_dirs
+            .place_config_file(format!("{uuid}.cert.pem"))
+            .map_err(|err| {
+                CollabError::Fatal(format!(
+                    "Failed to find/create self-signed certificate: {:#?}",
+                    err
+                ))
+            })?;
 
         let (key_pair, key_der) = if key_file.exists() {
-            let key_pem = std::fs::read_to_string(key_file)?;
+            let key_pem = std::fs::read_to_string(key_file).map_err(|err| {
+                CollabError::Fatal(format!("Failed to read private key from disk: {:#?}", err))
+            })?;
             let key_der = pem::parse(&key_pem)?.into_contents();
             let key_pair = rcgen::KeyPair::from_pem(&key_pem)?;
             (key_pair, key_der)
@@ -91,12 +105,19 @@ impl ConfigManager {
             let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
             let key_pem = key_pair.serialize_pem();
             let key_der = pem::parse(&key_pem).unwrap().into_contents();
-            std::fs::write(key_file, key_pem)?;
+            std::fs::write(key_file, key_pem).map_err(|err| {
+                CollabError::Fatal(format!(
+                    "Failed to save the private key to disk: {:#?}",
+                    err
+                ))
+            })?;
             (key_pair, key_der)
         };
 
         let cert_der = if cert_file.exists() {
-            let pem = std::fs::read_to_string(cert_file)?;
+            let pem = std::fs::read_to_string(cert_file).map_err(|err| {
+                CollabError::Fatal(format!("Failed to read the certificate file: {:#?}", err))
+            })?;
             pem::parse(pem)?.into_contents()
         } else {
             // The alt subject name doesn't really matter, but let's
@@ -106,7 +127,12 @@ impl ConfigManager {
             let cert = rcgen::Certificate::from_params(params).unwrap();
             let cert_pem = cert.serialize_pem().unwrap();
             let cert_der = pem::parse(&cert_pem)?.into_contents();
-            std::fs::write(cert_file, &cert_pem)?;
+            std::fs::write(cert_file, &cert_pem).map_err(|err| {
+                CollabError::Fatal(format!(
+                    "Failed to save the certificate to disk: {:#?}",
+                    err
+                ))
+            })?;
             cert_der
         };
 

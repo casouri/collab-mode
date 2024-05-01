@@ -187,6 +187,7 @@ pub struct InfoNotification {
 pub enum CollabNotification {
     Op(NewOpNotification),
     Info(InfoNotification),
+    HarmlessErr(String),
 }
 
 /// A snapshot of a document. Returned by the server when a site
