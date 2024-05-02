@@ -25,6 +25,7 @@ use tokio_tungstenite::tungstenite::{
     Message,
 };
 use tokio_tungstenite::WebSocketStream;
+use tracing::{instrument, Instrument};
 
 use super::key_store::{self, PubKeyStore};
 use super::{CertDerHash, SignalingError, SignalingResult, SDP};
@@ -36,22 +37,25 @@ pub async fn run_signaling_server(addr: &str, db_path: &Path) -> anyhow::Result<
     let key_store = key_store::PubKeyStore::new(db_path)?;
     let server = Server::new(key_store);
     while let Ok((stream, client_addr)) = listener.accept().await {
-        log::info!("Accepted a connection from {}", &client_addr);
+        tracing::info!("Accepted a connection from {}", client_addr);
         let server = server.clone();
-        let _ = tokio::spawn(async move {
-            let mut endpoint_id = None;
-            let res = handle_connection(&server, stream, &mut endpoint_id).await;
-            if let Some(id) = endpoint_id {
-                server.remove_endpoint(&id).await;
+        let span = tracing::info_span!("Serve connection", %client_addr);
+        let _ = tokio::spawn(
+            async move {
+                let mut endpoint_id = None;
+                let res = handle_connection(&server, stream, &mut endpoint_id).await;
+                if let Some(id) = endpoint_id {
+                    server.remove_endpoint(&id).await;
+                }
+                if let Err(err) = res {
+                    tracing::info!(
+                        %err,
+                        "Stopped serving connection due to error",
+                    );
+                }
             }
-            if let Err(err) = res {
-                log::warn!(
-                    "Error occurred when serving request from {}: {:?}",
-                    client_addr,
-                    err
-                );
-            }
-        });
+            .instrument(span),
+        );
     }
     Ok(())
 }
@@ -78,6 +82,7 @@ impl Server {
             key_store: Arc::new(Mutex::new(key_store)),
         }
     }
+
     /// Bind a collab server to `id`. return IdTaken if some endpoint
     /// is already connected with that id, or some endpoint has
     /// connected with that id and the pub key doesn't match.
@@ -87,6 +92,7 @@ impl Server {
         key: CertDerHash,
         msg_tx: mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
+        tracing::info!(id, key, "Handle req: bind()");
         // First check pub key.
         {
             let key_store = self.key_store.lock().unwrap();
@@ -119,6 +125,7 @@ impl Server {
         sender_key: CertDerHash,
         resp_tx: &mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
+        tracing::info!(sender_id, receiver_id, sender_key, "Handle req: connect()");
         let endpoint_info = self.get_endpoint_info(&receiver_id).await;
         match endpoint_info {
             Some(endpoint_info) => {
@@ -175,9 +182,9 @@ async fn handle_connection(
     while let Some(msg) = req_rx.recv().await {
         let msg = msg?;
         if let Ok(txt) = &msg.to_text() {
-            log::debug!("Received message: {txt}",);
+            tracing::debug!(txt, "Received ws message");
         } else {
-            log::debug!("Received message: {:?}", &msg);
+            tracing::debug!(?msg, "Received non-text ws message");
         }
         match msg {
             Message::Text(msg) => {
@@ -249,6 +256,7 @@ async fn handle_connection(
 // *** Subroutines for handle_connection
 
 /// Sends and receives messages from `stream`.
+#[instrument(skip_all)]
 async fn send_receive_stream(
     mut stream: WebSocketStream<TcpStream>,
     req_tx: mpsc::Sender<Result<Message, tung::tungstenite::Error>>,
@@ -256,37 +264,52 @@ async fn send_receive_stream(
 ) {
     // TCP sockets aren't free, close the connection after 12h.
     let (time_tx, mut time_rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        time::sleep(Duration::from_secs(12 * 3600)).await;
-        if time_tx.send(()).await.is_err() {
+    let timer_span = tracing::info_span!("Timer thread for auto-closing the connection");
+    let allocated_hrs = 12u16;
+    tokio::spawn(
+        async move {
+            let allocated_time = allocated_hrs * 3600;
+            time::sleep(Duration::from_secs(allocated_time as u64)).await;
+            tracing::info!(allocated_time, "Time's up");
+            let _ = time_tx.send(()).await;
             return;
         }
-    });
+        .instrument(timer_span),
+    );
 
     loop {
         tokio::select! {
             _ = time_rx.recv() => {
-                stream.send(SignalingMessage::TimesUp(12).into()).await.unwrap();
+                stream.send(SignalingMessage::TimesUp(allocated_hrs).into()).await.unwrap();
+                tracing::debug!("Sent time's up message to client");
                 stream.send(Message::Close(Some(CloseFrame {
                     code: CloseCode::Policy,
-                    reason: Cow::Owned("It's been 3 min, time is up".to_string())
+                    reason: Cow::Owned("Time's up".to_string())
                 }))).await.unwrap();
                 return;
             }
             msg = stream.next() => {
                 if let Some(msg) = msg {
                     if req_tx.send(msg).await.is_err() {
+                        // handle_connection stopped serving the
+                        // connection due to error, just return here.
                         return;
                     }
                 } else {
+                    tracing::info!("Stream from client closed");
                     return;
                 }
             }
             resp = resp_rx.recv() => {
                 if let Some(msg) = resp {
                     if stream.send(msg).await.is_err() {
+                        tracing::info!("Stream to client closed");
                         return;
                     }
+                } else {
+                    // handle_connection stopped serving the
+                    // connection due to error, just return here.
+                    return;
                 }
             }
         }
