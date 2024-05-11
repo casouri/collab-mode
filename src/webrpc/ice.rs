@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tracing::instrument;
 use webrtc_ice::agent::agent_config::AgentConfig;
 use webrtc_ice::agent::Agent;
 use webrtc_ice::candidate::candidate_base::unmarshal_candidate;
@@ -40,6 +41,7 @@ pub async fn ice_bind(
 
 /// Accept connections from `sock`. If `progress_tx` isn't None,
 /// report progress to it while establishing connection.
+#[instrument(skip(progress_tx))]
 pub async fn ice_accept(
     mut sock: SignalSocket,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
@@ -74,6 +76,7 @@ pub async fn ice_accept(
 /// server at signaling_addr`. `signaling_addr` should be a valid
 /// websocket url. If `progress_tx` isn't None, report progress to it
 /// while establishing connection.
+#[instrument(skip(my_key_cert, progress_tx))]
 pub async fn ice_connect(
     id: EndpointId,
     my_key_cert: ArcKeyCert,
@@ -115,13 +118,14 @@ pub async fn ice_connect(
 /// Monitor the handshake progress. If connection failed, send an error
 /// to `error_tx`. If `progress_tx` is non-none, send ConnectionState
 /// to it at each step.
+#[instrument(skip_all)]
 fn ice_monitor_progress(
     agent: Arc<Agent>,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     error_tx: mpsc::Sender<WebrpcError>,
 ) {
     agent.on_connection_state_change(Box::new(move |state| {
-        log::debug!("ICE state changed: {}", &state);
+        tracing::debug!(?state, "ICE state changed");
         if let Some(tx) = &progress_tx {
             let _ = tx.try_send(state);
         }
@@ -172,6 +176,7 @@ async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
 /// Send ICE credential of `agent` to `sock`.
 async fn send_ice_credential(sock: &mut SignalSocket, agent: &Agent) -> WebrpcResult<()> {
     let local_cred = ice_credential(agent).await;
+    tracing::info!(?local_cred, "Sending SDP");
     sock.send_sdp(serde_json::to_string(&local_cred).unwrap())
         .await?;
     Ok(())
@@ -186,6 +191,7 @@ async fn ice_credential(agent: &Agent) -> ICECredential {
 /// Start gathering candidates and exchange candidates with remote
 /// endpoint. If `connected_rx` is closed, don't send any candidates
 /// out. Errors are sent to `err_tx`.
+#[instrument(skip_all)]
 fn ice_exchange_candidates(
     agent: Arc<Agent>,
     mut sock: SignalSocket,
@@ -201,9 +207,14 @@ fn ice_exchange_candidates(
         if let Some(candidate) = candidate {
             let candidate = candidate.marshal();
             let candidate_sender = candidate_sender.clone();
-            log::debug!("Found candidate: {}", &candidate);
+
+            tracing::info!(candidate, "Found ICE candidate");
+
             tokio::spawn(async move {
-                let _todo = candidate_sender.send_candidate(candidate).await;
+                let res = candidate_sender.send_candidate(candidate).await;
+                if let Err(err) = res {
+                    tracing::error!(?err, "Error sending ICE candidate");
+                }
             });
         }
         Box::pin(async {})
@@ -214,7 +225,8 @@ fn ice_exchange_candidates(
     tokio::spawn(async move {
         while let Some(candidate) = sock.recv_candidate().await {
             let func = || {
-                log::debug!("Received candidate: {}", &candidate);
+                tracing::info!(?candidate, "Received ICE candidate");
+
                 let candidate = unmarshal_candidate(&candidate)?;
                 let candidate: Arc<dyn Candidate + Send + Sync> = Arc::new(candidate);
                 agent_1.add_remote_candidate(&candidate)?;

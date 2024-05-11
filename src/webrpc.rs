@@ -43,7 +43,7 @@
 //! For a server, fatal errors are sent to the request channel; for a client
 //! fatal errors are sent to every response channel.
 
-use crate::config_man::{hash_der, ArcKeyCert, KeyCert};
+use crate::config_man::{hash_der, ArcKeyCert};
 use crate::error::{WebrpcError, WebrpcResult};
 use crate::signaling::CertDerHash;
 use ice::{ice_accept, ice_bind, ice_connect};
@@ -53,6 +53,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tracing::{instrument, Instrument};
 use webrtc_dtls::{self, conn::DTLSConn};
 use webrtc_sctp::{association, chunk::chunk_payload_data::PayloadProtocolIdentifier, stream};
 use webrtc_util::Conn;
@@ -160,6 +161,7 @@ async fn create_sctp_client(
 // *** Listener
 
 impl Listener {
+    #[instrument(skip(my_key_cert))]
     pub async fn bind(
         id: String,
         my_key_cert: ArcKeyCert,
@@ -169,6 +171,7 @@ impl Listener {
         Ok(Listener { inner: listener })
     }
 
+    #[instrument(skip(self))]
     pub async fn accept(&mut self) -> WebrpcResult<Endpoint> {
         let sock = self.inner.accept().await?;
         let name = format!("connection to {}", sock.id());
@@ -243,6 +246,7 @@ struct Frame<'a> {
 
 impl Endpoint {
     /// Connect to the endpoint with `id` registered on the signaling server.
+    #[instrument(skip(my_key_cert))]
     pub async fn connect(
         id: EndpointId,
         my_key_cert: ArcKeyCert,
@@ -278,12 +282,14 @@ impl Endpoint {
     /// Like `send_request` but expects only one response.
     pub async fn send_request_oneshot<T: Serialize>(&self, message: &T) -> WebrpcResult<Message> {
         let (mut rx, req_id) = self.send_request(message).await?;
-        let rx_recv = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv());
+        let timeout = 10u8;
+        let rx_recv =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout as u64), rx.recv());
         let resp = rx_recv
             .await
             .map_err(|_err| {
                 self.resp_channel_map.write().unwrap().remove(&req_id);
-                WebrpcError::Timeout(10)
+                WebrpcError::Timeout(timeout)
             })?
             .unwrap_or_else(|| {
                 Err(WebrpcError::DataChannelError(
@@ -296,6 +302,7 @@ impl Endpoint {
     /// Send a message as a request over the data channel, returns a
     /// channel for response message(s). Close the channel to end the
     /// request. Use this on a client endpoint.
+    #[instrument(skip_all)]
     pub async fn send_request<T: Serialize>(
         &self,
         message: &T,
@@ -333,6 +340,7 @@ impl Endpoint {
     }
 
     /// Send a response `message` for the request with `id`.
+    #[instrument(skip(self, message))]
     pub async fn send_response<T: Serialize>(
         &self,
         req_id: RequestId,
@@ -360,32 +368,34 @@ impl Endpoint {
         let (tx, rx) = mpsc::unbounded_channel();
         let data_channel = self.data_channel.clone();
         let current_msg_id = self.current_msg_id.clone();
-        let channel_name = self.name.clone();
         let resp_channel_map = self.resp_channel_map.clone();
         let live_request_map = self.live_request_map.clone();
         let tx_1 = tx.clone();
-        tokio::spawn(async move {
-            let res = read_messages(
-                data_channel,
-                &resp_channel_map,
-                &live_request_map,
-                &current_msg_id,
-                &channel_name,
-                tx,
-            )
-            .await;
-            if let Err(err) = res {
-                // Send to request channel.
-                let send_res = tx_1.send(Err(err.clone()));
-                // If can't send to request channel, send to all
-                // response channels.
-                if send_res.is_err() {
-                    for (_, tx) in resp_channel_map.read().unwrap().iter() {
-                        let _ = tx.send(Err(err.clone()));
+        let span = tracing::info_span!("process_incoming_message", endpoint_name = self.name);
+        tokio::spawn(
+            async move {
+                let res = read_messages(
+                    data_channel,
+                    &resp_channel_map,
+                    &live_request_map,
+                    &current_msg_id,
+                    tx,
+                )
+                .await;
+                if let Err(err) = res {
+                    // Send to request channel.
+                    let send_res = tx_1.send(Err(err.clone()));
+                    // If can't send to request channel, send to all
+                    // response channels.
+                    if send_res.is_err() {
+                        for (_, tx) in resp_channel_map.read().unwrap().iter() {
+                            let _ = tx.send(Err(err.clone()));
+                        }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
         Ok(rx)
     }
 }
@@ -397,6 +407,7 @@ impl Endpoint {
 /// `body_buf` is for reading frame body, and should be
 /// [MAX_FRAME_BODY_SIZE] large. Return the request id and a slice of
 /// the `body_buf` that contains the frame body.
+#[instrument(skip_all)]
 async fn read_frame<'a>(
     reader: &DataChannel,
     packet_buf: &'a mut Vec<u8>,
@@ -406,11 +417,10 @@ async fn read_frame<'a>(
         Ok(0) => Err(WebrpcError::SCTPError("Connection closed".to_string())),
         Ok(packet_len) => {
             let frame: Frame = bincode::deserialize(&packet_buf[..packet_len])?;
-            log::debug!(
-                "read_frame() message_id={}, last={}, len={}",
+            tracing::debug!(
                 frame.message_id,
                 frame.last,
-                frame.body.len()
+                frame_body_len = frame.body.len()
             );
             Ok(frame)
         }
@@ -425,7 +435,6 @@ async fn read_messages(
     resp_channel_map: &ResponseChannelMap,
     live_request_map: &LiveRequestMap,
     current_msg_id: &AtomicU32,
-    channel_name: &str,
     mut req_tx: mpsc::UnboundedSender<WebrpcResult<Message>>,
 ) -> WebrpcResult<()> {
     // Read frames from `data_channel` in a loop, assemble them into
@@ -453,22 +462,19 @@ async fn read_messages(
         let msg = msg_map.remove(&frame.message_id).unwrap();
         let msg = bincode::deserialize::<Message>(&msg).map_err(|err| {
             WebrpcError::ParseError(format!(
-                "Cannot parse message #{} from data channel [{}]: {:?}",
-                frame.message_id, channel_name, err
+                "Cannot parse message #{} from data channel: {:?}",
+                frame.message_id, err
             ))
         })?;
-        log::debug!(
-            "read_message(): msg.kind={:?} msg.req_id={}",
-            &msg.kind,
-            &msg.req_id
-        );
+
+        tracing::debug!(?msg.kind, msg.req_id, "read_message");
+
         handle_new_message(
             msg,
             &data_channel,
             current_msg_id,
             resp_channel_map,
             live_request_map,
-            channel_name,
             &mut req_tx,
         )
         .await;
@@ -483,7 +489,6 @@ async fn handle_new_message(
     current_msg_id: &AtomicU32,
     resp_channel_map: &ResponseChannelMap,
     live_request_map: &LiveRequestMap,
-    channel_name: &str,
     req_tx: &mut mpsc::UnboundedSender<WebrpcResult<Message>>,
 ) {
     match msg.kind {
@@ -513,21 +518,19 @@ async fn handle_new_message(
                 let res = tx.send(Ok(msg));
                 if res.is_err() {
                     channel_unavailable = true;
-                    log::warn!(
-                        "Cannot send message #{} to its channel in data channel [{}]",
+                    tracing::warn!(
                         request_id,
-                        channel_name,
+                        "Cannot send message to its channel in data channel",
                     );
                     resp_channel_map.write().unwrap().remove(&request_id);
                 }
             } else {
                 channel_unavailable = true;
-                // It might be because we timed out waitinf for this
+                // It might be because we timed out waiting for this
                 // response.
-                log::warn!(
-                    "Cannot find the channel for request #{} in data channel [{}]",
+                tracing::warn!(
                     request_id,
-                    channel_name,
+                    "Cannot find the channel for the request in data channel"
                 );
             }
 
@@ -544,11 +547,7 @@ async fn handle_new_message(
                 };
                 let res = write_message(data_channel, current_msg_id, close_msg).await;
                 if let Err(err) = res {
-                    log::warn!(
-                        "Cannot send close message in data channel [{}]: {:?}",
-                        channel_name,
-                        err
-                    );
+                    tracing::warn!(?err, "Cannot send close message in data channel");
                 }
             }
         }
@@ -557,6 +556,7 @@ async fn handle_new_message(
 
 /// Chunkify `message` and send it over the data channel.
 /// `current_msg_id` will be incremented.
+#[instrument(skip_all)]
 async fn write_message(
     data_channel: &DataChannel,
     current_msg_id: &AtomicU32,
@@ -573,13 +573,14 @@ async fn write_message(
         let last = chunk_end == total_len;
 
         if total_len == body_len {
-            log::debug!(
-                "write_message(): message_id={}, last={}, body={}B",
+            tracing::debug!(
+                message.req_id,
                 message_id,
                 last,
-                &message_bytes.len()
+                message_len = &message_bytes.len()
             );
-            log::trace!("write_message(): body={:02X?}", &message_bytes);
+            tracing::trace!("message body = {:02X?}", &message_bytes);
+
             let frame = Frame {
                 message_id,
                 last,
@@ -590,8 +591,8 @@ async fn write_message(
                 return Err(WebrpcError::SCTPError("Package too large".to_string()));
             }
             // Sending the whole message in one go.
-            log::debug!("write_message(): body={}B", &message_bytes.len());
-            log::trace!("write_message(): body={:02X?}", &message_bytes);
+            tracing::debug!("body = {}B", &message_bytes.len());
+            tracing::trace!("body = {:02X?}", &message_bytes);
             data_channel.write(&bytes::Bytes::from(packet)).await?;
             return Ok(());
         } else {
@@ -606,13 +607,9 @@ async fn write_message(
             if packet.len() > MAX_FRAME_SIZE {
                 return Err(WebrpcError::SCTPError("Package too large".to_string()));
             }
-            log::debug!(
-                "write_message(): message_id={}, last={}, body={}B",
-                message_id,
-                last,
-                &message_bytes.len()
-            );
-            log::trace!("write_message(): chunk={:02X?}", &chunk);
+            tracing::debug!(message_id, last, message_len = message_bytes.len());
+            tracing::trace!("chunk = {:02X?}", &chunk);
+
             data_channel.write(&bytes::Bytes::from(packet)).await?;
             start += body_len;
         };

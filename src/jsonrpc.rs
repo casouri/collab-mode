@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::exit;
 use tokio::task::JoinHandle;
+use tracing::instrument;
 
 pub mod types;
 use types::*;
@@ -132,7 +133,8 @@ fn main_loop(
                 },
             };
             if let Err(err) = connection_1.sender.send(Message::Notification(msg)) {
-                log::error!("Error sending jsonrpc notification to editor: {:#}", err);
+                tracing::error!(?err, "Error sending jsonrpc notification to editor");
+                // FIXME: More graceful shutdown
                 exit(-1);
             }
         }
@@ -142,7 +144,8 @@ fn main_loop(
     std::thread::spawn(move || loop {
         let err: Option<CollabError> = async_err_rx.blocking_recv();
         if err.is_none() {
-            log::error!("JSONRPC server error channel broke");
+            tracing::error!("JSONRPC server error channel broke");
+            // FIXME: More graceful shutdown.
             exit(-1);
         }
         let msg = match err.unwrap() {
@@ -169,7 +172,7 @@ fn main_loop(
     loop {
         let msg = connection.receiver.recv();
         if msg.is_err() {
-            log::error!("JSONRPC request channel broke");
+            tracing::error!("JSONRPC request channel broke");
             // FIXME: Save everything and exit.
             return;
         }
@@ -195,11 +198,15 @@ fn main_loop(
                         }
                     };
                 } else if let Some(ref mut jsonrpc_server) = jsonrpc_server {
+                    tracing::debug!(?req, "handle_request");
+
                     let res = runtime.block_on(jsonrpc_server.handle_request(
                         req,
                         doc_server.clone(),
                         async_err_tx.clone(),
                     ));
+
+                    tracing::debug!(?res, "handle_request");
 
                     msg = match res {
                         Ok(msg) => msg,
@@ -218,12 +225,13 @@ fn main_loop(
 
                 let res = connection.sender.send(msg);
                 if res.is_err() {
-                    log::error!("JSONRPC response channel broke: {:?}", res);
+                    tracing::error!(?res, "JSONRPC response channel broke");
+                    // FIXME: More graceful shutdown
                     exit(-1);
                 }
             }
             Message::Response(_) => {
-                log::warn!("Received a response");
+                tracing::warn!("Received a response");
             }
             Message::Notification(notif) => {
                 if let Some(ref mut jsonrpc_server) = jsonrpc_server {
@@ -231,7 +239,7 @@ fn main_loop(
                         jsonrpc_server.handle_notification(notif.clone(), doc_server.clone()),
                     );
                     if let Err(err) = res {
-                        log::error!("Error handling notification {:?}: {:?}", &notif, err);
+                        tracing::error!(?notif, ?err, "Error handling notification");
                     }
                 }
             }
@@ -350,12 +358,14 @@ impl JSONRPCServer {
             let resp = self.handle_print_history_request(params)?;
             make_resp(request.id, resp)
         } else {
+            // FIXME: Replace with proper handling.
             todo!()
         };
         Ok(msg)
     }
 
     /// Handle `notif`.
+    #[instrument(skip(self, _server))]
     async fn handle_notification(
         &mut self,
         notif: Notification,
@@ -366,6 +376,7 @@ impl JSONRPCServer {
             self.handle_send_info_notif(params).await?;
             Ok(())
         } else {
+            // FIXME: Replace with proper handling.
             todo!()
         }
     }
@@ -427,6 +438,7 @@ impl JSONRPCServer {
         self.doc_map.remove(&key);
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_share_file_request(
         &mut self,
         params: ShareFileParams,
@@ -455,6 +467,7 @@ impl JSONRPCServer {
         Ok(resp)
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_share_dir_request(
         &mut self,
         params: ShareDirParams,
@@ -472,6 +485,7 @@ impl JSONRPCServer {
         Ok(resp)
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_send_op_request(
         &mut self,
         params: SendOpParams,
@@ -489,6 +503,7 @@ impl JSONRPCServer {
         Ok(resp)
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_send_info_notif(&mut self, params: SendInfoParams) -> CollabResult<()> {
         let client = self.get_client(&params.host_id)?;
         client
@@ -497,6 +512,7 @@ impl JSONRPCServer {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_list_files_request(
         &mut self,
         params: ListFilesParams,
@@ -538,6 +554,7 @@ impl JSONRPCServer {
         Ok(resp)
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_connect_to_file_request(
         &mut self,
         params: ConnectToFileParams,
@@ -572,6 +589,7 @@ impl JSONRPCServer {
         Ok(resp)
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_disconnect_from_file_request(
         &mut self,
         params: DocIdParams,
@@ -582,6 +600,7 @@ impl JSONRPCServer {
         Ok(params)
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_delete_file_request(
         &mut self,
         params: DocIdParams,
@@ -595,6 +614,7 @@ impl JSONRPCServer {
         Ok(params)
     }
 
+    #[instrument(skip(self))]
     pub fn handle_undo_request(&mut self, params: UndoParams) -> CollabResult<UndoResp> {
         let doc = self.get_doc(&params.doc_id, &params.host_id)?;
         let res = match params.kind {
@@ -613,6 +633,7 @@ impl JSONRPCServer {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn handle_accept_connection_request(
         &mut self,
         params: AcceptConnectionParams,
@@ -640,6 +661,7 @@ impl JSONRPCServer {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub fn handle_print_history_request(
         &mut self,
         params: PrintHistoryParams,

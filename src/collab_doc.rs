@@ -21,6 +21,7 @@ use crate::types::*;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
+use tracing::{instrument, Instrument};
 
 // *** Structs
 
@@ -65,6 +66,7 @@ impl DocStatus {
 
 /// A client that connects to the local server and remote server.
 /// Represents a local or remote document.
+#[derive(Debug)]
 pub struct Doc {
     doc_id: DocId,
     file_name: String,
@@ -88,6 +90,7 @@ pub struct Doc {
 
 impl Doc {
     /// Create a new Doc by sharing a file with the local server.
+    #[instrument(skip(server, file_meta, file, external_notifier))]
     pub async fn new_share_file(
         mut server: ClientEnum,
         file_name: &str,
@@ -148,6 +151,7 @@ impl Doc {
 
     /// Create a new Doc by connecting to a remote file through
     /// `client`.
+    #[instrument(skip(server, external_notifier))]
     pub async fn new_connect_file(
         mut server: ClientEnum,
         doc_file: DocDesc,
@@ -232,17 +236,22 @@ impl Doc {
     /// remote ops. Return the transformed remote ops that editor can
     /// apply to its document, plus the last seq number among the ops
     /// returned.
+    #[instrument(skip(self, ops))]
     pub fn send_op(
         &mut self,
         ops: Vec<EditorFatOp>,
     ) -> CollabResult<(Vec<EditorLeanOp>, GlobalSeq)> {
         self.check_async_errors()?;
 
+        tracing::debug!(?ops, "send_op");
+
         // Get remote ops before locking engine.
         let remote_ops: Vec<FatOp> = {
             let mut remote_ops = self.remote_op_buffer.lock().unwrap();
             remote_ops.drain(..).collect()
         };
+
+        tracing::info!(?remote_ops);
 
         // 1. Process local ops.
         let mut engine = self.engine.lock().unwrap();
@@ -260,6 +269,8 @@ impl Doc {
                 last_op = seq;
             }
         }
+
+        tracing::debug!(?transformed_remote_ops);
 
         // Try sending the new local ops. `spawn_thread_send_local_op`
         // will be waked by this signal and try to send the new local
@@ -351,6 +362,7 @@ fn spawn_thread_receive_remote_op(
     let external_notifier_1 = external_notifier.clone();
     let doc_id_1 = doc_id.clone();
     let server_id_1 = server_id.clone();
+    let span = tracing::info_span!("receiving remote info", doc_id, site_id, server_id);
     tokio::spawn(async move {
         while let Some(info) = remote_info_stream.next().await {
             match info {
@@ -399,87 +411,90 @@ fn spawn_thread_receive_remote_op(
             ));
             *status = err.into();
         }
-    });
+    }.instrument(span));
+
+    let span = tracing::info_span!("receiving remote ops", doc_id, site_id, server_id);
     // Receive op.
     //
     // Draining remote_op_stream and storing ops into a buffer seems
     // redundant, but is easier to write and understand in the big
     // picture. Also, make sure we add the remote op into the vector
     // before sending "remote op arrived" signal to editor.
-    tokio::spawn(async move {
-        loop {
-            let new_remote_ops = remote_op_stream.next().await;
-            if new_remote_ops.is_none() {
-                // Connection broke.
-                let err = CollabError::DocFatal(format!(
-                    "Connection for doc({}) broke: internal channel (local server --op--> local client) broke",
-                    &doc_id
-                ));
-                maybe_set_status(&mut status, err);
-                return;
-            };
-            let new_remote_ops = new_remote_ops.unwrap();
+    tokio::spawn(
+        async move {
+            loop {
+                let new_remote_ops = remote_op_stream.next().await;
+                if new_remote_ops.is_none() {
+                    // Connection broke.
+                    let err = CollabError::RpcError(format!(
+                        "Connection for receiving doc({}) ops broke",
+                        &doc_id
+                    ));
+                    maybe_set_status(&mut status, err);
+                    return;
+                };
+                let new_remote_ops = new_remote_ops.unwrap();
 
-            // Remove host sent error instead of ops.
-            if let Err(err) = new_remote_ops {
-                let err = convert_remote_err(err);
-                maybe_set_status(&mut status, err);
-                return;
-            }
-            let ops = new_remote_ops.unwrap();
-
-            log::debug!(
-                "Doc({}) Received ops from local server: {:?}",
-                &doc_id,
-                &ops
-            );
-            let truly_remote_op_arrived = ops
-                .iter()
-                .map(|op| op.site() != site_id)
-                .reduce(|acc, flag| acc || flag);
-            if truly_remote_op_arrived.is_none() {
-                continue;
-            }
-            let truly_remote_op_arrived = truly_remote_op_arrived.unwrap();
-
-            let last_global_seq;
-            match get_last_global_seq(&ops) {
-                Err(err) => {
-                    // Remote op doesn't have a sequence number, this
-                    // is doc-fatal.
+                // Remove host sent error instead of ops.
+                if let Err(err) = new_remote_ops {
+                    let err = convert_remote_err(err);
                     maybe_set_status(&mut status, err);
                     return;
                 }
-                Ok(seq) => {
-                    if let Some(seq) = seq {
-                        last_global_seq = seq;
-                    } else {
-                        // ops is an empty array, go to next iter.
-                        continue;
-                    }
+                let ops = new_remote_ops.unwrap();
+
+                tracing::debug!(?ops, "Received ops");
+
+                let truly_remote_op_arrived = ops
+                    .iter()
+                    .map(|op| op.site() != site_id)
+                    .reduce(|acc, flag| acc || flag);
+                if truly_remote_op_arrived.is_none() {
+                    continue;
                 }
-            };
+                let truly_remote_op_arrived = truly_remote_op_arrived.unwrap();
 
-            remote_op_buffer.lock().unwrap().extend(ops);
+                let last_global_seq;
+                match get_last_global_seq(&ops) {
+                    Err(err) => {
+                        // Remote op doesn't have a sequence number, this
+                        // is doc-fatal.
+                        maybe_set_status(&mut status, err);
+                        return;
+                    }
+                    Ok(seq) => {
+                        if let Some(seq) = seq {
+                            last_global_seq = seq;
+                        } else {
+                            // ops is an empty array, go to next iter.
+                            continue;
+                        }
+                    }
+                };
 
-            // Got some op from server, maybe we can send
-            // new local ops now?
-            notifier_tx.send(()).unwrap();
+                remote_op_buffer.lock().unwrap().extend(ops);
 
-            // Notify JSONRPC server to notify the editor.
-            if truly_remote_op_arrived {
-                let notification = CollabNotification::Op(NewOpNotification {
-                    doc_id: doc_id.clone(),
-                    host_id: server_id.clone(),
-                    last_seq: last_global_seq,
-                });
-                external_notifier
-                    .send(notification)
-                    // external_notifier is never dropped, so just unwrap.
-                    .unwrap();
+                // Got some op from server, maybe we can send
+                // new local ops now?
+                notifier_tx.send(()).unwrap();
+
+                // Notify JSONRPC server to notify the editor.
+                if truly_remote_op_arrived {
+                    let notification = CollabNotification::Op(NewOpNotification {
+                        doc_id: doc_id.clone(),
+                        host_id: server_id.clone(),
+                        last_seq: last_global_seq,
+                    });
+                    external_notifier
+                        .send(notification)
+                        // external_notifier is never dropped while
+                        // the program is running, so just unwrap.
+                        .unwrap();
+                }
             }
         }
-    })
+        .instrument(span),
+    )
 }
 
 /// Spawn a thread that keeps trying get local ops from `engine` and
@@ -493,22 +508,26 @@ fn spawn_thread_send_local_op(
     mut notifier_rx: watch::Receiver<()>,
     mut status: Arc<Mutex<DocStatus>>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            notifier_rx.changed().await.unwrap();
-            let ops = {
-                let mut engine = engine.lock().unwrap();
-                engine.maybe_package_local_ops()
-            };
-            if let Some(ops) = ops {
-                log::debug!("Doc({}) Sending op to server: {:?}", &doc_id, &ops);
-                if let Err(err) = server.send_op(ops).await {
-                    maybe_set_status(&mut status, err);
-                    return;
+    let span = tracing::info_span!("Send local ops", doc_id);
+    tokio::spawn(
+        async move {
+            loop {
+                notifier_rx.changed().await.unwrap();
+                let ops = {
+                    let mut engine = engine.lock().unwrap();
+                    engine.maybe_package_local_ops()
+                };
+                if let Some(ops) = ops {
+                    tracing::info!(?ops, "Sending ops to server");
+                    if let Err(err) = server.send_op(ops).await {
+                        maybe_set_status(&mut status, err);
+                        return;
+                    }
                 }
             }
         }
-    })
+        .instrument(span),
+    )
 }
 
 fn get_last_global_seq(ops: &[FatOp]) -> CollabResult<Option<GlobalSeq>> {
@@ -531,8 +550,8 @@ fn maybe_set_status(status: &mut Arc<Mutex<DocStatus>>, err: CollabError) {
     if status.is_fatal() {
         return;
     }
-    // TODO: log with doc id when tracing is added.
     let new_status: DocStatus = err.into();
+    tracing::info!(?new_status, "Doc status changed");
     // Don't allow going from fatal to offline, but allow going from
     // offline to fatal.
     if status.is_live() || new_status.is_fatal() {

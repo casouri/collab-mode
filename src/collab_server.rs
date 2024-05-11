@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tracing::{instrument, Instrument};
 
 const RETAINED_INFO_MSG_MAX: usize = 32;
 
@@ -328,6 +329,7 @@ impl LocalServer {
     // 2. Share a directory: file = path, file_path = None
     // 3. Create a file that's in a shared directory: file = content,
     //    file_path = file's dir and rel_path.
+    #[instrument(skip(self, file))]
     pub async fn share_file_1(
         &self,
         file_name: &str,
@@ -335,13 +337,8 @@ impl LocalServer {
         file: FileContentOrPath,
         file_path: Option<FilePath>,
     ) -> CollabResult<DocId> {
-        log::debug!(
-            "share_file_1(file_name={}, file_meta={:?}, file={:?}, file_path={:?})",
-            file_name,
-            file_meta,
-            &file,
-            file_path,
-        );
+        tracing::debug!("Entered share_file");
+
         // TODO permission check.
         let doc_id: DocId = rand::random();
         match file {
@@ -373,23 +370,24 @@ impl LocalServer {
     }
 
     /// Send local ops to the server. TODO: access control.
+    #[instrument(skip(self))]
     pub async fn send_op_1(&self, ops: ContextOps) -> CollabResult<()> {
-        log::debug!("send_op_1(ops={:?})", &ops);
+        tracing::debug!("Entered send_op");
+
         let doc_id = ops.doc();
         if let Some(doc) = self.get_doc(&doc_id) {
             let mut doc = doc.lock().unwrap();
             doc.check_for_existing_error()?;
 
-            log::debug!("send_op() Local server receive ops, processing: {:?}", &ops);
+            tracing::debug!(?ops, "Local server receive ops");
+
             let ops = doc.engine.process_ops(ops.ops, ops.context)?;
 
             for op in ops {
                 doc.apply_op(op)?;
             }
-            log::debug!(
-                "send_op() doc: \"{}\"",
-                doc.buffer.iter().collect::<String>()
-            );
+
+            tracing::trace!("doc = \"{}\"", doc.buffer.iter().collect::<String>());
 
             // Notification channel are never closed.
             // TODO: report error to error channel.
@@ -402,12 +400,14 @@ impl LocalServer {
 
     // Receive ops after `after` from server. Returns a stream of ops.
     // TODO access control.
+    #[instrument(skip(self))]
     pub async fn recv_op_1(
         &self,
         doc_id: &DocId,
         mut after: GlobalSeq,
     ) -> CollabResult<(ReceiverStream<Vec<FatOp>>, ReceiverStream<Info>)> {
-        log::debug!("recv_op_1(doc={}, after={})", doc_id, after);
+        tracing::debug!("Entered recv_op");
+
         let (tx_op, rx_op) = mpsc::channel(1);
         let (tx_info, rx_info) = mpsc::channel(1);
         // Clone a notification channel and a reference to the doc,
@@ -428,22 +428,21 @@ impl LocalServer {
 
         let _ = tokio::spawn(async move {
             while notifier.changed().await.is_ok() {
-                log::debug!(
-                    "recv_op() Local server collects global ops after seq#{} to send out",
+                tracing::debug!(
+                    "Local server collects global ops after seq#{} to send out",
                     after
                 );
                 let ops = doc1.lock().unwrap().engine.global_ops_after(after);
                 after += ops.len() as GlobalSeq;
-                log::debug!(
-                    "recv_op() Local server sends op to gRPC server or local client: {:?}",
-                    &ops
-                );
-                if let Err(_) = tx_op.send(ops).await {
+
+                tracing::debug!(?ops, "Local server sends out ops");
+
+                if let Err(err) = tx_op.send(ops).await {
                     // When the local or remote
                     // [crate::collab_doc::Doc] is dropped,
                     // its connection to us is dropped. This
                     // is not an error.
-                    log::info!("Internal channel (local server --op--> local client or grpc server) closed.");
+                    tracing::info!(?err, "Op channel closed.");
                     return;
                 }
             }
@@ -453,8 +452,8 @@ impl LocalServer {
         // two tasks.
         let _ = tokio::spawn(async move {
             while let Ok(info) = inner_rx_info.recv().await {
-                if let Err(_) = tx_info.send(info).await {
-                    log::info!("Internal channel (local server --info--> local client or grpc server) closed.");
+                if let Err(err) = tx_info.send(info).await {
+                    tracing::info!(?err, "Info channel closed");
                     return;
                 }
             }
@@ -548,8 +547,10 @@ impl LocalServer {
         };
     }
 
+    #[instrument(skip(self))]
     pub async fn list_files_1(&self, dir_path: Option<FilePath>) -> CollabResult<Vec<DocInfo>> {
-        log::debug!("list_files_1(dir_path={:?})", &dir_path);
+        tracing::debug!("Entered list_files");
+
         if let Some(dir_path) = dir_path {
             return self.list_directory(dir_path).await;
         }
@@ -578,7 +579,9 @@ impl LocalServer {
                 })
             };
         }
-        log::debug!("list_files_1() got docs");
+
+        tracing::debug!("Got docs");
+
         let dirs: Vec<(u32, Arc<Mutex<Dir>>)> = self
             .dirs
             .lock()
@@ -586,7 +589,9 @@ impl LocalServer {
             .iter()
             .map(|(dir_id, dir)| (*dir_id, dir.clone()))
             .collect();
-        log::debug!("list_files_1() got dirs");
+
+        tracing::debug!("Got dirs");
+
         for (dir_id, dir) in dirs {
             let dir = dir.lock().unwrap();
             res.push(DocInfo {
@@ -598,8 +603,10 @@ impl LocalServer {
         Ok(res)
     }
 
+    #[instrument(skip(self))]
     pub async fn request_file_1(&self, doc_file: &DocDesc) -> CollabResult<Snapshot> {
-        log::debug!("request_file_1(doc={:?})", doc_file);
+        tracing::debug!("Entered request_file");
+
         match doc_file {
             DocDesc::Doc(doc_id) => {
                 if let Some(doc) = self.get_doc(doc_id) {
@@ -625,8 +632,9 @@ impl LocalServer {
         }
     }
 
+    #[instrument(skip(self))]
     async fn delete_file_1(&self, doc_id: &DocId) -> CollabResult<()> {
-        log::debug!("delete_file_1(doc={})", doc_id);
+        tracing::debug!("Entered delete_file");
         {
             let mut docs = self.docs.lock().unwrap();
             docs.remove(doc_id);
@@ -638,8 +646,10 @@ impl LocalServer {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn send_info_1(&mut self, doc_id: &DocId, info: Info) -> CollabResult<()> {
-        log::debug!("send_info_1(doc={}, info={:?})", doc_id, &info);
+        tracing::debug!("Entered send_info");
+
         if let Some(doc) = self.get_doc(doc_id) {
             let doc = doc.lock().unwrap();
             doc.check_for_existing_error()?;
@@ -653,6 +663,7 @@ impl LocalServer {
 
 // *** Webrpc
 
+#[instrument(skip(server_key_cert, server))]
 pub async fn run_webrpc_server(
     server_id: ServerId,
     server_key_cert: ArcKeyCert,
@@ -660,30 +671,30 @@ pub async fn run_webrpc_server(
     server: LocalServer,
 ) -> CollabResult<()> {
     let mut listener = Listener::bind(server_id.clone(), server_key_cert, &signaling_addr).await?;
-    log::info!(
+
+    tracing::info!(
         "Registered as {} at signaling server {}",
         server_id,
         signaling_addr
     );
     loop {
         let endpoint = listener.accept().await?;
-        log::info!("Received connection, endpoint.name={}", &endpoint.name);
+
+        tracing::info!(endpoint.name, "Received connection");
+
+        let span = tracing::info_span!("Handle connection", endpoint.name);
         let server_1 = server.clone();
-        let _ = tokio::spawn(async move {
-            let res = handle_connection(endpoint.clone(), server_1).await;
-            if let Err(err) = res {
-                log::warn!(
-                    "Error occurred when handling remote client: {:?} endpoint.name={}",
-                    err,
-                    endpoint.name
-                )
-            } else {
-                log::info!(
-                    "Remote client closed connection, endpoint.name={}",
-                    endpoint.name
-                );
+        let _ = tokio::spawn(
+            async move {
+                let res = handle_connection(endpoint.clone(), server_1).await;
+                if let Err(err) = res {
+                    tracing::warn!(?err, "Error occurred when handling remote client")
+                } else {
+                    tracing::info!("Remote client closed connection");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }
 
@@ -695,7 +706,7 @@ async fn handle_connection(mut endpoint: Endpoint, mut server: LocalServer) -> C
         let res = handle_request(msg, &mut server, &mut endpoint).await;
         match res {
             Err(err) => {
-                log::warn!("Non-fatal error handling request: {}", err);
+                tracing::warn!(?err, "Non-fatal error when handling request");
                 endpoint
                     .send_response(req_id, &DocServerResp::Err(err))
                     .await?;
@@ -709,13 +720,16 @@ async fn handle_connection(mut endpoint: Endpoint, mut server: LocalServer) -> C
     Ok(())
 }
 
+#[instrument(skip(msg, server, endpoint))]
 async fn handle_request(
     msg: webrpc::Message,
     server: &mut LocalServer,
     endpoint: &mut Endpoint,
 ) -> CollabResult<Option<DocServerResp>> {
     let req = msg.unpack()?;
-    log::debug!("handle_request(req={:?})", &req);
+
+    tracing::debug!(?req, "handle_request");
+
     match req {
         DocServerReq::ShareFile {
             file_name,
@@ -778,29 +792,39 @@ async fn handle_request(
             let endpoint_2 = endpoint.clone();
             let req_id = msg.req_id;
             // Send ops.
-            let _ = tokio::spawn(async move {
-                while let Some(op) = stream_op.next().await {
-                    let res = endpoint_1
-                        .send_response(req_id, &DocServerResp::RecvOp(op))
-                        .await;
-                    if let Err(err) = res {
-                        log::warn!("Error sending ops to remote client: {:?}", err);
-                        return;
+            let span = tracing::info_span!("Send ops for recv_op_info", doc_id);
+            let _ = tokio::spawn(
+                async move {
+                    while let Some(op) = stream_op.next().await {
+                        let res = endpoint_1
+                            .send_response(req_id, &DocServerResp::RecvOp(op))
+                            .await;
+                        if let Err(err) = res {
+                            tracing::warn!(?err, "Error sending ops to remote client");
+                            return;
+                        }
                     }
+                    tracing::info!("Channel to remote client closed")
                 }
-            });
+                .instrument(span),
+            );
             // Send info.
-            let _ = tokio::spawn(async move {
-                while let Some(info) = stream_info.next().await {
-                    let res = endpoint_2
-                        .send_response(req_id, &DocServerResp::RecvInfo(info))
-                        .await;
-                    if let Err(err) = res {
-                        log::warn!("Error sending info to remote client: {:?}", err);
-                        return;
+            let span = tracing::info_span!("Send info for recv_op_info", doc_id);
+            let _ = tokio::spawn(
+                async move {
+                    while let Some(info) = stream_info.next().await {
+                        let res = endpoint_2
+                            .send_response(req_id, &DocServerResp::RecvInfo(info))
+                            .await;
+                        if let Err(err) = res {
+                            tracing::warn!(?err, "Error sending info to remote client");
+                            return;
+                        }
                     }
+                    tracing::info!("Channel to remote client closed")
                 }
-            });
+                .instrument(span),
+            );
             Ok(None)
         }
         DocServerReq::RequestFile(doc_file) => {

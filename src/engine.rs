@@ -257,9 +257,8 @@ impl InternalDoc {
             for range in self.ranges.iter() {
                 if internal_pos == cursor.internal_pos {
                     if editor_pos != cursor.editor_pos {
-                        log::error!("Cursor has wrong editor position, should be {}, cursor={:?}, site={site}, ranges={:?}",
-                            editor_pos,
-                        cursor, self.ranges);
+                        tracing::error!("Cursor has wrong editor position, should be {}, cursor={:?}, site={site}, ranges={:?}",
+                            editor_pos, cursor, self.ranges);
                         std::process::exit(-1);
                     }
                     break;
@@ -919,8 +918,8 @@ impl InternalDoc {
     // Convert the position of `op` to internal doc position, and
     // apply it to the internal doc.
     fn convert_editor_op_and_apply(&mut self, op: EditorOp, site: SiteId) -> Op {
-        log::debug!("convert_editor_op_and_apply(op={:?})", &op);
-        log::debug!("ranges_before={:?}", &self.ranges);
+        tracing::debug!(?op, "convert_editor_op_and_apply");
+        tracing::debug!(?self.ranges, "ranges_before");
 
         let mut cursor = self.get_cursor(&site);
         let converted_op = match op.clone() {
@@ -953,8 +952,8 @@ impl InternalDoc {
             _ => panic!(),
         };
 
-        log::debug!("ranges_after={:?}", &self.ranges,);
-        log::debug!("converted_op={:?}", &converted_op);
+        tracing::debug!(?self.ranges, "ranges_after");
+        tracing::debug!(?converted_op);
 
         // Put it back.
         self.cursors.insert(site, cursor);
@@ -965,9 +964,9 @@ impl InternalDoc {
     /// Convert internal `op` from internal pos to editor pos, and
     /// apply it to the internal_doc.
     fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
-        log::debug!("convert_internal_op_and_apply(op={:?})", &op);
-        log::debug!("ranges_before={:?}", &self.ranges);
-        log::debug!("cursors={:?}", &self.cursors);
+        tracing::debug!(?op, "convert_internal_op_and_apply");
+        tracing::debug!(?self.ranges, "ranges_before");
+        tracing::debug!(?self.cursors);
 
         let site = op.site();
         let mut cursor = self.get_cursor(&site);
@@ -1005,8 +1004,8 @@ impl InternalDoc {
         };
         self.check_cursor_positions();
 
-        log::debug!("ranges_after={:?}", &self.ranges,);
-        log::debug!("converted_op={:?}", &instr);
+        tracing::debug!(?self.ranges, "ranges_after");
+        tracing::debug!(?instr, "converted_op");
 
         instr
     }
@@ -1420,11 +1419,7 @@ impl ClientEngine {
         doc: DocId,
         site_seq: LocalSeq,
     ) -> EngineResult<()> {
-        log::debug!(
-            "process_local_op({:?}) current_site_seq: {}",
-            &editor_op,
-            self.current_site_seq,
-        );
+        tracing::debug!(?editor_op, ?self.current_site_seq, "process_local_op");
 
         let op = editor_op.op;
         let group_seq = editor_op.group_seq;
@@ -1482,11 +1477,7 @@ impl ClientEngine {
         &mut self,
         mut op: FatOp,
     ) -> EngineResult<Option<(EditorLeanOp, GlobalSeq)>> {
-        log::debug!(
-            "process_remote_op({:?}) current_seq: {}",
-            &op,
-            self.current_seq
-        );
+        tracing::debug!(?op, ?self.current_seq, "process_remote_op");
 
         let seq = op.seq.ok_or_else(|| EngineError::SeqMissing(op.clone()))?;
         if seq != self.current_seq + 1 {

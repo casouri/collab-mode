@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite as tung;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tracing::Instrument;
 
 /// Return Ok if `msg` is a text message, Err otherwise.
 fn expect_text(msg: Message) -> SignalingResult<String> {
@@ -59,8 +60,6 @@ pub struct Listener {
     /// When the listener receives a `BindResponse(their_id,
     /// their_sdp)`, it sends `(their_id, their_sdp)` to this channel.
     sock_rx: mpsc::UnboundedReceiver<SignalingResult<Socket>>,
-    /// Use for cleaning up.
-    shutdown_rx: mpsc::Receiver<()>,
 }
 
 /// A socket that can be used to exchange ICE candidates.
@@ -82,12 +81,6 @@ pub struct CandidateSender {
     their_id: EndpointId,
 }
 
-impl Drop for Listener {
-    fn drop(&mut self) {
-        self.shutdown_rx.close();
-    }
-}
-
 impl Listener {
     /// Create a listener that connects to the signaling server at
     /// `addr`. This endpoint has `id` and `key`.
@@ -101,9 +94,13 @@ impl Listener {
         let (in_tx, mut in_rx) = mpsc::channel(1);
         let (out_tx, out_rx) = mpsc::channel(1);
         let (sock_tx, sock_rx) = mpsc::unbounded_channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
-        let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx, shutdown_tx));
+        let span = tracing::info_span!(
+            "Listener send_receive_stream",
+            endpoint = id,
+            signaling_addr = addr
+        );
+        let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx).instrument(span));
 
         let der_hash = my_key_cert.cert_der_hash();
         let listener = Listener {
@@ -111,23 +108,37 @@ impl Listener {
             my_key_cert,
             sock_rx,
             out_tx: out_tx.clone(),
-            shutdown_rx,
         };
 
-        let _ = tokio::spawn(async move {
-            let mut endpoint_map = HashMap::new();
-            while let Some(msg) = in_rx.recv().await {
-                // Ignore errors as long as in_rx hasn't closed.
-                let _todo = listener_process_message(
-                    der_hash.clone(),
-                    msg,
-                    out_tx.clone(),
-                    sock_tx.clone(),
-                    &mut endpoint_map,
-                )
-                .await;
+        let span = tracing::info_span!(
+            "listener_process_message",
+            endpoint = id,
+            signaling_addr = addr
+        );
+        let _ = tokio::spawn(
+            async move {
+                let mut endpoint_map = HashMap::new();
+                while let Some(msg) = in_rx.recv().await {
+                    // Ignore errors as long as in_rx hasn't closed.
+                    // This thread must keep running and process
+                    // incoming connect requests from other collab
+                    // hosts.
+                    let res = listener_process_message(
+                        der_hash.clone(),
+                        msg,
+                        out_tx.clone(),
+                        sock_tx.clone(),
+                        &mut endpoint_map,
+                    )
+                    .await;
+                    if let Err(err) = res {
+                        tracing::warn!(?err, "Error processing incoming message");
+                    }
+                }
+                tracing::info!("ws stream closed, ending bg thread");
             }
-        });
+            .instrument(span),
+        );
         Ok(listener)
     }
 
@@ -261,36 +272,52 @@ async fn listener_process_message(
                 msg_tx: out_tx.clone(),
                 their_cert,
             };
-            sock_tx.send(Ok(sock)).unwrap(); // Receiver is never dropped.
+            // Receiver is never dropped while program is running.
+            sock_tx.send(Ok(sock)).unwrap();
             Ok(())
         }
         SignalingMessage::NoEndpointForId(id) => {
             sock_tx
                 .send(Err(SignalingError::NoEndpointForId(id)))
-                .unwrap(); // Receiver is never dropped.
+                // Receiver is never dropped while Listener is live.
+                .unwrap();
             Ok(())
         }
         SignalingMessage::IdTaken(id) => {
+            // Receiver is never dropped while Listener is live.
             sock_tx.send(Err(SignalingError::IdTaken(id))).unwrap();
             Ok(())
         }
         SignalingMessage::TimesUp(time) => {
+            // Receiver is never dropped while Listener is live.
             sock_tx.send(Err(SignalingError::TimesUp(time))).unwrap();
             Ok(())
         }
         SignalingMessage::Candidate(their_id, _my_id, their_candidate) => {
             let tx = endpoint_map.get(&their_id).map(|tx| tx.clone());
             if let Some(tx) = tx {
-                let _todo = tx.send(their_candidate);
+                let res = tx.send(their_candidate);
+
+                if let Err(err) = res {
+                    tracing::info!(
+                        their_id,
+                        ?err,
+                        "Can't send received remote candidate for this endpoint to their channel"
+                    );
+                    endpoint_map.remove(&their_id);
+                }
             } else {
-                log::warn!(
-                    "Received a candidate for client id {} but we don't have that client in the client_map",
-                    their_id
+                tracing::warn!(
+                    their_id,
+                    "Received a candidate but we don't have that client in the client_map"
                 );
             }
             Ok(())
         }
-        msg => Err(SignalingError::UnexpectedMessage("".to_string(), msg)),
+        msg => Err(SignalingError::UnexpectedMessage(
+            "SignalingMessage".to_string(),
+            msg,
+        )),
     }
 }
 
@@ -299,27 +326,29 @@ async fn send_receive_stream(
     mut stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     req_tx: mpsc::Sender<Result<Message, tung::tungstenite::Error>>,
     mut resp_rx: mpsc::Receiver<Message>,
-    shutdown_tx: mpsc::Sender<()>,
 ) {
     loop {
         tokio::select! {
-            _ = shutdown_tx.closed() => {
-                return;
-            }
             msg = stream.next() => {
                 if let Some(msg) = msg {
                     if req_tx.send(msg).await.is_err() {
+                        tracing::info!("Req channel closed, ending bg thread");
                         return;
                     }
                 } else {
+                    tracing::info!("Req stream closed, ending bg thread");
                     return;
                 }
             }
             resp = resp_rx.recv() => {
                 if let Some(msg) = resp {
                     if stream.send(msg).await.is_err() {
+                        tracing::info!("Resp stream closed, ending bg thread");
                         return;
                     }
+                } else {
+                    tracing::info!("Resp channel closed, ending bg thread");
+                    return;
                 }
             }
         }
