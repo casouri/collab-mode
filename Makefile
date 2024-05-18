@@ -1,6 +1,6 @@
 .POSIX:
 
-.PHONY: test test-all session-1 session-2
+.PHONY: test test-all session-1 session-2 upload
 
 LOG_ENV=RUST_LOG=debug
 
@@ -27,3 +27,6 @@ doc:
 run-2:
 	$(RUST_ENV) cargo run --bin collab-mode -- run --socket --socket-port 7702 &
 	~/emacs-head/src/emacs -f collab--setup-2
+
+upload:
+	rsync -rP ~/p/collab-mode yuan@collab-mode: --exclude "target" --exclude ".git" --exclude "release"
