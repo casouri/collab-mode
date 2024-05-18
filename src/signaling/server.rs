@@ -94,21 +94,30 @@ impl Server {
     ) -> SignalingResult<()> {
         tracing::info!(id, key, "Handle req: bind()");
         // First check pub key.
-        {
+        let id_taken = {
             let key_store = self.key_store.lock().unwrap();
             if let Some(saved_key) = key_store.get_key_for(&id)? {
-                if saved_key != key {
-                    return Err(SignalingError::IdTaken(id));
-                }
+                saved_key != key
             } else {
                 key_store.set_key_for(&id, &key)?;
+                false
             }
+        };
+        if id_taken {
+            let _ = msg_tx
+                .send(SignalingMessage::IdTaken(id.clone()).into())
+                .await;
+            let _ = msg_tx.send(Message::Close(None)).await;
         }
         // Then check current connection, as long as we hold the lock
         // on endpoint_map, no one can slip in and add an id before we
         // does.
         let mut endpoint_map = self.endpoint_map.write().await;
         if endpoint_map.contains_key(&id) {
+            let _ = msg_tx
+                .send(SignalingMessage::IdTaken(id.clone()).into())
+                .await;
+            let _ = msg_tx.send(Message::Close(None)).await;
             return Err(SignalingError::IdTaken(id));
         }
         let server_info = EndpointInfo { msg_tx };
@@ -180,74 +189,81 @@ async fn handle_connection(
     let _ = tokio::spawn(send_receive_stream(stream, req_tx, resp_rx));
 
     while let Some(msg) = req_rx.recv().await {
-        let msg = msg?;
-        if let Ok(txt) = &msg.to_text() {
-            tracing::debug!(txt, "Received ws message");
-        } else {
-            tracing::debug!(?msg, "Received non-text ws message");
-        }
-        match msg {
-            Message::Text(msg) => {
-                let msg: SignalingMessage = serde_json::from_str(&msg)?;
-                match msg {
-                    SignalingMessage::Bind(id, key) => {
-                        server
-                            .bind_endpoint(id.clone(), key.clone(), resp_tx.clone())
-                            .await?;
-                        *endpoint_id = Some(id);
-                    }
-                    SignalingMessage::Connect(sender_id, receiver_id, sdp, sender_key) => {
-                        check_id(&sender_id, endpoint_id, &resp_tx).await?;
+        handle_message(msg, server, &resp_tx, endpoint_id).await?;
+    }
+    Ok(())
+}
 
-                        if endpoint_id.is_none() {
-                            server
-                                .bind_endpoint(
-                                    sender_id.clone(),
-                                    sender_key.clone(),
-                                    resp_tx.clone(),
-                                )
-                                .await?;
-                            *endpoint_id = Some(sender_id.clone());
-                        }
-                        server
-                            .connect_to_endpoint(&sender_id, receiver_id, sdp, sender_key, &resp_tx)
-                            .await?;
-                    }
-                    SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
-                        check_id(&sender_id, endpoint_id, &resp_tx).await?;
+/// Handle each client message, send response to `resp_tx`.
+async fn handle_message(
+    msg: Result<Message, tokio_tungstenite::tungstenite::Error>,
+    server: &Server,
+    resp_tx: &mpsc::Sender<Message>,
+    endpoint_id: &mut Option<EndpointId>,
+) -> anyhow::Result<()> {
+    let msg = msg?;
+    if let Ok(txt) = &msg.to_text() {
+        tracing::debug!(txt, "Received ws message");
+    } else {
+        tracing::debug!(?msg, "Received non-text ws message");
+    }
+    match msg {
+        Message::Text(msg) => {
+            let msg: SignalingMessage = serde_json::from_str(&msg)?;
+            match msg {
+                SignalingMessage::Bind(id, key) => {
+                    server
+                        .bind_endpoint(id.clone(), key.clone(), resp_tx.clone())
+                        .await?;
+                    *endpoint_id = Some(id);
+                }
+                SignalingMessage::Connect(sender_id, receiver_id, sdp, sender_key) => {
+                    check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
-                        if endpoint_id.is_none() {
-                            let resp = resp_unsupported("You should send a Connect or Bind message before sending Candidate message");
-                            resp_tx.send(resp).await?;
-                            return Ok(());
-                        }
-                        if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
-                            let msg = SignalingMessage::Candidate(
-                                sender_id.clone(),
-                                receiver_id.clone(),
-                                candidate,
-                            );
-                            their_info.msg_tx.send(msg.into()).await?;
-                        } else {
-                            let msg = SignalingMessage::NoEndpointForId(receiver_id);
-                            resp_tx.send(msg.into()).await?;
-                        }
+                    if endpoint_id.is_none() {
+                        server
+                            .bind_endpoint(sender_id.clone(), sender_key.clone(), resp_tx.clone())
+                            .await?;
+                        *endpoint_id = Some(sender_id.clone());
                     }
-                    _ => {
-                        let resp = resp_unsupported(
-                            "You should only send Bind, Connect, or Candidate message to the signal server",
-                        );
+                    server
+                        .connect_to_endpoint(&sender_id, receiver_id, sdp, sender_key, &resp_tx)
+                        .await?;
+                }
+                SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
+                    check_id(&sender_id, endpoint_id, &resp_tx).await?;
+
+                    if endpoint_id.is_none() {
+                        let resp = resp_unsupported("You should send a Connect or Bind message before sending Candidate message");
                         resp_tx.send(resp).await?;
+                        return Ok(());
+                    }
+                    if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
+                        let msg = SignalingMessage::Candidate(
+                            sender_id.clone(),
+                            receiver_id.clone(),
+                            candidate,
+                        );
+                        their_info.msg_tx.send(msg.into()).await?;
+                    } else {
+                        let msg = SignalingMessage::NoEndpointForId(receiver_id);
+                        resp_tx.send(msg.into()).await?;
                     }
                 }
+                _ => {
+                    let resp = resp_unsupported(
+                            "You should only send Bind, Connect, or Candidate message to the signal server",
+                        );
+                    resp_tx.send(resp).await?;
+                }
             }
-            _ => {
-                let resp = Message::Close(Some(CloseFrame {
-                    code: CloseCode::Unsupported,
-                    reason: Cow::Owned("We only support text message".to_string()),
-                }));
-                resp_tx.send(resp).await?;
-            }
+        }
+        _ => {
+            let resp = Message::Close(Some(CloseFrame {
+                code: CloseCode::Unsupported,
+                reason: Cow::Owned("We only support text message".to_string()),
+            }));
+            resp_tx.send(resp).await?;
         }
     }
     Ok(())
