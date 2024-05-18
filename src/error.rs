@@ -37,6 +37,8 @@ pub enum CollabError {
     DocAlreadyExists(DocId),
     #[error("Cannot find Doc({0})")]
     DocNotFound(DocId),
+    #[error("Cannot find file on disk: {0}")]
+    FileNotFound(String),
     #[error("Not connected to Server({0})")]
     ServerNotConnected(ServerId),
     #[error("{0} is not a regular file")]

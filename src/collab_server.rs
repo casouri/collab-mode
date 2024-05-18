@@ -276,6 +276,7 @@ async fn run_auto_save(
                         tracing::error!(?err, "Autosave failed");
                         let _ = err_tx.try_send(err);
                     }
+                    tracing::debug!("Autosave");
                 }
             }
         }
@@ -374,11 +375,11 @@ impl LocalServer {
         // more friendly names.
         let file_name = full_path.to_string_lossy().to_string();
         let mut file = std::fs::File::open(full_path).map_err(|err| {
-            CollabError::DocFatal(format!("Can't open file {}: {:#?}", file_name, err))
+            CollabError::DocFatal(format!("Can't open file {}: {:?}", file_name, err))
         })?;
         let mut buf = String::new();
         file.read_to_string(&mut buf).map_err(|err| {
-            CollabError::DocFatal(format!("Can't read file {}: {:#?}", file_name, err))
+            CollabError::DocFatal(format!("Can't read file {}: {:?}", file_name, err))
         })?;
         let doc_id = self
             .share_file_1(
@@ -590,7 +591,7 @@ impl LocalServer {
                 // error instead of NotDirectory.
                 path.metadata().map_err(|err| {
                     CollabError::DocFatal(format!(
-                        "Can't access file {}: {:#?}",
+                        "Can't access file {}: {:?}",
                         path.to_string_lossy(),
                         err
                     ))
@@ -603,14 +604,14 @@ impl LocalServer {
 
             for file in std::fs::read_dir(&path).map_err(|err| {
                 CollabError::DocFatal(format!(
-                    "Can't read directory {}: {:#?}",
+                    "Can't read directory {}: {:?}",
                     path.to_string_lossy(),
                     err
                 ))
             })? {
                 let file = file.map_err(|err| {
                     CollabError::DocFatal(format!(
-                        "Can't read directory {}: {:#?}",
+                        "Can't read directory {}: {:?}",
                         path.to_string_lossy(),
                         err
                     ))
@@ -620,7 +621,7 @@ impl LocalServer {
                 // This traverses symlink.
                 let meta = std::fs::metadata(&abs_path).map_err(|err| {
                     CollabError::DocFatal(format!(
-                        "Can't access file {}: {:#?}",
+                        "Can't access file {}: {:?}",
                         abs_path.to_string_lossy(),
                         err
                     ))

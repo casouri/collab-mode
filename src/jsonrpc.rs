@@ -277,6 +277,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::RpcError(_) => ErrorCode::DocNonFatal,
 
         CollabError::DocNotFound(_) => ErrorCode::DocNotFound,
+        CollabError::FileNotFound(_) => ErrorCode::FileNotFound,
         CollabError::DocAlreadyExists(_) => ErrorCode::DocAlreadyExists,
         CollabError::ServerNotConnected(_) => ErrorCode::DocNonFatal,
         CollabError::NotRegularFile(_) => ErrorCode::NotRegularFile,
@@ -478,11 +479,13 @@ impl JSONRPCServer {
         params: ShareDirParams,
     ) -> CollabResult<ShareDirResp> {
         let client = self.get_client(&params.host_id)?;
+        let path = expanduser::expanduser(&params.path)
+            .map_err(|_| CollabError::FileNotFound(params.path))?;
         let doc_id = client
             .share_file(
                 &params.dir_name,
                 &params.dir_meta,
-                FileContentOrPath::Path(PathBuf::from(params.path)),
+                FileContentOrPath::Path(PathBuf::from(path)),
             )
             .await?;
 

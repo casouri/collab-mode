@@ -46,6 +46,8 @@ pub enum ErrorCode {
     UnsupportedOperation = 110,
     /// Can't auto-save a file.
     ErrAutoSave = 111,
+    /// Can't find this file on disk.
+    FileNotFound = 112,
 }
 
 #[derive(Clone, Copy, Debug)]
