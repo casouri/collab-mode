@@ -44,6 +44,8 @@ pub enum ErrorCode {
     NotDirectory = 109,
     /// Unsupported operation like sharing directory to remote host.
     UnsupportedOperation = 110,
+    /// Can't auto-save a file.
+    ErrAutoSave = 111,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,6 +57,7 @@ pub enum NotificationCode {
     AcceptConnectionErr,
     Info,
     HarmlessErr,
+    AutoSaveErr,
 }
 
 impl Into<String> for NotificationCode {
@@ -66,8 +69,16 @@ impl Into<String> for NotificationCode {
             NotificationCode::AcceptConnectionErr => "AcceptConnectionErr".to_string(),
             NotificationCode::Info => "Info".to_string(),
             NotificationCode::HarmlessErr => "HarmlessErr".to_string(),
+            NotificationCode::AutoSaveErr => "AutoSaveErr".to_string(),
         }
     }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoSaveErrParams {
+    pub doc_id: DocId,
+    pub msg: String,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

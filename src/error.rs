@@ -47,6 +47,8 @@ pub enum CollabError {
     UnsupportedOperation(String),
     #[error("The first request must be Initialize request")]
     NotInitialized,
+    #[error("Error autosaving Doc({0}): {1}")]
+    AutoSaveErr(DocId, String),
 
     // Non-fatal error. (Connection broke.)
     #[error("Rpc error ({0})")]

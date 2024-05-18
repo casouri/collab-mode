@@ -14,9 +14,10 @@ use crate::webrpc::{self, Endpoint, Listener};
 use async_trait::async_trait;
 use gapbuf::GapBuffer;
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::select;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -86,9 +87,14 @@ pub struct LocalServer {
     self_site_id: SiteId,
     /// SiteId given to the next connected client.
     next_site_id: Arc<Mutex<SiteId>>,
+    /// Docs hosted by this server.
     docs: Arc<Mutex<HashMap<DocId, Arc<Mutex<Doc>>>>>,
+    /// Like `docs` but stores directories.
     dirs: Arc<Mutex<HashMap<DocId, Arc<Mutex<Dir>>>>>,
+    /// Map of recognized users.
     user_list: Arc<Mutex<HashMap<Credential, SiteId>>>,
+    /// Channel for sending errors to the editor.
+    err_tx: mpsc::Sender<CollabError>,
 }
 
 /// Stores relevant data for a document, used by the server.
@@ -100,10 +106,13 @@ struct Doc {
     meta: JsonMap,
     /// The local file path, if exists.
     file_path: Option<FilePath>,
+    /// The full path of this doc on disk, if exists. This is used for
+    /// automatically saving the file to disk.
+    full_path: Arc<Mutex<Option<PathBuf>>>,
     /// The server engine that transforms and stores ops for this doc.
     engine: ServerEngine,
     /// The document itself.
-    buffer: GapBuffer<char>,
+    buffer: Arc<Mutex<GapBuffer<char>>>,
     /// Engine sends a Unit to tx when there are new ops.
     tx: watch::Sender<()>,
     /// Clone a rx from this rx, and check for new op notification.
@@ -113,19 +122,27 @@ struct Doc {
     /// Retain this receiver so the channel is not closed.
     _rx_info: broadcast::Receiver<Info>,
     /// If this is not None, some error happend to this Doc and any
-    /// further access should simply return an error.
+    /// further access should simply return an error. This way every
+    /// client sees the error rather than seeing DocNotFound.
     error: Option<CollabError>,
+    /// Dropping this rx terminates autosave thread.
+    _auto_save_shutdown_rx: mpsc::Receiver<()>,
 }
 
 /// Stores relevant data for a shared dir, used by the server.
 #[derive(Debug)]
 struct Dir {
-    /// Human-readable name for the doc.
+    /// Human-readable name for the dir.
     name: String,
     /// Metadata for the directory.
     meta: JsonMap,
     /// Absolute path of the directory on disk.
     path: PathBuf,
+    /// Children of this dir (rel_path, doc_id). Note that this
+    /// doesn't include all the files in this dir on the disk; it only
+    /// includes dirs and docs included in dir and doc maps in
+    /// [LocalServer].
+    children: Vec<(PathBuf, DocId)>,
     /// If this is not None, some error happend to this Doc and any
     /// further access should simply return an error.
     error: Option<CollabError>,
@@ -135,18 +152,33 @@ struct Dir {
 
 impl Doc {
     pub fn new(
+        doc_id: DocId,
         file_name: &str,
         file_meta: &JsonMap,
         content: &str,
         file_path: Option<FilePath>,
+        full_path: Arc<Mutex<Option<PathBuf>>>,
+        err_tx: mpsc::Sender<CollabError>,
     ) -> Doc {
         let (tx, rx) = watch::channel(());
         let (tx_info, rx_info) = broadcast::channel(RETAINED_INFO_MSG_MAX);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let mut buffer = GapBuffer::new();
         buffer.insert_many(0, content.chars());
+        let buffer = Arc::new(Mutex::new(buffer));
+
+        tokio::spawn(run_auto_save(
+            doc_id,
+            buffer.clone(),
+            full_path.clone(),
+            shutdown_tx,
+            err_tx,
+        ));
+
         Doc {
             name: file_name.to_string(),
             file_path,
+            full_path,
             meta: file_meta.clone(),
             engine: ServerEngine::new(content.chars().count() as u64),
             buffer,
@@ -155,6 +187,7 @@ impl Doc {
             tx_info,
             _rx_info: rx_info,
             error: None,
+            _auto_save_shutdown_rx: shutdown_rx,
         }
     }
 
@@ -164,12 +197,17 @@ impl Doc {
         match instr {
             EditInstruction::Ins(edits) => {
                 for (pos, str) in edits.into_iter().rev() {
-                    self.buffer.insert_many(pos as usize, str.chars());
+                    self.buffer
+                        .lock()
+                        .unwrap()
+                        .insert_many(pos as usize, str.chars());
                 }
             }
             EditInstruction::Del(edits) => {
                 for (pos, str) in edits.into_iter().rev() {
                     self.buffer
+                        .lock()
+                        .unwrap()
                         .drain((pos as usize)..(pos as usize + str.chars().count()));
                 }
             }
@@ -180,7 +218,7 @@ impl Doc {
     /// Return the current snapshot of the document.
     pub fn snapshot(&self, doc_id: DocId) -> Snapshot {
         Snapshot {
-            buffer: self.buffer.iter().collect::<String>(),
+            buffer: self.buffer.lock().unwrap().iter().collect::<String>(),
             file_name: self.name.clone(),
             seq: self.engine.current_seq(),
             doc_id,
@@ -193,6 +231,53 @@ impl Doc {
         match self.error {
             Some(ref err) => Err(err.clone()),
             None => Ok(()),
+        }
+    }
+}
+
+/// Save `text` to disk at `path` for `doc_id`.
+fn save_to_disk(doc_id: &DocId, path: &Path, text: &str) -> CollabResult<()> {
+    let file = std::fs::File::open(path).map_err(|err| {
+        CollabError::AutoSaveErr(
+            doc_id.clone(),
+            format!("Can’t open file for autosaving: {:#}", err),
+        )
+    })?;
+    let mut writer = std::io::BufWriter::new(file);
+    writer.write_all(text.as_bytes()).map_err(|err| {
+        CollabError::AutoSaveErr(
+            doc_id.clone(),
+            format!("Can’t write the doc to disk: {:#}", err),
+        )
+    })?;
+    Ok(())
+}
+
+async fn run_auto_save(
+    doc_id: DocId,
+    buffer: Arc<Mutex<GapBuffer<char>>>,
+    path: Arc<Mutex<Option<PathBuf>>>,
+    shutdown_tx: mpsc::Sender<()>,
+    err_tx: mpsc::Sender<CollabError>,
+) {
+    let mut timer = tokio::time::interval(std::time::Duration::from_secs(30));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        select! {
+            _ = shutdown_tx.closed() => {
+                return;
+            }
+            _ = timer.tick() => {
+                let path = path.lock().unwrap().clone();
+                if let Some(path) = path {
+                    let text = buffer.lock().unwrap().iter().collect::<String>();
+                    let res = save_to_disk(&doc_id, &path, &text);
+                    if let Err(err) = res {
+                        tracing::error!(?err, "Autosave failed");
+                        let _ = err_tx.try_send(err);
+                    }
+                }
+            }
         }
     }
 }
@@ -212,30 +297,15 @@ impl Dir {
 
 // *** Functions for CollabServer
 
-/// Return the doc id of the doc if there is a doc with `path`.
-fn get_docs_with_path(
-    docs: &[(u32, Arc<Mutex<Doc>>)],
-    path: &FilePath,
-) -> Option<(DocDesc, JsonMap)> {
-    for (doc_id, doc) in docs {
-        let doc = doc.lock().unwrap();
-        if let Some(path1) = &doc.file_path {
-            if path == path1 {
-                return Some((DocDesc::Doc(doc_id.clone()), doc.meta.clone()));
-            }
-        }
-    }
-    None
-}
-
 impl LocalServer {
-    pub fn new() -> LocalServer {
+    pub fn new(err_tx: mpsc::Sender<CollabError>) -> LocalServer {
         LocalServer {
             self_site_id: 0,
             next_site_id: Arc::new(Mutex::new(1)),
             docs: Arc::new(Mutex::new(HashMap::new())),
             dirs: Arc::new(Mutex::new(HashMap::new())),
             user_list: Arc::new(Mutex::new(HashMap::new())),
+            err_tx,
         }
     }
 
@@ -323,11 +393,21 @@ impl LocalServer {
         Ok(snapshot)
     }
 
+    /// Realize `path` into a full path.
+    fn realize_full_path(&self, path: &FilePath) -> PathBuf {
+        let (dir_id, rel_path) = path;
+        let dirs = self.dirs.lock().unwrap();
+        let dir = dirs.get(&dir_id).unwrap().clone();
+        drop(dirs);
+        let dir = dir.lock().unwrap();
+        dir.path.join(rel_path)
+    }
+
     // `file_path` is only for `get_dir_file`. Other callers always
     // pass a `None`. There are three use-cases for this function:
     // 1. Share a buffer: file = content, file_path = None
     // 2. Share a directory: file = path, file_path = None
-    // 3. Create a file that's in a shared directory: file = content,
+    // 3. Share a file that's in a shared directory: file = content,
     //    file_path = file's dir and rel_path.
     #[instrument(skip(self, file))]
     pub async fn share_file_1(
@@ -343,14 +423,44 @@ impl LocalServer {
         let doc_id: DocId = rand::random();
         match file {
             FileContentOrPath::Content(content) => {
+                // realize_full_path locks self.dirs, so we call it
+                // before locking self.docs.
+                let full_path = if let Some(ref file_path) = file_path {
+                    Some(self.realize_full_path(file_path))
+                } else {
+                    None
+                };
                 let mut docs = self.docs.lock().unwrap();
 
                 docs.insert(
                     doc_id.clone(),
                     Arc::new(Mutex::new(Doc::new(
-                        file_name, file_meta, &content, file_path,
+                        doc_id,
+                        file_name,
+                        file_meta,
+                        &content,
+                        file_path.clone(),
+                        Arc::new(Mutex::new(full_path)),
+                        self.err_tx.clone(),
                     ))),
                 );
+                drop(docs);
+
+                // Add doc before adding doc to the dir.
+                if let Some((dir_id, rel_path)) = file_path {
+                    let mut dirs = self.dirs.lock().unwrap();
+                    let maybe_dir = dirs.get_mut(&dir_id);
+                    if let Some(dir) = maybe_dir {
+                        let mut dir = dir.lock().unwrap();
+                        dir.check_for_existing_error()?;
+                        dir.children.push((rel_path, doc_id));
+                    } else {
+                        drop(dirs);
+                        let mut docs = self.docs.lock().unwrap();
+                        let _ = docs.remove(&doc_id);
+                        return Err(CollabError::DocNotFound(dir_id));
+                    }
+                }
             }
             FileContentOrPath::Path(path) => {
                 let mut dirs = self.dirs.lock().unwrap();
@@ -360,6 +470,7 @@ impl LocalServer {
                     Arc::new(Mutex::new(Dir {
                         name: file_name.to_string(),
                         path,
+                        children: vec![],
                         meta: empty_json_map(),
                         error: None,
                     })),
@@ -387,7 +498,10 @@ impl LocalServer {
                 doc.apply_op(op)?;
             }
 
-            tracing::trace!("doc = \"{}\"", doc.buffer.iter().collect::<String>());
+            tracing::trace!(
+                "doc = \"{}\"",
+                doc.buffer.lock().unwrap().iter().collect::<String>()
+            );
 
             // Notification channel are never closed.
             // TODO: report error to error channel.
@@ -465,10 +579,10 @@ impl LocalServer {
     async fn list_directory(&self, dir_path: FilePath) -> CollabResult<Vec<DocInfo>> {
         let (doc_id, rel_path) = dir_path;
         if let Some(dir) = self.get_dir(&doc_id) {
-            let path = {
+            let (path, children) = {
                 let dir = dir.lock().unwrap();
                 dir.check_for_existing_error()?;
-                Path::new(&dir.path).join(rel_path)
+                (Path::new(&dir.path).join(rel_path), dir.children.clone())
             };
 
             if !path.is_dir() {
@@ -486,14 +600,7 @@ impl LocalServer {
                 ));
             }
             let mut res = vec![];
-            // TODO: Add a map from file path to doc id.
-            let docs: Vec<(u32, Arc<Mutex<Doc>>)> = self
-                .docs
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(doc_id, doc)| (*doc_id, doc.clone()))
-                .collect();
+
             for file in std::fs::read_dir(&path).map_err(|err| {
                 CollabError::DocFatal(format!(
                     "Can't read directory {}: {:#?}",
@@ -518,24 +625,41 @@ impl LocalServer {
                         err
                     ))
                 })?;
-                let file_name_raw = file.file_name();
-                let file_name = file_name_raw.to_string_lossy().into();
-                let file_path = (doc_id, rel_path);
 
-                if let Some((doc, meta)) = get_docs_with_path(&docs, &file_path) {
+                // We got the child file, now let's see if it's
+                // already in the system as a doc.
+                let included_doc = if let Some(idx) = children
+                    .iter()
+                    .position(|(child_rel_path, _)| *child_rel_path == rel_path)
+                {
+                    let (_, child_doc_id) = children[idx];
+                    let doc = self
+                        .docs
+                        .lock()
+                        .unwrap()
+                        .get(&child_doc_id)
+                        .map(|x| x.clone());
+                    doc.map(|doc| (child_doc_id, doc.lock().unwrap().meta.clone()))
+                } else {
+                    None
+                };
+
+                let file_name = file.file_name().to_string_lossy().into();
+
+                if let Some((child_doc_id, meta)) = included_doc {
                     res.push(DocInfo {
-                        doc_desc: doc,
+                        doc_desc: DocDesc::Doc(child_doc_id),
                         file_name,
                         file_meta: meta,
                     });
                 } else {
-                    let doc = if meta.is_file() {
-                        DocDesc::File(file_path)
+                    let doc_desc = if meta.is_file() {
+                        DocDesc::File((doc_id, rel_path))
                     } else {
-                        DocDesc::Dir(file_path)
+                        DocDesc::Dir((doc_id, rel_path))
                     };
                     res.push(DocInfo {
-                        doc_desc: doc,
+                        doc_desc,
                         file_name,
                         file_meta: empty_json_map(),
                     });
@@ -635,10 +759,27 @@ impl LocalServer {
     #[instrument(skip(self))]
     async fn delete_file_1(&self, doc_id: &DocId) -> CollabResult<()> {
         tracing::debug!("Entered delete_file");
-        {
+        // Try remove it as a doc.
+        let affected_dir = {
             let mut docs = self.docs.lock().unwrap();
-            docs.remove(doc_id);
+            let maybe_doc = docs.remove(doc_id);
+            if let Some(doc) = maybe_doc {
+                let path = doc.lock().unwrap().file_path.clone();
+                path.map(|(dir_id, _)| dir_id)
+            } else {
+                None
+            }
+        };
+        // If it's a doc, remove it from its parent dir.
+        if let Some(dir_id) = affected_dir {
+            if let Some(dir) = self.dirs.lock().unwrap().get(&dir_id) {
+                let mut dir = dir.lock().unwrap();
+                if let Some(idx) = dir.children.iter().position(|(_, id)| *id == *doc_id) {
+                    dir.children.remove(idx);
+                }
+            }
         }
+        // Try remove it as a dir.
         {
             let mut dirs = self.dirs.lock().unwrap();
             dirs.remove(doc_id);
@@ -769,6 +910,7 @@ async fn handle_request(
             let doc_id = ops.doc();
             let res = server.send_op_1(ops).await;
             if let Err(err) = res {
+                // FIXME: When do we garbage collect errored docs?
                 server.attach_error(&doc_id, err.clone());
                 return Err(err);
             }
@@ -777,6 +919,7 @@ async fn handle_request(
         DocServerReq::SendInfo { doc_id, info } => {
             let res = server.send_info_1(&doc_id, info).await;
             if let Err(err) = res {
+                // FIXME: When do we garbage collect errored docs?
                 server.attach_error(&doc_id, err.clone());
                 return Err(err);
             }

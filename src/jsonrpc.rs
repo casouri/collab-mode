@@ -63,9 +63,8 @@ pub fn run_stdio(
     runtime: tokio::runtime::Runtime,
     config_man: ConfigManager,
 ) -> anyhow::Result<()> {
-    let server = LocalServer::new();
     let (connection, io_threads) = Connection::stdio();
-    main_loop(connection, server, runtime, config_man);
+    main_loop(connection, runtime, config_man);
     io_threads.join()?;
     Ok(())
 }
@@ -76,9 +75,8 @@ pub fn run_socket(
     runtime: tokio::runtime::Runtime,
     config_man: ConfigManager,
 ) -> anyhow::Result<()> {
-    let server = LocalServer::new();
     let (connection, io_threads) = Connection::listen(addr)?;
-    main_loop(connection, server, runtime, config_man);
+    main_loop(connection, runtime, config_man);
     io_threads.join()?;
     Ok(())
 }
@@ -97,14 +95,16 @@ pub fn run_socket(
 // |            |           (3)  <---block_on--->
 // +------------+ <-------
 //
-fn main_loop(
-    connection: Connection,
-    doc_server: LocalServer,
-    runtime: tokio::runtime::Runtime,
-    config_man: ConfigManager,
-) {
+fn main_loop(connection: Connection, runtime: tokio::runtime::Runtime, config_man: ConfigManager) {
     let (notifier_tx, notifier_rx) = std::sync::mpsc::channel();
-    let (async_err_tx, mut async_err_rx) = tokio::sync::mpsc::channel(1);
+    // This channel is used by both the doc server (for autosave
+    // errors) and client (for accept connection error). The client
+    // side is synchronous, so it won't generate many errors; the
+    // server will take care not to generate too many errors at once.
+    // So a modest buffer size should be enough.
+    let (async_err_tx, mut async_err_rx) = tokio::sync::mpsc::channel(16);
+
+    let doc_server = LocalServer::new(async_err_tx.clone());
     let mut jsonrpc_server = None;
 
     let connection = std::sync::Arc::new(connection);
@@ -156,6 +156,10 @@ fn main_loop(
             CollabError::AcceptConnectionErr(err) => lsp_server::Notification {
                 method: NotificationCode::AcceptConnectionErr.into(),
                 params: serde_json::to_value(err).unwrap(),
+            },
+            CollabError::AutoSaveErr(doc_id, msg) => lsp_server::Notification {
+                method: NotificationCode::AutoSaveErr.into(),
+                params: serde_json::to_value(AutoSaveErrParams { doc_id, msg }).unwrap(),
             },
             err => lsp_server::Notification {
                 method: NotificationCode::ServerError.into(),
@@ -279,6 +283,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::NotDirectory(_) => ErrorCode::NotDirectory,
         CollabError::UnsupportedOperation(_) => ErrorCode::UnsupportedOperation,
         CollabError::NotInitialized => ErrorCode::NotInitialized,
+        CollabError::AutoSaveErr(_, _) => ErrorCode::ErrAutoSave,
 
         // This shouldn't be ever needed, because they are converted
         // into notifications.
