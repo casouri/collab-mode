@@ -1544,8 +1544,10 @@ immediately."
                (host-id (cdr collab--doc-and-host))
                (info (alist-get host-id (collab--host-alist)
                                 nil nil #'equal))
-               (file-list (collab--list-files-req
-                           doc-desc host-id (nth 0 info) (nth 1 info)))
+               (file-list-resp (collab--list-files-req
+                                doc-desc host-id (nth 0 info) (nth 1 info)))
+               (file-list (seq-map #'identity
+                                   (plist-get file-list-resp :files)))
                (parent-doc-desc (collab--doc-desc-parent doc-desc)))
           (insert "Collab ( " collab--dired-root-name " / "
                   (if (root-dir-p collab--dired-rel-path)
@@ -1687,6 +1689,8 @@ If HOST-ID and DOC-ID non-nil, use them instead."
       (when buf
         (with-current-buffer buf
           (collab--disable)))
+      (puthash (cons doc-id host-id) nil
+               collab--buffer-table)
       (save-excursion
         (end-of-line)
         (when (looking-back " •" 2)
@@ -1797,8 +1801,9 @@ its name rather than doc id) to connect."
   (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
     (let* ((info (alist-get host (collab--host-alist)
                             nil nil #'equal))
-           (file-list (collab--list-files-req
-                       nil host (nth 0 info) (nth 1 info)))
+           (file-list-resp (collab--list-files-req
+                            nil host (nth 0 info) (nth 1 info)))
+           (file-list (seq-map #'identity (plist-get file-list-resp :files)))
            doc-desc
            file-name)
 
