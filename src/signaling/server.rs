@@ -107,7 +107,6 @@ impl Server {
             let _ = msg_tx
                 .send(SignalingMessage::IdTaken(id.clone()).into())
                 .await;
-            let _ = msg_tx.send(Message::Close(None)).await;
         }
         // Then check current connection, as long as we hold the lock
         // on endpoint_map, no one can slip in and add an id before we
@@ -117,7 +116,6 @@ impl Server {
             let _ = msg_tx
                 .send(SignalingMessage::IdTaken(id.clone()).into())
                 .await;
-            let _ = msg_tx.send(Message::Close(None)).await;
             return Err(SignalingError::IdTaken(id));
         }
         let server_info = EndpointInfo { msg_tx };
@@ -189,7 +187,11 @@ async fn handle_connection(
     let _ = tokio::spawn(send_receive_stream(stream, req_tx, resp_rx));
 
     while let Some(msg) = req_rx.recv().await {
-        handle_message(msg, server, &resp_tx, endpoint_id).await?;
+        let res = handle_message(msg, server, &resp_tx, endpoint_id).await;
+        if res.is_err() {
+            let _ = resp_tx.send(Message::Close(None)).await;
+        }
+        res?;
     }
     Ok(())
 }
