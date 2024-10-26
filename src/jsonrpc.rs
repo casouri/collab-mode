@@ -276,6 +276,7 @@ fn error_code(err: &CollabError) -> ErrorCode {
         CollabError::EngineError(_) => ErrorCode::DocFatal,
         CollabError::RpcError(_) => ErrorCode::DocNonFatal,
 
+        CollabError::BadRequest(_) => ErrorCode::BadRequest,
         CollabError::DocNotFound(_) => ErrorCode::DocNotFound,
         CollabError::FileNotFound(_) => ErrorCode::FileNotFound,
         CollabError::DocAlreadyExists(_) => ErrorCode::DocAlreadyExists,
@@ -449,6 +450,11 @@ impl JSONRPCServer {
         &mut self,
         params: ShareFileParams,
     ) -> CollabResult<ShareFileResp> {
+        if params.file_name == "" {
+            return Err(CollabError::BadRequest(
+                "File name can’t be empty".to_string(),
+            ));
+        }
         let client = self.get_client(&params.host_id)?;
         let site_id = client.site_id();
         let doc = Doc::new_share_file(
@@ -481,6 +487,11 @@ impl JSONRPCServer {
         let client = self.get_client(&params.host_id)?;
         let path = expanduser::expanduser(&params.path)
             .map_err(|_| CollabError::FileNotFound(params.path))?;
+        if params.dir_name == "" {
+            return Err(CollabError::BadRequest(
+                "Dir name can’t be empty".to_string(),
+            ));
+        }
         let doc_id = client
             .share_file(
                 &params.dir_name,

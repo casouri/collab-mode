@@ -35,6 +35,8 @@ pub enum CollabError {
     EngineError(String),
     #[error("Doc({0}) already exists")]
     DocAlreadyExists(DocId),
+    #[error("Bad request ({0})")]
+    BadRequest(String),
     #[error("Cannot find Doc({0})")]
     DocNotFound(DocId),
     #[error("Cannot find file on disk: {0}")]

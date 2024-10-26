@@ -48,6 +48,8 @@ pub enum ErrorCode {
     ErrAutoSave = 111,
     /// Can't find this file on disk.
     FileNotFound = 112,
+    /// Wrong arguments like empty filename.
+    BadRequest = 113,
 }
 
 #[derive(Clone, Copy, Debug)]
