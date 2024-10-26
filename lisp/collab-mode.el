@@ -89,6 +89,18 @@ reconnect to the doc.")
 (defvar collab--verbose nil
   "If non-nil, print debugging information.")
 
+(defvar collab-backup-dir
+  (let* ((var-dir (expand-file-name "var" user-emacs-directory))
+         (backup-dir (expand-file-name "collab-mode/backups"
+                                       (if (file-exists-p var-dir)
+                                           var-dir
+                                         user-emacs-directory))))
+    (unless (file-exists-p backup-dir)
+      (mkdir backup-dir t))
+    backup-dir)
+  "Backup directory for collab-mode.
+When you save a remote file, it’s saved to this directory.")
+
 ;;; Generic helpers
 
 ;; https://nullprogram.com/blog/2010/05/11/
@@ -629,14 +641,16 @@ To prevent them from being invoked."
       (delete-overlay (cdr ov)))
     (setq-local collab--cursor-ov-alist nil)
 
-    ;; (setq-local buffer-undo-list nil)
-    (setq-local collab--doc-and-host nil)
+    ;; Don’t set doc and host to nil, so that ‘collab-reconnect’ can
+    ;; auto-resume.
+    ;; (setq-local collab--doc-and-host nil)
+
     (setq-local collab--my-site-id nil)))
 
 (defun collab--enable (doc-id host-id my-site-id)
   "Enable ‘collab-monitored-mode’ in the current buffer.
 DOC-ID and HOST-ID are associated with the current buffer.
-MY-SITE-ID is the site if of this editor."
+MY-SITE-ID is the site id of this editor."
   (setq collab--doc-and-host (cons doc-id host-id))
   (setq collab--my-site-id my-site-id)
   (puthash collab--doc-and-host
@@ -1669,7 +1683,20 @@ If HOST-ID and DOC-ID non-nil, use them instead."
               (funcall (intern-soft suggested-major-mode))
             (let ((buffer-file-name file-name))
               (set-auto-mode)))
-          (collab--enable doc-id host-id site-id)))))
+          (collab--enable doc-id host-id site-id)
+
+          ;; Save remote files to backup dir.
+          (unless (equal host-id "self")
+            (let ((host-dir (expand-file-name
+                             host-id collab-backup-dir)))
+              (unless (file-exists-p host-dir)
+                (mkdir host-dir t))
+              (set-visited-file-name
+               (expand-file-name
+                (format "%s/%s (%s)" host-id file-name doc-id)
+                collab-backup-dir)
+               t)
+              (save-buffer)))))))
     ;; Refresh the hub buffer with cached file list, just to
     ;; add the green dot after just-opened doc.
     (with-current-buffer (collab--hub-buffer)
@@ -1790,7 +1817,8 @@ FILE can be either a file or a directory."
            (doc-id (plist-get resp :docId)))
       (collab--notify-newly-shared-doc doc-id))))
 
-(defun collab-reconnect-buffer (host doc-id)
+(defalias 'collab-reconnect 'collab-resume)
+(defun collab-resume (host doc-id)
   "Reconnect current buffer to a remote document HOST.
 
 Reconnecting will override the current content of the buffer.
@@ -1798,41 +1826,20 @@ Reconnecting will override the current content of the buffer.
 The document to reconnect to is determined by DOC-ID. But if
 called interactively, prompt the user to select a document (by
 its name rather than doc id) to connect."
-  (interactive (list (completing-read
-                      "Host: "
-                      (mapcar #'car (collab--host-alist)))
-                     'interactive))
+  (interactive (list (cdr collab--doc-and-host)
+                     (car collab--doc-and-host)))
   (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
     (let* ((info (alist-get host (collab--host-alist)
                             nil nil #'equal))
            (file-list-resp (collab--list-files-req
                             nil host (nth 0 info) (nth 1 info)))
            (file-list (seq-map #'identity (plist-get file-list-resp :files)))
-           doc-desc
-           file-name)
-
-      ;; Get file name by doc id, or prompt for file name and get doc
-      ;; id by file name.
-      (if (eq doc-id 'interactive)
-          (progn
-            (setq file-name (completing-read
-                             "Merge with: "
-                             (mapcar (lambda (elm)
-                                       (plist-get elm :fileName))
-                                     file-list)
-                             nil t))
-            (setq doc-desc (cl-loop for elm in file-list
-                                    if (equal (plist-get elm :fileName)
-                                              file-name)
-                                    return (plist-get elm :docDesc))))
-
-        (setq file-name (cl-loop for elm in file-list
-                                 if (equal (collab--doc-desc-id
-                                            (plist-get elm :docDesc))
-                                           doc-id)
-                                 return (plist-get elm :fileName)))
-        (setq doc-desc `(:Doc ,doc-id)))
-
+           (doc-desc `(:Doc ,doc-id))
+           (file-name (cl-loop for elm in file-list
+                               if (equal (collab--doc-desc-id
+                                          (plist-get elm :docDesc))
+                                         doc-id)
+                               return (plist-get elm :fileName))))
       ;; Replace buffer content with document content.
       (let* ((resp (collab--connect-to-file-req doc-desc host))
              (content (plist-get resp :content))
@@ -1840,7 +1847,7 @@ its name rather than doc id) to connect."
              (inhibit-read-only t))
 
         (when (buffer-modified-p)
-          (when (y-or-n-p "Save buffer before merging?")
+          (when (y-or-n-p "Save buffer before replacing it with remote content?")
             (save-buffer)))
 
         ;; Same as in ‘collab--open-doc’.
@@ -1955,7 +1962,7 @@ detailed history."
                     (y-or-n-p (collab--fairy "Buffer in collab-mode, already quite set. Share it as new doc, confirm without regret? ")))
             (call-interactively #'collab-share-buffer)))
       (?S (call-interactively #'collab-share))
-      (?r (call-interactively #'collab-reconnect-buffer))
+      (?r (call-interactively #'collab-resume))
       (?k (collab-disconnect-buffer))
       (? (collab-share-link))
       (?h (collab-hub)))))
