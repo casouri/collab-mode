@@ -771,8 +771,8 @@ If DOC-DESC is at the top-level, return itself."
 The purpose of this function is to cancel get ops timer when we
 know that we’re gonna send ops (which gets remotes ops too) very
 soon."
-  (when-let ((timer (gethash collab--doc-and-host
-                             collab--dispatcher-timer-table)))
+  (when-let* ((timer (gethash collab--doc-and-host
+                              collab--dispatcher-timer-table)))
     (cancel-timer timer))  )
 
 (defun collab--request-remote-ops (buffer seq)
@@ -1619,7 +1619,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
          (file-name (get-text-property (point) 'collab-file-name))
          (host-id (or host-id
                       (get-text-property (point) 'collab-host-id)))
-         (buf (when-let ((doc-id (collab--doc-desc-id doc-desc)))
+         (buf (when-let* ((doc-id (collab--doc-desc-id doc-desc)))
                 (gethash (cons doc-id host-id)
                          collab--buffer-table))))
     (cond
@@ -1699,7 +1699,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
 (defun collab--delete-doc ()
   "Delete the file at point."
   (interactive)
-  (when-let ((doc-id (collab--doc-desc-id
+  (when-let* ((doc-id (collab--doc-desc-id
                       (get-text-property (point) 'collab-doc-desc)))
              (host-id (get-text-property (point) 'collab-host-id)))
     (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
@@ -1768,9 +1768,10 @@ When called interactively, prompt for the host."
   "Share FILE with FILE-NAME.
 FILE can be either a file or a directory."
   (interactive (let* ((path (read-file-name "Share: "))
-                      (file-name (file-name-nondirectory path)))
+                      (file-name (file-name-nondirectory
+                                  (string-trim-right path "/"))))
                  (list path file-name)))
-  (if (or (when-let ((target (file-symlink-p file)))
+  (if (or (when-let* ((target (file-symlink-p file)))
             (file-regular-p target))
           (file-regular-p file))
       (progn
