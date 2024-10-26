@@ -1,3 +1,5 @@
+use std::process::exit;
+
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, jsonrpc};
 
@@ -50,7 +52,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         _ => {
-            todo!()
+            panic!("Unsupported command");
         }
     }
 }

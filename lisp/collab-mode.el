@@ -758,7 +758,8 @@ If DOC-DESC is at the top-level, return itself."
                         ('pipe
                          (make-process
                           :name "collab"
-                          :command (list collab-command)
+                          :noquery t
+                          :command (list collab-command "run")
                           :connection-type 'pipe)))))
 
         (let ((conn (make-instance 'jsonrpc-process-connection
@@ -1693,7 +1694,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                 (mkdir host-dir t))
               (set-visited-file-name
                (expand-file-name
-                (format "%s/%s (%s)" host-id file-name doc-id)
+                (format "%s/(%s)%s" host-id doc-id file-name)
                 collab-backup-dir)
                t)
               (save-buffer)))))))
