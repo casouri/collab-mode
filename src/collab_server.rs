@@ -323,6 +323,20 @@ impl LocalServer {
         }
     }
 
+    /// Get the `Doc` with the `file_path`.
+    fn get_doc_with_path(&self, file_path: &FilePath) -> Option<(DocId, Arc<Mutex<Doc>>)> {
+        let docs = self.docs.lock().unwrap();
+        for (doc_id, doc) in docs.iter() {
+            if let Some(ref doc_path) = doc.lock().unwrap().file_path {
+                if *doc_path == *file_path {
+                    let doc = doc.clone();
+                    return Some((*doc_id, doc));
+                }
+            }
+        }
+        return None;
+    }
+
     /// Get the `Dir` with `doc_id`. Getting the `Dir` using this
     /// function doesn't locks `self.docs`.
     fn get_dir(&self, doc_id: &DocId) -> Option<Arc<Mutex<Dir>>> {
@@ -742,7 +756,14 @@ impl LocalServer {
                     Err(CollabError::DocNotFound(doc_id.clone()))
                 }
             }
-            DocDesc::File((dir_id, rel_path)) => {
+            DocDesc::File(file_path) => {
+                if let Some((doc_id, doc)) = self.get_doc_with_path(&file_path) {
+                    let doc = doc.lock().unwrap();
+                    doc.check_for_existing_error()?;
+                    return Ok(doc.snapshot(doc_id));
+                }
+
+                let (dir_id, rel_path) = file_path;
                 if let Some(dir) = self.get_dir(dir_id) {
                     self.get_dir_file(&dir_id, &dir, rel_path).await
                 } else {

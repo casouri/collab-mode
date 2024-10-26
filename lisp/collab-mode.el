@@ -1030,7 +1030,7 @@ If ENCODED is non-nil, OPS should be already in sexp JSON
 format (a list of EditorOp, probably the Undo or Redo variant).
 
 Return the largest global seq of all the ops received from the
-collab process."
+collab process; return nil if we didn’t get any ops."
   (collab--check-precondition)
   (when collab--verbose
     (message "Sending ops: %s" ops))
@@ -1069,7 +1069,10 @@ collab process."
            (when (> (length edits) 0)
              (let ((last-edit (aref edits (1- (length edits)))))
                (collab--move-cursor
-                site-id (1+ (aref last-edit 0)))))))
+                site-id (1+ (aref last-edit 0))))))
+          ;; If there’s no op to return, collab process returns an
+          ;; empty response.
+          ('nil nil))
         ;; Return the largest global seq received from collab process.
         last-seq))))
 
@@ -1378,7 +1381,7 @@ If USE-CACHE is t, don’t refetch file list, use the cached file list."
               (propertize "NO" 'face 'shadow))
             "\n")
     (when (and connection-up collab--accepting-connection)
-      (insert (format "Host at: %s/%s\n"
+      (insert (format "Your address: %s/%s\n"
                       (nth 1 collab-local-host-config)
                       (car collab-local-host-config))))
     (insert "\n\n")
@@ -1700,8 +1703,8 @@ If HOST-ID and DOC-ID non-nil, use them instead."
   "Delete the file at point."
   (interactive)
   (when-let* ((doc-id (collab--doc-desc-id
-                      (get-text-property (point) 'collab-doc-desc)))
-             (host-id (get-text-property (point) 'collab-host-id)))
+                       (get-text-property (point) 'collab-doc-desc)))
+              (host-id (get-text-property (point) 'collab-host-id)))
     (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
       (collab--delete-file-req doc-id host-id))
     (collab--refresh)))

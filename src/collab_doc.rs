@@ -240,7 +240,7 @@ impl Doc {
     pub fn send_op(
         &mut self,
         ops: Vec<EditorFatOp>,
-    ) -> CollabResult<(Vec<EditorLeanOp>, GlobalSeq)> {
+    ) -> CollabResult<Option<(Vec<EditorLeanOp>, GlobalSeq)>> {
         self.check_async_errors()?;
 
         tracing::debug!(?ops, "send_op");
@@ -277,7 +277,12 @@ impl Doc {
         // ops.
         self.new_ops_tx.send(()).unwrap();
 
-        Ok((transformed_remote_ops, last_op))
+        // We want to avoid sending seq number = 0.
+        if transformed_remote_ops.len() > 0 {
+            Ok(Some((transformed_remote_ops, last_op)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Return `n` consecutive undo ops from the current undo tip.

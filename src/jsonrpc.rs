@@ -508,18 +508,21 @@ impl JSONRPCServer {
     pub async fn handle_send_op_request(
         &mut self,
         params: SendOpParams,
-    ) -> CollabResult<SendOpResp> {
+    ) -> CollabResult<Option<SendOpResp>> {
         let doc = self.get_doc(&params.doc_id, &params.host_id)?;
         let res = doc.send_op(params.ops);
         if res.is_err() {
             self.remove_doc(&params.doc_id, &params.host_id);
         }
-        let (remote_ops, last_seq) = res?;
-        let resp = SendOpResp {
-            ops: remote_ops,
-            last_seq,
-        };
-        Ok(resp)
+        if let Some((remote_ops, last_seq)) = res? {
+            let resp = SendOpResp {
+                ops: remote_ops,
+                last_seq,
+            };
+            Ok(Some(resp))
+        } else {
+            Ok(None)
+        }
     }
 
     #[instrument(skip(self))]
