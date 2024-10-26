@@ -486,14 +486,14 @@ Then apply the returned remote ops."
     (if (not collab--ops-current-command)
         (collab--send-cursor-pos)
       (unwind-protect
-          (if-let ((amalgamated-op
-                    (and (eq 1 (length collab--ops-current-command))
-                         (let ((this-op
-                                (car collab--ops-current-command))
-                               (last-op (car collab--pending-ops)))
-                           (and last-op
-                                (collab--maybe-amalgamate
-                                 last-op this-op))))))
+          (if-let* ((amalgamated-op
+                     (and (eq 1 (length collab--ops-current-command))
+                          (let ((this-op
+                                 (car collab--ops-current-command))
+                                (last-op (car collab--pending-ops)))
+                            (and last-op
+                                 (collab--maybe-amalgamate
+                                  last-op this-op))))))
               ;; Amalgamated, don’t send ops yet.
               (progn
                 (setcar collab--pending-ops amalgamated-op)
@@ -1090,7 +1090,7 @@ If REDO is non-nil, redo the most recent undo instead."
                                 :docId ,(car collab--doc-and-host)
                                 :kind ,(if redo "Redo" "Undo"))
                              :timeout collab-rpc-timeout))
-      (if-let ((instructions (plist-get resp :ops)))
+      (if-let* ((instructions (plist-get resp :ops)))
           (if (eq (length instructions) 0)
               (message "No more operations to %s" (if redo "redo" "undo"))
             ;; Only ‘seq-map’ can map over vector. TODO: if the op is
@@ -1863,11 +1863,11 @@ its name rather than doc id) to connect."
 (defun collab-share-link ()
   "Copy the share link of current doc to clipboard."
   (interactive)
-  (if-let ((doc-id
-            (if (derived-mode-p 'collab-hub-mode)
-                (collab--doc-desc-id
-                 (get-text-property (point) 'collab-doc-desc))
-              (car collab--doc-and-host))))
+  (if-let* ((doc-id
+             (if (derived-mode-p 'collab-hub-mode)
+                 (collab--doc-desc-id
+                  (get-text-property (point) 'collab-doc-desc))
+               (car collab--doc-and-host))))
       (let ((link (format "%s/%s/%s"
                           (nth 1 collab-local-host-config)
                           (nth 0 collab-local-host-config)
