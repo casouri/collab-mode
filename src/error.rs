@@ -65,6 +65,11 @@ pub enum CollabError {
     SignalingTimesUp(u16),
 }
 
+#[macro_export]
+macro_rules! fatal {
+    ($($t:tt)*) => (crate::error::CollabError::Fatal(format!($($t)*)));
+}
+
 pub type CollabResult<T> = Result<T, CollabError>;
 
 // impl From<std::io::Error> for CollabError {
