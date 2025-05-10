@@ -30,9 +30,6 @@ pub enum CollabError {
     // Generic fatal doc error.
     #[error("Doc fatal error ({0})")]
     DocFatal(String),
-    // Generic non-fatal error.
-    #[error("({0})")]
-    NonFatal(String),
     // Specific fatal doc errors.
     #[error("Fatal OT engine error ({0})")]
     EngineError(String),
