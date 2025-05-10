@@ -30,6 +30,9 @@ pub enum CollabError {
     // Generic fatal doc error.
     #[error("Doc fatal error ({0})")]
     DocFatal(String),
+    // Generic non-fatal error.
+    #[error("({0})")]
+    NonFatal(String),
     // Specific fatal doc errors.
     #[error("Fatal OT engine error ({0})")]
     EngineError(String),
@@ -68,6 +71,11 @@ pub enum CollabError {
 #[macro_export]
 macro_rules! fatal {
     ($($t:tt)*) => (crate::error::CollabError::Fatal(format!($($t)*)));
+}
+
+#[macro_export]
+macro_rules! nfatal {
+    ($($t:tt)*) => (crate::error::CollabError::NonFatal(format!($($t)*)));
 }
 
 pub type CollabResult<T> = Result<T, CollabError>;
