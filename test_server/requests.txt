@@ -12,6 +12,10 @@ POST :endpoint/add-project?path=~/p/collab-mode
 
 GET :endpoint/list-files?project=1&path=lisp
 
+### File content
+
+GET :endpoint/file-content?project=1&path=cargo.toml
+
 ;; Local Variables:
 ;; mode: restclient
 ;; End:

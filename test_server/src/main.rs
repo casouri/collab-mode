@@ -33,7 +33,7 @@ fn send_400_error(message: &str, request: Request) -> anyhow::Result<()> {
 
 /// Respond to `request` with 200 if `resp` is `Ok`; respond with 500
 /// otherwise.
-fn respond_200_or_500<E: ToString>(
+fn respond_200_or_500<E: std::fmt::Debug>(
     resp: Result<String, E>,
     request: Request,
 ) -> anyhow::Result<()> {
@@ -51,7 +51,7 @@ fn respond_200_or_500<E: ToString>(
             request.respond(Response::new(
                 500.into(),
                 vec![],
-                format!("{{\"error\": \"{}\"}}", err.to_string()).as_bytes(),
+                format!("{{\"error\": \"{:?}\"}}", err).as_bytes(),
                 None,
                 None,
             ))?;
@@ -134,6 +134,33 @@ pub fn main() -> Result<(), anyhow::Error> {
             let files = file_server::list_files(project, path, &conn)
                 .map(|files| serde_json::to_string(&files).unwrap());
             respond_200_or_500(files, request)?;
+            continue;
+        }
+
+        if url.path() == "/file-content" {
+            let project = queries.get("project");
+            if project.is_none() {
+                send_400_missing("project", request)?;
+                continue;
+            }
+
+            let project = str::parse::<u64>(project.unwrap());
+            if project.is_err() {
+                send_400_error("Can't parse project", request)?;
+                continue;
+            }
+            let project = project.unwrap();
+
+            let path = queries.get("path");
+            if path.is_none() {
+                send_400_missing("path", request)?;
+                continue;
+            }
+            let path = path.unwrap();
+
+            let content = file_server::file_content(project, path, &conn)
+                .map(|content| serde_json::to_string(&content).unwrap());
+            respond_200_or_500(content, request)?;
             continue;
         }
 

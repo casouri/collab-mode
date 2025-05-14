@@ -35,31 +35,6 @@ pub struct ProjectFile {
     is_symlink: bool,
 }
 
-// *** Impl
-
-impl ProjectFile {
-    /// Get the basename of the file.
-    pub fn basename(&self) -> String {
-        if let Some(name) = PathBuf::from(&self.rel_path).file_name() {
-            name.to_string_lossy().to_string()
-        } else {
-            "".to_string()
-        }
-    }
-
-    /// Get the absolute filename of the file. Symlinks are resolved.
-    pub fn abs_filename(&self, project: &Project) -> std::io::Result<PathBuf> {
-        let proj_filename = PathBuf::from(&project.root);
-        let filename = proj_filename.join(&self.rel_path);
-        let stat = std::fs::metadata(&filename)?;
-        if stat.is_symlink() {
-            std::fs::read_link(filename)
-        } else {
-            Ok(filename)
-        }
-    }
-}
-
 // *** Const
 
 const CREATE_PROJECT_TABLE: &'static str = "CREATE TABLE IF NOT EXISTS project (
@@ -89,6 +64,30 @@ op TEXT NOT NULL,
 remote INTEGER NOT NULL,
 FOREIGN KEY(doc_id) REFERENCES doc(id)
 )";
+
+// *** Helper Fn
+
+/// Get the basename of the file.
+fn basename(rel_path: &str) -> String {
+    if let Some(name) = PathBuf::from(rel_path).file_name() {
+        name.to_string_lossy().to_string()
+    } else {
+        "".to_string()
+    }
+}
+
+/// Get the absolute filename of the `rel_path` in `project`. Symlinks
+/// are resolved.
+fn abs_filename(rel_path: &str, project: &Project) -> std::io::Result<PathBuf> {
+    let proj_filename = PathBuf::from(&project.root);
+    let filename = proj_filename.join(rel_path);
+    let stat = std::fs::metadata(&filename)?;
+    if stat.is_symlink() {
+        std::fs::read_link(filename)
+    } else {
+        Ok(filename)
+    }
+}
 
 // *** Fn
 
@@ -121,30 +120,31 @@ pub fn list_projects(conn: &Connection) -> anyhow::Result<Vec<Project>> {
     Ok(projects)
 }
 
+/// Get the project with id `project_id`.
+fn get_project_by_id(project_id: u64, conn: &Connection) -> anyhow::Result<Project> {
+    conn.query_row_and_then(
+        "SELECT id, name, root, meta FROM project WHERE id = ?",
+        [project_id],
+        |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                root: row.get(2)?,
+                meta: row.get(3)?,
+            }) as anyhow::Result<Project>
+        },
+    )
+    .with_context(|| format!("Failed to get the project (id = {}) from DB", project_id))
+}
+
+/// List the files under the directory at `rel_path` in the project
+/// with `project_id`.
 pub fn list_files(
     project_id: u64,
     rel_path: &str,
     conn: &Connection,
 ) -> anyhow::Result<Vec<ProjectFile>> {
-    let project = conn
-        .query_row_and_then(
-            "SELECT id, name, root, meta FROM project WHERE id = ?",
-            [project_id],
-            |row| {
-                Ok(Project {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    root: row.get(2)?,
-                    meta: row.get(3)?,
-                }) as anyhow::Result<Project>
-            },
-        )
-        .with_context(|| format!("Failed to get the project (id = {}) from DB", project_id))?;
-    list_files_1(project, rel_path)
-}
-
-/// List the files under the directory at `rel_path` in `project`.
-pub fn list_files_1(project: Project, rel_path: &str) -> anyhow::Result<Vec<ProjectFile>> {
+    let project = get_project_by_id(project_id, conn)?;
     let rel_path = rel_path.trim_start_matches('/');
     let filename = std::path::Path::new(&project.root).join(rel_path);
     let filename_str = filename.to_string_lossy().to_string();
@@ -172,18 +172,39 @@ pub fn list_files_1(project: Project, rel_path: &str) -> anyhow::Result<Vec<Proj
     Ok(result)
 }
 
-/// Get file content of `file` under `project`.
-pub fn file_content(project: &Project, file: &ProjectFile) -> anyhow::Result<String> {
-    let filename = file
-        .abs_filename(project)
-        .with_context(|| format!("Failed to access file {}", file.rel_path))?;
-    std::fs::read_to_string(filename).with_context(|| format!("Can't read {}", file.rel_path))
+/// Get file content of the file at `rel_path` under `project`.
+pub fn file_content(project_id: u64, rel_path: &str, conn: &Connection) -> anyhow::Result<String> {
+    let project = get_project_by_id(project_id, &conn)?;
+    let filename = abs_filename(rel_path, &project)
+        .with_context(|| format!("Failed to access file {}", rel_path))?;
+    std::fs::read_to_string(filename).with_context(|| format!("Can't read file {}", rel_path))
 }
 
 /// Create a project at `path`.
 pub fn add_project(path: &str, conn: &Connection) -> anyhow::Result<Project> {
     let abs_path = expanduser::expanduser(path)
         .with_context(|| format!("Can't expand filename to absolute path"))?;
+
+    let abs_path_str = abs_path.to_string_lossy().to_string();
+    let res = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 from project WHERE root = ?) AS res",
+            [abs_path_str.clone()],
+            |row| Ok(row.get::<&str, u64>("res")?),
+        )
+        .with_context(|| {
+            format!(
+                "Failed to check if project (path={}) already exists in DB",
+                &abs_path_str
+            )
+        })?;
+    if res == 1 {
+        return Err(anyhow!(
+            "Project with the same path ({}) already exists",
+            abs_path_str
+        ));
+    }
+
     let basename = if let Some(name) = abs_path.file_name() {
         name.to_string_lossy().to_string()
     } else {
