@@ -1,0 +1,17 @@
+:endpoint = http://127.0.0.1:8000
+
+### List Projects
+
+GET :endpoint/projects
+
+### Add project
+
+POST :endpoint/add-project?path=~/p/collab-mode
+
+### List files
+
+GET :endpoint/list-files?project=1&path=lisp
+
+;; Local Variables:
+;; mode: restclient
+;; End:
