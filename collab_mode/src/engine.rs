@@ -4,6 +4,7 @@
 use crate::error::{CollabError, CollabResult};
 use crate::{op::quatradic_transform, types::*};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::result::Result;
@@ -39,7 +40,7 @@ impl ContextOps {
 /// A range in the internal document. Each range is either a live text
 /// (not deleted) or dead text (deleted). All the ranges should be in
 /// order, connect, and don't overlap.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Range {
     /// Live text, (len).
     Live(u64),
@@ -82,7 +83,7 @@ impl Range {
 /// This cursor also tracks the editor document's position.
 /// Translating between editor position and internal document position
 /// around a cursor is very fast.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Cursor {
     /// The position of this cursor in the editor's document. This
     /// position doesn't account for the tombstones.
@@ -221,20 +222,23 @@ impl RangeIterator {
 /// The internal full document that contains both live text and
 /// tombstones. This is used to convert between editor positions (no
 /// tombstone) and internal positions (includes tombstone).
-#[derive(Debug, Clone)]
-struct InternalDoc {
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalDoc {
     /// Ranges fully covering the document. The ranges are coalesced
     /// after every insertion and deletion, so there should never be
     /// two consecutive ranges that has the same liveness.
     ranges: Vec<Range>,
     /// Cursor for each site. TODO: cursors garbage collect?
+    #[serde_as(as = "Vec<(_, _)>")]
     cursors: HashMap<SiteId, Cursor>,
 }
 
 impl InternalDoc {
     /// Create a internal doc with initial document length at
     /// `init_len`.
-    fn new(init_len: u64) -> InternalDoc {
+    pub fn new(init_len: u64) -> InternalDoc {
         InternalDoc {
             ranges: if init_len > 0 {
                 vec![Range::Live(init_len)]

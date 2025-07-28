@@ -9,7 +9,7 @@
 //! receive (transformed) remotes ops to be applied.
 //!
 //! [Doc] starts background threads to send/receive ops, if error
-//! occurs, the error is captured and saved, the next time we caller
+//! occurs, the error is captured and saved, the next time the caller
 //! uses one of [Doc]'s methods (sendop, undo, and redo), the error
 //! will be returned immediately. The caller should report the error
 //! to the editor and drop the [Doc], which will clean up the
