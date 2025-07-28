@@ -1,8 +1,14 @@
-use crate::{collab_doc::Doc, types::JsonMap};
+use crate::{
+    collab_doc::Doc,
+    engine::InternalDoc,
+    error::CollabError,
+    types::{ClientEngine, DocId, FatOp, GlobalSeq, LocalSeq, SiteId},
+};
 use anyhow::{anyhow, Context};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+use webrtc_util::sync::Mutex;
 
 // *** Struct
 
@@ -44,25 +50,30 @@ root TEXT NOT NULL UNIQUE,
 meta TEXT NOT NULL
 )";
 
+// Snapshot can lag behind the ops, since saving snapshot to DB can be
+// a bit expensive (with serialization). As long as we have the ops,
+// we can always bring snapshot up-to-date by appling ops on it.
 const CREATE_DOC_TABLE: &'static str = "CREATE TABLE IF NOT EXISTS doc (
 id INTEGER PRIMARY KEY AUTOINCREMENT,
 abs_path TEXT NOT NULL,
-site_seq INTEGER NOT NULL,
+current_site_seq INTEGER NOT NULL,
 snapshot_internal_doc TEXT NOT NULL,
 snapshot_content TEXT NOT NULL,
 snapshot_seq INTEGER NOT NULL,
 meta TEXT NOT NULL
 )";
 
+// Both global op and local op live in this table. Global ops have
+// global_seq, local ops only have site_seq.
 const CREATE_OP_TABLE: &'static str = "CREATE TABLE IF NOT EXISTS op (
 doc_id INTEGER NOT NULL,
-seq INTEGER NOT NULL,
+global_seq INTEGER,
 site_seq INTEGER NOT NULL,
 group_seq INTEGER NOT NULL,
 kind INTEGER NOT NULL,
 op TEXT NOT NULL,
-remote INTEGER NOT NULL,
 FOREIGN KEY(doc_id) REFERENCES doc(id)
+PRIMARY KEY(doc_id, seq)
 )";
 
 // *** Helper Fn
@@ -223,22 +234,60 @@ pub fn add_project(path: &str, conn: &Connection) -> anyhow::Result<Project> {
     })
 }
 
-/// Starting tracking a file as a doc.
-pub fn add_doc(
-    file: &ProjectFile,
-    project: &Project,
-    conn: &mut Connection,
-) -> anyhow::Result<Doc> {
-    // let abs_path = file.abs_filename(project).with_context(|| {
-    //     format!(
-    //         "Failed to resolve absolute path of file {} in project {}",
-    //         file.rel_path, project.name
-    //     )
-    // })?;
-    // let stmt = conn.prepare(
-    //     "SELECT id, abs_path, site_seq, snapshot_interal_doc, snapshot_content, snapshot_seq, meta FROM doc WHERE abs_path = ?",
-    // );
-    // stmt.query_map(vec![abs_path], |row| {})
-    //     .with_context(|| format!("Failed to find doc in DB"));
-    todo!()
-}
+// // Create a new doc, insert into DB, and return a `NewDoc` object.
+// pub fn new_doc(
+//     conn: &mut Connection,
+//     site_id: SiteId,
+//     abs_path: PathBuf,
+//     content: String,
+//     base_seq: GlobalSeq,
+// ) -> anyhow::Result<NewDoc> {
+//     let path_str = abs_path.to_string_lossy().to_string();
+//     let mut stmt = conn.prepare("SELECT id FROM doc WHERE abs_path = ?")?;
+//     let existing_doc = stmt
+//         .query_map([path_str.clone()], |row| row.get(0))
+//         .with_context(|| format!("Failed to find doc in DB"))?;
+//     if let Some(doc_id) = existing_doc.into_iter().next() {
+//         let doc_id = doc_id?;
+//         return Err(CollabError::DocAlreadyExists(doc_id).into());
+//     }
+
+//     let engine = ClientEngine::new(site_id, base_seq, content.len() as u64);
+
+//     // Insert doc to DB.
+
+//     conn.execute("INSERT INTO doc (abs_path, next_site_seq, snapshot_internal_doc, snapshot_content, meta) VALUES (?, ?, ?, ?, ?)", [
+//         path_str,
+//         "1".to_string(),
+//         serde_json::to_string(&internal_doc).expect("Serializing InternalDoc to JSON shouldn't fail"),
+//         file_content ])?;
+// }
+
+// /// Start tracking a file as a doc.
+// pub fn new_doc_from_file(
+//     file: &ProjectFile,
+//     project: &Project,
+//     conn: &mut Connection,
+// ) -> anyhow::Result<NewDoc> {
+//     let abs_path = abs_filename(&file.rel_path, project).with_context(|| {
+//         format!(
+//             "Failed to resolve absolute path of file {} in project {}",
+//             file.rel_path, project.name
+//         )
+//     })?;
+//     let path_str = abs_path.to_string_lossy().to_string();
+
+//     // Read file content.
+//     let file_content = std::fs::read_to_string(&abs_path)
+//         .with_context(|| format!("Failed to read file {}", path_str))?;
+//     let file_len = file_content.len() as u64;
+//     let internal_doc = InternalDoc::new(file_len);
+
+//     Ok(NewDoc {
+//         doc_id: conn.last_insert_rowid() as u32,
+//         abs_path,
+//         engine: Arc::new(Mutex::new(ClientEngine::new(0, 0, file_len))),
+//         remote_op_buffer: Arc::new(Mutex::new(Vec::new())),
+//         site_seq: 1,
+//     })
+// }
