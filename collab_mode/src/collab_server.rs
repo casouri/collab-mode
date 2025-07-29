@@ -104,6 +104,8 @@ struct Doc {
     name: String,
     /// Metadata for this doc.
     meta: JsonMap,
+    /// The local file path, if exists.
+    file_path: Option<FilePath>,
     /// The full path of this doc on disk, if exists. This is used for
     /// automatically saving the file to disk. This is also used for
     /// checking whether a file is already opened as a doc.

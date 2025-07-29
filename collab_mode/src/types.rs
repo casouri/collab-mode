@@ -65,6 +65,16 @@ pub enum DocDesc {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum FileDesc {
+    /// A shared doc.
+    Doc(DocId),
+    /// A file on disk, not yet shared.
+    File(FilePath),
+    /// A subdir on disk under a shared dir.
+    Dir(FilePath),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileContentOrPath {
     /// File content.
     Content(String),
