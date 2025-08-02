@@ -59,7 +59,8 @@ pub enum Msg {
     // Errors
     ConnectionBroke(ServerId),
     StopSendingOps(DocId),
-    DeserializationError(String),
+    SerializationErr(String),
+    Fatal(String)
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -102,6 +103,9 @@ impl WebChannel {
         self.my_hostid.clone()
     }
 
+    /// Bind on signaling server, and run in a loop and accept
+    /// connections. For each connection, setup message handling
+    /// threads running in the background.
     pub async fn accept(
         &self,
         my_key_cert: ArcKeyCert,
@@ -115,7 +119,7 @@ impl WebChannel {
             let remote_hostid = sock.id();
 
             let self_clone = self.clone();
-            let listener_key_cert = listener.my_key_cert.clone();
+            let my_key_cert = listener.my_key_cert.clone();
             let msg_tx = self.msg_tx.clone();
 
             tokio::spawn(async move {
@@ -130,7 +134,7 @@ impl WebChannel {
                 }
                 let conn = conn.unwrap();
 
-                let dtls_connection = create_dtls_server(conn, listener_key_cert, their_cert).await;
+                let dtls_connection = create_dtls_server(conn, my_key_cert, their_cert).await;
                 if dtls_connection.is_err() {
                     tracing::error!("Failed to create DTLS server: {}", dtls_connection.err().unwrap());
                     let _ = msg_tx.send(Message {
@@ -152,7 +156,8 @@ impl WebChannel {
                 }
                 let sctp_assoc = sctp_assoc.unwrap();
 
-                if let Err(e) = self_clone.setup_message_handling(remote_hostid.clone(), sctp_assoc, 2u16.pow(15)).await {
+                let res = self_clone.setup_message_handling(remote_hostid.clone(), sctp_assoc, 2u16.pow(15)).await;
+                if let Err(e) = res {
                     tracing::error!("Failed to setup message handling: {}", e);
                     let _ = msg_tx.send(Message {
                         host: remote_hostid.clone(),
@@ -163,6 +168,9 @@ impl WebChannel {
         }
     }
 
+    /// Connect to a remote host through signaling server. Setup
+    /// message handling threads that runs in the background. Doesn’t
+    /// block.
     pub async fn connect(
         &self,
         remote_hostid: ServerId,
@@ -171,14 +179,15 @@ impl WebChannel {
     ) -> anyhow::Result<()> {
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
         let msg_tx = self.msg_tx.clone();
-        let hostid_clone = self.my_hostid.clone();
+        let hostid = self.hostid();
 
+        // Spawn a thread that sends ICE progress to editor.
         tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
                 tracing::info!("ICE progress: {progress}");
                 let _ = msg_tx
                     .send(Message {
-                        host: hostid_clone.clone(),
+                        host: hostid.clone(),
                         body: Msg::IceProgress(progress.to_string()),
                     })
                     .await;
@@ -200,6 +209,7 @@ impl WebChannel {
         Ok(())
     }
 
+    /// Send a message to a remote host. Doesn’t block.
     pub async fn send(&self, recipient: ServerId, msg: Msg) -> anyhow::Result<()> {
         let message = Message {
             host: self.my_hostid.clone(),
@@ -214,13 +224,19 @@ impl WebChannel {
             .ok_or_else(|| anyhow!("Recipient {} not connected", recipient))?;
 
         tx.send(message).await
-            .map_err(|_| anyhow!("Failed to send message to {}", recipient))?;
+            .map_err(|_| anyhow!("Connection to {} broke", recipient))?;
 
         Ok(())
     }
 
-    // On accept side, create stream id from 2^15, on connect side,
-    // create stream id from 0.
+    /// Create a threads that accepts SCTP streams from remote and read
+    /// the message and sends to message channel; create another thread
+    /// that reads from outgoing message channel and sends to remote
+    /// host.
+    ///
+    /// `stream_id_base`: If caller is on the accept side, create
+    /// stream id from 2^15 + 1 (id_base=2^15); on connect side,
+    /// create stream id from 1 (id_base=0).
     async fn setup_message_handling(
         &self,
         remote_hostid: ServerId,
@@ -229,6 +245,8 @@ impl WebChannel {
     ) -> anyhow::Result<()> {
         // Create channel for outgoing messages
         let (tx, rx) = mpsc::channel(16);
+
+        let (err_tx, mut err_rx) = mpsc::channel::<()>(1);
 
         // Store the sender in the association map
         self.assoc_tx.lock().unwrap().insert(remote_hostid.clone(), tx);
@@ -247,6 +265,7 @@ impl WebChannel {
                 remote_hostid_clone,
                 msg_tx_clone,
                 stream_id_base,
+                err_tx
             ).await;
         });
 
@@ -256,14 +275,23 @@ impl WebChannel {
         let assoc_tx_clone = self.assoc_tx.clone();
 
         tokio::spawn(async move {
-            handle_incoming_streams(
-                sctp_assoc,
-                msg_tx_clone,
-                remote_hostid_clone.clone(),
-            ).await;
+            tokio::select! {
+                _ = handle_incoming_messages(
+                    sctp_assoc,
+                    msg_tx_clone.clone(),
+                    remote_hostid_clone.clone(),
+                ) => (),
+                _ = err_rx.recv() => (),
+            }
 
             // Clean up when connection closes
             assoc_tx_clone.lock().unwrap().remove(&remote_hostid_clone);
+
+            // Connection closed, send ConnectionBroke message
+            let _ = msg_tx_clone.send(Message {
+                host: remote_hostid.clone(),
+                body: Msg::ConnectionBroke(remote_hostid),
+            }).await;
         });
 
         Ok(())
@@ -272,7 +300,6 @@ impl WebChannel {
 
 // *** DTLS and SCTP
 
-const MAX_FRAME_BODY_SIZE: usize = 32 * 1024;
 const MAX_FRAME_SIZE: usize = 64 * 1024;
 const RECEIVE_BUFFER_SIZE: u32 = 1024 * 1024;
 
@@ -361,29 +388,32 @@ async fn handle_outgoing_messages(
     remote_hostid: ServerId,
     msg_tx: mpsc::Sender<Message>,
     stream_id_base: u16,
+    err_tx: mpsc::Sender<()>,
 ) {
     while let Some(message) = rx.recv().await {
-        let stream_id = stream_id_base + next_stream_id.fetch_add(2, Ordering::SeqCst);
+        let stream_id = stream_id_base + next_stream_id.fetch_add(1, Ordering::SeqCst);
 
+        // open_stream only errs when _ourselves_ accept_stream
+        // blocked, which shouldn’t happen. So just drop and let
+        // setup_message_handling clean things up and send connection
+        // broke error.
         let res = sctp_assoc.open_stream(stream_id, PayloadProtocolIdentifier::Binary).await;
         if res.is_err() {
-            tracing::error!("Failed to open stream: {}, breaking connection", res.err().unwrap());
-            // Send ConnectionBroke message
-            let _ = msg_tx.send(Message {
-                host: remote_hostid.clone(),
-                body: Msg::ConnectionBroke(remote_hostid),
-            }).await;
+            tracing::error!("Failed to open stream #{}: {}", stream_id, res.err().unwrap());
+            let _ = err_tx.send(()).await;
             break; // Break and drop rx
         }
         let stream = res.unwrap();
         let data = match bincode::serialize(&message) {
             Ok(data) => data,
             Err(e) => {
+                // I don’t expect this to happen.
                 tracing::error!("Failed to serialize message: {}", e);
                 let _ = msg_tx.send(Message {
                     host: remote_hostid.clone(),
-                    body: Msg::ConnectionBroke(remote_hostid),
+                    body: Msg::SerializationErr(remote_hostid),
                 }).await;
+                let _ = err_tx.send(()).await;
                 break;
             }
         };
@@ -393,7 +423,9 @@ async fn handle_outgoing_messages(
         let len_bytes = bytes::Bytes::from(len_bytes.to_vec());
         if let Err(e) = stream.write(&len_bytes).await {
             tracing::error!("Failed to write length prefix to stream: {}", e);
-            continue;
+            // Let setup_message_handling send the connection broke message.
+            let _ = err_tx.send(()).await;
+            break;
         }
 
         // Send data in chunks of MAX_FRAME_SIZE
@@ -404,6 +436,8 @@ async fn handle_outgoing_messages(
 
             if let Err(e) = stream.write(&chunk).await {
                 tracing::error!("Failed to write data chunk to stream: {}", e);
+                // Let setup_message_handling send the connection broke message.
+                let _ = err_tx.send(()).await;
                 break;
             }
 
@@ -412,7 +446,7 @@ async fn handle_outgoing_messages(
     }
 }
 
-async fn handle_incoming_streams(
+async fn handle_incoming_messages(
     sctp_assoc: Arc<association::Association>,
     msg_tx: mpsc::Sender<Message>,
     remote_hostid: ServerId,
@@ -423,22 +457,19 @@ async fn handle_incoming_streams(
                 let msg_tx = msg_tx.clone();
                 let remote_hostid = remote_hostid.clone();
 
+                tracing::info!("New stream (#{}) from {}", stream.stream_identifier(), remote_hostid);
                 tokio::spawn(async move {
                     read_from_stream(stream, msg_tx, remote_hostid).await;
                 });
             }
             None => {
+                // When this function returns, the caller cleans up
+                // assoc_tx map and sends connection closed message.
                 tracing::info!("No more streams from {}", remote_hostid);
                 break;
             }
         }
     }
-
-    // Connection closed, send ConnectionBroke message
-    let _ = msg_tx.send(Message {
-        host: remote_hostid.clone(),
-        body: Msg::ConnectionBroke(remote_hostid),
-    }).await;
 }
 
 async fn read_from_stream(
@@ -454,18 +485,20 @@ async fn read_from_stream(
             if n < 8 {
                 let _ = msg_tx.send(Message {
                     host: remote_hostid.clone(),
-                    body: Msg::DeserializationError(
-                        format!("Failed to read full length prefix: only got {} bytes", n)
+                    body: Msg::SerializationErr(
+                        format!("Failed to read full length (8 bytes) prefix: only got {} bytes", n)
                     ),
                 }).await;
                 return;
             }
         }
-        Err(e) => {
-            tracing::error!("Failed to read length from stream from {}: {}", remote_hostid, e);
+        Err(err) => {
+            // The only error stream.read might throw is
+            // ErrShortBuffer. Which shouldn’t happen.
+            tracing::error!("Failed to read from stream #{} from {}: {}", stream.stream_identifier(), remote_hostid, err);
             let _ = msg_tx.send(Message {
                 host: remote_hostid.clone(),
-                body: Msg::ConnectionBroke(remote_hostid),
+                body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
             }).await;
             return;
         }
@@ -487,7 +520,7 @@ async fn read_from_stream(
                     // EOF before reading full content
                     let _ = msg_tx.send(Message {
                         host: remote_hostid.clone(),
-                        body: Msg::DeserializationError(
+                        body: Msg::SerializationErr(
                             format!("EOF while reading content: expected {} bytes, got {}", content_length, full_buffer.len())
                         ),
                     }).await;
@@ -496,10 +529,12 @@ async fn read_from_stream(
                 full_buffer.extend_from_slice(&chunk_buffer[..n]);
             }
             Err(e) => {
+                // The only error stream.read might throw is
+                // ErrShortBuffer. Which shouldn’t happen.
                 tracing::error!("Failed to read content from stream from {}: {}", remote_hostid, e);
                 let _ = msg_tx.send(Message {
                     host: remote_hostid.clone(),
-                    body: Msg::ConnectionBroke(remote_hostid),
+                    body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
                 }).await;
                 return;
             }
@@ -511,20 +546,19 @@ async fn read_from_stream(
         Ok(message) => {
             if let Err(e) = msg_tx.send(message).await {
                 tracing::error!("Failed to send message to channel: {}", e);
+                // No need to send error, the incoming_message handler
+                // will detect broken stream.
             }
         }
         Err(e) => {
             tracing::error!("Failed to deserialize message from {}: {}", remote_hostid, e);
             let _ = msg_tx.send(Message {
                 host: remote_hostid.clone(),
-                body: Msg::DeserializationError(format!("Failed to deserialize message: {}", e)),
+                body: Msg::SerializationErr(format!("Failed to deserialize message: {}", e)),
             }).await;
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
 
 #[cfg(test)]
 mod e2e_tests;
