@@ -7,6 +7,18 @@ description = "One-stop-shop for collaborative editing"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "collab-signal"
+path = "src/bin/collab-signal.rs"
+
+[[bin]]
+name = "test-editor-receptor"
+path = "src/bin/test_editor_receptor.rs"
+
+[[bin]]
+name = "test-websocket-receptor"
+path = "src/bin/test_websocket_receptor.rs"
+
 [dependencies]
 thiserror = "1.0.40"
 anyhow = "1.0.71"
