@@ -18,6 +18,10 @@ pub type Credential = String;
 /// path. We don't want to use full path since some people might
 /// consider the full path sensitive?
 pub type FilePath = (DocId, PathBuf);
+/// Project's id is it's abs filename.
+pub type ProjectId = String;
+/// A file under a project. Can be shared or not-shared.
+pub type ProjectFile = (ProjectId, String);
 
 pub type FatOp = crate::op::FatOp<Op>;
 
@@ -66,12 +70,10 @@ pub enum DocDesc {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileDesc {
-    /// A shared doc.
-    Doc(DocId),
-    /// A file on disk, not yet shared.
-    File(FilePath),
-    /// A subdir on disk under a shared dir.
-    Dir(FilePath),
+    /// A shared doc that isn't in a project.
+    File(DocId),
+    /// A file in a project.
+    ProjectFile(ProjectFile),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

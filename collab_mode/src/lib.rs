@@ -16,5 +16,6 @@ mod message;
 mod op;
 pub mod signaling;
 mod types;
+mod webchannel;
 mod webrpc;
 pub mod websocket_receptor;
