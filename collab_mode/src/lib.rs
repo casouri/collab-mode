@@ -10,6 +10,7 @@ pub mod editor_receptor;
 mod engine;
 mod error;
 pub mod file_server;
+mod ice;
 pub mod jsonrpc;
 mod message;
 mod op;

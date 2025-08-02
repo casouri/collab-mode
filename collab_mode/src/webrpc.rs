@@ -50,8 +50,8 @@
 
 use crate::config_man::{hash_der, ArcKeyCert};
 use crate::error::{WebrpcError, WebrpcResult};
+use crate::ice::{ice_accept, ice_bind, ice_connect};
 use crate::signaling::CertDerHash;
-use ice::{ice_accept, ice_bind, ice_connect};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,8 +64,6 @@ use webrtc_sctp::{association, chunk::chunk_payload_data::PayloadProtocolIdentif
 use webrtc_util::Conn;
 
 pub use crate::signaling::EndpointId;
-
-mod ice;
 
 const MAX_FRAME_BODY_SIZE: usize = 32 * 1024;
 const MAX_FRAME_SIZE: usize = 64 * 1024;
@@ -391,9 +389,9 @@ impl Endpoint {
                     // Send to request channel.
                     let _send_res = tx_1.send(Err(err.clone()));
                     // If can't send to request channel, send to all
-                    // response channels. Me in 2025: we don't really
-                    // need to do this much , caller will receive the
-                    // error when we drop the channels.
+                    // response channels. Me in 2025: we don't
+                    // really need to do this much , caller will receive the error
+                    // when we drop the channels.
 
                     // if send_res.is_err() {
                     //     for (_, tx) in resp_channel_map.read().unwrap().iter() {
