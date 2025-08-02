@@ -1303,6 +1303,10 @@ pub enum EngineError {
     SiteSeqMismatch(LocalSeq, EditorOp),
     #[error("Op {0:?} should have a global seq number, but doesn't")]
     SeqMissing(FatOp),
+    #[error("Insertion cannot be empty: {0:?}")]
+    EmptyInsert(EditorOp),
+    #[error("You can’t delete in empty doc")]
+    DeleteInEmptyDoc,
     #[error("Undo error: {0}")]
     UndoError(String),
 }
@@ -1435,10 +1439,16 @@ impl ClientEngine {
         self.current_site_seq = site_seq;
 
         let ops = match &op {
-            EditorOp::Ins(_, _) => {
+            EditorOp::Ins(_, ref text) => {
+                if (text.chars().count() as u64) == 0 {
+                    return Err(EngineError::EmptyInsert(op));
+                }
                 vec![self.internal_doc.convert_editor_op_and_apply(op, self.site)]
             }
             EditorOp::Del(_, _) => {
+                if self.internal_doc.ranges.len() == 0 {
+                    return Err(EngineError::DeleteInEmptyDoc);
+                }
                 vec![self.internal_doc.convert_editor_op_and_apply(op, self.site)]
             }
             EditorOp::Undo => self
@@ -2475,6 +2485,9 @@ mod tests {
         assert!(cursor.editor_pos == 0);
         assert!(cursor.range_idx == Some(0));
     }
+
+    #[cfg(test)]
+    mod internal_doc_tests;
 
     #[test]
     fn test_mark_to_ins_or_del() {
