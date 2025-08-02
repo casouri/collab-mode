@@ -630,7 +630,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::ice::{ice_accept, ice_bind, ice_connect};
+    use crate::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
     use super::{create_sctp_client, create_sctp_server};
     use crate::config_man::create_key_cert;
