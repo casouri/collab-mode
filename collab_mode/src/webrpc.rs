@@ -42,6 +42,11 @@
 //!
 //! For a server, fatal errors are sent to the request channel; for a client
 //! fatal errors are sent to every response channel.
+//!
+//! Me from 2025: SCTP has channels and messages, so our rpc should've
+//! been trivial to implement, sadly webrtc's sctp doesn't implement
+//! messages; and we didn't use channels, maybe in the future we can
+//! use channels.
 
 use crate::config_man::{hash_der, ArcKeyCert};
 use crate::error::{WebrpcError, WebrpcResult};
@@ -384,14 +389,17 @@ impl Endpoint {
                 .await;
                 if let Err(err) = res {
                     // Send to request channel.
-                    let send_res = tx_1.send(Err(err.clone()));
+                    let _send_res = tx_1.send(Err(err.clone()));
                     // If can't send to request channel, send to all
-                    // response channels.
-                    if send_res.is_err() {
-                        for (_, tx) in resp_channel_map.read().unwrap().iter() {
-                            let _ = tx.send(Err(err.clone()));
-                        }
-                    }
+                    // response channels. Me in 2025: we don't really
+                    // need to do this much , caller will receive the
+                    // error when we drop the channels.
+
+                    // if send_res.is_err() {
+                    //     for (_, tx) in resp_channel_map.read().unwrap().iter() {
+                    //         let _ = tx.send(Err(err.clone()));
+                    //     }
+                    // }
                 }
             }
             .instrument(span),
