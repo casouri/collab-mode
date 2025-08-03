@@ -19,6 +19,9 @@ use webrtc_sctp::{association, stream};
 use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 use webrtc_util::Conn;
 
+const STREAM_ID_HALF: u16 = 2u16.pow(15);
+const STREAM_ID_INIT: u16 = 1;
+
 // We don't have to split into three categories, but this should make
 // it easier to manage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +100,7 @@ impl WebChannel {
             my_hostid,
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
-            next_stream_id: Arc::new(AtomicU16::new(1)),
+            next_stream_id: Arc::new(AtomicU16::new(STREAM_ID_INIT)),
         }
     }
 
@@ -161,7 +164,7 @@ impl WebChannel {
                 }
                 let sctp_assoc = sctp_assoc.unwrap();
 
-                let res = self_clone.setup_message_handling(remote_hostid.clone(), sctp_assoc, 2u16.pow(15)).await;
+                let res = self_clone.setup_message_handling(remote_hostid.clone(), sctp_assoc, STREAM_ID_HALF).await;
                 if let Err(e) = res {
                     tracing::error!("Failed to setup message handling: {}", e);
                     let _ = msg_tx.send(Message {
@@ -486,8 +489,8 @@ async fn handle_incoming_messages(
                 // messages will have stream id greater than that.
                 // Then, if we get a stream with id greater than 2^15,
                 // it’s from ourself, so don’t read from it.
-                let stream_is_from_us = stream_id_base == 0 && stream_id <= 2u16.pow(15)
-                    || stream_id_base == 2u16.pow(15) && stream_id > 2u16.pow(15);
+                let stream_is_from_us = stream_id_base == 0 && stream_id < STREAM_ID_HALF + STREAM_ID_INIT
+                    || stream_id_base == STREAM_ID_HALF && stream_id >= STREAM_ID_HALF + STREAM_ID_INIT;
 
                 if stream_is_from_us {
                     let _ = stream.shutdown(std::net::Shutdown::Read).await;
