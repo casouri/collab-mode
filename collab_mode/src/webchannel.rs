@@ -7,6 +7,7 @@
 use crate::ice::{ice_accept, ice_bind, ice_connect};
 use crate::{config_man::hash_der, signaling::CertDerHash, types::*};
 use anyhow::anyhow;
+use lsp_server::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,7 @@ use webrtc_util::Conn;
 pub struct Message {
     host: ServerId,
     body: Msg,
+    req_id: Option<RequestId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +131,7 @@ impl WebChannel {
                     let _ = msg_tx.send(Message {
                         host: remote_hostid.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
+                        req_id: None,
                     }).await;
                     return;
                 }
@@ -140,6 +143,7 @@ impl WebChannel {
                     let _ = msg_tx.send(Message {
                         host: remote_hostid.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
+                        req_id: None,
                     }).await;
                     return;
                 }
@@ -151,6 +155,7 @@ impl WebChannel {
                     let _ = msg_tx.send(Message {
                         host: remote_hostid.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
+                        req_id: None,
                     }).await;
                     return;
                 }
@@ -162,6 +167,7 @@ impl WebChannel {
                     let _ = msg_tx.send(Message {
                         host: remote_hostid.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
+                        req_id: None,
                     }).await;
                 }
             });
@@ -189,6 +195,7 @@ impl WebChannel {
                     .send(Message {
                         host: hostid.clone(),
                         body: Msg::IceProgress(progress.to_string()),
+                        req_id: None,
                     })
                     .await;
             }
@@ -214,6 +221,7 @@ impl WebChannel {
         let message = Message {
             host: self.my_hostid.clone(),
             body: msg,
+            req_id: None,
         };
 
         let tx = self.assoc_tx
@@ -291,6 +299,7 @@ impl WebChannel {
             let _ = msg_tx_clone.send(Message {
                 host: remote_hostid.clone(),
                 body: Msg::ConnectionBroke(remote_hostid),
+                req_id: None,
             }).await;
         });
 
@@ -412,6 +421,7 @@ async fn handle_outgoing_messages(
                 let _ = msg_tx.send(Message {
                     host: remote_hostid.clone(),
                     body: Msg::SerializationErr(remote_hostid),
+                    req_id: None,
                 }).await;
                 let _ = err_tx.send(()).await;
                 break;
@@ -488,6 +498,7 @@ async fn read_from_stream(
                     body: Msg::SerializationErr(
                         format!("Failed to read full length (8 bytes) prefix: only got {} bytes", n)
                     ),
+                    req_id: None,
                 }).await;
                 return;
             }
@@ -499,6 +510,7 @@ async fn read_from_stream(
             let _ = msg_tx.send(Message {
                 host: remote_hostid.clone(),
                 body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
+                req_id: None,
             }).await;
             return;
         }
@@ -523,6 +535,7 @@ async fn read_from_stream(
                         body: Msg::SerializationErr(
                             format!("EOF while reading content: expected {} bytes, got {}", content_length, full_buffer.len())
                         ),
+                        req_id: None,
                     }).await;
                     return;
                 }
@@ -535,6 +548,7 @@ async fn read_from_stream(
                 let _ = msg_tx.send(Message {
                     host: remote_hostid.clone(),
                     body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
+                    req_id: None,
                 }).await;
                 return;
             }
@@ -555,6 +569,7 @@ async fn read_from_stream(
             let _ = msg_tx.send(Message {
                 host: remote_hostid.clone(),
                 body: Msg::SerializationErr(format!("Failed to deserialize message: {}", e)),
+                req_id: None,
             }).await;
         }
     }
