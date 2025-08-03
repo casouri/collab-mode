@@ -288,6 +288,7 @@ impl WebChannel {
                     sctp_assoc,
                     msg_tx_clone.clone(),
                     remote_hostid_clone.clone(),
+                    stream_id_base,
                 ) => (),
                 _ = err_rx.recv() => (),
             }
@@ -390,6 +391,10 @@ async fn create_sctp_client(
 
 // *** Helper functions for WebChannel
 
+// Read messages from `rx` and send them out to remote. Open a new
+// stream for every message to send out. When creating new steam id,
+// add `stream_id_base` to it, so the two ends of the connection
+// create non-overlapping stream ids.
 async fn handle_outgoing_messages(
     mut rx: mpsc::Receiver<Message>,
     sctp_assoc: Arc<association::Association>,
@@ -424,6 +429,7 @@ async fn handle_outgoing_messages(
                     req_id: None,
                 }).await;
                 let _ = err_tx.send(()).await;
+                let _ = stream.shutdown(std::net::Shutdown::Both).await;
                 break;
             }
         };
@@ -435,6 +441,7 @@ async fn handle_outgoing_messages(
             tracing::error!("Failed to write length prefix to stream: {}", e);
             // Let setup_message_handling send the connection broke message.
             let _ = err_tx.send(()).await;
+            let _ = stream.shutdown(std::net::Shutdown::Both).await;
             break;
         }
 
@@ -448,22 +455,45 @@ async fn handle_outgoing_messages(
                 tracing::error!("Failed to write data chunk to stream: {}", e);
                 // Let setup_message_handling send the connection broke message.
                 let _ = err_tx.send(()).await;
+                let _ = stream.shutdown(std::net::Shutdown::Both).await;
                 break;
             }
 
             offset = chunk_end;
         }
+        let _ = stream.shutdown(std::net::Shutdown::Write).await;
     }
 }
 
+// Listen for new SCTP streams, each stream is a new message. For each
+// new stream, spawn a new thread that reads a message from it and
+// send to `msg_tx`. `stream_id_base` is the same as the one passed to
+// `handle_outgoing_messages`, we use it to determine which streams we
+// get are actually from ourselves.
 async fn handle_incoming_messages(
     sctp_assoc: Arc<association::Association>,
     msg_tx: mpsc::Sender<Message>,
     remote_hostid: ServerId,
+    stream_id_base: u16,
 ) {
     loop {
         match sctp_assoc.accept_stream().await {
             Some(stream) => {
+                let stream_id = stream.stream_identifier();
+                // If `stream_id_base` is 2^15, that means we’re the
+                // accept side of the overall connection, which means
+                // all the streams created by us for sending out
+                // messages will have stream id greater than that.
+                // Then, if we get a stream with id greater than 2^15,
+                // it’s from ourself, so don’t read from it.
+                let stream_is_from_us = stream_id_base == 0 && stream_id <= 2u16.pow(15)
+                    || stream_id_base == 2u16.pow(15) && stream_id > 2u16.pow(15);
+
+                if stream_is_from_us {
+                    let _ = stream.shutdown(std::net::Shutdown::Read).await;
+                    continue;
+                }
+
                 let msg_tx = msg_tx.clone();
                 let remote_hostid = remote_hostid.clone();
 
@@ -500,6 +530,7 @@ async fn read_from_stream(
                     ),
                     req_id: None,
                 }).await;
+                let _ = stream.shutdown(std::net::Shutdown::Both).await;
                 return;
             }
         }
@@ -512,6 +543,7 @@ async fn read_from_stream(
                 body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
                 req_id: None,
             }).await;
+            let _ = stream.shutdown(std::net::Shutdown::Both).await;
             return;
         }
     }
@@ -537,6 +569,7 @@ async fn read_from_stream(
                         ),
                         req_id: None,
                     }).await;
+                    let _ = stream.shutdown(std::net::Shutdown::Both).await;
                     return;
                 }
                 full_buffer.extend_from_slice(&chunk_buffer[..n]);
@@ -550,10 +583,13 @@ async fn read_from_stream(
                     body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
                     req_id: None,
                 }).await;
+                let _ = stream.shutdown(std::net::Shutdown::Both).await;
                 return;
             }
         }
     }
+
+    let _ = stream.shutdown(std::net::Shutdown::Read).await;
 
     // Deserialize the message
     match bincode::deserialize::<Message>(&full_buffer) {
