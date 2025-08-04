@@ -19,3 +19,4 @@ mod types;
 mod webchannel;
 mod webrpc;
 pub mod websocket_receptor;
+pub mod server;

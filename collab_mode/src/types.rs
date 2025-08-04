@@ -84,6 +84,19 @@ pub enum FileContentOrPath {
     Path(PathBuf),
 }
 
+/// A shared directory, basically. Remote user can freely browse and
+/// open files under a shared project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    /// Name of the project, default to the base name of `root`.
+    name: String,
+    /// Absolute filename of the root of the project.
+    root: String,
+    /// Metadata for the project. A serialized JSON object.
+    meta: String,
+}
+
 impl EditorOp {
     pub fn kind(&self) -> EditorOpKind {
         match self {

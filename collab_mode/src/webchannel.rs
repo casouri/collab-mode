@@ -33,9 +33,9 @@ impl std::error::Error for WebchannelError {}
 // it easier to manage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    host: ServerId,
-    body: Msg,
-    req_id: Option<RequestId>,
+    pub host: ServerId,
+    pub body: Msg,
+    pub req_id: Option<RequestId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +67,7 @@ pub enum Msg {
 
     // Misc
     IceProgress(String),
+    Hey(String),
 
     // Errors
     ConnectionBroke(ServerId),
@@ -158,13 +159,14 @@ impl WebChannel {
             let self_clone = self.clone();
             let my_key_cert = listener.my_key_cert.clone();
             let msg_tx = self.msg_tx.clone();
+            let remote_hostid_clone = remote_hostid.to_string();
 
             tokio::spawn(async move {
                 let conn = ice_accept(sock, None).await;
                 if conn.is_err() {
                     tracing::error!("Failed to accept ICE connection: {}", conn.err().unwrap());
                     let _ = msg_tx.send(Message {
-                        host: remote_hostid.clone(),
+                        host: remote_hostid_clone.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
                         req_id: None,
                     }).await;
@@ -176,7 +178,7 @@ impl WebChannel {
                 if dtls_connection.is_err() {
                     tracing::error!("Failed to create DTLS server: {}", dtls_connection.err().unwrap());
                     let _ = msg_tx.send(Message {
-                        host: remote_hostid.clone(),
+                        host: remote_hostid_clone.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
                         req_id: None,
                     }).await;
@@ -188,7 +190,7 @@ impl WebChannel {
                 if sctp_assoc.is_err() {
                     tracing::error!("Failed to create SCTP server: {}", sctp_assoc.err().unwrap());
                     let _ = msg_tx.send(Message {
-                        host: remote_hostid.clone(),
+                        host: remote_hostid_clone.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
                         req_id: None,
                     }).await;
@@ -196,22 +198,24 @@ impl WebChannel {
                 }
                 let sctp_assoc = sctp_assoc.unwrap();
 
-                let res = self_clone.setup_message_handling(remote_hostid.clone(), sctp_assoc, STREAM_ID_HALF).await;
+                let res = self_clone.setup_message_handling(&remote_hostid, sctp_assoc, STREAM_ID_HALF).await;
                 if let Err(e) = res {
                     tracing::error!("Failed to setup message handling: {}", e);
                     let _ = msg_tx.send(Message {
-                        host: remote_hostid.clone(),
+                        host: remote_hostid_clone.clone(),
                         body: Msg::ConnectionBroke(remote_hostid),
                         req_id: None,
                     }).await;
                 }
+
+                let _ = self_clone.send(&remote_hostid_clone, None, Msg::Hey("Welcom to my server".to_string())).await;
             });
         }
     }
 
     /// Connect to a remote host through signaling server. Setup
-    /// message handling threads that runs in the background. Doesn’t
-    /// block.
+    /// message handling threads that runs in the background. Blocks
+    /// until the connection is established.
     pub async fn connect(
         &self,
         remote_hostid: ServerId,
@@ -246,28 +250,30 @@ impl WebChannel {
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
         let sctp_assoc = create_sctp_client(dtls_connection).await?;
 
-        self.setup_message_handling(remote_hostid, sctp_assoc, 0).await?;
+        self.setup_message_handling(&remote_hostid, sctp_assoc, 0).await?;
+
+        self.send(&remote_hostid, None, Msg::Hey("Nice to meet ya".to_string())).await?;
 
         Ok(())
     }
 
     /// Send a message to a remote host. Doesn’t block.
-    pub async fn send(&self, recipient: ServerId, msg: Msg) -> anyhow::Result<()> {
+    pub async fn send(&self, recipient: &ServerId, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
         let message = Message {
             host: self.my_hostid.clone(),
             body: msg,
-            req_id: None,
+            req_id,
         };
 
         let tx = self.assoc_tx
             .lock()
             .unwrap()
-            .get(&recipient)
+            .get(recipient)
             .cloned()
-            .ok_or_else(|| anyhow!("Recipient {} not connected", recipient))?;
+            .ok_or_else(|| anyhow!("Not connected"))?;
 
         tx.send(message).await
-            .map_err(|_| anyhow!("Connection to {} broke", recipient))?;
+            .map_err(|_| anyhow!("Unknown"))?;
 
         Ok(())
     }
@@ -282,7 +288,7 @@ impl WebChannel {
     /// create stream id from 1 (id_base=0).
     async fn setup_message_handling(
         &self,
-        remote_hostid: ServerId,
+        remote_hostid: &ServerId,
         sctp_assoc: Arc<association::Association>,
         stream_id_base: u16,
     ) -> anyhow::Result<()> {
@@ -314,7 +320,7 @@ impl WebChannel {
 
         // Spawn task to handle incoming streams
         let msg_tx_clone = self.msg_tx.clone();
-        let remote_hostid_clone = remote_hostid.clone();
+        let remote_hostid_clone = remote_hostid.to_string();
         let assoc_tx_clone = self.assoc_tx.clone();
 
         tokio::spawn(async move {
@@ -333,8 +339,8 @@ impl WebChannel {
 
             // Connection closed, send ConnectionBroke message
             let _ = msg_tx_clone.send(Message {
-                host: remote_hostid.clone(),
-                body: Msg::ConnectionBroke(remote_hostid),
+                host: remote_hostid_clone.clone(),
+                body: Msg::ConnectionBroke(remote_hostid_clone),
                 req_id: None,
             }).await;
         });
