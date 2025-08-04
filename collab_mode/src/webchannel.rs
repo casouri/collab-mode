@@ -22,6 +22,13 @@ use webrtc_util::Conn;
 const STREAM_ID_HALF: u16 = 2u16.pow(15);
 const STREAM_ID_INIT: u16 = 1;
 
+#[derive(fmt_derive::Debug, fmt_derive::Display)]
+pub enum WebchannelError {
+    AlreadyAccepting,
+}
+
+impl std::error::Error for WebchannelError {}
+
 // We don't have to split into three categories, but this should make
 // it easier to manage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +99,8 @@ pub struct WebChannel {
     msg_tx: mpsc::Sender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
     next_stream_id: Arc<AtomicU16>,
+    /// Wether there’s an accepting thread running already.
+    accepting: bool,
 }
 
 impl WebChannel {
@@ -101,6 +110,7 @@ impl WebChannel {
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU16::new(STREAM_ID_INIT)),
+            accepting: false,
         }
     }
 
@@ -112,6 +122,20 @@ impl WebChannel {
     /// connections. For each connection, setup message handling
     /// threads running in the background.
     pub async fn accept(
+        &mut self,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+    ) -> anyhow::Result<()> {
+        if self.accepting {
+            return Err(anyhow!(WebchannelError::AlreadyAccepting));
+        }
+        self.accepting = true;
+        let res = self.accept_inner(my_key_cert, signaling_addr).await;
+        self.accepting = false;
+        return res;
+    }
+
+    pub async fn accept_inner(
         &self,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
