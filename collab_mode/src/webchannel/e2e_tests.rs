@@ -156,7 +156,7 @@ mod e2e_tests {
         // Test message exchange
         let test_msg = Msg::FileShared(42); // DocId is u32
         tracing::info!("Sending test message from {} to {}", id2, id1);
-        let send_result = channel2.send(id1.clone(), test_msg.clone()).await;
+        let send_result = channel2.send(&id1, None, test_msg.clone()).await;
         assert!(send_result.is_ok(), "Send should succeed");
 
         // Receive message on channel1
@@ -231,7 +231,7 @@ mod e2e_tests {
 
         // Send all message types
         for msg in test_messages.iter() {
-            channel2.send(id1.clone(), msg.clone()).await.unwrap();
+            channel2.send(&id1, None, msg.clone()).await.unwrap();
         }
 
         // Receive and verify all messages
@@ -292,7 +292,7 @@ mod e2e_tests {
             };
 
             // Send large message
-            channel2.send(id1.clone(), msg).await.unwrap();
+            channel2.send(&id1, None, msg).await.unwrap();
 
             // Receive and verify
             let received = timeout(Duration::from_secs(10), rx1.recv()).await.unwrap().unwrap();
@@ -382,7 +382,7 @@ mod e2e_tests {
                     value: format!("Hello from client {}", i),
                 }
             );
-            channel.send(hub_id.clone(), msg).await.unwrap();
+            channel.send(&hub_id, None, msg).await.unwrap();
         }
 
         // Hub receives all messages (skip ICE progress messages)
@@ -416,7 +416,7 @@ mod e2e_tests {
         // Test hub sending to specific clients
         for (i, (client_id, _)) in client_channels.iter().enumerate() {
             let msg = Msg::FileShared(1000 + i as u32); // Use unique DocIds
-            hub_channel.send(client_id.clone(), msg).await.unwrap();
+            hub_channel.send(client_id, None, msg).await.unwrap();
         }
 
         // Each client receives its message (skip non-hub messages)
@@ -485,7 +485,7 @@ mod e2e_tests {
         channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url()).await.unwrap();
 
         // Exchange messages to verify connection
-        channel2.send(id1.clone(), Msg::FileShared(1)).await.unwrap();
+        channel2.send(&id1, None, Msg::FileShared(1)).await.unwrap();
         let msg = timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap();
         assert_eq!(msg.host, id2);
 
@@ -493,7 +493,7 @@ mod e2e_tests {
         channel1.assoc_tx.lock().unwrap().remove(&id2);
 
         // Try to send should fail
-        let send_result = channel1.send(id2.clone(), Msg::FileShared(2)).await;
+        let send_result = channel1.send(&id2, None, Msg::FileShared(2)).await;
         assert!(send_result.is_err());
         assert!(send_result.unwrap_err().to_string().contains("not connected"));
 
@@ -610,7 +610,7 @@ mod e2e_tests {
                             }
                         )
                     };
-                    channel2.send(id1.clone(), msg).await.unwrap();
+                    channel2.send(&id1, None, msg).await.unwrap();
                 }
             })
         };
