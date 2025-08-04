@@ -101,7 +101,7 @@ pub struct WebChannel {
     next_stream_id: Arc<AtomicU16>,
     /// Wether there’s an accepting thread running already for a
     /// signaling server URL.
-    accepting: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    accepting: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 impl WebChannel {
@@ -127,23 +127,20 @@ impl WebChannel {
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
     ) -> anyhow::Result<()> {
-        let accepting = self.accepting.lock().unwrap().get(signaling_addr).map_or(None, |x| Some(x.clone()));
+        let accepting = {
+            let mut accepting_map = self.accepting.lock().unwrap();
+            let accepting = accepting_map.get(signaling_addr).map_or(false, |x| x.clone());
+            accepting_map.insert(signaling_addr.to_string(), true);
+            accepting
+        };
 
-        match accepting {
-            None => {
-                let lock = Arc::new(Mutex::new(()));
-                lock.lock().unwrap();
-                self.accepting.lock().unwrap().insert(signaling_addr.to_string(), lock.clone());
-                self.accept_inner(my_key_cert, signaling_addr).await
-            }
-            Some(lock) => {
-                match lock.try_lock() {
-                    Ok(_) => self.accept_inner(my_key_cert, signaling_addr).await,
-                    Err(_) => Err(anyhow!(WebchannelError::AlreadyAccepting)),
-                }
-            }
+        if accepting {
+            Err(anyhow!(WebchannelError::AlreadyAccepting))
+        } else {
+            let res = self.accept_inner(my_key_cert, signaling_addr).await;
+            self.accepting.lock().unwrap().insert(signaling_addr.to_string(), false);
+            res
         }
-
     }
 
     pub async fn accept_inner(
