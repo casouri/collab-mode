@@ -33,7 +33,7 @@ struct Doc {
 }
 
 /// Stores relevant for the server.
-struct Server {
+pub struct Server {
     /// Host id of this server.
     host_id: ServerId,
     /// SiteId given to ourselves.
@@ -85,19 +85,19 @@ impl Server {
 
     pub async fn run(&mut self, editor_tx: mpsc::Sender<lsp_server::Message>, mut editor_rx: mpsc::Receiver<lsp_server::Message>) -> anyhow::Result<()> {
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
-        let webchanel = WebChannel::new(self.host_id.clone(), msg_tx);
+        let webchannel = WebChannel::new(self.host_id.clone(), msg_tx);
 
         loop {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
                     tracing::info!("Received message from editor: {:?}", msg);
-                    self.handle_editor_message(msg, &editor_tx, &webchanel).await;
+                    self.handle_editor_message(msg, &editor_tx, &webchannel).await;
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
                     tracing::info!("Received message from remote: {:?}", web_msg);
-                    self.handle_remote_message(web_msg, &editor_tx, &webchanel).await;
+                    self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
                 },
             }
         }
@@ -275,7 +275,7 @@ impl Server {
 
 // *** Helper functions
 
-async fn send_notification<T: Display>(
+pub async fn send_notification<T: Display>(
     editor_tx: &mpsc::Sender<lsp_server::Message>,
     method: T,
     params: serde_json::Value,
@@ -321,3 +321,6 @@ async fn send_connection_broke(
         tracing::error!("Failed to send connection broke notification to editor: {}", err);
     }
 }
+
+#[cfg(test)]
+mod tests;
