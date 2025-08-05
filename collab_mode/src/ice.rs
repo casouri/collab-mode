@@ -41,7 +41,7 @@ pub async fn ice_bind(
 
 /// Accept connections from `sock`. If `progress_tx` isn't None,
 /// report progress to it while establishing connection.
-#[instrument(skip(progress_tx))]
+#[instrument(skip_all)]
 pub async fn ice_accept(
     mut sock: SignalSocket,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
