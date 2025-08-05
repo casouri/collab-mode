@@ -127,7 +127,7 @@ mod e2e_tests {
 
         // Start accepting on channel1
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             let id1_clone = id1.clone();
@@ -193,7 +193,7 @@ mod e2e_tests {
 
         // Establish connection
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
@@ -263,7 +263,7 @@ mod e2e_tests {
 
         // Establish connection
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
@@ -327,7 +327,7 @@ mod e2e_tests {
 
         // Start hub accepting connections
         let accept_handle = {
-            let hub_channel = hub_channel.clone();
+            let mut hub_channel = hub_channel.clone();
             let hub_key_cert = hub_key_cert.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
@@ -351,7 +351,7 @@ mod e2e_tests {
 
             // Start client accepting connections too
             let client_accept_handle = {
-                let channel_clone = channel.clone();
+                let mut channel_clone = channel.clone();
                 let key_cert_clone = key_cert.clone();
                 let signaling_url = env.signaling_url().to_string();
                 tokio::spawn(async move {
@@ -473,7 +473,7 @@ mod e2e_tests {
 
         // Establish initial connection
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
@@ -531,7 +531,7 @@ mod e2e_tests {
 
         // Start accepting with cert1
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
@@ -572,7 +572,7 @@ mod e2e_tests {
 
         // Establish connection
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
@@ -650,7 +650,7 @@ mod e2e_tests {
 
         // Start accepting
         let accept_handle = {
-            let channel1 = channel1.clone();
+            let mut channel1 = channel1.clone();
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
