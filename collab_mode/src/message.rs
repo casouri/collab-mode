@@ -160,7 +160,7 @@ pub struct DeclareProjectEntry {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
-    pub dir: Option<DocDesc>,
+    pub dir: Option<ProjectFile>,
     pub host_id: ServerId,
     pub signaling_addr: String,
     pub credential: Credential,
@@ -178,6 +178,7 @@ pub struct ListFileEntry {
     pub file: FileDesc,
     // The non-directory filename (buffer/document name in editor).
     pub filename: String,
+    pub is_directory: bool,
     pub meta: JsonMap,
 }
 

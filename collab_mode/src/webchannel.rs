@@ -47,7 +47,7 @@ pub enum Msg {
     },
     FileShared(DocId),
     ListFiles {
-        project: Option<FilePath>,
+        dir: Option<ProjectFile>,
     },
     FileList(Vec<ListFilesEntry>),
     DeclareProjects(Vec<DeclareProjectEntry>),

@@ -72,6 +72,8 @@ pub enum DocDesc {
 pub enum FileDesc {
     /// A shared doc that isn't in a project.
     File(DocId),
+    /// A project.
+    Project(ProjectId),
     /// A file in a project.
     ProjectFile(ProjectFile),
 }
@@ -90,11 +92,11 @@ pub enum FileContentOrPath {
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     /// Name of the project, default to the base name of `root`.
-    name: String,
+    pub name: String,
     /// Absolute filename of the root of the project.
-    root: String,
+    pub root: String,
     /// Metadata for the project. A serialized JSON object.
-    meta: String,
+    pub meta: JsonMap,
 }
 
 impl EditorOp {

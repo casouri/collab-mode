@@ -3,13 +3,15 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, atomic::AtomicU32};
 use gapbuf::GapBuffer;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use crate::config_man::ConfigManager;
 use crate::signaling::SignalingError;
 use crate::webchannel::{self, Msg, Message as WMsg};
-use crate::message::*;
+use crate::message::{self, *};
 use crate::types::*;
 use crate::webchannel::WebChannel;
+use anyhow::{Context, anyhow};
 
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
@@ -43,7 +45,7 @@ pub struct Server {
     /// Docs hosted by this server.
     docs: HashMap<DocId, Doc>,
     /// Projects.
-    projects: Vec<Project>,
+    projects: HashMap<ProjectId, Project>,
     /// Map of recognized users.
     users: HashMap<Credential, SiteId>,
     /// Active remote peers.
@@ -71,7 +73,7 @@ impl Server {
             site_id: 0,
             next_site_id: AtomicU32::new(1),
             docs: HashMap::new(),
-            projects: Vec::new(),
+            projects: HashMap::new(),
             users: HashMap::new(),
             active_remotes: Vec::new(),
             site_id_map: HashMap::new(),
@@ -158,7 +160,7 @@ impl Server {
     ) -> anyhow::Result<()> {
         match req.method.as_str() {
             "ListFiles" => {
-                let params: ListFilesParams = serde_json::from_value(req.params)?;
+                let params: message::ListFilesParams = serde_json::from_value(req.params)?;
                 // Handle the request...
                 Ok(())
             },
@@ -214,22 +216,7 @@ impl Server {
             },
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
-                send_notification(editor_tx, NotificationCode::Connecting, serde_json::json!({
-                    "hostId": params.host_id,
-                })).await;
-                let key_cert = self.key_cert.clone();
-                let webchannel_1 = webchannel.clone();
-                let editor_tx_1 = editor_tx.clone();
-
-                tokio::spawn(async move {
-                    if let Err(err) = webchannel_1.connect(params.host_id.clone(), key_cert, &params.signaling_addr).await {
-                        tracing::error!("Failed to connect to {}: {}", params.host_id, err);
-                        send_notification(&editor_tx_1, NotificationCode::ConnectionBroke, serde_json::json!({
-                            "hostId": params.host_id,
-                            "reason": err.to_string(),
-                        })).await;
-                    }
-                });
+                self.connect(editor_tx, webchannel, params.host_id, params.signaling_addr).await;
             },
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
@@ -269,6 +256,101 @@ impl Server {
             _ => todo!()
         }
     }
+
+// **** Handler functions
+
+    async fn connect(&mut self, editor_tx: &mpsc::Sender<lsp_server::Message>, webchannel: &WebChannel, host_id: ServerId, signaling_addr: String) {
+        if host_id == self.host_id {
+            return;
+        }
+        send_notification(editor_tx, NotificationCode::Connecting, serde_json::json!({
+            "hostId": host_id,
+        })).await;
+        let key_cert = self.key_cert.clone();
+        let webchannel_1 = webchannel.clone();
+        let editor_tx_1 = editor_tx.clone();
+
+        tokio::spawn(async move {
+            if let Err(err) = webchannel_1.connect(host_id.clone(), key_cert, &signaling_addr).await {
+                tracing::error!("Failed to connect to {}: {}", host_id, err);
+                send_notification(&editor_tx_1, NotificationCode::ConnectionBroke, serde_json::json!({
+                    "hostId": host_id,
+                    "reason": err.to_string(),
+                })).await;
+            }
+        });
+    }
+
+    async fn list_files(&mut self, editor_tx: &mpsc::Sender<lsp_server::Message>, webchannel: &WebChannel, host_id: ServerId, dir: Option<ProjectFile>, req_id: lsp_server::RequestId) -> anyhow::Result<()> {
+        if self.host_id != host_id {
+            webchannel.send(&host_id, Some(req_id), Msg::ListFiles { dir }).await?;
+            return Ok(());
+        }
+        // Host id is ourselves:
+        // It doesn’t make sense to list files for ourselves in attached mode.
+        if self.attached {
+            send_response(editor_tx, req_id, ListFilesResp {
+                files: vec![],
+            }, None).await;
+            return Ok(());
+        }
+        // Not in attached mode, read files from disk.
+        if let Some((project_id, rel_filename)) = dir {
+            // List files in a project directory.
+            let project = self.projects.get(&project_id).ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+
+            let filename = std::path::PathBuf::from(project.root.clone()).join(rel_filename);
+            let filename_str = filename.to_string_lossy().to_string();
+            let stat = std::fs::metadata(&filename)
+                .with_context(|| format!("Can't access file {}", &filename_str))?;
+
+            if !stat.is_dir() {
+                return Err(anyhow!(format!("Not a directory: {}", filename_str)));
+            }
+
+            let mut result = vec![];
+            let files = std::fs::read_dir(&filename)
+                .with_context(|| format!("Can't access file {}", &filename_str))?;
+            for file in files {
+                let file = file.with_context(|| format!("Can't access files in {}", &filename_str))?;
+                let file_str = file.file_name().to_string_lossy().to_string();
+                let stat = file
+                    .metadata()
+                    .with_context(|| format!("Can't access file {}", &file_str))?;
+                let file_rel = pathdiff::diff_paths(&project.root, &file_str).unwrap();
+                result.push(ListFileEntry {
+                    file: FileDesc::ProjectFile((project_id.clone(), file_rel.to_string_lossy().to_string())),
+                    filename: file.file_name().to_string_lossy().to_string(),
+                    is_directory: stat.is_dir(),
+                    meta: JsonMap::new(),
+                });
+            }
+
+            send_response(editor_tx, req_id, ListFilesResp { files: result }, None).await;
+        } else {
+            // List top-level projects and docs.
+            let mut result = vec![];
+            for (_, project) in self.projects.iter() {
+                result.push(ListFileEntry {
+                    file: FileDesc::Project(project.root.clone()),
+                    filename: project.name.clone(),
+                    is_directory: true,
+                    meta: project.meta.clone(),
+                });
+            }
+            for (docid, doc) in self.docs.iter() {
+                result.push(ListFileEntry {
+                    file: FileDesc::File(docid.clone()),
+                    is_directory: false,
+                    filename: doc.name.clone(),
+                    meta: doc.meta.clone(),
+                });
+            }
+            send_response(editor_tx, req_id, ListFilesResp { files: result }, None).await;
+
+        }
+        Ok(())
+    }
 }
 
 
@@ -292,12 +374,12 @@ pub async fn send_notification<T: Display>(
 async fn send_response(
     editor_tx: &mpsc::Sender<lsp_server::Message>,
     id: lsp_server::RequestId,
-    result: Option<serde_json::Value>,
+    result: impl Serialize,
     error: Option<lsp_server::ResponseError>,
 ) {
     let response = lsp_server::Response {
         id,
-        result,
+        result: Some(serde_json::to_value(result).unwrap()),
         error,
     };
     if let Err(err) = editor_tx.send(lsp_server::Message::Response(response)).await {
