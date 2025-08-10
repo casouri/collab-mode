@@ -133,7 +133,7 @@ mod e2e_tests {
             let id1_clone = id1.clone();
             tokio::spawn(async move {
                 tracing::info!("{} starting to accept connections", id1_clone);
-                let result = channel1.accept(key_cert1, &signaling_url).await;
+                let result = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
                 if let Err(e) = result {
                     tracing::error!("{} accept error: {}", id1_clone, e);
                 }
@@ -147,7 +147,7 @@ mod e2e_tests {
         tracing::info!("{} connecting to {}", id2, id1);
         let connect_result = timeout(
             Duration::from_secs(5),
-            channel2.connect(id1.clone(), key_cert2, env.signaling_url())
+            channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP)
         ).await;
 
         assert!(connect_result.is_ok(), "Connection should succeed");
@@ -197,12 +197,12 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url).await;
+                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2, env.signaling_url()).await.unwrap();
+        channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
 
         // Test various message types
         let test_messages = vec![
@@ -213,7 +213,7 @@ mod e2e_tests {
             },
             Msg::FileShared(123),
             Msg::ListFiles {
-                project: Some((1, PathBuf::from("/test"))), // FilePath is (DocId, PathBuf)
+                dir: Some(("project1".to_string(), "/test".to_string())), // ProjectFile is (ProjectId, String)
             },
             Msg::FileList(vec![ListFilesEntry {
                 doc: FileDesc::File(1),
@@ -267,12 +267,12 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url).await;
+                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2, env.signaling_url()).await.unwrap();
+        channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
 
         // Test various sizes
         let test_sizes = vec![
@@ -331,7 +331,7 @@ mod e2e_tests {
             let hub_key_cert = hub_key_cert.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = hub_channel.accept(hub_key_cert, &signaling_url).await;
+                let _ = hub_channel.accept(hub_key_cert, &signaling_url, TransportType::SCTP).await;
             })
         };
 
@@ -355,16 +355,16 @@ mod e2e_tests {
                 let key_cert_clone = key_cert.clone();
                 let signaling_url = env.signaling_url().to_string();
                 tokio::spawn(async move {
-                    let _ = channel_clone.accept(key_cert_clone, &signaling_url).await;
+                    let _ = channel_clone.accept(key_cert_clone, &signaling_url, TransportType::SCTP).await;
                 })
             };
             client_accept_handles.push(client_accept_handle);
 
             // Connect to hub
-            channel.connect(hub_id.clone(), key_cert.clone(), env.signaling_url()).await.unwrap();
+            channel.connect(hub_id.clone(), key_cert.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
 
             // Hub connects back to client for bidirectional communication
-            hub_channel.connect(id.clone(), hub_key_cert.clone(), env.signaling_url()).await.unwrap();
+            hub_channel.connect(id.clone(), hub_key_cert.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
 
             client_channels.push((id, channel));
             client_rxs.push(rx);
@@ -477,12 +477,12 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url).await;
+                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url()).await.unwrap();
+        channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
 
         // Exchange messages to verify connection
         channel2.send(&id1, None, Msg::FileShared(1)).await.unwrap();
@@ -535,7 +535,7 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url).await;
+                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
             })
         };
 
@@ -544,7 +544,7 @@ mod e2e_tests {
         // Connect with matching cert should succeed
         let connect_result = timeout(
             Duration::from_secs(5),
-            channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url())
+            channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP)
         ).await;
         assert!(connect_result.is_ok() && connect_result.unwrap().is_ok());
 
@@ -576,12 +576,12 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url).await;
+                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2, env.signaling_url()).await.unwrap();
+        channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
 
         // Send many messages rapidly
         let num_messages = 100;
@@ -654,7 +654,7 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url).await;
+                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
             })
         };
 
@@ -666,7 +666,7 @@ mod e2e_tests {
             let key_cert2 = key_cert2.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                channel2.connect(id1.clone(), key_cert2, &signaling_url).await
+                channel2.connect(id1.clone(), key_cert2, &signaling_url, TransportType::SCTP).await
             })
         };
 

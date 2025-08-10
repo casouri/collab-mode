@@ -29,6 +29,13 @@ pub enum WebchannelError {
 
 impl std::error::Error for WebchannelError {}
 
+/// Types of transport. currently only SCTP, we might add webrtc
+/// later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransportType {
+    SCTP,
+}
+
 // We don't have to split into three categories, but this should make
 // it easier to manage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +138,7 @@ impl WebChannel {
         &mut self,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
+        _transport_type: TransportType,
     ) -> anyhow::Result<()> {
         let accepting = {
             let mut accepting_map = self.accepting.lock().unwrap();
@@ -252,6 +260,7 @@ impl WebChannel {
         remote_hostid: ServerId,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
+        _transport_type: TransportType,
     ) -> anyhow::Result<()> {
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
         let msg_tx = self.msg_tx.clone();

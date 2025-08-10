@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::{types::*, webchannel::TransportType};
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,7 @@ pub enum NotificationCode {
     ConnectionProgress,  // Editor should show connection progress.
     AcceptingConnection, // Editor should show that we're accepting connections.
     AcceptStopped,       // Editor should show that we're not accepting connections anymore.
-    Hey, // A ping from a remote, editor should mark the remote as connected.
+    Hey,                 // A ping from a remote, editor should mark the remote as connected.
 
     Misc,  // Editor should display the notification.
     Error, // Generic error, like bad notification arguments.
@@ -102,6 +102,7 @@ pub struct InitParams {
 pub struct AcceptConnectionParams {
     pub host_id: ServerId,
     pub signaling_addr: String,
+    pub transport_type: TransportType,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -118,6 +119,7 @@ pub struct ConnectionBrokeParams {
 pub struct ConnectParams {
     pub host_id: ServerId,
     pub signaling_addr: String,
+    pub transport_type: TransportType,
 }
 
 // *** ShareFile

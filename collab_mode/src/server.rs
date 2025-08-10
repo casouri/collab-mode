@@ -1,17 +1,17 @@
+use crate::config_man::ConfigManager;
+use crate::message::{self, *};
+use crate::signaling::SignalingError;
+use crate::types::*;
+use crate::webchannel::WebChannel;
+use crate::webchannel::{self, Message as WMsg, Msg};
+use anyhow::{anyhow, Context};
+use gapbuf::GapBuffer;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, atomic::AtomicU32};
-use gapbuf::GapBuffer;
-use serde::Serialize;
+use std::sync::{atomic::AtomicU32, Arc, Mutex};
 use tokio::sync::mpsc;
-use crate::config_man::ConfigManager;
-use crate::signaling::SignalingError;
-use crate::webchannel::{self, Msg, Message as WMsg};
-use crate::message::{self, *};
-use crate::types::*;
-use crate::webchannel::WebChannel;
-use anyhow::{Context, anyhow};
 
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
@@ -85,7 +85,11 @@ impl Server {
         Ok(server)
     }
 
-    pub async fn run(&mut self, editor_tx: mpsc::Sender<lsp_server::Message>, mut editor_rx: mpsc::Receiver<lsp_server::Message>) -> anyhow::Result<()> {
+    pub async fn run(
+        &mut self,
+        editor_tx: mpsc::Sender<lsp_server::Message>,
+        mut editor_rx: mpsc::Receiver<lsp_server::Message>,
+    ) -> anyhow::Result<()> {
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
         let webchannel = WebChannel::new(self.host_id.clone(), msg_tx);
 
@@ -125,17 +129,23 @@ impl Server {
                             data: None,
                         }),
                     };
-                    if let Err(err) = editor_tx.send(lsp_server::Message::Response(response)).await {
+                    if let Err(err) = editor_tx
+                        .send(lsp_server::Message::Response(response))
+                        .await
+                    {
                         tracing::error!("Failed to send response to editor: {}", err);
                     }
                 }
                 Ok(())
-            },
+            }
             lsp_server::Message::Response(resp) => {
                 todo!();
-            },
+            }
             lsp_server::Message::Notification(notif) => {
-                if let Err(err) = self.handle_editor_notification(notif, editor_tx, webchannel).await {
+                if let Err(err) = self
+                    .handle_editor_notification(notif, editor_tx, webchannel)
+                    .await
+                {
                     tracing::error!("Failed to handle editor notification: {}", err);
                     let notif = lsp_server::Notification {
                         method: NotificationCode::Error.to_string(),
@@ -143,12 +153,15 @@ impl Server {
                             "message": err.to_string(),
                         }),
                     };
-                    if let Err(err) = editor_tx.send(lsp_server::Message::Notification(notif)).await {
+                    if let Err(err) = editor_tx
+                        .send(lsp_server::Message::Notification(notif))
+                        .await
+                    {
                         tracing::error!("Failed to send notification to editor: {}", err);
                     }
                 }
                 Ok(())
-            },
+            }
         }
     }
 
@@ -163,12 +176,12 @@ impl Server {
                 let params: message::ListFilesParams = serde_json::from_value(req.params)?;
                 // Handle the request...
                 Ok(())
-            },
+            }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
                 // Handle the request...
                 Ok(())
-            },
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -190,34 +203,58 @@ impl Server {
                     return Ok(());
                 }
                 self.accepting.insert(params.signaling_addr.clone(), ());
-                send_notification(editor_tx, NotificationCode::AcceptingConnection, serde_json::json!({
-                    "signaling_addr": params.signaling_addr,
-                })).await;
+                send_notification(
+                    editor_tx,
+                    NotificationCode::AcceptingConnection,
+                    serde_json::json!({
+                        "signaling_addr": params.signaling_addr,
+                    }),
+                )
+                .await;
                 let key_cert = self.key_cert.clone();
                 let mut webchannel_1 = webchannel.clone();
                 let editor_tx_1 = editor_tx.clone();
 
                 tokio::spawn(async move {
-                    let res = webchannel_1.accept(key_cert, &params.signaling_addr).await;
+                    let res = webchannel_1
+                        .accept(key_cert, &params.signaling_addr, params.transport_type)
+                        .await;
                     if let Err(err) = res {
                         tracing::warn!("Stopped accepting connection: {}", err);
                         let msg = match err.downcast_ref() {
-                            Some(SignalingError::TimesUp(time)) => format!("Allocated signaling time is up ({}s)", time),
-                            Some(SignalingError::Closed) => format!("Signaling server closed the connection"),
-                            Some(SignalingError::IdTaken(id)) => format!("Host id {} is already taken", id),
+                            Some(SignalingError::TimesUp(time)) => {
+                                format!("Allocated signaling time is up ({}s)", time)
+                            }
+                            Some(SignalingError::Closed) => {
+                                format!("Signaling server closed the connection")
+                            }
+                            Some(SignalingError::IdTaken(id)) => {
+                                format!("Host id {} is already taken", id)
+                            }
                             _ => err.to_string(),
                         };
-                        send_notification(&editor_tx_1, NotificationCode::AcceptStopped, serde_json::json!({
+                        send_notification(
+                            &editor_tx_1,
+                            NotificationCode::AcceptStopped,
+                            serde_json::json!({
                                 "reason": msg,
-                            })).await;
-
+                            }),
+                        )
+                        .await;
                     }
                 });
-            },
+            }
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
-                self.connect(editor_tx, webchannel, params.host_id, params.signaling_addr).await;
-            },
+                self.connect(
+                    editor_tx,
+                    webchannel,
+                    params.host_id,
+                    params.signaling_addr,
+                    params.transport_type,
+                )
+                .await;
+            }
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
                 // TODO: send back an error response.
@@ -234,70 +271,115 @@ impl Server {
     ) -> anyhow::Result<()> {
         match msg.body {
             Msg::IceProgress(progress) => {
-                send_notification(editor_tx, NotificationCode::ConnectionProgress, serde_json::json!({
-                    "message": progress,
-                })).await;
-                Ok(())
-            },
-            Msg::ConnectionBroke(host_id) => {
-                send_notification(editor_tx, NotificationCode::ConnectionBroke, serde_json::json!({
-                    "hostId": host_id,
-                    "reason": "",
-                })).await;
-                Ok(())
-            },
-            Msg::Hey(message) => {
-                send_notification(editor_tx, NotificationCode::Hey, serde_json::json!({
-                    "hostId": msg.host,
-                    "message": message,
-                })).await;
+                send_notification(
+                    editor_tx,
+                    NotificationCode::ConnectionProgress,
+                    serde_json::json!({
+                        "message": progress,
+                    }),
+                )
+                .await;
                 Ok(())
             }
-            _ => todo!()
+            Msg::ConnectionBroke(host_id) => {
+                send_notification(
+                    editor_tx,
+                    NotificationCode::ConnectionBroke,
+                    serde_json::json!({
+                        "hostId": host_id,
+                        "reason": "",
+                    }),
+                )
+                .await;
+                Ok(())
+            }
+            Msg::Hey(message) => {
+                send_notification(
+                    editor_tx,
+                    NotificationCode::Hey,
+                    serde_json::json!({
+                        "hostId": msg.host,
+                        "message": message,
+                    }),
+                )
+                .await;
+                Ok(())
+            }
+            _ => todo!(),
         }
     }
 
-// **** Handler functions
+    // **** Handler functions
 
-    async fn connect(&mut self, editor_tx: &mpsc::Sender<lsp_server::Message>, webchannel: &WebChannel, host_id: ServerId, signaling_addr: String) {
+    async fn connect(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+        host_id: ServerId,
+        signaling_addr: String,
+        transpot_type: webchannel::TransportType,
+    ) {
         if host_id == self.host_id {
             return;
         }
-        send_notification(editor_tx, NotificationCode::Connecting, serde_json::json!({
-            "hostId": host_id,
-        })).await;
+        send_notification(
+            editor_tx,
+            NotificationCode::Connecting,
+            serde_json::json!({
+                "hostId": host_id,
+            }),
+        )
+        .await;
         let key_cert = self.key_cert.clone();
         let webchannel_1 = webchannel.clone();
         let editor_tx_1 = editor_tx.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = webchannel_1.connect(host_id.clone(), key_cert, &signaling_addr).await {
+            if let Err(err) = webchannel_1
+                .connect(host_id.clone(), key_cert, &signaling_addr, transpot_type)
+                .await
+            {
                 tracing::error!("Failed to connect to {}: {}", host_id, err);
-                send_notification(&editor_tx_1, NotificationCode::ConnectionBroke, serde_json::json!({
-                    "hostId": host_id,
-                    "reason": err.to_string(),
-                })).await;
+                send_notification(
+                    &editor_tx_1,
+                    NotificationCode::ConnectionBroke,
+                    serde_json::json!({
+                        "hostId": host_id,
+                        "reason": err.to_string(),
+                    }),
+                )
+                .await;
             }
         });
     }
 
-    async fn list_files(&mut self, editor_tx: &mpsc::Sender<lsp_server::Message>, webchannel: &WebChannel, host_id: ServerId, dir: Option<ProjectFile>, req_id: lsp_server::RequestId) -> anyhow::Result<()> {
+    async fn list_files(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+        host_id: ServerId,
+        dir: Option<ProjectFile>,
+        req_id: lsp_server::RequestId,
+    ) -> anyhow::Result<()> {
         if self.host_id != host_id {
-            webchannel.send(&host_id, Some(req_id), Msg::ListFiles { dir }).await?;
+            webchannel
+                .send(&host_id, Some(req_id), Msg::ListFiles { dir })
+                .await?;
             return Ok(());
         }
         // Host id is ourselves:
         // It doesn’t make sense to list files for ourselves in attached mode.
         if self.attached {
-            send_response(editor_tx, req_id, ListFilesResp {
-                files: vec![],
-            }, None).await;
+            send_response(editor_tx, req_id, ListFilesResp { files: vec![] }, None).await;
             return Ok(());
         }
         // Not in attached mode, read files from disk.
         if let Some((project_id, rel_filename)) = dir {
             // List files in a project directory.
-            let project = self.projects.get(&project_id).ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+            let project = self
+                .projects
+                .get(&project_id)
+                .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
 
             let filename = std::path::PathBuf::from(project.root.clone()).join(rel_filename);
             let filename_str = filename.to_string_lossy().to_string();
@@ -312,14 +394,18 @@ impl Server {
             let files = std::fs::read_dir(&filename)
                 .with_context(|| format!("Can't access file {}", &filename_str))?;
             for file in files {
-                let file = file.with_context(|| format!("Can't access files in {}", &filename_str))?;
+                let file =
+                    file.with_context(|| format!("Can't access files in {}", &filename_str))?;
                 let file_str = file.file_name().to_string_lossy().to_string();
                 let stat = file
                     .metadata()
                     .with_context(|| format!("Can't access file {}", &file_str))?;
                 let file_rel = pathdiff::diff_paths(&project.root, &file_str).unwrap();
                 result.push(ListFileEntry {
-                    file: FileDesc::ProjectFile((project_id.clone(), file_rel.to_string_lossy().to_string())),
+                    file: FileDesc::ProjectFile((
+                        project_id.clone(),
+                        file_rel.to_string_lossy().to_string(),
+                    )),
                     filename: file.file_name().to_string_lossy().to_string(),
                     is_directory: stat.is_dir(),
                     meta: JsonMap::new(),
@@ -347,13 +433,10 @@ impl Server {
                 });
             }
             send_response(editor_tx, req_id, ListFilesResp { files: result }, None).await;
-
         }
         Ok(())
     }
 }
-
-
 
 // *** Helper functions
 
@@ -366,7 +449,10 @@ pub async fn send_notification<T: Display>(
         method: method.to_string(),
         params,
     };
-    if let Err(err) = editor_tx.send(lsp_server::Message::Notification(notif)).await {
+    if let Err(err) = editor_tx
+        .send(lsp_server::Message::Notification(notif))
+        .await
+    {
         tracing::error!("Failed to send notification to editor: {}", err);
     }
 }
@@ -382,7 +468,10 @@ async fn send_response(
         result: Some(serde_json::to_value(result).unwrap()),
         error,
     };
-    if let Err(err) = editor_tx.send(lsp_server::Message::Response(response)).await {
+    if let Err(err) = editor_tx
+        .send(lsp_server::Message::Response(response))
+        .await
+    {
         tracing::error!("Failed to send response to editor: {}", err);
     }
 }
@@ -399,8 +488,14 @@ async fn send_connection_broke(
             "reason": reason,
         }),
     };
-    if let Err(err) = editor_tx.send(lsp_server::Message::Notification(notif)).await {
-        tracing::error!("Failed to send connection broke notification to editor: {}", err);
+    if let Err(err) = editor_tx
+        .send(lsp_server::Message::Notification(notif))
+        .await
+    {
+        tracing::error!(
+            "Failed to send connection broke notification to editor: {}",
+            err
+        );
     }
 }
 
