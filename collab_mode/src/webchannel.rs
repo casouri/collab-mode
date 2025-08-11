@@ -251,6 +251,7 @@ impl WebChannel {
     pub async fn connect(
         &self,
         remote_hostid: ServerId,
+        my_hostid: ServerId,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
         _transport_type: TransportType,
@@ -278,6 +279,7 @@ impl WebChannel {
             my_key_cert.clone(),
             signaling_addr,
             Some(progress_tx),
+            Some(my_hostid),
         )
         .await?;
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;

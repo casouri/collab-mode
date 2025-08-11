@@ -82,12 +82,13 @@ pub async fn ice_connect(
     my_key_cert: ArcKeyCert,
     signaling_addr: &str,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
+    my_id: Option<String>,
 ) -> WebrpcResult<(Arc<impl Conn + Send + Sync>, CertDerHash)> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
     let (connected_tx, connected_rx) = watch::channel(());
 
-    let my_id = uuid::Uuid::new_v4().to_string();
+    let my_id = my_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut listener = Listener::new(signaling_addr, my_id, my_key_cert).await?;
     let agent = Arc::new(make_ice_agent(true).await?);
     let cred = ice_credential(&agent).await;
@@ -289,8 +290,14 @@ mod tests {
     async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
         // We don't verify server_cert until DTLS connection is
         // established. So no use for the server_cert at this layer.
-        let (conn, _server_cert) =
-            ice_connect(server_id, client_key_cert, "ws://127.0.0.1:9000", None).await?;
+        let (conn, _server_cert) = ice_connect(
+            server_id,
+            client_key_cert,
+            "ws://127.0.0.1:9000",
+            None,
+            None,
+        )
+        .await?;
         let conn_tx = Arc::clone(&conn);
 
         // Send and receive message.

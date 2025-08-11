@@ -431,7 +431,25 @@ impl Server {
                 }
                 Ok(())
             }
-            _ => todo!(),
+            Msg::FileList(files) => {
+                let resp_id = msg.req_id;
+                if resp_id.is_none() {
+                    tracing::warn!(
+                        "Received FileList from remote {} without req_id, ignoring",
+                        msg.host
+                    );
+                    send_notification(editor_tx, NotificationCode::Error, serde_json::json!({
+                        "message": format!("Received file list from remote {}, but without req_id", msg.host),
+                    })).await;
+                    return Ok(());
+                }
+                let resp_id = resp_id.unwrap();
+                send_response(editor_tx, resp_id, ListFilesResp { files }, None).await;
+                Ok(())
+            }
+            _ => {
+                panic!("Unhandled message type from {}: {:?}", msg.host, msg.body);
+            }
         }
     }
 
@@ -459,10 +477,17 @@ impl Server {
         let key_cert = self.key_cert.clone();
         let webchannel_1 = webchannel.clone();
         let editor_tx_1 = editor_tx.clone();
+        let my_host_id = self.host_id.clone();
 
         tokio::spawn(async move {
             if let Err(err) = webchannel_1
-                .connect(host_id.clone(), key_cert, &signaling_addr, transpot_type)
+                .connect(
+                    host_id.clone(),
+                    my_host_id,
+                    key_cert,
+                    &signaling_addr,
+                    transpot_type,
+                )
                 .await
             {
                 tracing::error!("Failed to connect to {}: {}", host_id, err);

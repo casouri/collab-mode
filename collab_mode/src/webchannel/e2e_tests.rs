@@ -147,11 +147,25 @@ mod e2e_tests {
         tracing::info!("{} connecting to {}", id2, id1);
         let connect_result = timeout(
             Duration::from_secs(5),
-            channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP)
+            channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP)
         ).await;
 
         assert!(connect_result.is_ok(), "Connection should succeed");
         assert!(connect_result.unwrap().is_ok(), "Connection should not error");
+
+        // First consume the automatic "Hey" messages
+        for _ in 0..2 {  // Expect up to 2 Hey messages (one from each side)
+            if let Ok(Some(msg)) = timeout(Duration::from_millis(500), rx1.recv()).await {
+                if let Msg::Hey(_) = msg.body {
+                    tracing::info!("Received Hey message from {}", msg.host);
+                    continue;
+                }
+                // If it's not a Hey message, put it back (we can't do that with mpsc, so break)
+                break;
+            } else {
+                break;
+            }
+        }
 
         // Test message exchange
         let test_msg = Msg::FileShared(42); // DocId is u32
@@ -168,7 +182,7 @@ mod e2e_tests {
         assert_eq!(msg.host, id2);
         match msg.body {
             Msg::FileShared(doc_id) => assert_eq!(doc_id, 42),
-            _ => panic!("Unexpected message type"),
+            _ => panic!("Unexpected message type: {:?}", msg.body),
         }
 
         // Cleanup
@@ -202,7 +216,16 @@ mod e2e_tests {
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+
+        // Consume automatic Hey messages
+        for _ in 0..2 {
+            if let Ok(Some(msg)) = timeout(Duration::from_millis(500), rx1.recv()).await {
+                if let Msg::Hey(_) = msg.body {
+                    tracing::info!("Received Hey message from {}", msg.host);
+                }
+            }
+        }
 
         // Test various message types
         let test_messages = vec![
@@ -273,7 +296,16 @@ mod e2e_tests {
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+
+        // Consume automatic Hey messages
+        for _ in 0..2 {
+            if let Ok(Some(msg)) = timeout(Duration::from_millis(500), rx1.recv()).await {
+                if let Msg::Hey(_) = msg.body {
+                    tracing::info!("Received Hey message from {}", msg.host);
+                }
+            }
+        }
 
         // Test various sizes
         let test_sizes = vec![
@@ -362,10 +394,10 @@ mod e2e_tests {
             client_accept_handles.push(client_accept_handle);
 
             // Connect to hub
-            channel.connect(hub_id.clone(), key_cert.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
+            channel.connect(hub_id.clone(), id.clone(), key_cert.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
 
-            // Hub connects back to client for bidirectional communication
-            hub_channel.connect(id.clone(), hub_key_cert.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
+            // Note: Hub doesn't need to connect back since it's already accepting connections
+            // The connection is bidirectional once established
 
             client_channels.push((id, channel));
             client_rxs.push(rx);
@@ -373,6 +405,18 @@ mod e2e_tests {
 
         // Give time for all connections to stabilize
         sleep(Duration::from_millis(500)).await;
+
+        // Consume Hey messages from hub
+        let mut hey_count = 0;
+        let start_time = std::time::Instant::now();
+        while hey_count < num_clients && start_time.elapsed() < Duration::from_secs(2) {
+            if let Ok(Some(msg)) = timeout(Duration::from_millis(100), hub_rx.recv()).await {
+                if let Msg::Hey(_) = msg.body {
+                    tracing::info!("Hub received Hey message");
+                    hey_count += 1;
+                }
+            }
+        }
 
         // Each client sends a unique message
         for (i, (_client_id, channel)) in client_channels.iter().enumerate() {
@@ -483,7 +527,7 @@ mod e2e_tests {
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2.connect(id1.clone(), id2.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
 
         // Exchange messages to verify connection
         channel2.send(&id1, None, Msg::FileShared(1)).await.unwrap();
@@ -545,7 +589,7 @@ mod e2e_tests {
         // Connect with matching cert should succeed
         let connect_result = timeout(
             Duration::from_secs(5),
-            channel2.connect(id1.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP)
+            channel2.connect(id1.clone(), id2.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP)
         ).await;
         assert!(connect_result.is_ok() && connect_result.unwrap().is_ok());
 
@@ -582,7 +626,7 @@ mod e2e_tests {
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
 
         // Send many messages rapidly
         let num_messages = 100;
@@ -667,7 +711,7 @@ mod e2e_tests {
             let key_cert2 = key_cert2.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                channel2.connect(id1.clone(), key_cert2, &signaling_url, TransportType::SCTP).await
+                channel2.connect(id1.clone(), id2.clone(), key_cert2, &signaling_url, TransportType::SCTP).await
             })
         };
 

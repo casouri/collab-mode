@@ -256,7 +256,7 @@ impl Endpoint {
         signaling_addr: &str,
     ) -> WebrpcResult<Endpoint> {
         let (conn, their_cert) =
-            ice_connect(id.clone(), my_key_cert.clone(), signaling_addr, None).await?;
+            ice_connect(id.clone(), my_key_cert.clone(), signaling_addr, None, None).await?;
         let dtls_conn = create_dtls_client(conn, my_key_cert, their_cert).await?;
         let sctp_conn = create_sctp_client(dtls_conn).await?;
         let stream = sctp_conn
@@ -630,10 +630,10 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use crate::ice::{ice_accept, ice_bind, ice_connect};
     use super::Endpoint;
     use super::{create_sctp_client, create_sctp_server};
     use crate::config_man::create_key_cert;
+    use crate::ice::{ice_accept, ice_bind, ice_connect};
     use crate::signaling::server::run_signaling_server;
     use crate::types::ArcKeyCert;
     use crate::webrpc::{create_dtls_client, create_dtls_server};
@@ -686,6 +686,7 @@ mod tests {
             server_id,
             client_key_cert.clone(),
             "ws://127.0.0.1:9000",
+            None,
             None,
         )
         .await?;
