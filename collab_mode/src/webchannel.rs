@@ -537,8 +537,9 @@ async fn handle_outgoing_messages(
             break; // Break and drop rx
         }
         let stream = res.unwrap();
-        let data = match bincode::serialize(&message) {
-            Ok(data) => data,
+        // let data = match bincode::serialize(&message) {
+        let data = match serde_json::to_string(&message) {
+            Ok(data) => data.into_bytes(),
             Err(e) => {
                 // I don’t expect this to happen.
                 tracing::error!("Failed to serialize message: {}", e);
@@ -735,7 +736,8 @@ async fn read_from_stream(
     let _ = stream.shutdown(std::net::Shutdown::Read).await;
 
     // Deserialize the message
-    match bincode::deserialize::<Message>(&full_buffer) {
+    // match bincode::deserialize::<Message>(&full_buffer) {
+    match serde_json::from_slice::<Message>(&full_buffer) {
         Ok(message) => {
             if let Err(e) = msg_tx.send(message).await {
                 tracing::error!("Failed to send message to channel: {}", e);
