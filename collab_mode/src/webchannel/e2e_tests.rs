@@ -215,10 +215,11 @@ mod e2e_tests {
             Msg::ListFiles {
                 dir: Some(("project1".to_string(), "/test".to_string())), // ProjectFile is (ProjectId, String)
             },
-            Msg::FileList(vec![ListFilesEntry {
-                doc: FileDesc::File(1),
+            Msg::FileList(vec![crate::message::ListFileEntry {
+                file: FileDesc::File(1),
                 filename: "file1.txt".to_string(),
-                meta: "text".to_string(),
+                is_directory: false,
+                meta: serde_json::Map::new(),
             }]),
             Msg::Login("test-cred".to_string()), // Credential is String
             Msg::LoggedYouIn(42), // SiteId is u32
