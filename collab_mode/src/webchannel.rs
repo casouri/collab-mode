@@ -56,7 +56,7 @@ pub enum Msg {
     ListFiles {
         dir: Option<ProjectFile>,
     },
-    FileList(Vec<ListFilesEntry>),
+    FileList(Vec<crate::message::ListFileEntry>),
     DeclareProjects(Vec<DeclareProjectEntry>),
     OpFromClient(ContextOps),
     OpFromServer(Vec<FatOp>),
@@ -81,6 +81,7 @@ pub enum Msg {
     StopSendingOps(DocId),
     SerializationErr(String),
     Fatal(String),
+    BadRequest(String),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -91,14 +92,6 @@ pub struct DeclareProjectEntry {
     /// Name of the project.
     pub name: String,
     pub meta: JsonMap,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListFilesEntry {
-    pub doc: FileDesc,
-    pub filename: String,
-    pub meta: String,
 }
 
 #[derive(Clone)]

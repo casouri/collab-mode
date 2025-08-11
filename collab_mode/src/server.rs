@@ -10,7 +10,10 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicU32, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicI32, AtomicU32, Ordering},
+    Arc, Mutex,
+};
 use tokio::sync::mpsc;
 
 /// Stores relevant data for a document, used by the server.
@@ -34,6 +37,15 @@ struct Doc {
     subscribers: HashMap<SiteId, LocalSeq>,
 }
 
+/// When remote sends a request and we delegate it to the editor, we
+/// store the original request so we can route the response back to
+/// the remote.
+struct OrigRequest {
+    req_id: lsp_server::RequestId,
+    method: String,
+    host_id: ServerId,
+}
+
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server.
@@ -42,6 +54,8 @@ pub struct Server {
     site_id: SiteId,
     /// SiteId given to the next connected client.
     next_site_id: AtomicU32,
+    /// Next request id to be used for requests to editor.
+    next_req_id: AtomicI32,
     /// Docs hosted by this server.
     docs: HashMap<DocId, Doc>,
     /// Projects.
@@ -63,6 +77,12 @@ pub struct Server {
     config: ConfigManager,
     /// Key and certificate for the server.
     key_cert: Arc<KeyCert>,
+    /// If we get a remote request with a request id and we send a
+    /// request to editor to handle, the request id of the request to
+    /// editor maps to the request id of the received request in this
+    /// map. Also record the method name of the request sent to the
+    /// editor, and the remote host.
+    orig_req_map: HashMap<i32, OrigRequest>,
 }
 
 impl Server {
@@ -72,6 +92,7 @@ impl Server {
             host_id,
             site_id: 0,
             next_site_id: AtomicU32::new(1),
+            next_req_id: AtomicI32::new(1),
             docs: HashMap::new(),
             projects: HashMap::new(),
             users: HashMap::new(),
@@ -81,6 +102,7 @@ impl Server {
             accepting: HashMap::new(),
             config,
             key_cert: Arc::new(key_cert),
+            orig_req_map: HashMap::new(),
         };
         Ok(server)
     }
@@ -139,7 +161,52 @@ impl Server {
                 Ok(())
             }
             lsp_server::Message::Response(resp) => {
-                todo!();
+                let resp_id = unwrap_req_id(&resp.id);
+                if resp_id.is_err() {
+                    tracing::error!("Failed to parse request id: {:?}", &resp_id);
+                    send_notification(
+                        editor_tx,
+                        NotificationCode::Error,
+                        serde_json::json!({
+                            "message": format!("Failed to parse request id: {}", resp_id.unwrap_err()),
+                        }),
+                    )
+                        .await;
+                    return Ok(());
+                }
+                let resp_id = resp_id.unwrap();
+                let orig_req = self.orig_req_map.remove(&resp_id);
+                if orig_req.is_none() {
+                    tracing::warn!(
+                        "Received ListFiles response without a matching request id: {}, ignoring",
+                        resp_id
+                    );
+                    return Ok(());
+                }
+                let orig_req = orig_req.unwrap();
+                if let Err(err) = self
+                    .handle_editor_response(orig_req, resp.result, editor_tx, webchannel)
+                    .await
+                {
+                    match err.downcast_ref::<serde_json::Error>() {
+                        Some(err) => {
+                            send_notification(
+                                editor_tx,
+                                NotificationCode::Error,
+                                serde_json::json!({
+                                    "message": format!("Failed to parse response: {}", err),
+                                }),
+                            )
+                            .await;
+                        }
+                        None => (),
+                    }
+                    tracing::error!("Failed to handle editor response: {}", err);
+                    // If it’s not a parsing error, it’s some error
+                    // sending the response back to remote, don’t need
+                    // to bother our editor in that case.
+                }
+                Ok(())
             }
             lsp_server::Message::Notification(notif) => {
                 if let Err(err) = self
@@ -166,7 +233,7 @@ impl Server {
     }
 
     async fn handle_editor_request(
-        &self,
+        &mut self,
         req: lsp_server::Request,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
@@ -174,7 +241,16 @@ impl Server {
         match req.method.as_str() {
             "ListFiles" => {
                 let params: message::ListFilesParams = serde_json::from_value(req.params)?;
-                // Handle the request...
+                // Either sends a request to remote or sends a
+                // response to editor.
+                self.list_files_from_editor(
+                    editor_tx,
+                    webchannel,
+                    params.host_id,
+                    params.dir,
+                    req.id,
+                )
+                .await?;
                 Ok(())
             }
             "OpenFile" => {
@@ -263,8 +339,36 @@ impl Server {
         Ok(())
     }
 
+    async fn handle_editor_response(
+        &mut self,
+        orig_req: OrigRequest,
+        result: Option<serde_json::Value>,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+    ) -> anyhow::Result<()> {
+        match orig_req.method.as_str() {
+            "ListFiles" => {
+                let resp: ListFilesResp = serde_json::from_value(result.unwrap_or_default())
+                    .with_context(|| "Failed to parse ListFiles response")?;
+                webchannel
+                    .send(
+                        &orig_req.host_id,
+                        Some(orig_req.req_id),
+                        Msg::FileList(resp.files),
+                    )
+                    .await?;
+            }
+            _ => {
+                tracing::warn!(
+                    "Unknown method read from editor response: {}",
+                    orig_req.method
+                );
+            }
+        }
+        Ok(())
+    }
     async fn handle_remote_message(
-        &self,
+        &mut self,
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
@@ -303,6 +407,28 @@ impl Server {
                     }),
                 )
                 .await;
+                Ok(())
+            }
+            Msg::ListFiles { dir } => {
+                if let Some(req_id) = msg.req_id {
+                    self.list_files_from_remote(
+                        editor_tx,
+                        webchannel,
+                        dir,
+                        req_id,
+                        msg.host.clone(),
+                    )
+                    .await?;
+                } else {
+                    tracing::warn!("Received ListFiles without req_id, ignoring.");
+                    webchannel
+                        .send(
+                            &msg.host,
+                            None,
+                            Msg::BadRequest("Missing req_id".to_string()),
+                        )
+                        .await?;
+                }
                 Ok(())
             }
             _ => todo!(),
@@ -353,7 +479,13 @@ impl Server {
         });
     }
 
-    async fn list_files(
+    // If host_id is not us, delegate to remote, if it’s us, handle
+    // ourselves: if in attached mode, respond with empty because
+    // editor should be the source of truth so why ur asking me man??
+    // In non-attached mode read files from disk. If dir is None, list
+    // top-level projects and docs, if dir non-nil, list files in that
+    // dir.
+    async fn list_files_from_editor(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
@@ -373,6 +505,66 @@ impl Server {
             send_response(editor_tx, req_id, ListFilesResp { files: vec![] }, None).await;
             return Ok(());
         }
+
+        let files = self
+            .list_files_from_dist(dir)
+            .await
+            .with_context(|| "Failed to list files from disk")?;
+
+        send_response(editor_tx, req_id, ListFilesResp { files }, None).await;
+
+        Ok(())
+    }
+
+    // In attached mode, delegate to editor, otherwise read from disk
+    // and response immediately.
+    async fn list_files_from_remote(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+        dir: Option<ProjectFile>,
+        req_id: lsp_server::RequestId,
+        remote_host_id: ServerId,
+    ) -> anyhow::Result<()> {
+        let id = self.next_req_id.fetch_add(1, Ordering::SeqCst);
+        if self.attached {
+            self.orig_req_map.insert(
+                id,
+                OrigRequest {
+                    req_id,
+                    method: "ListFiles".to_string(),
+                    host_id: remote_host_id.clone(),
+                },
+            );
+            send_request(
+                editor_tx,
+                id,
+                "ListFiles",
+                ListFilesParams {
+                    dir,
+                    host_id: "".to_string(),
+                    signaling_addr: "".to_string(),
+                    credential: "".to_string(),
+                },
+            )
+            .await;
+        } else {
+            // Not in attached mode, read files from disk.
+            let files = self
+                .list_files_from_dist(dir)
+                .await
+                .with_context(|| "Failed to list files from disk")?;
+            webchannel
+                .send(&remote_host_id, Some(req_id), Msg::FileList(files))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn list_files_from_dist(
+        &self,
+        dir: Option<ProjectFile>,
+    ) -> anyhow::Result<Vec<ListFileEntry>> {
         // Not in attached mode, read files from disk.
         if let Some((project_id, rel_filename)) = dir {
             // List files in a project directory.
@@ -411,8 +603,7 @@ impl Server {
                     meta: JsonMap::new(),
                 });
             }
-
-            send_response(editor_tx, req_id, ListFilesResp { files: result }, None).await;
+            return Ok(result);
         } else {
             // List top-level projects and docs.
             let mut result = vec![];
@@ -432,9 +623,8 @@ impl Server {
                     meta: doc.meta.clone(),
                 });
             }
-            send_response(editor_tx, req_id, ListFilesResp { files: result }, None).await;
+            return Ok(result);
         }
-        Ok(())
     }
 }
 
@@ -476,6 +666,22 @@ async fn send_response(
     }
 }
 
+async fn send_request(
+    editor_tx: &mpsc::Sender<lsp_server::Message>,
+    req_id: i32,
+    method: &str,
+    params: impl Serialize,
+) {
+    let request = lsp_server::Request {
+        id: lsp_server::RequestId::from(req_id),
+        method: method.to_string(),
+        params: serde_json::to_value(params).unwrap(),
+    };
+    if let Err(err) = editor_tx.send(lsp_server::Message::Request(request)).await {
+        tracing::error!("Failed to send request to editor: {}", err);
+    }
+}
+
 async fn send_connection_broke(
     editor_tx: &mpsc::Sender<lsp_server::Message>,
     host_id: ServerId,
@@ -497,6 +703,14 @@ async fn send_connection_broke(
             err
         );
     }
+}
+
+/// Convert a JSONRPC request id to an i32.
+fn unwrap_req_id(req_id: &lsp_server::RequestId) -> anyhow::Result<i32> {
+    req_id
+        .to_string()
+        .parse::<i32>()
+        .map_err(|_| anyhow!("Can’t parse request id: {:?}", &req_id).into())
 }
 
 #[cfg(test)]
