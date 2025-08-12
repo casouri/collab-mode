@@ -142,21 +142,12 @@ impl Server {
                 let req_id = req.id.clone();
                 if let Err(err) = self.handle_editor_request(req, editor_tx, webchannel).await {
                     tracing::error!("Failed to handle editor request: {}", err);
-                    let response = lsp_server::Response {
-                        id: req_id,
-                        result: None,
-                        error: Some(lsp_server::ResponseError {
-                            code: 30000, // FIXME: Use appropriate error code.
-                            message: err.to_string(),
-                            data: None,
-                        }),
+                    let err = lsp_server::ResponseError {
+                        code: 30000, // FIXME: Use appropriate error code.
+                        message: err.to_string(),
+                        data: None,
                     };
-                    if let Err(err) = editor_tx
-                        .send(lsp_server::Message::Response(response))
-                        .await
-                    {
-                        tracing::error!("Failed to send response to editor: {}", err);
-                    }
+                    send_response(editor_tx, req_id, (), Some(err)).await;
                 }
                 Ok(())
             }
@@ -232,18 +223,10 @@ impl Server {
                     .await
                 {
                     tracing::error!("Failed to handle editor notification: {}", err);
-                    let notif = lsp_server::Notification {
-                        method: NotificationCode::Error.to_string(),
-                        params: serde_json::json!({
-                            "message": err.to_string(),
-                        }),
-                    };
-                    if let Err(err) = editor_tx
-                        .send(lsp_server::Message::Notification(notif))
-                        .await
-                    {
-                        tracing::error!("Failed to send notification to editor: {}", err);
-                    }
+                    let params = serde_json::json!({
+                        "message": err.to_string(),
+                    });
+                    send_notification(editor_tx, NotificationCode::Error, params).await;
                 }
                 Ok(())
             }
@@ -476,21 +459,13 @@ impl Server {
                 let req_id = msg.req_id.unwrap();
 
                 // Send error response back to the editor
-                let response = lsp_server::Response {
-                    id: req_id,
-                    result: None,
-                    error: Some(lsp_server::ResponseError {
-                        code: 500,
-                        message: error_msg,
-                        data: None,
-                    }),
+                let err = lsp_server::ResponseError {
+                    code: 500,
+                    message: error_msg,
+                    data: None,
                 };
-                if let Err(err) = editor_tx
-                    .send(lsp_server::Message::Response(response))
-                    .await
-                {
-                    tracing::error!("Failed to send error response to editor: {}", err);
-                }
+                send_response(editor_tx, req_id, (), Some(err)).await;
+
                 Ok(())
             }
             _ => {
