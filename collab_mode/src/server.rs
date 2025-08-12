@@ -184,6 +184,24 @@ impl Server {
                     return Ok(());
                 }
                 let orig_req = orig_req.unwrap();
+
+                // Check if the response has an error
+                if let Some(error) = resp.error {
+                    // Send ErrorResp to the remote
+                    if let Err(err) = webchannel
+                        .send(
+                            &orig_req.host_id,
+                            Some(orig_req.req_id),
+                            Msg::ErrorResp(format!("{}: {}", error.code, error.message)),
+                        )
+                        .await
+                    {
+                        tracing::error!("Failed to send error response to remote: {}", err);
+                    }
+                    return Ok(());
+                }
+
+                // Only handle successful responses
                 if let Err(err) = self
                     .handle_editor_response(orig_req, resp.result, editor_tx, webchannel)
                     .await
@@ -445,6 +463,34 @@ impl Server {
                 }
                 let resp_id = resp_id.unwrap();
                 send_response(editor_tx, resp_id, ListFilesResp { files }, None).await;
+                Ok(())
+            }
+            Msg::ErrorResp(error_msg) => {
+                if msg.req_id.is_none() {
+                    tracing::warn!("Received ErrorResp without req_id, ignoring");
+                    send_notification(editor_tx, NotificationCode::Error, serde_json::json!({
+                        "message": format!("Received error response from remote {}, but without response id: {}", msg.host, error_msg),
+                    })).await;
+                    return Ok(());
+                }
+                let req_id = msg.req_id.unwrap();
+
+                // Send error response back to the editor
+                let response = lsp_server::Response {
+                    id: req_id,
+                    result: None,
+                    error: Some(lsp_server::ResponseError {
+                        code: 500,
+                        message: error_msg,
+                        data: None,
+                    }),
+                };
+                if let Err(err) = editor_tx
+                    .send(lsp_server::Message::Response(response))
+                    .await
+                {
+                    tracing::error!("Failed to send error response to editor: {}", err);
+                }
                 Ok(())
             }
             _ => {
