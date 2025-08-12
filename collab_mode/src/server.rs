@@ -121,6 +121,9 @@ impl Server {
                 Some(msg) = editor_rx.recv() => {
                     tracing::info!("Received message from editor: {:?}", msg);
                     let res = self.handle_editor_message(msg, &editor_tx, &webchannel).await;
+                    // Normally the handler shouldn’t return an error.
+                    // Most errors ar handled by sending error
+                    // response to editor/remote.
                     if let Err(err) = res {
                         tracing::error!("Failed to handle editor message: {}", err);
                     }
@@ -129,6 +132,9 @@ impl Server {
                 Some(web_msg) = msg_rx.recv() => {
                     tracing::info!("Received message from remote: {:?}", web_msg);
                     let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                    // Normally the handler shouldn’t return an error.
+                    // Most errors ar handled by sending error
+                    // response to editor/remote.
                     if let Err(err) = res {
                         tracing::error!("Failed to handle remote message: {}", err);
                     }
