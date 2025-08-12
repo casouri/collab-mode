@@ -191,16 +191,13 @@ impl Server {
                 // Check if the response has an error
                 if let Some(error) = resp.error {
                     // Send ErrorResp to the remote
-                    if let Err(err) = webchannel
-                        .send(
-                            &orig_req.host_id,
-                            Some(orig_req.req_id),
-                            Msg::ErrorResp(format!("{}: {}", error.code, error.message)),
-                        )
-                        .await
-                    {
-                        tracing::error!("Failed to send error response to remote: {}", err);
-                    }
+                    send_to_remote(
+                        webchannel,
+                        &orig_req.host_id,
+                        Some(orig_req.req_id),
+                        Msg::ErrorResp(format!("{}: {}", error.code, error.message)),
+                    )
+                    .await;
                     return Ok(());
                 }
 
@@ -363,13 +360,13 @@ impl Server {
             "ListFiles" => {
                 let resp: ListFilesResp = serde_json::from_value(result.unwrap_or_default())
                     .with_context(|| "Failed to parse ListFiles response")?;
-                webchannel
-                    .send(
-                        &orig_req.host_id,
-                        Some(orig_req.req_id),
-                        Msg::FileList(resp.files),
-                    )
-                    .await?;
+                send_to_remote(
+                    webchannel,
+                    &orig_req.host_id,
+                    Some(orig_req.req_id),
+                    Msg::FileList(resp.files),
+                )
+                .await;
             }
             _ => {
                 tracing::warn!(
@@ -434,13 +431,13 @@ impl Server {
                     .await?;
                 } else {
                     tracing::warn!("Received ListFiles without req_id, ignoring.");
-                    webchannel
-                        .send(
-                            &msg.host,
-                            None,
-                            Msg::BadRequest("Missing req_id".to_string()),
-                        )
-                        .await?;
+                    send_to_remote(
+                        webchannel,
+                        &msg.host,
+                        None,
+                        Msg::BadRequest("Missing req_id".to_string()),
+                    )
+                    .await;
                 }
                 Ok(())
             }
@@ -552,9 +549,7 @@ impl Server {
         req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
         if self.host_id != host_id {
-            webchannel
-                .send(&host_id, Some(req_id), Msg::ListFiles { dir })
-                .await?;
+            send_to_remote(webchannel, &host_id, Some(req_id), Msg::ListFiles { dir }).await;
             return Ok(());
         }
         // Host id is ourselves:
@@ -612,9 +607,13 @@ impl Server {
                 .list_files_from_dist(dir)
                 .await
                 .with_context(|| "Failed to list files from disk")?;
-            webchannel
-                .send(&remote_host_id, Some(req_id), Msg::FileList(files))
-                .await?;
+            send_to_remote(
+                webchannel,
+                &remote_host_id,
+                Some(req_id),
+                Msg::FileList(files),
+            )
+            .await;
         }
         Ok(())
     }
@@ -758,6 +757,23 @@ async fn send_connection_broke(
     {
         tracing::error!(
             "Failed to send connection broke notification to editor: {}",
+            err
+        );
+    }
+}
+
+/// Send a message to a remote host via WebChannel with error logging.
+async fn send_to_remote(
+    webchannel: &WebChannel,
+    host_id: &ServerId,
+    req_id: Option<lsp_server::RequestId>,
+    msg: Msg,
+) {
+    if let Err(err) = webchannel.send(host_id, req_id, msg.clone()).await {
+        tracing::error!(
+            "Failed to send {:?} to remote host {}: {}",
+            msg,
+            host_id,
             err
         );
     }
