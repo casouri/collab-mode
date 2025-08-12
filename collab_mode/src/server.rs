@@ -120,12 +120,18 @@ impl Server {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
                     tracing::info!("Received message from editor: {:?}", msg);
-                    self.handle_editor_message(msg, &editor_tx, &webchannel).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel).await;
+                    if let Err(err) = res {
+                        tracing::error!("Failed to handle editor message: {}", err);
+                    }
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
                     tracing::info!("Received message from remote: {:?}", web_msg);
-                    self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                    if let Err(err) = res {
+                        tracing::error!("Failed to handle remote message: {}", err);
+                    }
                 },
             }
         }
