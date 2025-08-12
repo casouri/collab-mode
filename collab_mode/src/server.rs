@@ -37,6 +37,24 @@ struct Doc {
     subscribers: HashMap<SiteId, LocalSeq>,
 }
 
+/// Stores relevant data for a remote doc, used by the server.
+#[derive(Debug)]
+struct RemoteDoc {
+    /// Human-readable name for the doc.
+    name: String,
+    /// The absolute filename of the file on remote peer’s disk, used
+    /// for detecting already-opened docs in project.
+    file_desc: FileDesc,
+    /// Site seq number of next local op.
+    next_site_seq: LocalSeq,
+    /// Metadata for this doc.
+    meta: JsonMap,
+    /// Arrived remote ops are saved in this buffer until processed.
+    remote_op_buffer: Vec<FatOp>,
+    /// The server engine that transforms and stores ops for this doc.
+    engine: ClientEngine,
+}
+
 /// When remote sends a request and we delegate it to the editor, we
 /// store the original request so we can route the response back to
 /// the remote.
@@ -58,6 +76,8 @@ pub struct Server {
     next_req_id: AtomicI32,
     /// Docs hosted by this server.
     docs: HashMap<DocId, Doc>,
+    /// Docs hosted by remote peers.
+    remote_docs: HashMap<DocId, RemoteDoc>,
     /// Projects.
     projects: HashMap<ProjectId, Project>,
     /// Map of recognized users.
@@ -94,6 +114,7 @@ impl Server {
             next_site_id: AtomicU32::new(1),
             next_req_id: AtomicI32::new(1),
             docs: HashMap::new(),
+            remote_docs: HashMap::new(),
             projects: HashMap::new(),
             users: HashMap::new(),
             active_remotes: Vec::new(),

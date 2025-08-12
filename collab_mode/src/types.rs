@@ -232,6 +232,18 @@ pub struct Snapshot {
     pub doc_id: DocId,
 }
 
+/// A snapshot of a document. Returned by the server when a site
+/// requests a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewSnapshot {
+    /// The file content.
+    pub content: String,
+    /// File name of the doc.
+    pub filename: String,
+    /// Sequence number of the last op.
+    pub seq: GlobalSeq,
+}
+
 /// Requests sent to webrpc server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DocServerReq {
