@@ -720,23 +720,22 @@ impl Server {
     // and response immediately.
     async fn list_files_from_remote(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        _editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
         dir: Option<ProjectFile>,
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
-        let files = self
-            .list_files_from_disk(dir)
-            .await
-            .with_context(|| "Failed to list files from disk")?;
-        send_to_remote(
-            webchannel,
-            &remote_host_id,
-            Some(req_id),
-            Msg::FileList(files),
-        )
-        .await;
+        match self.list_files_from_disk(dir).await {
+            Ok(files) => {
+                let msg = Msg::FileList(files);
+                send_to_remote(webchannel, &remote_host_id, Some(req_id), msg).await;
+            }
+            Err(err) => {
+                let msg = Msg::ErrorResp(err.to_string());
+                send_to_remote(webchannel, &remote_host_id, Some(req_id), msg).await;
+            }
+        }
         Ok(())
     }
 
@@ -752,7 +751,7 @@ impl Server {
                 .get(&project_id)
                 .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
 
-            let filename = std::path::PathBuf::from(project.root.clone()).join(rel_filename);
+            let filename = std::path::PathBuf::from(project.root.clone()).join(&rel_filename);
             let filename_str = filename.to_string_lossy().to_string();
             let stat = std::fs::metadata(&filename)
                 .with_context(|| format!("Can't access file {}", &filename_str))?;
@@ -767,17 +766,25 @@ impl Server {
             for file in files {
                 let file =
                     file.with_context(|| format!("Can't access files in {}", &filename_str))?;
-                let file_str = file.file_name().to_string_lossy().to_string();
+                let filename = file.file_name().to_string_lossy().to_string();
                 let stat = file
                     .metadata()
-                    .with_context(|| format!("Can't access file {}", &file_str))?;
-                let file_rel = pathdiff::diff_paths(&project.root, &file_str).unwrap();
+                    .with_context(|| format!("Can't access file {}", &filename))?;
+
+                // Calculate relative path from project root using pathdiff
+                let file_path = file.path();
+                let project_root = std::path::PathBuf::from(&project.root);
+                let file_rel = pathdiff::diff_paths(&file_path, &project_root)
+                    .ok_or_else(|| anyhow!("Failed to calculate relative path"))?
+                    .to_string_lossy()
+                    .to_string();
+
                 result.push(ListFileEntry {
                     file: FileDesc::ProjectFile {
                         project: project_id.clone(),
-                        file: file_rel.to_string_lossy().to_string(),
+                        file: file_rel,
                     },
-                    filename: file.file_name().to_string_lossy().to_string(),
+                    filename,
                     is_directory: stat.is_dir(),
                     meta: JsonMap::new(),
                 });

@@ -462,6 +462,53 @@ fn create_test_project() -> anyhow::Result<tempfile::TempDir> {
     Ok(temp_dir)
 }
 
+/// Creates a complex project directory with nested structure
+fn create_complex_project() -> anyhow::Result<tempfile::TempDir> {
+    let temp_dir = tempfile::TempDir::new()?;
+    let project_path = temp_dir.path();
+
+    // Root level files
+    std::fs::write(project_path.join("README.md"), "# Complex Project")?;
+    std::fs::write(
+        project_path.join("Cargo.toml"),
+        "[package]\nname = \"test\"",
+    )?;
+    std::fs::write(project_path.join(".gitignore"), "target/\n*.swp")?;
+
+    // src directory
+    let src_dir = project_path.join("src");
+    std::fs::create_dir(&src_dir)?;
+    std::fs::write(src_dir.join("main.rs"), "fn main() {}")?;
+    std::fs::write(src_dir.join("lib.rs"), "pub mod modules;")?;
+
+    // src/modules directory
+    let modules_dir = src_dir.join("modules");
+    std::fs::create_dir(&modules_dir)?;
+    std::fs::write(modules_dir.join("mod1.rs"), "pub fn func1() {}")?;
+    std::fs::write(modules_dir.join("mod2.rs"), "pub fn func2() {}")?;
+    std::fs::write(modules_dir.join("mod.rs"), "pub mod mod1;\npub mod mod2;")?;
+
+    // tests directory
+    let tests_dir = project_path.join("tests");
+    std::fs::create_dir(&tests_dir)?;
+    std::fs::write(
+        tests_dir.join("integration_test.rs"),
+        "#[test]\nfn test() {}",
+    )?;
+
+    // docs directory
+    let docs_dir = project_path.join("docs");
+    std::fs::create_dir(&docs_dir)?;
+    std::fs::write(docs_dir.join("api.md"), "# API Documentation")?;
+    std::fs::write(docs_dir.join("guide.md"), "# User Guide")?;
+
+    // Empty directory
+    let empty_dir = project_path.join("empty");
+    std::fs::create_dir(&empty_dir)?;
+
+    Ok(temp_dir)
+}
+
 #[tokio::test]
 async fn test_accept_connect() {
     // Test: Basic connection establishment between two servers
@@ -1012,5 +1059,580 @@ async fn test_open_file_doc_id_not_found() {
     assert!(err_msg.contains("112") || err_msg.contains("not found"));
 
     tracing::info!("test_open_file_doc_id_not_found completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_top_level() {
+    // Test: List top-level projects and docs
+    // Flow:
+    // 1. Hub declares multiple projects
+    // 2. Hub shares some docs
+    // 3. Spoke requests top-level listing (dir = None)
+    // Expected: Returns list of all projects and shared docs
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create two test projects
+    let project1_dir = create_test_project().unwrap();
+    let project1_path = project1_dir.path().to_string_lossy().to_string();
+
+    let project2_dir = create_complex_project().unwrap();
+    let project2_path = project2_dir.path().to_string_lossy().to_string();
+
+    // Hub declares projects
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [
+                    {
+                        "filename": project1_path.clone(),
+                        "name": "Project1",
+                        "meta": {"type": "simple"}
+                    },
+                    {
+                        "filename": project2_path.clone(),
+                        "name": "Project2",
+                        "meta": {"type": "complex"}
+                    }
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Spoke requests top-level listing
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": null,
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for response
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Verify we have 2 projects
+    assert_eq!(files.len(), 2);
+
+    // Check first project
+    let has_project1 = files.iter().any(|f| {
+        f["filename"].as_str() == Some("Project1")
+            && f["isDirectory"].as_bool() == Some(true)
+            && f["file"]["type"].as_str() == Some("project")
+    });
+    assert!(has_project1, "Should have Project1");
+
+    // Check second project
+    let has_project2 = files.iter().any(|f| {
+        f["filename"].as_str() == Some("Project2")
+            && f["isDirectory"].as_bool() == Some(true)
+            && f["file"]["type"].as_str() == Some("project")
+    });
+    assert!(has_project2, "Should have Project2");
+
+    tracing::info!("test_list_files_top_level completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_project_directory() {
+    // Test: List files in a specific project directory
+    // Flow:
+    // 1. Hub declares a complex project
+    // 2. Spoke requests listing of src directory
+    // 3. Spoke requests listing of src/modules directory
+    // Expected: Returns correct files for each directory level
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create complex project
+    let project_dir = create_complex_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "ComplexProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Request listing of src directory
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), "src"],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Should have main.rs, lib.rs, and modules directory
+    assert_eq!(files.len(), 3);
+
+    let has_main = files.iter().any(|f| {
+        f["filename"].as_str() == Some("main.rs") && f["isDirectory"].as_bool() == Some(false)
+    });
+    assert!(has_main, "Should have main.rs");
+
+    let has_lib = files.iter().any(|f| {
+        f["filename"].as_str() == Some("lib.rs") && f["isDirectory"].as_bool() == Some(false)
+    });
+    assert!(has_lib, "Should have lib.rs");
+
+    let has_modules = files.iter().any(|f| {
+        f["filename"].as_str() == Some("modules") && f["isDirectory"].as_bool() == Some(true)
+    });
+    assert!(has_modules, "Should have modules directory");
+
+    // Request listing of src/modules directory
+    let req_id = 2;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), "src/modules"],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Should have mod.rs, mod1.rs, and mod2.rs
+    assert_eq!(files.len(), 3);
+
+    tracing::info!("test_list_files_project_directory completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_from_remote() {
+    // Test: Remote server requests file listing from hub
+    // Flow:
+    // 1. Hub declares project
+    // 2. Spoke1 requests file listing from hub
+    // 3. Hub serves the file list
+    // Expected: Spoke receives correct file list from hub
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "SharedProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Spoke1 requests root directory listing
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), ""],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Should have test.txt, readme.md, and src directory
+    assert_eq!(files.len(), 3);
+
+    // Spoke2 also requests the same listing
+    let req_id = 2;
+    setup.spokes[1]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), ""],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[1]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files2 = resp["files"].as_array().unwrap();
+
+    // Both spokes should get the same file list
+    assert_eq!(files.len(), files2.len());
+
+    tracing::info!("test_list_files_from_remote completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_project_not_found() {
+    // Test: Request listing with non-existent project ID
+    // Flow:
+    // 1. Request listing with invalid project ID
+    // Expected: Error response
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Request listing with non-existent project
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": ["/non/existent/project", "src"],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Should get an error response
+    let result = setup.spokes[0].editor.wait_for_response(req_id, 5).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("500") || err_msg.contains("Project") || err_msg.contains("not found")
+    );
+
+    tracing::info!("test_list_files_project_not_found completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_not_directory() {
+    // Test: Request listing of a file path (not directory)
+    // Flow:
+    // 1. Hub declares project
+    // 2. Request listing of a file instead of directory
+    // Expected: Error response "Not a directory"
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Request listing of a file (not directory)
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), "test.txt"],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Should get an error response
+    let result = setup.spokes[0].editor.wait_for_response(req_id, 5).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("Not a directory") || err_msg.contains("500"));
+
+    tracing::info!("test_list_files_not_directory completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_empty_directory() {
+    // Test: List an empty directory
+    // Flow:
+    // 1. Hub declares project with empty directory
+    // 2. Request listing of empty directory
+    // Expected: Returns empty list
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create project with empty directory
+    let project_dir = create_complex_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "ProjectWithEmpty",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Request listing of empty directory
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), "empty"],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Should be empty
+    assert_eq!(files.len(), 0);
+
+    tracing::info!("test_list_files_empty_directory completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_list_files_nested_structure() {
+    // Test: Navigate through nested directory structure
+    // Flow:
+    // 1. Hub declares complex project
+    // 2. Request listings at different levels
+    // 3. Verify correct file paths and types
+    // Expected: Correct listings at each level with proper relative paths
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create complex project
+    let project_dir = create_complex_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "NestedProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Test root level
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), ""],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Should have README.md, Cargo.toml, .gitignore, src/, tests/, docs/, empty/
+    assert_eq!(files.len(), 7);
+
+    // Verify file paths are correct
+    let readme = files
+        .iter()
+        .find(|f| f["filename"].as_str() == Some("README.md"))
+        .unwrap();
+    assert_eq!(readme["file"]["file"].as_str(), Some("README.md"));
+    assert_eq!(readme["isDirectory"].as_bool(), Some(false));
+
+    let src_dir = files
+        .iter()
+        .find(|f| f["filename"].as_str() == Some("src"))
+        .unwrap();
+    assert_eq!(src_dir["file"]["file"].as_str(), Some("src"));
+    assert_eq!(src_dir["isDirectory"].as_bool(), Some(true));
+
+    // Test nested level - src/modules
+    let req_id = 2;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": [project_path.clone(), "src/modules"],
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let files = resp["files"].as_array().unwrap();
+
+    // Should have mod.rs, mod1.rs, mod2.rs
+    assert_eq!(files.len(), 3);
+
+    // Verify nested file paths
+    let mod1 = files
+        .iter()
+        .find(|f| f["filename"].as_str() == Some("mod1.rs"))
+        .unwrap();
+    assert_eq!(mod1["file"]["file"].as_str(), Some("src/modules/mod1.rs"));
+    assert_eq!(mod1["file"]["type"].as_str(), Some("projectFile"));
+
+    tracing::info!("test_list_files_nested_structure completed successfully");
     setup.cleanup();
 }
