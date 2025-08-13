@@ -280,9 +280,13 @@ pub struct NewSnapshot {
     /// The file content.
     pub content: String,
     /// File name of the doc.
-    pub filename: String,
+    pub name: String,
     /// Sequence number of the last op.
     pub seq: GlobalSeq,
+    /// Assigned site id for the receiver.
+    pub site_id: SiteId,
+    /// File desc used by the original RequestFile request.
+    pub file_desc: FileDesc,
 }
 
 /// Requests sent to webrpc server.

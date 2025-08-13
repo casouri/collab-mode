@@ -60,8 +60,6 @@ pub enum ErrorCode {
     NotRegularFile = 108,
     /// Not a directory
     NotDirectory = 109,
-    /// Unsupported operation like sharing directory to remote host.
-    UnsupportedOperation = 110,
     /// Can't find this file on disk.
     FileNotFound = 112,
     /// Wrong arguments like empty filename.
@@ -200,6 +198,22 @@ pub struct OpenFileResp {
     pub site_id: SiteId,
     pub filename: String,
     pub doc_id: DocId,
+}
+
+// *** WriteFile
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteFileParams {
+    pub host_id: ServerId,
+    pub file_desc: FileDesc,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteFileResp {
+    pub host_id: ServerId,
+    pub file_desc: FileDesc,
 }
 
 // *** SendOpEditor

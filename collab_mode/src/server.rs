@@ -13,7 +13,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use tokio::sync::mpsc;
 
@@ -107,6 +107,61 @@ pub struct Server {
     /// editor, and the remote host.
     orig_req_map: HashMap<i32, OrigRequest>,
 }
+
+// *** Impl Doc
+
+impl Doc {
+    pub fn new(
+        name: String,
+        meta: JsonMap,
+        abs_filename: Option<PathBuf>,
+        content: &str,
+        engine: ServerEngine,
+    ) -> Self {
+        let mut buffer = GapBuffer::new();
+        buffer.insert_many(0, content.chars());
+
+        Self {
+            name,
+            meta,
+            abs_filename,
+            engine,
+            buffer,
+            subscribers: HashMap::new(),
+        }
+    }
+
+    /// Apply `op` to the document.
+    pub fn apply_op(&mut self, op: FatOp) -> anyhow::Result<()> {
+        let instr = self.engine.convert_internal_op_and_apply(op)?;
+        match instr {
+            EditInstruction::Ins(edits) => {
+                for (pos, str) in edits.into_iter().rev() {
+                    self.buffer.insert_many(pos as usize, str.chars());
+                }
+            }
+            EditInstruction::Del(edits) => {
+                for (pos, str) in edits.into_iter().rev() {
+                    self.buffer
+                        .drain((pos as usize)..(pos as usize + str.chars().count()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the current snapshot of the document.
+    pub fn snapshot(&self, doc_id: DocId) -> Snapshot {
+        Snapshot {
+            buffer: self.buffer.iter().collect::<String>(),
+            file_name: self.name.clone(),
+            seq: self.engine.current_seq(),
+            doc_id,
+        }
+    }
+}
+
+// *** Impl Server
 
 impl Server {
     pub fn new(host_id: ServerId, attached: bool, config: ConfigManager) -> anyhow::Result<Self> {
@@ -406,13 +461,13 @@ impl Server {
                 let buffer = snapshot_val["buffer"].as_str().unwrap_or("");
                 let filename = snapshot_val["fileName"].as_str().unwrap_or("untitled");
                 let seq = snapshot_val["seq"].as_u64().unwrap_or(0);
-                
+
                 let snapshot = NewSnapshot {
                     content: buffer.to_string(),
                     filename: filename.to_string(),
                     seq: seq as u32,
                 };
-                
+
                 // Send snapshot back to remote
                 send_to_remote(
                     webchannel,
@@ -555,13 +610,8 @@ impl Server {
             }
             Msg::Snapshot(snapshot) => {
                 if let Some(req_id) = msg.req_id {
-                    self.handle_snapshot(
-                        editor_tx,
-                        snapshot,
-                        req_id,
-                        msg.host.clone(),
-                    )
-                    .await?;
+                    self.handle_snapshot(editor_tx, snapshot, req_id, msg.host.clone())
+                        .await?;
                 } else {
                     tracing::warn!("Received Snapshot without req_id, ignoring.");
                 }
@@ -642,15 +692,9 @@ impl Server {
             send_to_remote(webchannel, &host_id, Some(req_id), Msg::ListFiles { dir }).await;
             return Ok(());
         }
-        // Host id is ourselves:
-        // It doesn’t make sense to list files for ourselves in attached mode.
-        if self.attached {
-            send_response(editor_tx, req_id, ListFilesResp { files: vec![] }, None).await;
-            return Ok(());
-        }
 
         let files = self
-            .list_files_from_dist(dir)
+            .list_files_from_disk(dir)
             .await
             .with_context(|| "Failed to list files from disk")?;
 
@@ -669,46 +713,21 @@ impl Server {
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
-        let id = self.next_req_id.fetch_add(1, Ordering::SeqCst);
-        if self.attached {
-            self.orig_req_map.insert(
-                id,
-                OrigRequest {
-                    req_id,
-                    method: "ListFiles".to_string(),
-                    host_id: remote_host_id.clone(),
-                },
-            );
-            send_request(
-                editor_tx,
-                id,
-                "ListFiles",
-                ListFilesParams {
-                    dir,
-                    host_id: "".to_string(),
-                    signaling_addr: "".to_string(),
-                    credential: "".to_string(),
-                },
-            )
-            .await;
-        } else {
-            // Not in attached mode, read files from disk.
-            let files = self
-                .list_files_from_dist(dir)
-                .await
-                .with_context(|| "Failed to list files from disk")?;
-            send_to_remote(
-                webchannel,
-                &remote_host_id,
-                Some(req_id),
-                Msg::FileList(files),
-            )
-            .await;
-        }
+        let files = self
+            .list_files_from_disk(dir)
+            .await
+            .with_context(|| "Failed to list files from disk")?;
+        send_to_remote(
+            webchannel,
+            &remote_host_id,
+            Some(req_id),
+            Msg::FileList(files),
+        )
+        .await;
         Ok(())
     }
 
-    async fn list_files_from_dist(
+    async fn list_files_from_disk(
         &self,
         dir: Option<ProjectFile>,
     ) -> anyhow::Result<Vec<ListFileEntry>> {
@@ -776,6 +795,11 @@ impl Server {
         }
     }
 
+    /// Read file from disk and return the content as string.
+    async fn open_file_from_disk(&self, file_desc: FileDesc) -> anyhow::Result<String> {
+        todo!()
+    }
+
     async fn open_file_from_editor(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
@@ -785,53 +809,26 @@ impl Server {
         req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
         if self.host_id == host_id {
-            // Opening our own file - not supported in attached mode
-            if self.attached {
-                let err = lsp_server::ResponseError {
-                    code: 400,
-                    message: "Cannot open local files in attached mode".to_string(),
-                    data: None,
-                };
-                send_response(editor_tx, req_id, (), Some(err)).await;
-                return Ok(());
-            }
-            // TODO: Handle opening local files in non-attached mode
+            // TODO: Read local file and send back a OpenRileResp
+            // response to editor.
             return Ok(());
         }
 
         // Check if we already have this file in remote_docs
         for (doc_id, remote_doc) in &self.remote_docs {
             if remote_doc.file_desc == file_desc {
-                // Already have this doc, return it
-                let resp = OpenFileResp {
-                    content: self.get_remote_doc_content(*doc_id)?,
-                    site_id: self.site_id,
-                    filename: remote_doc.name.clone(),
-                    doc_id: *doc_id,
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::BadRequest as i32,
+                    message: format!("File {} ({}) is already opened", remote_doc.name, doc_id),
+                    data: None,
                 };
-                send_response(editor_tx, req_id, resp, None).await;
+                send_response(editor_tx, req_id, (), Some(err)).await;
                 return Ok(());
             }
         }
 
-        // Need to request file from remote
-        let internal_req_id = self.next_req_id.fetch_add(1, Ordering::SeqCst);
-        self.orig_req_map.insert(
-            internal_req_id,
-            OrigRequest {
-                req_id: req_id.clone(),
-                method: "OpenFile".to_string(),
-                host_id: host_id.clone(),
-            },
-        );
-
-        send_to_remote(
-            webchannel,
-            &host_id,
-            Some(req_id),
-            Msg::RequestFile(file_desc),
-        )
-        .await;
+        let msg = Msg::RequestFile(file_desc);
+        send_to_remote(webchannel, &host_id, Some(req_id), msg).await;
         Ok(())
     }
 
@@ -843,56 +840,15 @@ impl Server {
         remote_host_id: ServerId,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
     ) -> anyhow::Result<()> {
-        // Store the remote request so we can handle the response later
-        let editor_req_id = self.next_req_id.fetch_add(1, Ordering::SeqCst);
-        let orig_req = OrigRequest {
-            method: "RequestFile".to_string(),
-            host_id: remote_host_id.clone(),
-            req_id: req_id.clone(),
-        };
-        self.orig_req_map.insert(editor_req_id, orig_req);
-        
-        // Convert FileDesc to the format expected by the editor (using tagged representation)
-        let params = match &file_desc {
-            FileDesc::File { id } => {
-                serde_json::json!({
-                    "fileDesc": {
-                        "type": "file",
-                        "id": id
-                    }
-                })
-            }
-            FileDesc::Project { id } => {
-                serde_json::json!({
-                    "fileDesc": {
-                        "type": "project",
-                        "id": id
-                    }
-                })
-            }
-            FileDesc::ProjectFile { project, file } => {
-                serde_json::json!({
-                    "fileDesc": {
-                        "type": "projectFile",
-                        "project": project,
-                        "file": file
-                    }
-                })
-            }
-        };
-        
-        // Send RequestFile request to our editor
-        let request = lsp_server::Request {
-            id: lsp_server::RequestId::from(editor_req_id),
-            method: "RequestFile".to_string(),
-            params,
-        };
-        
-        editor_tx
-            .send(lsp_server::Message::Request(request))
-            .await?;
-        
-        Ok(())
+        // TODO: look for existing doc in docs, if found, send back
+        // the snapshot. If not found, read the file on disk, create a
+        // new doc, send back snapshot.
+
+        // If there’s no existing doc in docs and file_desc is a
+        // File(doc_id), return a file not found error message
+
+        // If file_desc is a Project(project_id), return a bad request message.
+        todo!()
     }
 
     async fn handle_snapshot(
@@ -902,90 +858,48 @@ impl Server {
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
-        // Find doc_id for this snapshot
+        // First check if there’s existing doc with the same file_desc.
+        for (doc_id, remote_doc) in &self.remote_docs {
+            if remote_doc.file_desc == snapshot.file_desc {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::BadRequest as i32,
+                    message: format!("File {} ({}) is already opened", remote_doc.name, doc_id),
+                    data: None,
+                };
+                send_response(editor_tx, req_id, (), Some(err)).await;
+                return Ok(());
+            }
+        }
+
+        // No existing doc, create one.
         let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
-        
+
         // Create RemoteDoc
         let remote_doc = RemoteDoc {
-            name: snapshot.filename.clone(),
-            file_desc: FileDesc::File { id: doc_id }, // Will be updated based on context
+            name: snapshot.name.clone(),
+            file_desc: snapshot.file_desc,
             next_site_seq: 1,
             meta: serde_json::Map::new(),
             remote_op_buffer: Vec::new(),
             engine: ClientEngine::new(self.site_id, 0, 0),
         };
-        
+
         self.remote_docs.insert(doc_id, remote_doc);
 
         // Send response to editor
         let resp = OpenFileResp {
             content: snapshot.content,
-            site_id: self.site_id,
-            filename: snapshot.filename,
+            site_id: snapshot.site_id,
+            filename: snapshot.name,
             doc_id,
         };
         send_response(editor_tx, req_id, resp, None).await;
         Ok(())
     }
 
-    fn file_desc_matches_doc(&self, file_desc: &FileDesc, doc: &Doc) -> bool {
-        // Compare based on normalized filename
-        match file_desc {
-            FileDesc::File { .. } => false, // Can't match by ID since we don't know remote's ID
-            FileDesc::Project { .. } => false,
-            FileDesc::ProjectFile { file, .. } => {
-                // Compare with doc's filename if available
-                &doc.name == file || doc.name.ends_with(file)
-            }
-        }
-    }
-
-    fn create_doc_from_file_desc(&self, file_desc: &FileDesc) -> anyhow::Result<Doc> {
-        let name = match file_desc {
-            FileDesc::File { .. } => "untitled".to_string(),
-            FileDesc::Project { id } => id.clone(),
-            FileDesc::ProjectFile { file, .. } => file.clone(),
-        };
-
-        let abs_filename = match file_desc {
-            FileDesc::ProjectFile { project, file } => {
-                Some(PathBuf::from(project).join(file))
-            }
-            _ => None,
-        };
-
-        Ok(Doc {
-            name,
-            meta: serde_json::Map::new(),
-            abs_filename,
-            engine: ServerEngine::new(0),
-            buffer: GapBuffer::new(),
-            subscribers: HashMap::new(),
-        })
-    }
-
-    fn create_snapshot(&self, doc_id: DocId) -> anyhow::Result<NewSnapshot> {
-        let doc = self.docs.get(&doc_id)
-            .ok_or_else(|| anyhow!("Doc {} not found", doc_id))?;
-        
-        let content: String = doc.buffer.iter().collect();
-        
-        Ok(NewSnapshot {
-            content,
-            filename: doc.name.clone(),
-            seq: 0, // TODO: track sequence numbers
-        })
-    }
-
-    fn get_remote_doc_content(&self, doc_id: DocId) -> anyhow::Result<String> {
-        let remote_doc = self.remote_docs.get(&doc_id)
-            .ok_or_else(|| anyhow!("Remote doc {} not found", doc_id))?;
-        
-        // TODO: Reconstruct content from engine
-        Ok(String::new())
-    }
-
-    fn get_or_create_site_id(&mut self, host_id: &ServerId) -> SiteId {
+    /// Get the site_of assigned to host. Create one if not assigned
+    /// yet.
+    fn site_id_of(&mut self, host_id: &ServerId) -> SiteId {
         if let Some(&site_id) = self.site_id_map.get(host_id) {
             site_id
         } else {
