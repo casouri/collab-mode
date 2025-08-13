@@ -428,6 +428,17 @@ impl Server {
                 )
                 .await;
             }
+            "DeclareProjects" => {
+                let params: DeclareProjectsParams = serde_json::from_value(notif.params)?;
+                for project_entry in params.projects {
+                    let project = Project {
+                        name: project_entry.name,
+                        root: project_entry.filename,
+                        meta: project_entry.meta,
+                    };
+                    self.projects.insert(project.root.clone(), project);
+                }
+            }
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
                 // TODO: send back an error response.
@@ -464,8 +475,10 @@ impl Server {
 
                 let snapshot = NewSnapshot {
                     content: buffer.to_string(),
-                    filename: filename.to_string(),
+                    name: filename.to_string(),
                     seq: seq as u32,
+                    site_id: 0,                          // Will be set by receiver
+                    file_desc: FileDesc::File { id: 0 }, // Placeholder
                 };
 
                 // Send snapshot back to remote
@@ -796,8 +809,25 @@ impl Server {
     }
 
     /// Read file from disk and return the content as string.
-    async fn open_file_from_disk(&self, file_desc: FileDesc) -> anyhow::Result<String> {
-        todo!()
+    async fn open_file_from_disk(
+        &self,
+        project_id: &ProjectId,
+        rel_path: &str,
+    ) -> anyhow::Result<String> {
+        // Look up project
+        let project = self
+            .projects
+            .get(project_id)
+            .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+
+        // Construct full path
+        let full_path = std::path::PathBuf::from(&project.root).join(rel_path);
+
+        // Read file content
+        let content = std::fs::read_to_string(&full_path)
+            .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
+
+        Ok(content)
     }
 
     async fn open_file_from_editor(
@@ -809,8 +839,95 @@ impl Server {
         req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
         if self.host_id == host_id {
-            // TODO: Read local file and send back a OpenRileResp
-            // response to editor.
+            // Handle local file opening
+            match &file_desc {
+                FileDesc::ProjectFile { project, file } => {
+                    // Check if already open
+                    let full_path = std::path::PathBuf::from(&project).join(&file);
+                    for (doc_id, doc) in &self.docs {
+                        if let Some(ref abs_filename) = doc.abs_filename {
+                            if abs_filename == &full_path {
+                                // Already open, return existing doc
+                                let resp = OpenFileResp {
+                                    content: doc.buffer.iter().collect(),
+                                    site_id: self.site_id,
+                                    filename: doc.name.clone(),
+                                    doc_id: *doc_id,
+                                };
+                                send_response(editor_tx, req_id, resp, None).await;
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    // Read from disk
+                    let content = self.open_file_from_disk(project, file).await;
+                    if let Err(err) = content {
+                        let err = lsp_server::ResponseError {
+                            code: ErrorCode::FileNotFound as i32,
+                            message: err.to_string(),
+                            data: None,
+                        };
+                        send_response(editor_tx, req_id, (), Some(err)).await;
+                        return Ok(());
+                    }
+                    let content = content.unwrap();
+
+                    // Create new doc
+                    let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+                    let filename = std::path::Path::new(file)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(file)
+                        .to_string();
+
+                    let doc = Doc::new(
+                        filename.clone(),
+                        JsonMap::new(),
+                        Some(full_path),
+                        &content,
+                        ServerEngine::new(content.len() as u64),
+                    );
+
+                    self.docs.insert(doc_id, doc);
+
+                    // Send response
+                    let resp = OpenFileResp {
+                        content,
+                        site_id: self.site_id,
+                        filename,
+                        doc_id,
+                    };
+                    send_response(editor_tx, req_id, resp, None).await;
+                }
+                FileDesc::File { id } => {
+                    // Look up existing doc
+                    if let Some(doc) = self.docs.get(id) {
+                        let resp = OpenFileResp {
+                            content: doc.buffer.iter().collect(),
+                            site_id: self.site_id,
+                            filename: doc.name.clone(),
+                            doc_id: *id,
+                        };
+                        send_response(editor_tx, req_id, resp, None).await;
+                    } else {
+                        let err = lsp_server::ResponseError {
+                            code: ErrorCode::FileNotFound as i32,
+                            message: format!("Doc {} not found", id),
+                            data: None,
+                        };
+                        send_response(editor_tx, req_id, (), Some(err)).await;
+                    }
+                }
+                FileDesc::Project { .. } => {
+                    let err = lsp_server::ResponseError {
+                        code: ErrorCode::BadRequest as i32,
+                        message: "Cannot open a project directory".to_string(),
+                        data: None,
+                    };
+                    send_response(editor_tx, req_id, (), Some(err)).await;
+                }
+            }
             return Ok(());
         }
 
@@ -838,17 +955,125 @@ impl Server {
         file_desc: FileDesc,
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        _editor_tx: &mpsc::Sender<lsp_server::Message>,
     ) -> anyhow::Result<()> {
-        // TODO: look for existing doc in docs, if found, send back
-        // the snapshot. If not found, read the file on disk, create a
-        // new doc, send back snapshot.
+        let site_id = self.site_id_of(&remote_host_id);
 
-        // If there’s no existing doc in docs and file_desc is a
-        // File(doc_id), return a file not found error message
+        match &file_desc {
+            FileDesc::ProjectFile { project, file } => {
+                // Check if already open
+                let full_path = std::path::PathBuf::from(&project).join(&file);
 
-        // If file_desc is a Project(project_id), return a bad request message.
-        todo!()
+                // Look for existing doc with same abs_filename
+                for (doc_id, doc) in &self.docs {
+                    if let Some(ref abs_filename) = doc.abs_filename {
+                        if abs_filename == &full_path {
+                            // Already open, send snapshot
+                            let snapshot = NewSnapshot {
+                                content: doc.buffer.iter().collect(),
+                                name: doc.name.clone(),
+                                seq: doc.engine.current_seq(),
+                                site_id,
+                                file_desc: file_desc.clone(),
+                            };
+                            send_to_remote(
+                                webchannel,
+                                &remote_host_id,
+                                Some(req_id),
+                                Msg::Snapshot(snapshot),
+                            )
+                            .await;
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Not open, read from disk
+                let content = self.open_file_from_disk(project, file).await;
+                if let Err(err) = content {
+                    send_to_remote(
+                        webchannel,
+                        &remote_host_id,
+                        Some(req_id),
+                        Msg::ErrorResp(format!("File not found: {}", err)),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                let content = content.unwrap();
+
+                // Create new doc
+                let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+                let filename = std::path::Path::new(file)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(file)
+                    .to_string();
+
+                let doc = Doc::new(
+                    filename.clone(),
+                    JsonMap::new(),
+                    Some(full_path),
+                    &content,
+                    ServerEngine::new(content.len() as u64),
+                );
+
+                self.docs.insert(doc_id, doc);
+
+                // Send snapshot
+                let snapshot = NewSnapshot {
+                    content,
+                    name: filename,
+                    seq: 0,
+                    site_id,
+                    file_desc,
+                };
+                send_to_remote(
+                    webchannel,
+                    &remote_host_id,
+                    Some(req_id),
+                    Msg::Snapshot(snapshot),
+                )
+                .await;
+            }
+            FileDesc::File { id } => {
+                // Look up existing doc
+                if let Some(doc) = self.docs.get(id) {
+                    let snapshot = NewSnapshot {
+                        content: doc.buffer.iter().collect(),
+                        name: doc.name.clone(),
+                        seq: doc.engine.current_seq(),
+                        site_id,
+                        file_desc: file_desc.clone(),
+                    };
+                    send_to_remote(
+                        webchannel,
+                        &remote_host_id,
+                        Some(req_id),
+                        Msg::Snapshot(snapshot),
+                    )
+                    .await;
+                } else {
+                    send_to_remote(
+                        webchannel,
+                        &remote_host_id,
+                        Some(req_id),
+                        Msg::ErrorResp(format!("Doc {} not found", id)),
+                    )
+                    .await;
+                }
+            }
+            FileDesc::Project { .. } => {
+                send_to_remote(
+                    webchannel,
+                    &remote_host_id,
+                    Some(req_id),
+                    Msg::BadRequest("Cannot open a project directory".to_string()),
+                )
+                .await;
+            }
+        }
+        Ok(())
     }
 
     async fn handle_snapshot(

@@ -435,6 +435,33 @@ async fn setup_hub_and_spoke_servers(
     })
 }
 
+/// Creates a test project directory with some sample files
+fn create_test_project() -> anyhow::Result<tempfile::TempDir> {
+    let temp_dir = tempfile::TempDir::new()?;
+    let project_path = temp_dir.path();
+
+    // Create test files
+    std::fs::write(project_path.join("test.txt"), "Hello from test.txt")?;
+    std::fs::write(
+        project_path.join("readme.md"),
+        "# Test Project\nThis is a test",
+    )?;
+
+    // Create a subdirectory with files
+    let subdir = project_path.join("src");
+    std::fs::create_dir(&subdir)?;
+    std::fs::write(
+        subdir.join("main.rs"),
+        "fn main() {\n    println!(\"Hello\");\n}",
+    )?;
+    std::fs::write(
+        subdir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}",
+    )?;
+
+    Ok(temp_dir)
+}
+
 #[tokio::test]
 async fn test_accept_connect() {
     // Test: Basic connection establishment between two servers
@@ -611,4 +638,379 @@ async fn test_accept_connect() {
 
     server1_handle.abort();
     server2_handle.abort();
+}
+
+#[tokio::test]
+async fn test_open_file_basic() {
+    // Test: Basic file opening from local editor
+    // Flow:
+    // 1. Create a test project with files
+    // 2. Server declares the project
+    // 3. Editor requests to open a file from the project
+    // 4. Server opens the file and returns content
+    // Expected: Editor receives file content and metadata
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Request to open a file
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for response
+    let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+
+    // Verify response
+    assert_eq!(resp["content"], "Hello from test.txt");
+    assert_eq!(resp["filename"], "test.txt");
+    assert!(resp["docId"].is_number());
+    assert!(resp["siteId"].is_number());
+
+    tracing::info!("test_open_file_basic completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_open_file_from_remote() {
+    // Test: Remote server requests file from hub
+    // Flow:
+    // 1. Hub declares a project with files
+    // 2. Spoke connects to hub
+    // 3. Spoke requests to open a file from hub's project
+    // 4. Hub serves the file content to spoke
+    // Expected: Spoke receives file content from hub
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Spoke requests to open a file from hub
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "src/main.rs"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for response
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+
+    // Verify response
+    assert_eq!(resp["content"], "fn main() {\n    println!(\"Hello\");\n}");
+    assert_eq!(resp["filename"], "main.rs");
+    assert!(resp["docId"].is_number());
+    assert!(resp["siteId"].is_number());
+
+    tracing::info!("test_open_file_from_remote completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_open_file_not_found() {
+    // Test: Handle file not found error
+    // Flow:
+    // 1. Create a project
+    // 2. Request to open a non-existent file
+    // Expected: Error response with FileNotFound code
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Request to open a non-existent file
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "non_existent.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for error response
+    let result = setup.hub.editor.wait_for_response(req_id, 5).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("112") || err_msg.contains("Failed to read file"));
+
+    tracing::info!("test_open_file_not_found completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_open_file_bad_request() {
+    // Test: Handle bad request (trying to open a directory)
+    // Flow:
+    // 1. Request to open a Project (directory) instead of a file
+    // Expected: Error response with BadRequest code
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Request to open a project directory
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "project",
+                    "id": project_path.clone()
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for error response
+    let result = setup.hub.editor.wait_for_response(req_id, 5).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("113") || err_msg.contains("Cannot open a project directory"));
+
+    tracing::info!("test_open_file_bad_request completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_open_file_already_open() {
+    // Test: Handle already opened file
+    // Flow:
+    // 1. Open a file successfully
+    // 2. Try to open the same file again
+    // Expected: Should return the same content without error
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // First request to open a file
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp1 = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let doc_id1 = resp1["docId"].as_u64().unwrap();
+
+    // Second request to open the same file
+    let req_id = 2;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp2 = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let doc_id2 = resp2["docId"].as_u64().unwrap();
+
+    // Should return the same doc_id
+    assert_eq!(doc_id1, doc_id2);
+    assert_eq!(resp2["content"], "Hello from test.txt");
+
+    tracing::info!("test_open_file_already_open completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_open_file_doc_id_not_found() {
+    // Test: Handle request for non-existent doc by ID
+    // Flow:
+    // 1. Request to open a file by doc_id that doesn't exist
+    // Expected: Error response with FileNotFound code
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Request to open a non-existent doc by ID
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "file",
+                    "id": 9999
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for error response
+    let result = setup.hub.editor.wait_for_response(req_id, 5).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("112") || err_msg.contains("not found"));
+
+    tracing::info!("test_open_file_doc_id_not_found completed successfully");
+    setup.cleanup();
 }
