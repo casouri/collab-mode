@@ -239,7 +239,7 @@ mod e2e_tests {
                 dir: Some(("project1".to_string(), "/test".to_string())), // ProjectFile is (ProjectId, String)
             },
             Msg::FileList(vec![crate::message::ListFileEntry {
-                file: FileDesc::File(1),
+                file: FileDesc::File { id: 1 },
                 filename: "file1.txt".to_string(),
                 is_directory: false,
                 meta: serde_json::Map::new(),

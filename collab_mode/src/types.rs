@@ -69,14 +69,55 @@ pub enum DocDesc {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
 pub enum FileDesc {
     /// A shared doc that isn't in a project.
-    File(DocId),
+    File { id: DocId },
     /// A project.
-    Project(ProjectId),
+    Project { id: ProjectId },
     /// A file in a project.
-    ProjectFile(ProjectFile),
+    ProjectFile {
+        project: ProjectId,
+        /// Relative path to the file in the project.
+        file: String,
+    },
 }
+
+impl PartialEq for FileDesc {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FileDesc::File { id: id1 }, FileDesc::File { id: id2 }) => id1 == id2,
+            (FileDesc::Project { id: id1 }, FileDesc::Project { id: id2 }) => {
+                // Normalize and compare project paths
+                std::path::Path::new(id1)
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(id1))
+                    == std::path::Path::new(id2)
+                        .canonicalize()
+                        .unwrap_or_else(|_| std::path::PathBuf::from(id2))
+            }
+            (
+                FileDesc::ProjectFile {
+                    project: proj1,
+                    file: path1,
+                },
+                FileDesc::ProjectFile {
+                    project: proj2,
+                    file: path2,
+                },
+            ) => {
+                // Compare normalized full paths
+                let full_path1 = std::path::Path::new(proj1).join(path1);
+                let full_path2 = std::path::Path::new(proj2).join(path2);
+                full_path1.canonicalize().unwrap_or(full_path1.clone())
+                    == full_path2.canonicalize().unwrap_or(full_path2.clone())
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for FileDesc {}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileContentOrPath {

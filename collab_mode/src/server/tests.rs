@@ -303,6 +303,15 @@ impl MockEditor {
 
 #[tokio::test]
 async fn test_accept_connect() {
+    // Test: Basic connection establishment between two servers
+    // Flow:
+    // 1. Editor1 tells Server1 to accept connections on signaling server
+    // 2. Editor2 tells Server2 to connect to Server1 via signaling server
+    // 3. Both servers establish WebRTC connection through ICE/DTLS/SCTP
+    // 4. Once connected, servers exchange "Hey" messages
+    // 5. Each editor receives a Hey notification from the remote server
+    // Expected: Both editors receive Hey messages indicating successful connection
+
     let env = TestEnvironment::new().await.unwrap();
 
     let id1 = create_test_id("server1");
@@ -472,6 +481,16 @@ async fn test_accept_connect() {
 
 #[tokio::test]
 async fn test_list_files_basic() {
+    // Test: ListFiles request from one server to another
+    // Flow:
+    // 1. Editor1 sends ListFiles request to Server1 for files on Server2
+    // 2. Server1 forwards ListFiles message to Server2 via WebRTC
+    // 3. Server2 receives the message and sends ListFiles request to Editor2
+    // 4. Editor2 responds with a file list containing various file types
+    // 5. Server2 sends the file list back to Server1 via WebRTC
+    // 6. Server1 forwards the response to Editor1
+    // Expected: Editor1 receives the complete file list from Server2
+
     let env = TestEnvironment::new().await.unwrap();
 
     let id1 = create_test_id("server1");
@@ -621,19 +640,24 @@ async fn test_list_files_basic() {
     tracing::info!("Editor2 sending ListFiles response");
     let mock_files = vec![
         message::ListFileEntry {
-            file: FileDesc::File(1),
+            file: FileDesc::File { id: 1 },
             filename: "test_file.txt".to_string(),
             is_directory: false,
             meta: serde_json::Map::new(),
         },
         message::ListFileEntry {
-            file: FileDesc::Project("project1".to_string()),
+            file: FileDesc::Project {
+                id: "project1".to_string(),
+            },
             filename: "MyProject".to_string(),
             is_directory: true,
             meta: serde_json::Map::new(),
         },
         message::ListFileEntry {
-            file: FileDesc::ProjectFile(("project1".to_string(), "src/main.rs".to_string())),
+            file: FileDesc::ProjectFile {
+                project: "project1".to_string(),
+                file: "src/main.rs".to_string(),
+            },
             filename: "main.rs".to_string(),
             is_directory: false,
             meta: serde_json::Map::new(),
@@ -670,6 +694,16 @@ async fn test_list_files_basic() {
 
 #[tokio::test]
 async fn test_list_files_empty() {
+    // Test: ListFiles request when remote server has no files
+    // Flow:
+    // 1. Editor1 sends ListFiles request to Server1 for files on Server2
+    // 2. Server1 forwards request to Server2 via WebRTC
+    // 3. Server2 asks Editor2 for files
+    // 4. Editor2 responds with an empty file list
+    // 5. Server2 sends empty list back to Server1
+    // 6. Server1 forwards empty response to Editor1
+    // Expected: Editor1 receives an empty file list (valid but empty response)
+
     let env = TestEnvironment::new().await.unwrap();
 
     let id1 = create_test_id("server1");
@@ -799,6 +833,20 @@ async fn test_list_files_empty() {
 
 #[tokio::test]
 async fn test_list_files_error_handling() {
+    // Test: Error handling in ListFiles request flow
+    // Flow has two test cases:
+    // Test 1 - Remote editor returns an error:
+    //   1. Editor1 sends ListFiles request for Server2
+    //   2. Server1 forwards to Server2
+    //   3. Server2 asks Editor2
+    //   4. Editor2 responds with an error (404 File not found)
+    //   5. Server2 sends ErrorResp message back to Server1
+    //   6. Server1 sends error response to Editor1
+    // Test 2 - Remote editor returns invalid format:
+    //   1. Same flow as above but Editor2 returns invalid JSON structure
+    //   2. Server may handle parsing error internally
+    // Expected: Editor1 receives appropriate error responses
+
     let env = TestEnvironment::new().await.unwrap();
 
     let id1 = create_test_id("server1");
@@ -955,6 +1003,15 @@ async fn test_list_files_error_handling() {
 
 #[tokio::test]
 async fn test_list_files_timeout() {
+    // Test: Timeout handling when remote editor doesn't respond
+    // Flow:
+    // 1. Editor1 sends ListFiles request for Server2
+    // 2. Server1 forwards to Server2 via WebRTC
+    // 3. Server2 asks Editor2 for files
+    // 4. Editor2 receives the request but intentionally doesn't respond
+    // 5. Editor1's wait_for_response times out after 3 seconds
+    // Expected: Editor1 experiences a timeout waiting for the response
+
     let env = TestEnvironment::new().await.unwrap();
 
     let id1 = create_test_id("server1");
@@ -1063,6 +1120,339 @@ async fn test_list_files_timeout() {
     assert!(response_result.unwrap_err().to_string().contains("Timeout"));
 
     tracing::info!("test_list_files_timeout completed successfully");
+
+    server1_handle.abort();
+    server2_handle.abort();
+}
+
+#[tokio::test]
+async fn test_open_file_basic() {
+    // Test: Opening files from a remote server
+    // This test covers two scenarios:
+    // 1. Opening a simple file by ID
+    // 2. Opening a project file by project path and relative file path
+    // Both test the complete request/response flow through the WebRTC connection
+
+    let env = TestEnvironment::new().await.unwrap();
+
+    let id1 = create_test_id("server1");
+    let id2 = create_test_id("server2");
+
+    tracing::info!("Testing OpenFile basic scenario");
+
+    // Create servers in attached mode
+    let temp_dir1 = tempfile::TempDir::new().unwrap();
+    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
+    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
+
+    let temp_dir2 = tempfile::TempDir::new().unwrap();
+    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
+    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
+
+    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
+    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
+
+    // Start server tasks
+    let server1_handle = {
+        tokio::spawn(async move {
+            if let Err(e) = server1.run(server_tx1, server_rx1).await {
+                tracing::error!("Server1 error: {}", e);
+            }
+        })
+    };
+
+    let server2_handle = {
+        tokio::spawn(async move {
+            if let Err(e) = server2.run(server_tx2, server_rx2).await {
+                tracing::error!("Server2 error: {}", e);
+            }
+        })
+    };
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Establish connection between servers
+    mock_editor1
+        .send_notification(
+            "AcceptConnection",
+            serde_json::json!({
+                "hostId": id1.clone(),
+                "signalingAddr": env.signaling_url(),
+                "transportType": "SCTP",
+            }),
+        )
+        .await
+        .unwrap();
+
+    mock_editor2
+        .send_notification(
+            "Connect",
+            serde_json::json!({
+                "hostId": id1.clone(),
+                "signalingAddr": env.signaling_url(),
+                "transportType": "SCTP",
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for connection establishment
+    let (_host_id, _message) = mock_editor1.expect_hey_notification(10).await.unwrap();
+    let (_host_id, _message) = mock_editor2.expect_hey_notification(10).await.unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Test 1: Open a file from remote server
+    // Flow:
+    // 1. Editor1 sends OpenFile request to Server1 for a file on Server2
+    // 2. Server1 converts to RequestFile message and sends to Server2 via WebRTC
+    // 3. Server2 receives RequestFile and sends RequestFile request to Editor2
+    // 4. Editor2 responds with file content (buffer, fileName, seq, docId)
+    // 5. Server2 converts response to Snapshot message and sends to Server1
+    // 6. Server1 creates a RemoteDoc and sends OpenFile response to Editor1
+    // Expected: Editor1 receives file content with new local docId and siteId
+
+    tracing::info!("Test 1: Open file from remote server");
+
+    // Editor 1 requests to open a file on server 2
+    mock_editor1
+        .send_request(
+            1,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": id2.clone(),
+                "fileDesc": {
+                    "type": "file",
+                    "id": 42
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Editor 2 should receive a RequestFile request
+    let (req_id, params) = mock_editor2
+        .wait_for_request("RequestFile", 10)
+        .await
+        .unwrap();
+
+    tracing::info!("Editor 2 received RequestFile: {:?}", params);
+
+    // Verify the params structure matches what we sent
+    assert_eq!(params["fileDesc"]["type"], "file");
+    assert_eq!(params["fileDesc"]["id"], 42);
+
+    // Editor 2 responds with the file snapshot
+    mock_editor2
+        .send_response(
+            req_id,
+            serde_json::json!({
+                "buffer": "Hello, World!",
+                "fileName": "test.txt",
+                "seq": 0,
+                "docId": 42
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Editor 1 should receive the OpenFile response
+    let response = mock_editor1.wait_for_response(1, 10).await.unwrap();
+    tracing::info!("Editor 1 received OpenFile response: {:?}", response);
+
+    assert_eq!(response["content"], "Hello, World!");
+    assert_eq!(response["filename"], "test.txt");
+    assert!(response["docId"].is_number());
+    assert!(response["siteId"].is_number());
+
+    // Test 2: Open a project file
+    // Flow:
+    // 1. Editor1 sends OpenFile for a ProjectFile (project + relative path)
+    // 2. Server1 forwards as RequestFile with ProjectFile descriptor to Server2
+    // 3. Server2 asks Editor2 for the specific project file
+    // 4. Editor2 responds with the file content
+    // 5. Response flows back through Server2 -> Server1 -> Editor1
+    // Expected: Editor1 receives the project file content with proper metadata
+
+    tracing::info!("Test 2: Open project file from remote server");
+
+    mock_editor1
+        .send_request(
+            2,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": id2.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "/project/path",
+                    "file": "src/main.rs"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Editor 2 should receive a RequestFile request
+    let (req_id, params) = mock_editor2
+        .wait_for_request("RequestFile", 10)
+        .await
+        .unwrap();
+
+    tracing::info!(
+        "Editor 2 received RequestFile for project file: {:?}",
+        params
+    );
+
+    // Editor 2 responds with the file snapshot
+    mock_editor2
+        .send_response(
+            req_id,
+            serde_json::json!({
+                "buffer": "fn main() {\n    println!(\"Hello, world!\");\n}",
+                "fileName": "main.rs",
+                "seq": 0,
+                "docId": 43
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Editor 1 should receive the OpenFile response
+    let response = mock_editor1.wait_for_response(2, 10).await.unwrap();
+    tracing::info!(
+        "Editor 1 received OpenFile response for project file: {:?}",
+        response
+    );
+
+    assert!(response["content"].as_str().unwrap().contains("fn main()"));
+    assert_eq!(response["filename"], "main.rs");
+    assert!(response["docId"].is_number());
+    assert!(response["siteId"].is_number());
+
+    tracing::info!("test_open_file_basic completed successfully");
+
+    server1_handle.abort();
+    server2_handle.abort();
+}
+
+#[tokio::test]
+async fn test_open_file_error_handling() {
+    // Test: Error handling when opening a non-existent file from remote server
+    // Flow:
+    // 1. Editor1 sends OpenFile request for a non-existent file (ID 999)
+    // 2. Server1 forwards RequestFile to Server2 via WebRTC
+    // 3. Server2 asks Editor2 for the file
+    // 4. Editor2 responds with error (404 File not found)
+    // 5. Server2 sends ErrorResp message back to Server1
+    // 6. Server1 forwards error response to Editor1
+    // Expected: Editor1 receives an error response with 404 status
+
+    let env = TestEnvironment::new().await.unwrap();
+
+    let id1 = create_test_id("server1");
+    let id2 = create_test_id("server2");
+
+    tracing::info!("Testing OpenFile error handling");
+
+    // Create servers in attached mode
+    let temp_dir1 = tempfile::TempDir::new().unwrap();
+    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
+    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
+
+    let temp_dir2 = tempfile::TempDir::new().unwrap();
+    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
+    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
+
+    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
+    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
+
+    // Start server tasks
+    let server1_handle = {
+        tokio::spawn(async move {
+            if let Err(e) = server1.run(server_tx1, server_rx1).await {
+                tracing::error!("Server1 error: {}", e);
+            }
+        })
+    };
+
+    let server2_handle = {
+        tokio::spawn(async move {
+            if let Err(e) = server2.run(server_tx2, server_rx2).await {
+                tracing::error!("Server2 error: {}", e);
+            }
+        })
+    };
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Establish connection between servers
+    mock_editor1
+        .send_notification(
+            "AcceptConnection",
+            serde_json::json!({
+                "hostId": id1.clone(),
+                "signalingAddr": env.signaling_url(),
+                "transportType": "SCTP",
+            }),
+        )
+        .await
+        .unwrap();
+
+    mock_editor2
+        .send_notification(
+            "Connect",
+            serde_json::json!({
+                "hostId": id1.clone(),
+                "signalingAddr": env.signaling_url(),
+                "transportType": "SCTP",
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for connection establishment
+    let (_host_id, _message) = mock_editor1.expect_hey_notification(10).await.unwrap();
+    let (_host_id, _message) = mock_editor2.expect_hey_notification(10).await.unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Test case: Remote server returns error for RequestFile
+    // This simulates when the requested file doesn't exist on the remote server
+    tracing::info!("Test: Remote server returns error for RequestFile");
+
+    mock_editor1
+        .send_request(
+            1,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": id2.clone(),
+                "fileDesc": {
+                    "type": "file",
+                    "id": 999
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Editor 2 should receive a RequestFile request
+    let (req_id, _params) = mock_editor2
+        .wait_for_request("RequestFile", 10)
+        .await
+        .unwrap();
+
+    // Editor 2 responds with an error
+    mock_editor2
+        .send_error_response(req_id, 404, "File not found".to_string())
+        .await
+        .unwrap();
+
+    // Editor 1 should receive an error response
+    let response_result = mock_editor1.wait_for_response(1, 10).await;
+    assert!(response_result.is_err());
+    assert!(response_result.unwrap_err().to_string().contains("404"));
+
+    tracing::info!("test_open_file_error_handling completed successfully");
 
     server1_handle.abort();
     server2_handle.abort();

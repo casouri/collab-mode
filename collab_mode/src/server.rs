@@ -1,9 +1,10 @@
 use crate::config_man::ConfigManager;
+use crate::engine::{ClientEngine, ServerEngine};
 use crate::message::{self, *};
 use crate::signaling::SignalingError;
 use crate::types::*;
 use crate::webchannel::WebChannel;
-use crate::webchannel::{self, Message as WMsg, Msg};
+use crate::webchannel::{self, Msg};
 use anyhow::{anyhow, Context};
 use gapbuf::GapBuffer;
 use serde::Serialize;
@@ -74,6 +75,8 @@ pub struct Server {
     next_site_id: AtomicU32,
     /// Next request id to be used for requests to editor.
     next_req_id: AtomicI32,
+    /// Next doc id to be used for new docs.
+    next_doc_id: AtomicU32,
     /// Docs hosted by this server.
     docs: HashMap<DocId, Doc>,
     /// Docs hosted by remote peers.
@@ -113,6 +116,7 @@ impl Server {
             site_id: 0,
             next_site_id: AtomicU32::new(1),
             next_req_id: AtomicI32::new(1),
+            next_doc_id: AtomicU32::new(1),
             docs: HashMap::new(),
             remote_docs: HashMap::new(),
             projects: HashMap::new(),
@@ -286,7 +290,14 @@ impl Server {
             }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
-                // Handle the request...
+                self.open_file_from_editor(
+                    editor_tx,
+                    webchannel,
+                    params.host_id,
+                    params.file_desc,
+                    req.id,
+                )
+                .await?;
                 Ok(())
             }
             _ => {
@@ -374,7 +385,7 @@ impl Server {
         &mut self,
         orig_req: OrigRequest,
         result: Option<serde_json::Value>,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        _editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
         match orig_req.method.as_str() {
@@ -386,6 +397,28 @@ impl Server {
                     &orig_req.host_id,
                     Some(orig_req.req_id),
                     Msg::FileList(resp.files),
+                )
+                .await;
+            }
+            "RequestFile" => {
+                // Parse the Snapshot response from editor
+                let snapshot_val = result.unwrap_or_default();
+                let buffer = snapshot_val["buffer"].as_str().unwrap_or("");
+                let filename = snapshot_val["fileName"].as_str().unwrap_or("untitled");
+                let seq = snapshot_val["seq"].as_u64().unwrap_or(0);
+                
+                let snapshot = NewSnapshot {
+                    content: buffer.to_string(),
+                    filename: filename.to_string(),
+                    seq: seq as u32,
+                };
+                
+                // Send snapshot back to remote
+                send_to_remote(
+                    webchannel,
+                    &orig_req.host_id,
+                    Some(orig_req.req_id),
+                    Msg::Snapshot(snapshot),
                 )
                 .await;
             }
@@ -496,6 +529,42 @@ impl Server {
                 };
                 send_response(editor_tx, req_id, (), Some(err)).await;
 
+                Ok(())
+            }
+            Msg::RequestFile(file_desc) => {
+                if let Some(req_id) = msg.req_id {
+                    self.handle_request_file(
+                        webchannel,
+                        file_desc,
+                        req_id,
+                        msg.host.clone(),
+                        editor_tx,
+                    )
+                    .await?;
+                } else {
+                    tracing::warn!("Received RequestFile without req_id, ignoring.");
+                    send_to_remote(
+                        webchannel,
+                        &msg.host,
+                        None,
+                        Msg::BadRequest("Missing req_id".to_string()),
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+            Msg::Snapshot(snapshot) => {
+                if let Some(req_id) = msg.req_id {
+                    self.handle_snapshot(
+                        editor_tx,
+                        snapshot,
+                        req_id,
+                        msg.host.clone(),
+                    )
+                    .await?;
+                } else {
+                    tracing::warn!("Received Snapshot without req_id, ignoring.");
+                }
                 Ok(())
             }
             _ => {
@@ -672,10 +741,10 @@ impl Server {
                     .with_context(|| format!("Can't access file {}", &file_str))?;
                 let file_rel = pathdiff::diff_paths(&project.root, &file_str).unwrap();
                 result.push(ListFileEntry {
-                    file: FileDesc::ProjectFile((
-                        project_id.clone(),
-                        file_rel.to_string_lossy().to_string(),
-                    )),
+                    file: FileDesc::ProjectFile {
+                        project: project_id.clone(),
+                        file: file_rel.to_string_lossy().to_string(),
+                    },
                     filename: file.file_name().to_string_lossy().to_string(),
                     is_directory: stat.is_dir(),
                     meta: JsonMap::new(),
@@ -687,7 +756,9 @@ impl Server {
             let mut result = vec![];
             for (_, project) in self.projects.iter() {
                 result.push(ListFileEntry {
-                    file: FileDesc::Project(project.root.clone()),
+                    file: FileDesc::Project {
+                        id: project.root.clone(),
+                    },
                     filename: project.name.clone(),
                     is_directory: true,
                     meta: project.meta.clone(),
@@ -695,13 +766,232 @@ impl Server {
             }
             for (docid, doc) in self.docs.iter() {
                 result.push(ListFileEntry {
-                    file: FileDesc::File(docid.clone()),
+                    file: FileDesc::File { id: docid.clone() },
                     is_directory: false,
                     filename: doc.name.clone(),
                     meta: doc.meta.clone(),
                 });
             }
             return Ok(result);
+        }
+    }
+
+    async fn open_file_from_editor(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+        host_id: ServerId,
+        file_desc: FileDesc,
+        req_id: lsp_server::RequestId,
+    ) -> anyhow::Result<()> {
+        if self.host_id == host_id {
+            // Opening our own file - not supported in attached mode
+            if self.attached {
+                let err = lsp_server::ResponseError {
+                    code: 400,
+                    message: "Cannot open local files in attached mode".to_string(),
+                    data: None,
+                };
+                send_response(editor_tx, req_id, (), Some(err)).await;
+                return Ok(());
+            }
+            // TODO: Handle opening local files in non-attached mode
+            return Ok(());
+        }
+
+        // Check if we already have this file in remote_docs
+        for (doc_id, remote_doc) in &self.remote_docs {
+            if remote_doc.file_desc == file_desc {
+                // Already have this doc, return it
+                let resp = OpenFileResp {
+                    content: self.get_remote_doc_content(*doc_id)?,
+                    site_id: self.site_id,
+                    filename: remote_doc.name.clone(),
+                    doc_id: *doc_id,
+                };
+                send_response(editor_tx, req_id, resp, None).await;
+                return Ok(());
+            }
+        }
+
+        // Need to request file from remote
+        let internal_req_id = self.next_req_id.fetch_add(1, Ordering::SeqCst);
+        self.orig_req_map.insert(
+            internal_req_id,
+            OrigRequest {
+                req_id: req_id.clone(),
+                method: "OpenFile".to_string(),
+                host_id: host_id.clone(),
+            },
+        );
+
+        send_to_remote(
+            webchannel,
+            &host_id,
+            Some(req_id),
+            Msg::RequestFile(file_desc),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn handle_request_file(
+        &mut self,
+        webchannel: &WebChannel,
+        file_desc: FileDesc,
+        req_id: lsp_server::RequestId,
+        remote_host_id: ServerId,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+    ) -> anyhow::Result<()> {
+        // Store the remote request so we can handle the response later
+        let editor_req_id = self.next_req_id.fetch_add(1, Ordering::SeqCst);
+        let orig_req = OrigRequest {
+            method: "RequestFile".to_string(),
+            host_id: remote_host_id.clone(),
+            req_id: req_id.clone(),
+        };
+        self.orig_req_map.insert(editor_req_id, orig_req);
+        
+        // Convert FileDesc to the format expected by the editor (using tagged representation)
+        let params = match &file_desc {
+            FileDesc::File { id } => {
+                serde_json::json!({
+                    "fileDesc": {
+                        "type": "file",
+                        "id": id
+                    }
+                })
+            }
+            FileDesc::Project { id } => {
+                serde_json::json!({
+                    "fileDesc": {
+                        "type": "project",
+                        "id": id
+                    }
+                })
+            }
+            FileDesc::ProjectFile { project, file } => {
+                serde_json::json!({
+                    "fileDesc": {
+                        "type": "projectFile",
+                        "project": project,
+                        "file": file
+                    }
+                })
+            }
+        };
+        
+        // Send RequestFile request to our editor
+        let request = lsp_server::Request {
+            id: lsp_server::RequestId::from(editor_req_id),
+            method: "RequestFile".to_string(),
+            params,
+        };
+        
+        editor_tx
+            .send(lsp_server::Message::Request(request))
+            .await?;
+        
+        Ok(())
+    }
+
+    async fn handle_snapshot(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        snapshot: NewSnapshot,
+        req_id: lsp_server::RequestId,
+        remote_host_id: ServerId,
+    ) -> anyhow::Result<()> {
+        // Find doc_id for this snapshot
+        let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+        
+        // Create RemoteDoc
+        let remote_doc = RemoteDoc {
+            name: snapshot.filename.clone(),
+            file_desc: FileDesc::File { id: doc_id }, // Will be updated based on context
+            next_site_seq: 1,
+            meta: serde_json::Map::new(),
+            remote_op_buffer: Vec::new(),
+            engine: ClientEngine::new(self.site_id, 0, 0),
+        };
+        
+        self.remote_docs.insert(doc_id, remote_doc);
+
+        // Send response to editor
+        let resp = OpenFileResp {
+            content: snapshot.content,
+            site_id: self.site_id,
+            filename: snapshot.filename,
+            doc_id,
+        };
+        send_response(editor_tx, req_id, resp, None).await;
+        Ok(())
+    }
+
+    fn file_desc_matches_doc(&self, file_desc: &FileDesc, doc: &Doc) -> bool {
+        // Compare based on normalized filename
+        match file_desc {
+            FileDesc::File { .. } => false, // Can't match by ID since we don't know remote's ID
+            FileDesc::Project { .. } => false,
+            FileDesc::ProjectFile { file, .. } => {
+                // Compare with doc's filename if available
+                &doc.name == file || doc.name.ends_with(file)
+            }
+        }
+    }
+
+    fn create_doc_from_file_desc(&self, file_desc: &FileDesc) -> anyhow::Result<Doc> {
+        let name = match file_desc {
+            FileDesc::File { .. } => "untitled".to_string(),
+            FileDesc::Project { id } => id.clone(),
+            FileDesc::ProjectFile { file, .. } => file.clone(),
+        };
+
+        let abs_filename = match file_desc {
+            FileDesc::ProjectFile { project, file } => {
+                Some(PathBuf::from(project).join(file))
+            }
+            _ => None,
+        };
+
+        Ok(Doc {
+            name,
+            meta: serde_json::Map::new(),
+            abs_filename,
+            engine: ServerEngine::new(0),
+            buffer: GapBuffer::new(),
+            subscribers: HashMap::new(),
+        })
+    }
+
+    fn create_snapshot(&self, doc_id: DocId) -> anyhow::Result<NewSnapshot> {
+        let doc = self.docs.get(&doc_id)
+            .ok_or_else(|| anyhow!("Doc {} not found", doc_id))?;
+        
+        let content: String = doc.buffer.iter().collect();
+        
+        Ok(NewSnapshot {
+            content,
+            filename: doc.name.clone(),
+            seq: 0, // TODO: track sequence numbers
+        })
+    }
+
+    fn get_remote_doc_content(&self, doc_id: DocId) -> anyhow::Result<String> {
+        let remote_doc = self.remote_docs.get(&doc_id)
+            .ok_or_else(|| anyhow!("Remote doc {} not found", doc_id))?;
+        
+        // TODO: Reconstruct content from engine
+        Ok(String::new())
+    }
+
+    fn get_or_create_site_id(&mut self, host_id: &ServerId) -> SiteId {
+        if let Some(&site_id) = self.site_id_map.get(host_id) {
+            site_id
+        } else {
+            let site_id = self.next_site_id.fetch_add(1, Ordering::SeqCst);
+            self.site_id_map.insert(host_id.clone(), site_id);
+            site_id
         }
     }
 }
