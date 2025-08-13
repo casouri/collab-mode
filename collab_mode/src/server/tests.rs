@@ -301,6 +301,140 @@ impl MockEditor {
     }
 }
 
+struct ServerSetup {
+    id: ServerId,
+    handle: tokio::task::JoinHandle<()>,
+    editor: MockEditor,
+    _temp_dir: tempfile::TempDir,
+}
+
+struct HubAndSpokeSetup {
+    hub: ServerSetup,
+    spokes: Vec<ServerSetup>,
+}
+
+impl HubAndSpokeSetup {
+    fn cleanup(self) {
+        self.hub.handle.abort();
+        for spoke in self.spokes {
+            spoke.handle.abort();
+        }
+    }
+}
+
+/// Creates a hub-and-spoke topology with one central server and multiple spoke servers.
+/// The hub server accepts connections and all spoke servers connect to it.
+/// Returns the hub and spoke setups with established connections.
+async fn setup_hub_and_spoke_servers(
+    env: &TestEnvironment,
+    num_spokes: usize,
+) -> anyhow::Result<HubAndSpokeSetup> {
+    // Create hub server
+    let hub_id = create_test_id("hub");
+    let hub_temp_dir = tempfile::TempDir::new()?;
+    let hub_config = ConfigManager::new(Some(hub_temp_dir.path().to_string_lossy().to_string()));
+    let mut hub_server = Server::new(hub_id.clone(), true, hub_config)?;
+
+    let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
+
+    let hub_handle = tokio::spawn(async move {
+        if let Err(e) = hub_server.run(hub_tx, hub_rx).await {
+            tracing::error!("Hub server error: {}", e);
+        }
+    });
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Hub starts accepting connections
+    tracing::info!("Hub server {} starting to accept connections", hub_id);
+    hub_editor
+        .send_notification(
+            "AcceptConnection",
+            serde_json::json!({
+                "hostId": hub_id.clone(),
+                "signalingAddr": env.signaling_url(),
+                "transportType": "SCTP",
+            }),
+        )
+        .await?;
+
+    let _ = hub_editor
+        .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
+        .await?;
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Create and connect spoke servers
+    let mut spokes = Vec::new();
+
+    for i in 0..num_spokes {
+        let spoke_id = create_test_id(&format!("spoke{}", i + 1));
+        let spoke_temp_dir = tempfile::TempDir::new()?;
+        let spoke_config =
+            ConfigManager::new(Some(spoke_temp_dir.path().to_string_lossy().to_string()));
+        let mut spoke_server = Server::new(spoke_id.clone(), true, spoke_config)?;
+
+        let (mut spoke_editor, spoke_tx, spoke_rx) = MockEditor::new();
+
+        let spoke_handle = tokio::spawn(async move {
+            if let Err(e) = spoke_server.run(spoke_tx, spoke_rx).await {
+                tracing::error!("Spoke server {} error: {}", i + 1, e);
+            }
+        });
+
+        sleep(Duration::from_millis(100)).await;
+
+        // Spoke connects to hub
+        tracing::info!("Spoke server {} connecting to hub {}", spoke_id, hub_id);
+        spoke_editor
+            .send_notification(
+                "Connect",
+                serde_json::json!({
+                    "hostId": hub_id.clone(),
+                    "signalingAddr": env.signaling_url(),
+                    "transportType": "SCTP",
+                }),
+            )
+            .await?;
+
+        let _ = spoke_editor
+            .wait_for_notification(&NotificationCode::Connecting.to_string(), 5)
+            .await?;
+
+        spokes.push(ServerSetup {
+            id: spoke_id,
+            handle: spoke_handle,
+            editor: spoke_editor,
+            _temp_dir: spoke_temp_dir,
+        });
+    }
+
+    // Wait for all connections to be established
+    tracing::info!("Waiting for all connections to be established");
+
+    // Hub should receive Hey from each spoke
+    for i in 0..num_spokes {
+        let (host_id, _message) = hub_editor.expect_hey_notification(10).await?;
+        tracing::info!("Hub received Hey from spoke: {}", host_id);
+    }
+
+    // Each spoke should receive Hey from hub
+    for spoke in &mut spokes {
+        let (host_id, _message) = spoke.editor.expect_hey_notification(10).await?;
+        tracing::info!("Spoke {} received Hey from hub: {}", spoke.id, host_id);
+    }
+
+    Ok(HubAndSpokeSetup {
+        hub: ServerSetup {
+            id: hub_id,
+            handle: hub_handle,
+            editor: hub_editor,
+            _temp_dir: hub_temp_dir,
+        },
+        spokes,
+    })
+}
+
 #[tokio::test]
 async fn test_accept_connect() {
     // Test: Basic connection establishment between two servers
@@ -483,141 +617,33 @@ async fn test_accept_connect() {
 async fn test_list_files_basic() {
     // Test: ListFiles request from one server to another
     // Flow:
-    // 1. Editor1 sends ListFiles request to Server1 for files on Server2
-    // 2. Server1 forwards ListFiles message to Server2 via WebRTC
-    // 3. Server2 receives the message and sends ListFiles request to Editor2
-    // 4. Editor2 responds with a file list containing various file types
-    // 5. Server2 sends the file list back to Server1 via WebRTC
-    // 6. Server1 forwards the response to Editor1
-    // Expected: Editor1 receives the complete file list from Server2
+    // 1. Hub editor sends ListFiles request to Hub server for files on Spoke server
+    // 2. Hub server forwards ListFiles message to Spoke server via WebRTC
+    // 3. Spoke server receives the message and sends ListFiles request to Spoke editor
+    // 4. Spoke editor responds with a file list containing various file types
+    // 5. Spoke server sends the file list back to Hub server via WebRTC
+    // 6. Hub server forwards the response to Hub editor
+    // Expected: Hub editor receives the complete file list from Spoke server
 
     let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
 
-    let id1 = create_test_id("server1");
-    let id2 = create_test_id("server2");
+    let spoke_id = setup.spokes[0].id.clone();
 
-    tracing::info!("Creating servers with IDs: {} and {}", id1, id2);
-
-    // Create servers in attached mode
-    let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
-
-    let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
-
-    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
-    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
-
-    // Start server tasks
-    let server1_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
-                tracing::error!("Server1 error: {}", e);
-            }
-        })
-    };
-
-    let server2_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
-                tracing::error!("Server2 error: {}", e);
-            }
-        })
-    };
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Establish connection between servers
-    tracing::info!("Establishing connection between servers");
-    mock_editor1
-        .send_notification(
-            "AcceptConnection",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor1
-        .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
-        .await
-        .unwrap();
-
-    sleep(Duration::from_millis(500)).await;
-
-    mock_editor2
-        .send_notification(
-            "Connect",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor2
-        .wait_for_notification(&NotificationCode::Connecting.to_string(), 5)
-        .await
-        .unwrap();
-
-    // Wait for connection to be established - look for Hey messages from both sides
-    tracing::info!("Waiting for connection to be established");
-
-    let timeout_duration = Duration::from_secs(30);
-    let start_time = std::time::Instant::now();
-    let mut hey_received_count = 0;
-    let hey_method = NotificationCode::Hey.to_string();
-
-    while hey_received_count < 2 && start_time.elapsed() < timeout_duration {
-        // Check for Hey message from editor1
-        match timeout(Duration::from_millis(100), mock_editor1.rx.recv()).await {
-            Ok(Some(lsp_server::Message::Notification(notif))) => {
-                if notif.method == hey_method {
-                    tracing::info!("Editor1 received Hey notification");
-                    hey_received_count += 1;
-                }
-            }
-            _ => {}
-        }
-
-        // Check for Hey message from editor2
-        match timeout(Duration::from_millis(100), mock_editor2.rx.recv()).await {
-            Ok(Some(lsp_server::Message::Notification(notif))) => {
-                if notif.method == hey_method {
-                    tracing::info!("Editor2 received Hey notification");
-                    hey_received_count += 1;
-                }
-            }
-            _ => {}
-        }
-
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    assert_eq!(
-        hey_received_count, 2,
-        "Should receive Hey messages from both sides"
-    );
-
-    // Editor 1 sends ListFiles request to its server
+    // Hub editor sends ListFiles request to its server
     tracing::info!(
-        "Editor1 sending ListFiles request to server for host {}",
-        id2
+        "Hub editor sending ListFiles request to server for host {}",
+        spoke_id
     );
-    mock_editor1
+    setup
+        .hub
+        .editor
         .send_request(
             1,
             "ListFiles",
             serde_json::json!({
                 "dir": null,
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "signalingAddr": "",
                 "credential": "",
             }),
@@ -625,9 +651,10 @@ async fn test_list_files_basic() {
         .await
         .unwrap();
 
-    // Editor 2 should receive the ListFiles request from its server
-    tracing::info!("Editor2 waiting for ListFiles request");
-    let (req_id, params) = mock_editor2
+    // Spoke editor should receive the ListFiles request from its server
+    tracing::info!("Spoke editor waiting for ListFiles request");
+    let (req_id, params) = setup.spokes[0]
+        .editor
         .wait_for_request("ListFiles", 10)
         .await
         .unwrap();
@@ -636,8 +663,8 @@ async fn test_list_files_basic() {
     let list_params: message::ListFilesParams = serde_json::from_value(params).unwrap();
     assert_eq!(list_params.dir, None);
 
-    // Editor 2 responds with a mock file list
-    tracing::info!("Editor2 sending ListFiles response");
+    // Spoke editor responds with a mock file list
+    tracing::info!("Spoke editor sending ListFiles response");
     let mock_files = vec![
         message::ListFileEntry {
             file: FileDesc::File { id: 1 },
@@ -664,7 +691,8 @@ async fn test_list_files_basic() {
         },
     ];
 
-    mock_editor2
+    setup.spokes[0]
+        .editor
         .send_response(
             req_id,
             serde_json::to_value(message::ListFilesResp {
@@ -675,9 +703,9 @@ async fn test_list_files_basic() {
         .await
         .unwrap();
 
-    // Editor 1 should receive the response
-    tracing::info!("Editor1 waiting for ListFiles response");
-    let response = mock_editor1.wait_for_response(1, 10).await.unwrap();
+    // Hub editor should receive the response
+    tracing::info!("Hub editor waiting for ListFiles response");
+    let response = setup.hub.editor.wait_for_response(1, 10).await.unwrap();
 
     // Verify the response
     let list_resp: message::ListFilesResp = serde_json::from_value(response).unwrap();
@@ -688,109 +716,37 @@ async fn test_list_files_basic() {
 
     tracing::info!("test_list_files_basic completed successfully");
 
-    server1_handle.abort();
-    server2_handle.abort();
+    setup.cleanup();
 }
 
 #[tokio::test]
 async fn test_list_files_empty() {
     // Test: ListFiles request when remote server has no files
     // Flow:
-    // 1. Editor1 sends ListFiles request to Server1 for files on Server2
-    // 2. Server1 forwards request to Server2 via WebRTC
-    // 3. Server2 asks Editor2 for files
-    // 4. Editor2 responds with an empty file list
-    // 5. Server2 sends empty list back to Server1
-    // 6. Server1 forwards empty response to Editor1
-    // Expected: Editor1 receives an empty file list (valid but empty response)
+    // 1. Hub editor sends ListFiles request to Hub server for files on Spoke server
+    // 2. Hub server forwards request to Spoke server via WebRTC
+    // 3. Spoke server asks Spoke editor for files
+    // 4. Spoke editor responds with an empty file list
+    // 5. Spoke server sends empty list back to Hub server
+    // 6. Hub server forwards empty response to Hub editor
+    // Expected: Hub editor receives an empty file list (valid but empty response)
 
     let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
 
-    let id1 = create_test_id("server1");
-    let id2 = create_test_id("server2");
+    let spoke_id = setup.spokes[0].id.clone();
 
-    tracing::info!("Creating servers with IDs: {} and {}", id1, id2);
-
-    // Create servers in attached mode
-    let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
-
-    let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
-
-    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
-    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
-
-    // Start server tasks
-    let server1_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
-                tracing::error!("Server1 error: {}", e);
-            }
-        })
-    };
-
-    let server2_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
-                tracing::error!("Server2 error: {}", e);
-            }
-        })
-    };
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Establish connection between servers
-    mock_editor1
-        .send_notification(
-            "AcceptConnection",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor1
-        .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
-        .await
-        .unwrap();
-
-    sleep(Duration::from_millis(500)).await;
-
-    mock_editor2
-        .send_notification(
-            "Connect",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor2
-        .wait_for_notification(&NotificationCode::Connecting.to_string(), 5)
-        .await
-        .unwrap();
-
-    // Wait for connection to be established
-    sleep(Duration::from_secs(3)).await;
-
-    // Editor 1 sends ListFiles request with a specific directory
-    tracing::info!("Editor1 sending ListFiles request for specific directory");
-    mock_editor1
+    // Hub editor sends ListFiles request with a specific directory
+    tracing::info!("Hub editor sending ListFiles request for specific directory");
+    setup
+        .hub
+        .editor
         .send_request(
             2,
             "ListFiles",
             serde_json::json!({
                 "dir": ["project1", "src"],
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "signalingAddr": "",
                 "credential": "",
             }),
@@ -798,8 +754,9 @@ async fn test_list_files_empty() {
         .await
         .unwrap();
 
-    // Editor 2 receives the request
-    let (req_id, params) = mock_editor2
+    // Spoke editor receives the request
+    let (req_id, params) = setup.spokes[0]
+        .editor
         .wait_for_request("ListFiles", 10)
         .await
         .unwrap();
@@ -808,9 +765,10 @@ async fn test_list_files_empty() {
     let list_params: message::ListFilesParams = serde_json::from_value(params).unwrap();
     assert!(list_params.dir.is_some());
 
-    // Editor 2 responds with an empty file list
-    tracing::info!("Editor2 sending empty ListFiles response");
-    mock_editor2
+    // Spoke editor responds with an empty file list
+    tracing::info!("Spoke editor sending empty ListFiles response");
+    setup.spokes[0]
+        .editor
         .send_response(
             req_id,
             serde_json::to_value(message::ListFilesResp { files: vec![] }).unwrap(),
@@ -818,8 +776,8 @@ async fn test_list_files_empty() {
         .await
         .unwrap();
 
-    // Editor 1 should receive the empty response
-    let response = mock_editor1.wait_for_response(2, 10).await.unwrap();
+    // Hub editor should receive the empty response
+    let response = setup.hub.editor.wait_for_response(2, 10).await.unwrap();
 
     // Verify the response is empty
     let list_resp: message::ListFilesResp = serde_json::from_value(response).unwrap();
@@ -827,8 +785,7 @@ async fn test_list_files_empty() {
 
     tracing::info!("test_list_files_empty completed successfully");
 
-    server1_handle.abort();
-    server2_handle.abort();
+    setup.cleanup();
 }
 
 #[tokio::test]
@@ -836,103 +793,33 @@ async fn test_list_files_error_handling() {
     // Test: Error handling in ListFiles request flow
     // Flow has two test cases:
     // Test 1 - Remote editor returns an error:
-    //   1. Editor1 sends ListFiles request for Server2
-    //   2. Server1 forwards to Server2
-    //   3. Server2 asks Editor2
-    //   4. Editor2 responds with an error (404 File not found)
-    //   5. Server2 sends ErrorResp message back to Server1
-    //   6. Server1 sends error response to Editor1
+    //   1. Hub editor sends ListFiles request for Spoke server
+    //   2. Hub server forwards to Spoke server
+    //   3. Spoke server asks Spoke editor
+    //   4. Spoke editor responds with an error (404 File not found)
+    //   5. Spoke server sends ErrorResp message back to Hub server
+    //   6. Hub server sends error response to Hub editor
     // Test 2 - Remote editor returns invalid format:
-    //   1. Same flow as above but Editor2 returns invalid JSON structure
+    //   1. Same flow as above but Spoke editor returns invalid JSON structure
     //   2. Server may handle parsing error internally
-    // Expected: Editor1 receives appropriate error responses
+    // Expected: Hub editor receives appropriate error responses
 
     let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
 
-    let id1 = create_test_id("server1");
-    let id2 = create_test_id("server2");
-
-    tracing::info!("Testing ListFiles error handling scenarios");
-
-    // Create servers in attached mode
-    let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
-
-    let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
-
-    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
-    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
-
-    // Start server tasks
-    let server1_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
-                tracing::error!("Server1 error: {}", e);
-            }
-        })
-    };
-
-    let server2_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
-                tracing::error!("Server2 error: {}", e);
-            }
-        })
-    };
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Establish connection between servers
-    mock_editor1
-        .send_notification(
-            "AcceptConnection",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor1
-        .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
-        .await
-        .unwrap();
-
-    sleep(Duration::from_millis(500)).await;
-
-    mock_editor2
-        .send_notification(
-            "Connect",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor2
-        .wait_for_notification(&NotificationCode::Connecting.to_string(), 5)
-        .await
-        .unwrap();
-
-    sleep(Duration::from_secs(3)).await;
+    let spoke_id = setup.spokes[0].id.clone();
 
     // Test 1: Editor sends error response
     tracing::info!("Test 1: Error response from editor");
-    mock_editor1
+    setup
+        .hub
+        .editor
         .send_request(
             3,
             "ListFiles",
             serde_json::json!({
                 "dir": null,
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "signalingAddr": "",
                 "credential": "",
             }),
@@ -940,31 +827,35 @@ async fn test_list_files_error_handling() {
         .await
         .unwrap();
 
-    let (req_id, _params) = mock_editor2
+    let (req_id, _params) = setup.spokes[0]
+        .editor
         .wait_for_request("ListFiles", 10)
         .await
         .unwrap();
 
-    // Editor 2 responds with an error
-    mock_editor2
+    // Spoke editor responds with an error
+    setup.spokes[0]
+        .editor
         .send_error_response(req_id, 404, "File not found".to_string())
         .await
         .unwrap();
 
-    // Editor 1 should receive an error response
-    let response_result = mock_editor1.wait_for_response(3, 10).await;
+    // Hub editor should receive an error response
+    let response_result = setup.hub.editor.wait_for_response(3, 10).await;
     assert!(response_result.is_err());
     assert!(response_result.unwrap_err().to_string().contains("404"));
 
     // Test 2: Invalid response format
     tracing::info!("Test 2: Invalid response format");
-    mock_editor1
+    setup
+        .hub
+        .editor
         .send_request(
             4,
             "ListFiles",
             serde_json::json!({
                 "dir": null,
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "signalingAddr": "",
                 "credential": "",
             }),
@@ -972,13 +863,15 @@ async fn test_list_files_error_handling() {
         .await
         .unwrap();
 
-    let (req_id, _params) = mock_editor2
+    let (req_id, _params) = setup.spokes[0]
+        .editor
         .wait_for_request("ListFiles", 10)
         .await
         .unwrap();
 
-    // Editor 2 responds with invalid data (not a ListFilesResp)
-    mock_editor2
+    // Spoke editor responds with invalid data (not a ListFilesResp)
+    setup.spokes[0]
+        .editor
         .send_response(
             req_id,
             serde_json::json!({
@@ -989,115 +882,44 @@ async fn test_list_files_error_handling() {
         .await
         .unwrap();
 
-    // Editor 1 should receive the response but parsing might fail on the server side
+    // Hub editor should receive the response but parsing might fail on the server side
     // The server will likely send an error notification
-    let response = mock_editor1.wait_for_response(4, 10).await;
+    let response = setup.hub.editor.wait_for_response(4, 10).await;
     // Response should be received but may be empty or error
     assert!(response.is_ok() || response.is_err());
 
     tracing::info!("test_list_files_error_handling completed successfully");
 
-    server1_handle.abort();
-    server2_handle.abort();
+    setup.cleanup();
 }
 
 #[tokio::test]
 async fn test_list_files_timeout() {
     // Test: Timeout handling when remote editor doesn't respond
     // Flow:
-    // 1. Editor1 sends ListFiles request for Server2
-    // 2. Server1 forwards to Server2 via WebRTC
-    // 3. Server2 asks Editor2 for files
-    // 4. Editor2 receives the request but intentionally doesn't respond
-    // 5. Editor1's wait_for_response times out after 3 seconds
-    // Expected: Editor1 experiences a timeout waiting for the response
+    // 1. Hub editor sends ListFiles request for Spoke server
+    // 2. Hub server forwards to Spoke server via WebRTC
+    // 3. Spoke server asks Spoke editor for files
+    // 4. Spoke editor receives the request but intentionally doesn't respond
+    // 5. Hub editor's wait_for_response times out after 3 seconds
+    // Expected: Hub editor experiences a timeout waiting for the response
 
     let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
 
-    let id1 = create_test_id("server1");
-    let id2 = create_test_id("server2");
+    let spoke_id = setup.spokes[0].id.clone();
 
-    tracing::info!("Testing ListFiles timeout scenario");
-
-    // Create servers in attached mode
-    let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
-
-    let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
-
-    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
-    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
-
-    // Start server tasks
-    let server1_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
-                tracing::error!("Server1 error: {}", e);
-            }
-        })
-    };
-
-    let server2_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
-                tracing::error!("Server2 error: {}", e);
-            }
-        })
-    };
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Establish connection between servers
-    mock_editor1
-        .send_notification(
-            "AcceptConnection",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor1
-        .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
-        .await
-        .unwrap();
-
-    sleep(Duration::from_millis(500)).await;
-
-    mock_editor2
-        .send_notification(
-            "Connect",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _ = mock_editor2
-        .wait_for_notification(&NotificationCode::Connecting.to_string(), 5)
-        .await
-        .unwrap();
-
-    sleep(Duration::from_secs(3)).await;
-
-    // Editor 1 sends ListFiles request
-    tracing::info!("Editor1 sending ListFiles request that will timeout");
-    mock_editor1
+    // Hub editor sends ListFiles request
+    tracing::info!("Hub editor sending ListFiles request that will timeout");
+    setup
+        .hub
+        .editor
         .send_request(
             5,
             "ListFiles",
             serde_json::json!({
                 "dir": null,
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "signalingAddr": "",
                 "credential": "",
             }),
@@ -1105,24 +927,24 @@ async fn test_list_files_timeout() {
         .await
         .unwrap();
 
-    // Editor 2 receives the request but doesn't respond
-    let (_req_id, _params) = mock_editor2
+    // Spoke editor receives the request but doesn't respond
+    let (_req_id, _params) = setup.spokes[0]
+        .editor
         .wait_for_request("ListFiles", 10)
         .await
         .unwrap();
 
-    // Editor 2 intentionally doesn't respond to simulate timeout
-    tracing::info!("Editor2 not responding to simulate timeout");
+    // Spoke editor intentionally doesn't respond to simulate timeout
+    tracing::info!("Spoke editor not responding to simulate timeout");
 
-    // Editor 1 should timeout waiting for response
-    let response_result = mock_editor1.wait_for_response(5, 3).await;
+    // Hub editor should timeout waiting for response
+    let response_result = setup.hub.editor.wait_for_response(5, 3).await;
     assert!(response_result.is_err());
     assert!(response_result.unwrap_err().to_string().contains("Timeout"));
 
     tracing::info!("test_list_files_timeout completed successfully");
 
-    server1_handle.abort();
-    server2_handle.abort();
+    setup.cleanup();
 }
 
 #[tokio::test]
@@ -1134,93 +956,31 @@ async fn test_open_file_basic() {
     // Both test the complete request/response flow through the WebRTC connection
 
     let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
 
-    let id1 = create_test_id("server1");
-    let id2 = create_test_id("server2");
-
-    tracing::info!("Testing OpenFile basic scenario");
-
-    // Create servers in attached mode
-    let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
-
-    let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
-
-    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
-    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
-
-    // Start server tasks
-    let server1_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
-                tracing::error!("Server1 error: {}", e);
-            }
-        })
-    };
-
-    let server2_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
-                tracing::error!("Server2 error: {}", e);
-            }
-        })
-    };
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Establish connection between servers
-    mock_editor1
-        .send_notification(
-            "AcceptConnection",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    mock_editor2
-        .send_notification(
-            "Connect",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for connection establishment
-    let (_host_id, _message) = mock_editor1.expect_hey_notification(10).await.unwrap();
-    let (_host_id, _message) = mock_editor2.expect_hey_notification(10).await.unwrap();
-
-    sleep(Duration::from_millis(100)).await;
+    let spoke_id = setup.spokes[0].id.clone();
 
     // Test 1: Open a file from remote server
     // Flow:
-    // 1. Editor1 sends OpenFile request to Server1 for a file on Server2
-    // 2. Server1 converts to RequestFile message and sends to Server2 via WebRTC
-    // 3. Server2 receives RequestFile and sends RequestFile request to Editor2
-    // 4. Editor2 responds with file content (buffer, fileName, seq, docId)
-    // 5. Server2 converts response to Snapshot message and sends to Server1
-    // 6. Server1 creates a RemoteDoc and sends OpenFile response to Editor1
-    // Expected: Editor1 receives file content with new local docId and siteId
+    // 1. Hub editor sends OpenFile request to Hub server for a file on Spoke server
+    // 2. Hub server converts to RequestFile message and sends to Spoke server via WebRTC
+    // 3. Spoke server receives RequestFile and sends RequestFile request to Spoke editor
+    // 4. Spoke editor responds with file content (buffer, fileName, seq, docId)
+    // 5. Spoke server converts response to Snapshot message and sends to Hub server
+    // 6. Hub server creates a RemoteDoc and sends OpenFile response to Hub editor
+    // Expected: Hub editor receives file content with new local docId and siteId
 
     tracing::info!("Test 1: Open file from remote server");
 
-    // Editor 1 requests to open a file on server 2
-    mock_editor1
+    // Hub editor requests to open a file on spoke server
+    setup
+        .hub
+        .editor
         .send_request(
             1,
             "OpenFile",
             serde_json::json!({
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "fileDesc": {
                     "type": "file",
                     "id": 42
@@ -1230,20 +990,22 @@ async fn test_open_file_basic() {
         .await
         .unwrap();
 
-    // Editor 2 should receive a RequestFile request
-    let (req_id, params) = mock_editor2
+    // Spoke editor should receive a RequestFile request
+    let (req_id, params) = setup.spokes[0]
+        .editor
         .wait_for_request("RequestFile", 10)
         .await
         .unwrap();
 
-    tracing::info!("Editor 2 received RequestFile: {:?}", params);
+    tracing::info!("Spoke editor received RequestFile: {:?}", params);
 
     // Verify the params structure matches what we sent
     assert_eq!(params["fileDesc"]["type"], "file");
     assert_eq!(params["fileDesc"]["id"], 42);
 
-    // Editor 2 responds with the file snapshot
-    mock_editor2
+    // Spoke editor responds with the file snapshot
+    setup.spokes[0]
+        .editor
         .send_response(
             req_id,
             serde_json::json!({
@@ -1256,9 +1018,9 @@ async fn test_open_file_basic() {
         .await
         .unwrap();
 
-    // Editor 1 should receive the OpenFile response
-    let response = mock_editor1.wait_for_response(1, 10).await.unwrap();
-    tracing::info!("Editor 1 received OpenFile response: {:?}", response);
+    // Hub editor should receive the OpenFile response
+    let response = setup.hub.editor.wait_for_response(1, 10).await.unwrap();
+    tracing::info!("Hub editor received OpenFile response: {:?}", response);
 
     assert_eq!(response["content"], "Hello, World!");
     assert_eq!(response["filename"], "test.txt");
@@ -1267,21 +1029,23 @@ async fn test_open_file_basic() {
 
     // Test 2: Open a project file
     // Flow:
-    // 1. Editor1 sends OpenFile for a ProjectFile (project + relative path)
-    // 2. Server1 forwards as RequestFile with ProjectFile descriptor to Server2
-    // 3. Server2 asks Editor2 for the specific project file
-    // 4. Editor2 responds with the file content
-    // 5. Response flows back through Server2 -> Server1 -> Editor1
-    // Expected: Editor1 receives the project file content with proper metadata
+    // 1. Hub editor sends OpenFile for a ProjectFile (project + relative path)
+    // 2. Hub server forwards as RequestFile with ProjectFile descriptor to Spoke server
+    // 3. Spoke server asks Spoke editor for the specific project file
+    // 4. Spoke editor responds with the file content
+    // 5. Response flows back through Spoke server -> Hub server -> Hub editor
+    // Expected: Hub editor receives the project file content with proper metadata
 
     tracing::info!("Test 2: Open project file from remote server");
 
-    mock_editor1
+    setup
+        .hub
+        .editor
         .send_request(
             2,
             "OpenFile",
             serde_json::json!({
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
                     "project": "/project/path",
@@ -1292,19 +1056,21 @@ async fn test_open_file_basic() {
         .await
         .unwrap();
 
-    // Editor 2 should receive a RequestFile request
-    let (req_id, params) = mock_editor2
+    // Spoke editor should receive a RequestFile request
+    let (req_id, params) = setup.spokes[0]
+        .editor
         .wait_for_request("RequestFile", 10)
         .await
         .unwrap();
 
     tracing::info!(
-        "Editor 2 received RequestFile for project file: {:?}",
+        "Spoke editor received RequestFile for project file: {:?}",
         params
     );
 
-    // Editor 2 responds with the file snapshot
-    mock_editor2
+    // Spoke editor responds with the file snapshot
+    setup.spokes[0]
+        .editor
         .send_response(
             req_id,
             serde_json::json!({
@@ -1317,10 +1083,10 @@ async fn test_open_file_basic() {
         .await
         .unwrap();
 
-    // Editor 1 should receive the OpenFile response
-    let response = mock_editor1.wait_for_response(2, 10).await.unwrap();
+    // Hub editor should receive the OpenFile response
+    let response = setup.hub.editor.wait_for_response(2, 10).await.unwrap();
     tracing::info!(
-        "Editor 1 received OpenFile response for project file: {:?}",
+        "Hub editor received OpenFile response for project file: {:?}",
         response
     );
 
@@ -1331,101 +1097,38 @@ async fn test_open_file_basic() {
 
     tracing::info!("test_open_file_basic completed successfully");
 
-    server1_handle.abort();
-    server2_handle.abort();
+    setup.cleanup();
 }
 
 #[tokio::test]
 async fn test_open_file_error_handling() {
     // Test: Error handling when opening a non-existent file from remote server
     // Flow:
-    // 1. Editor1 sends OpenFile request for a non-existent file (ID 999)
-    // 2. Server1 forwards RequestFile to Server2 via WebRTC
-    // 3. Server2 asks Editor2 for the file
-    // 4. Editor2 responds with error (404 File not found)
-    // 5. Server2 sends ErrorResp message back to Server1
-    // 6. Server1 forwards error response to Editor1
-    // Expected: Editor1 receives an error response with 404 status
+    // 1. Hub editor sends OpenFile request for a non-existent file (ID 999)
+    // 2. Hub server forwards RequestFile to Spoke server via WebRTC
+    // 3. Spoke server asks Spoke editor for the file
+    // 4. Spoke editor responds with error (404 File not found)
+    // 5. Spoke server sends ErrorResp message back to Hub server
+    // 6. Hub server forwards error response to Hub editor
+    // Expected: Hub editor receives an error response with 404 status
 
     let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
 
-    let id1 = create_test_id("server1");
-    let id2 = create_test_id("server2");
-
-    tracing::info!("Testing OpenFile error handling");
-
-    // Create servers in attached mode
-    let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
-
-    let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
-
-    let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
-    let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
-
-    // Start server tasks
-    let server1_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
-                tracing::error!("Server1 error: {}", e);
-            }
-        })
-    };
-
-    let server2_handle = {
-        tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
-                tracing::error!("Server2 error: {}", e);
-            }
-        })
-    };
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Establish connection between servers
-    mock_editor1
-        .send_notification(
-            "AcceptConnection",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    mock_editor2
-        .send_notification(
-            "Connect",
-            serde_json::json!({
-                "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
-                "transportType": "SCTP",
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for connection establishment
-    let (_host_id, _message) = mock_editor1.expect_hey_notification(10).await.unwrap();
-    let (_host_id, _message) = mock_editor2.expect_hey_notification(10).await.unwrap();
-
-    sleep(Duration::from_millis(100)).await;
+    let spoke_id = setup.spokes[0].id.clone();
 
     // Test case: Remote server returns error for RequestFile
     // This simulates when the requested file doesn't exist on the remote server
     tracing::info!("Test: Remote server returns error for RequestFile");
 
-    mock_editor1
+    setup
+        .hub
+        .editor
         .send_request(
             1,
             "OpenFile",
             serde_json::json!({
-                "hostId": id2.clone(),
+                "hostId": spoke_id.clone(),
                 "fileDesc": {
                     "type": "file",
                     "id": 999
@@ -1435,25 +1138,26 @@ async fn test_open_file_error_handling() {
         .await
         .unwrap();
 
-    // Editor 2 should receive a RequestFile request
-    let (req_id, _params) = mock_editor2
+    // Spoke editor should receive a RequestFile request
+    let (req_id, _params) = setup.spokes[0]
+        .editor
         .wait_for_request("RequestFile", 10)
         .await
         .unwrap();
 
-    // Editor 2 responds with an error
-    mock_editor2
+    // Spoke editor responds with an error
+    setup.spokes[0]
+        .editor
         .send_error_response(req_id, 404, "File not found".to_string())
         .await
         .unwrap();
 
-    // Editor 1 should receive an error response
-    let response_result = mock_editor1.wait_for_response(1, 10).await;
+    // Hub editor should receive an error response
+    let response_result = setup.hub.editor.wait_for_response(1, 10).await;
     assert!(response_result.is_err());
     assert!(response_result.unwrap_err().to_string().contains("404"));
 
     tracing::info!("test_open_file_error_handling completed successfully");
 
-    server1_handle.abort();
-    server2_handle.abort();
+    setup.cleanup();
 }
