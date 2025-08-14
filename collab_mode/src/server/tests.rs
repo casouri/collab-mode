@@ -1669,3 +1669,186 @@ async fn test_list_files_nested_structure() {
     tracing::info!("test_list_files_nested_structure completed successfully");
     setup.cleanup();
 }
+
+#[tokio::test]
+async fn test_send_ops_e2e() {
+    // Test: End-to-end test for SendOps functionality
+    // Note: This test currently only tests the hub sending ops to itself
+    // because of an architectural limitation where OpFromServer messages
+    // contain doc_ids that are specific to the sending server, and
+    // receiving servers can't map these to their own doc_ids.
+    // A full test would require refactoring to track doc mappings
+    // between servers or use file descriptors instead of doc_ids.
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
+
+    // Create test project with a file
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Hub opens the file first (to create it in both docs and remote_docs)
+    let hub_req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            hub_req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let hub_resp = setup.hub.editor.wait_for_response(hub_req_id, 5).await.unwrap();
+    let hub_doc_id = hub_resp["docId"].as_u64().unwrap() as u32;
+    
+    // Spoke 1 requests the file
+    let spoke1_req_id = 2;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            spoke1_req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let spoke1_resp = setup.spokes[0].editor.wait_for_response(spoke1_req_id, 5).await.unwrap();
+    assert_eq!(spoke1_resp["content"], "Hello from test.txt");
+    let spoke1_doc_id = spoke1_resp["docId"].as_u64().unwrap() as u32;
+
+    // Spoke 2 requests the file
+    let spoke2_req_id = 3;
+    setup.spokes[1]
+        .editor
+        .send_request(
+            spoke2_req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let spoke2_resp = setup.spokes[1].editor.wait_for_response(spoke2_req_id, 5).await.unwrap();
+    assert_eq!(spoke2_resp["content"], "Hello from test.txt");
+    let spoke2_doc_id = spoke2_resp["docId"].as_u64().unwrap() as u32;
+
+    sleep(Duration::from_millis(200)).await;
+
+    // Hub sends ops to insert text at the beginning (hub acts as a client to itself)
+    let send_ops_req_id = 4;
+    setup.hub
+        .editor
+        .send_request(
+            send_ops_req_id,
+            "SendOps",
+            serde_json::json!({
+                "docId": hub_doc_id,
+                "hostId": setup.hub.id.clone(),
+                "ops": [{
+                    "op": {
+                        "Ins": [0, "Modified: "]
+                    },
+                    "groupSeq": 1
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for SendOps response
+    let send_ops_resp = setup.hub.editor.wait_for_response(send_ops_req_id, 5).await.unwrap();
+    
+    // Hub shouldn't receive any remote ops in response (ops are from itself)
+    assert!(send_ops_resp["ops"].as_array().unwrap().is_empty());
+
+    // Give time for ops to propagate
+    sleep(Duration::from_millis(500)).await;
+
+    // Spoke 2 should receive RemoteOpsArrived notification
+    let notification = setup.spokes[1]
+        .editor
+        .wait_for_notification("RemoteOpsArrived", 5)
+        .await
+        .unwrap();
+    
+    assert_eq!(notification["hostId"], setup.hub.id.clone());
+    assert_eq!(notification["docId"], spoke2_doc_id);
+
+    // Spoke 2 sends SendOps with empty ops to fetch remote ops
+    let fetch_ops_req_id = 5;
+    setup.spokes[1]
+        .editor
+        .send_request(
+            fetch_ops_req_id,
+            "SendOps",
+            serde_json::json!({
+                "docId": spoke2_doc_id,
+                "hostId": setup.hub.id.clone(),
+                "ops": []
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for response with remote ops
+    let fetch_ops_resp = setup.spokes[1].editor.wait_for_response(fetch_ops_req_id, 5).await.unwrap();
+    let remote_ops = fetch_ops_resp["ops"].as_array().unwrap();
+    
+    // Should have received the insert op
+    assert_eq!(remote_ops.len(), 1);
+    let op = &remote_ops[0];
+    assert!(op["op"]["Ins"].is_array());
+    let ins_op = op["op"]["Ins"].as_array().unwrap();
+    // The Ins op is an array of [position, text] pairs
+    assert_eq!(ins_op[0].as_array().unwrap()[0].as_u64().unwrap(), 0);
+    assert_eq!(ins_op[0].as_array().unwrap()[1].as_str().unwrap(), "Modified: ");
+
+    // Now all editors should have the same content
+    // We can verify this by having each editor send another op and checking consistency
+    
+    tracing::info!("test_send_ops_e2e completed successfully");
+    setup.cleanup();
+}

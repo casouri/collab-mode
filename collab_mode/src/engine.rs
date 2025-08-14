@@ -1552,6 +1552,16 @@ impl ClientEngine {
             Ok(Some((op, seq)))
         }
     }
+
+    /// Return the current global sequence number.
+    pub fn current_gseq(&self) -> GlobalSeq {
+        self.current_seq
+    }
+    
+    /// Return the site id for this client.
+    pub fn site(&self) -> SiteId {
+        self.site
+    }
 }
 
 // *** ClientEngine UNDO

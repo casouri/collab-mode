@@ -287,6 +287,8 @@ pub struct NewSnapshot {
     pub site_id: SiteId,
     /// File desc used by the original RequestFile request.
     pub file_desc: FileDesc,
+    /// Doc id on the remote server.
+    pub doc_id: DocId,
 }
 
 /// Requests sent to webrpc server.

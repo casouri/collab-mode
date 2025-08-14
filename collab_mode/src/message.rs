@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, fmt_derive::Debug, fmt_derive::Display)]
 #[non_exhaustive]
 pub enum NotificationCode {
-    RemoteOpArrived,     // Editor should fetch remote ops.
+    RemoteOpsArrived,    // Editor should fetch remote ops.
     FileListUpdated,     // Editor should update the file list.
     SuggestOpenFile,     // Editor should suggest to open a file.
     ConnectionBroke,     // Editor should indicate connection is broken.
@@ -14,6 +14,7 @@ pub enum NotificationCode {
     AcceptingConnection, // Editor should show that we're accepting connections.
     AcceptStopped,       // Editor should show that we're not accepting connections anymore.
     Hey,                 // A ping from a remote, editor should mark the remote as connected.
+    WriteFile,
 
     Misc,  // Editor should display the notification.
     Error, // Generic error, like bad notification arguments.
@@ -81,6 +82,13 @@ pub struct SuggestOpenFileParams {
 pub struct HeyParams {
     pub host_id: ServerId,
     pub message: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOpsArrivedParams {
+    pub host_id: ServerId,
+    pub doc_id: DocId,
 }
 
 // Requests and responses
@@ -209,18 +217,11 @@ pub struct WriteFileParams {
     pub file_desc: FileDesc,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteFileResp {
-    pub host_id: ServerId,
-    pub file_desc: FileDesc,
-}
-
 // *** SendOpEditor
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SendOpEditorParams {
+pub struct SendOpsParams {
     pub ops: Vec<EditorFatOp>,
     pub doc_id: DocId,
     pub host_id: ServerId,
@@ -228,7 +229,7 @@ pub struct SendOpEditorParams {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SendOpEditorResp {
+pub struct SendOpsResp {
     pub ops: Vec<EditorLeanOp>,
     pub last_seq: GlobalSeq,
 }

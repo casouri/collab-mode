@@ -60,7 +60,7 @@ pub enum Msg {
     DeclareProjects(Vec<DeclareProjectEntry>),
     OpFromClient(ContextOps),
     OpFromServer(Vec<FatOp>),
-    RecvOpAndInfo {
+    RequestOps {
         doc: DocId,
         after: GlobalSeq,
     },
@@ -81,6 +81,9 @@ pub enum Msg {
     StopSendingOps(DocId),
     SerializationErr(String),
     BadRequest(String),
+    // Fatal error that shouldn’t happen (not a fault, ie, a bug in
+    // code), must reset the doc.
+    DocFatal(DocId, String),
     // If we need to respond to a request from a remote’s editor with
     // an error, use this message.
     ErrorResp(String),
@@ -313,6 +316,15 @@ impl WebChannel {
             req_id,
         };
 
+        if recipient == &self.my_hostid {
+            // If recipient is ourselves, send to our own message channel.
+            return self
+                .msg_tx
+                .send(message)
+                .await
+                .map_err(|_| anyhow!("Channel broke"));
+        }
+
         let tx = self
             .assoc_tx
             .lock()
@@ -321,10 +333,9 @@ impl WebChannel {
             .cloned()
             .ok_or_else(|| anyhow!("Not connected"))?;
 
-        // When this method returns an error, caller knows it’s
-        // “connection broke”. So the inner message should be
-        // “unknown”.
-        tx.send(message).await.map_err(|_| anyhow!("Unknown"))?;
+        tx.send(message)
+            .await
+            .map_err(|_| anyhow!("Channel broke"))?;
 
         Ok(())
     }
