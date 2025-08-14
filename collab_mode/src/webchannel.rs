@@ -54,7 +54,7 @@ pub enum Msg {
     },
     FileShared(DocId),
     ListFiles {
-        dir: Option<ProjectFile>,
+        dir: Option<FileDesc>,
     },
     FileList(Vec<crate::message::ListFileEntry>),
     DeclareProjects(Vec<DeclareProjectEntry>),

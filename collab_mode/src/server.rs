@@ -698,7 +698,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
         host_id: ServerId,
-        dir: Option<ProjectFile>,
+        dir: Option<FileDesc>,
         req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
         if self.host_id != host_id {
@@ -722,7 +722,7 @@ impl Server {
         &mut self,
         _editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
-        dir: Option<ProjectFile>,
+        dir: Option<FileDesc>,
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
@@ -741,77 +741,117 @@ impl Server {
 
     async fn list_files_from_disk(
         &self,
-        dir: Option<ProjectFile>,
+        dir: Option<FileDesc>,
     ) -> anyhow::Result<Vec<ListFileEntry>> {
-        // Not in attached mode, read files from disk.
-        if let Some((project_id, rel_filename)) = dir {
-            // List files in a project directory.
-            let project = self
-                .projects
-                .get(&project_id)
-                .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+        match dir {
+            Some(FileDesc::ProjectFile { project, file }) => {
+                // List files in a project directory.
+                let project_data = self
+                    .projects
+                    .get(&project)
+                    .ok_or_else(|| anyhow!("Project {} not found", project))?;
 
-            let filename = std::path::PathBuf::from(project.root.clone()).join(&rel_filename);
-            let filename_str = filename.to_string_lossy().to_string();
-            let stat = std::fs::metadata(&filename)
-                .with_context(|| format!("Can't access file {}", &filename_str))?;
+                let filename = std::path::PathBuf::from(project_data.root.clone()).join(&file);
+                let filename_str = filename.to_string_lossy().to_string();
+                let stat = std::fs::metadata(&filename)
+                    .with_context(|| format!("Can't access file {}", &filename_str))?;
 
-            if !stat.is_dir() {
-                return Err(anyhow!(format!("Not a directory: {}", filename_str)));
+                if !stat.is_dir() {
+                    return Err(anyhow!(format!("Not a directory: {}", filename_str)));
+                }
+
+                let mut result = vec![];
+                let files = std::fs::read_dir(&filename)
+                    .with_context(|| format!("Can't access file {}", &filename_str))?;
+                for entry in files {
+                    let entry =
+                        entry.with_context(|| format!("Can't access files in {}", &filename_str))?;
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let stat = entry
+                        .metadata()
+                        .with_context(|| format!("Can't access file {}", &file_name))?;
+
+                    // Calculate relative path from project root using pathdiff
+                    let file_path = entry.path();
+                    let project_root = std::path::PathBuf::from(&project_data.root);
+                    let file_rel = pathdiff::diff_paths(&file_path, &project_root)
+                        .ok_or_else(|| anyhow!("Failed to calculate relative path"))?
+                        .to_string_lossy()
+                        .to_string();
+
+                    result.push(ListFileEntry {
+                        file: FileDesc::ProjectFile {
+                            project: project.clone(),
+                            file: file_rel,
+                        },
+                        filename: file_name,
+                        is_directory: stat.is_dir(),
+                        meta: JsonMap::new(),
+                    });
+                }
+                Ok(result)
             }
+            Some(FileDesc::Project { id }) => {
+                // List files in project root directory.
+                let project_data = self
+                    .projects
+                    .get(&id)
+                    .ok_or_else(|| anyhow!("Project {} not found", id))?;
 
-            let mut result = vec![];
-            let files = std::fs::read_dir(&filename)
-                .with_context(|| format!("Can't access file {}", &filename_str))?;
-            for file in files {
-                let file =
-                    file.with_context(|| format!("Can't access files in {}", &filename_str))?;
-                let filename = file.file_name().to_string_lossy().to_string();
-                let stat = file
-                    .metadata()
-                    .with_context(|| format!("Can't access file {}", &filename))?;
+                let filename = std::path::PathBuf::from(project_data.root.clone());
+                let filename_str = filename.to_string_lossy().to_string();
 
-                // Calculate relative path from project root using pathdiff
-                let file_path = file.path();
-                let project_root = std::path::PathBuf::from(&project.root);
-                let file_rel = pathdiff::diff_paths(&file_path, &project_root)
-                    .ok_or_else(|| anyhow!("Failed to calculate relative path"))?
-                    .to_string_lossy()
-                    .to_string();
+                let mut result = vec![];
+                let files = std::fs::read_dir(&filename)
+                    .with_context(|| format!("Can't access project root {}", &filename_str))?;
+                for entry in files {
+                    let entry =
+                        entry.with_context(|| format!("Can't access files in {}", &filename_str))?;
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let stat = entry
+                        .metadata()
+                        .with_context(|| format!("Can't access file {}", &file_name))?;
 
-                result.push(ListFileEntry {
-                    file: FileDesc::ProjectFile {
-                        project: project_id.clone(),
-                        file: file_rel,
-                    },
-                    filename,
-                    is_directory: stat.is_dir(),
-                    meta: JsonMap::new(),
-                });
+                    // For project root, relative path is just the filename
+                    result.push(ListFileEntry {
+                        file: FileDesc::ProjectFile {
+                            project: id.clone(),
+                            file: file_name.clone(),
+                        },
+                        filename: file_name,
+                        is_directory: stat.is_dir(),
+                        meta: JsonMap::new(),
+                    });
+                }
+                Ok(result)
             }
-            return Ok(result);
-        } else {
-            // List top-level projects and docs.
-            let mut result = vec![];
-            for (_, project) in self.projects.iter() {
-                result.push(ListFileEntry {
-                    file: FileDesc::Project {
-                        id: project.root.clone(),
-                    },
-                    filename: project.name.clone(),
-                    is_directory: true,
-                    meta: project.meta.clone(),
-                });
+            Some(FileDesc::File { .. }) => {
+                // Can't list a file, only directories
+                Err(anyhow!("Cannot list files in a document, only directories"))
             }
-            for (docid, doc) in self.docs.iter() {
-                result.push(ListFileEntry {
-                    file: FileDesc::File { id: docid.clone() },
-                    is_directory: false,
-                    filename: doc.name.clone(),
-                    meta: doc.meta.clone(),
-                });
+            None => {
+                // List top-level projects and docs.
+                let mut result = vec![];
+                for (_, project) in self.projects.iter() {
+                    result.push(ListFileEntry {
+                        file: FileDesc::Project {
+                            id: project.root.clone(),
+                        },
+                        filename: project.name.clone(),
+                        is_directory: true,
+                        meta: project.meta.clone(),
+                    });
+                }
+                for (docid, doc) in self.docs.iter() {
+                    result.push(ListFileEntry {
+                        file: FileDesc::File { id: docid.clone() },
+                        is_directory: false,
+                        filename: doc.name.clone(),
+                        meta: doc.meta.clone(),
+                    });
+                }
+                Ok(result)
             }
-            return Ok(result);
         }
     }
 

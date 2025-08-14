@@ -160,7 +160,7 @@ pub struct DeclareProjectEntry {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
-    pub dir: Option<ProjectFile>,
+    pub dir: Option<FileDesc>,
     pub host_id: ServerId,
     pub signaling_addr: String,
     pub credential: Credential,

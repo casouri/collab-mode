@@ -236,7 +236,10 @@ mod e2e_tests {
             },
             Msg::FileShared(123),
             Msg::ListFiles {
-                dir: Some(("project1".to_string(), "/test".to_string())), // ProjectFile is (ProjectId, String)
+                dir: Some(FileDesc::ProjectFile {
+                    project: "project1".to_string(),
+                    file: "test".to_string(),
+                }),
             },
             Msg::FileList(vec![crate::message::ListFileEntry {
                 file: FileDesc::File { id: 1 },

@@ -1199,7 +1199,11 @@ async fn test_list_files_project_directory() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), "src"],
+                "dir": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "src"
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1241,7 +1245,11 @@ async fn test_list_files_project_directory() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), "src/modules"],
+                "dir": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "src/modules"
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1307,7 +1315,10 @@ async fn test_list_files_from_remote() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), ""],
+                "dir": {
+                    "type": "project",
+                    "id": project_path.clone()
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1334,7 +1345,10 @@ async fn test_list_files_from_remote() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), ""],
+                "dir": {
+                    "type": "project",
+                    "id": project_path.clone()
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1375,7 +1389,11 @@ async fn test_list_files_project_not_found() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": ["/non/existent/project", "src"],
+                "dir": {
+                    "type": "projectFile",
+                    "project": "/non/existent/project",
+                    "file": "src"
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1438,7 +1456,11 @@ async fn test_list_files_not_directory() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), "test.txt"],
+                "dir": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1499,7 +1521,11 @@ async fn test_list_files_empty_directory() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), "empty"],
+                "dir": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "empty"
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1565,7 +1591,10 @@ async fn test_list_files_nested_structure() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), ""],
+                "dir": {
+                    "type": "project",
+                    "id": project_path.clone()
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
@@ -1607,7 +1636,11 @@ async fn test_list_files_nested_structure() {
             "ListFiles",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "dir": [project_path.clone(), "src/modules"],
+                "dir": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "src/modules"
+                },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
             }),
