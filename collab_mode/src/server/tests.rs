@@ -2,7 +2,8 @@ use super::*;
 use crate::config_man::ConfigManager;
 use crate::signaling;
 use std::time::Duration;
-use tokio::net::TcpListener;
+// use tokio::net::TcpListener;
+use rand::Rng;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 use tracing_subscriber::EnvFilter;
@@ -27,6 +28,12 @@ struct TestEnvironment {
     temp_dir: tempfile::TempDir,
 }
 
+fn get_random_port() -> u16 {
+    let mut rng = rand::thread_rng();
+    // Ephemeral port range (49152-65535)
+    rng.gen_range(49152..=65535)
+}
+
 impl TestEnvironment {
     async fn new() -> anyhow::Result<Self> {
         init_test_tracing();
@@ -37,10 +44,12 @@ impl TestEnvironment {
         let db_path = temp_dir.path().join("test-signal.db");
         tracing::debug!("Test database path: {:?}", db_path);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        drop(listener);
-        tracing::info!("Found available port: {}", addr);
+        let port = get_random_port();
+        let addr = format!("127.0.0.1:{}", port);
+        // let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // let addr = listener.local_addr()?;
+        // drop(listener);
+        // tracing::info!("Found available port: {}", addr);
 
         let db_path_clone = db_path.clone();
         let addr_string = addr.to_string();
@@ -362,7 +371,7 @@ async fn setup_hub_and_spoke_servers(
         .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
         .await?;
 
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(1000)).await;
 
     // Create and connect spoke servers
     let mut spokes = Vec::new();
@@ -381,8 +390,6 @@ async fn setup_hub_and_spoke_servers(
                 tracing::error!("Spoke server {} error: {}", i + 1, e);
             }
         });
-
-        sleep(Duration::from_millis(100)).await;
 
         // Spoke connects to hub
         tracing::info!("Spoke server {} connecting to hub {}", spoke_id, hub_id);

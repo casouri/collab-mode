@@ -3,11 +3,11 @@ mod e2e_tests {
     use super::super::*;
     use crate::config_man::{create_key_cert, ArcKeyCert};
     use crate::signaling;
-    use crate::types::{FileContentOrPath, FileDesc, Info};
-    use std::path::PathBuf;
+    use crate::types::{FileContentOrPath, Info};
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::net::TcpListener;
+    // use tokio::net::TcpListener;
+    use rand::Rng;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, timeout};
     use tracing_subscriber::EnvFilter;
@@ -34,6 +34,12 @@ mod e2e_tests {
         temp_dir: tempfile::TempDir,
     }
 
+    fn get_random_port() -> u16 {
+        let mut rng = rand::thread_rng();
+        // Ephemeral port range (49152-65535)
+        rng.gen_range(49152..=65535)
+    }
+
     impl TestEnvironment {
         async fn new() -> anyhow::Result<Self> {
             // Initialize tracing for this test environment
@@ -47,10 +53,12 @@ mod e2e_tests {
             tracing::debug!("Test database path: {:?}", db_path);
 
             // Find available port
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let addr = listener.local_addr()?;
-            drop(listener);
-            tracing::info!("Found available port: {}", addr);
+            let port = get_random_port();
+            let addr = format!("127.0.0.1:{}", port);
+            // let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // let addr = listener.local_addr()?;
+            // drop(listener);
+            // tracing::info!("Found available port: {}", addr);
 
             // Start signaling server
             let db_path_clone = db_path.clone();
@@ -141,7 +149,7 @@ mod e2e_tests {
         };
 
         // Give acceptor time to bind
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(500)).await;
 
         // Connect from channel2
         tracing::info!("{} connecting to {}", id2, id1);
