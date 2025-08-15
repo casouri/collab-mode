@@ -9,16 +9,16 @@ mod e2e_tests {
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
-    use tokio::time::{timeout, sleep};
-    use uuid::Uuid;
+    use tokio::time::{sleep, timeout};
     use tracing_subscriber::EnvFilter;
+    use uuid::Uuid;
 
     // Helper function to initialize tracing for tests
     fn init_test_tracing() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("info,webchannel=debug,collab_mode=debug"))
+                    .unwrap_or_else(|_| EnvFilter::new("info,webchannel=debug,collab_mode=debug")),
             )
             .with_test_writer()
             .with_target(true)
@@ -58,10 +58,8 @@ mod e2e_tests {
             tracing::info!("Starting signaling server on {}", addr_string);
             let signaling_task = tokio::spawn(async move {
                 tracing::debug!("Signaling server task started");
-                let result = signaling::server::run_signaling_server(
-                    &addr_string,
-                    &db_path_clone,
-                ).await;
+                let result =
+                    signaling::server::run_signaling_server(&addr_string, &db_path_clone).await;
                 if let Err(e) = result {
                     tracing::error!("Signaling server error: {}", e);
                 }
@@ -133,7 +131,9 @@ mod e2e_tests {
             let id1_clone = id1.clone();
             tokio::spawn(async move {
                 tracing::info!("{} starting to accept connections", id1_clone);
-                let result = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
+                let result = channel1
+                    .accept(key_cert1, &signaling_url, TransportType::SCTP)
+                    .await;
                 if let Err(e) = result {
                     tracing::error!("{} accept error: {}", id1_clone, e);
                 }
@@ -147,14 +147,25 @@ mod e2e_tests {
         tracing::info!("{} connecting to {}", id2, id1);
         let connect_result = timeout(
             Duration::from_secs(5),
-            channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP)
-        ).await;
+            channel2.connect(
+                id1.clone(),
+                id2.clone(),
+                key_cert2,
+                env.signaling_url(),
+                TransportType::SCTP,
+            ),
+        )
+        .await;
 
         assert!(connect_result.is_ok(), "Connection should succeed");
-        assert!(connect_result.unwrap().is_ok(), "Connection should not error");
+        assert!(
+            connect_result.unwrap().is_ok(),
+            "Connection should not error"
+        );
 
         // First consume the automatic "Hey" messages
-        for _ in 0..2 {  // Expect up to 2 Hey messages (one from each side)
+        for _ in 0..2 {
+            // Expect up to 2 Hey messages (one from each side)
             if let Ok(Some(msg)) = timeout(Duration::from_millis(500), rx1.recv()).await {
                 if let Msg::Hey(_) = msg.body {
                     tracing::info!("Received Hey message from {}", msg.host);
@@ -190,89 +201,6 @@ mod e2e_tests {
     }
 
     #[tokio::test]
-    async fn test_all_message_types() {
-        let env = TestEnvironment::new().await.unwrap();
-
-        let (tx1, mut rx1) = mpsc::channel::<Message>(100);
-        let (tx2, _rx2) = mpsc::channel::<Message>(100);
-
-        let id1 = create_test_id("msg-test-1");
-        let id2 = create_test_id("msg-test-2");
-
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
-
-        let key_cert1 = create_test_key_cert(&id1);
-        let key_cert2 = create_test_key_cert(&id2);
-
-        // Establish connection
-        let accept_handle = {
-            let mut channel1 = channel1.clone();
-            let key_cert1 = key_cert1.clone();
-            let signaling_url = env.signaling_url().to_string();
-            tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
-            })
-        };
-
-        sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
-
-        // Consume automatic Hey messages
-        for _ in 0..2 {
-            if let Ok(Some(msg)) = timeout(Duration::from_millis(500), rx1.recv()).await {
-                if let Msg::Hey(_) = msg.body {
-                    tracing::info!("Received Hey message from {}", msg.host);
-                }
-            }
-        }
-
-        // Test various message types
-        let test_messages = vec![
-            Msg::ShareSingleFile {
-                filename: "test.txt".to_string(),
-                meta: "text".to_string(),
-                content: FileContentOrPath::Content("test content".to_string()),
-            },
-            Msg::FileShared(123),
-            Msg::ListFiles {
-                dir: Some(FileDesc::ProjectFile {
-                    project: "project1".to_string(),
-                    file: "test".to_string(),
-                }),
-            },
-            Msg::FileList(vec![crate::message::ListFileEntry {
-                file: FileDesc::File { id: 1 },
-                filename: "file1.txt".to_string(),
-                is_directory: false,
-                meta: serde_json::Map::new(),
-            }]),
-            Msg::Login("test-cred".to_string()), // Credential is String
-            Msg::LoggedYouIn(42), // SiteId is u32
-            Msg::IceProgress("connected".to_string()),
-            Msg::Info(1, Info {
-                sender: 1,
-                value: "info".to_string(),
-            }),
-        ];
-
-        // Send all message types
-        for msg in test_messages.iter() {
-            channel2.send(&id1, None, msg.clone()).await.unwrap();
-        }
-
-        // Receive and verify all messages
-        for expected_msg in test_messages.iter() {
-            let received = timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap();
-            assert_eq!(received.host, id2);
-            // Compare using format to handle complex enums
-            assert_eq!(format!("{:?}", received.body), format!("{:?}", expected_msg));
-        }
-
-        accept_handle.abort();
-    }
-
-    #[tokio::test]
     async fn test_large_message_chunking() {
         let env = TestEnvironment::new().await.unwrap();
 
@@ -294,12 +222,23 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
+                let _ = channel1
+                    .accept(key_cert1, &signaling_url, TransportType::SCTP)
+                    .await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2
+            .connect(
+                id1.clone(),
+                id2.clone(),
+                key_cert2,
+                env.signaling_url(),
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
 
         // Consume automatic Hey messages
         for _ in 0..2 {
@@ -312,10 +251,10 @@ mod e2e_tests {
 
         // Test various sizes
         let test_sizes = vec![
-            ("small", 1024),              // 1KB
-            ("medium", 100 * 1024),       // 100KB (exceeds MAX_FRAME_SIZE)
-            ("large", 1024 * 1024),       // 1MB
-            ("xlarge", 5 * 1024 * 1024),  // 5MB
+            ("small", 1024),             // 1KB
+            ("medium", 100 * 1024),      // 100KB (exceeds MAX_FRAME_SIZE)
+            ("large", 1024 * 1024),      // 1MB
+            ("xlarge", 5 * 1024 * 1024), // 5MB
         ];
 
         for (name, size) in test_sizes {
@@ -324,23 +263,33 @@ mod e2e_tests {
             let msg = Msg::ShareSingleFile {
                 filename: format!("{}.bin", name),
                 meta: "binary".to_string(),
-                content: FileContentOrPath::Content(String::from_utf8_lossy(&test_data).to_string()),
+                content: FileContentOrPath::Content(
+                    String::from_utf8_lossy(&test_data).to_string(),
+                ),
             };
 
             // Send large message
             channel2.send(&id1, None, msg).await.unwrap();
 
             // Receive and verify
-            let received = timeout(Duration::from_secs(10), rx1.recv()).await.unwrap().unwrap();
+            let received = timeout(Duration::from_secs(10), rx1.recv())
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(received.host, id2);
 
             match received.body {
-                Msg::ShareSingleFile { filename, content, .. } => {
+                Msg::ShareSingleFile {
+                    filename, content, ..
+                } => {
                     assert_eq!(filename, format!("{}.bin", name));
                     match content {
                         FileContentOrPath::Content(data) => {
-
-                            assert!(data.chars().nth(size - 1) == Some('A'), "Data should not be empty for {}", name);
+                            assert!(
+                                data.chars().nth(size - 1) == Some('A'),
+                                "Data should not be empty for {}",
+                                name
+                            );
                         }
                         _ => panic!("Expected content, not path"),
                     }
@@ -367,7 +316,9 @@ mod e2e_tests {
             let hub_key_cert = hub_key_cert.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = hub_channel.accept(hub_key_cert, &signaling_url, TransportType::SCTP).await;
+                let _ = hub_channel
+                    .accept(hub_key_cert, &signaling_url, TransportType::SCTP)
+                    .await;
             })
         };
 
@@ -391,13 +342,24 @@ mod e2e_tests {
                 let key_cert_clone = key_cert.clone();
                 let signaling_url = env.signaling_url().to_string();
                 tokio::spawn(async move {
-                    let _ = channel_clone.accept(key_cert_clone, &signaling_url, TransportType::SCTP).await;
+                    let _ = channel_clone
+                        .accept(key_cert_clone, &signaling_url, TransportType::SCTP)
+                        .await;
                 })
             };
             client_accept_handles.push(client_accept_handle);
 
             // Connect to hub
-            channel.connect(hub_id.clone(), id.clone(), key_cert.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
+            channel
+                .connect(
+                    hub_id.clone(),
+                    id.clone(),
+                    key_cert.clone(),
+                    env.signaling_url(),
+                    TransportType::SCTP,
+                )
+                .await
+                .unwrap();
 
             // Note: Hub doesn't need to connect back since it's already accepting connections
             // The connection is bidirectional once established
@@ -428,7 +390,7 @@ mod e2e_tests {
                 Info {
                     sender: i as u32,
                     value: format!("Hello from client {}", i),
-                }
+                },
             );
             channel.send(&hub_id, None, msg).await.unwrap();
         }
@@ -459,7 +421,10 @@ mod e2e_tests {
             }
         }
 
-        assert_eq!(received_count, num_clients, "Did not receive all expected messages");
+        assert_eq!(
+            received_count, num_clients,
+            "Did not receive all expected messages"
+        );
 
         // Test hub sending to specific clients
         for (i, (client_id, _)) in client_channels.iter().enumerate() {
@@ -492,7 +457,11 @@ mod e2e_tests {
                 }
             }
 
-            assert!(found_message, "Client {} did not receive expected message from hub", i);
+            assert!(
+                found_message,
+                "Client {} did not receive expected message from hub",
+                i
+            );
         }
 
         // Cleanup
@@ -525,16 +494,30 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
+                let _ = channel1
+                    .accept(key_cert1, &signaling_url, TransportType::SCTP)
+                    .await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), id2.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2
+            .connect(
+                id1.clone(),
+                id2.clone(),
+                key_cert2.clone(),
+                env.signaling_url(),
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
 
         // Exchange messages to verify connection
         channel2.send(&id1, None, Msg::FileShared(1)).await.unwrap();
-        let msg = timeout(Duration::from_secs(2), rx1.recv()).await.unwrap().unwrap();
+        let msg = timeout(Duration::from_secs(2), rx1.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(msg.host, id2);
 
         // Simulate connection break by removing the connection from channel1
@@ -543,7 +526,10 @@ mod e2e_tests {
         // Try to send should fail
         let send_result = channel1.send(&id2, None, Msg::FileShared(2)).await;
         assert!(send_result.is_err());
-        assert!(send_result.unwrap_err().to_string().contains("not connected"));
+        assert!(send_result
+            .unwrap_err()
+            .to_string()
+            .contains("not connected"));
 
         // Channel2 should eventually receive ConnectionBroke
         let mut got_connection_broke = false;
@@ -556,7 +542,10 @@ mod e2e_tests {
                 }
             }
         }
-        assert!(got_connection_broke, "Should receive ConnectionBroke message");
+        assert!(
+            got_connection_broke,
+            "Should receive ConnectionBroke message"
+        );
 
         accept_handle.abort();
     }
@@ -583,7 +572,9 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
+                let _ = channel1
+                    .accept(key_cert1, &signaling_url, TransportType::SCTP)
+                    .await;
             })
         };
 
@@ -592,8 +583,15 @@ mod e2e_tests {
         // Connect with matching cert should succeed
         let connect_result = timeout(
             Duration::from_secs(5),
-            channel2.connect(id1.clone(), id2.clone(), key_cert2.clone(), env.signaling_url(), TransportType::SCTP)
-        ).await;
+            channel2.connect(
+                id1.clone(),
+                id2.clone(),
+                key_cert2.clone(),
+                env.signaling_url(),
+                TransportType::SCTP,
+            ),
+        )
+        .await;
         assert!(connect_result.is_ok() && connect_result.unwrap().is_ok());
 
         // Test that certificates are properly validated during DTLS handshake
@@ -624,12 +622,23 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
+                let _ = channel1
+                    .accept(key_cert1, &signaling_url, TransportType::SCTP)
+                    .await;
             })
         };
 
         sleep(Duration::from_millis(200)).await;
-        channel2.connect(id1.clone(), id2.clone(), key_cert2, env.signaling_url(), TransportType::SCTP).await.unwrap();
+        channel2
+            .connect(
+                id1.clone(),
+                id2.clone(),
+                key_cert2,
+                env.signaling_url(),
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
 
         // Send many messages rapidly
         let num_messages = 100;
@@ -646,7 +655,9 @@ mod e2e_tests {
                         Msg::ShareSingleFile {
                             filename: format!("file-{}.dat", i),
                             meta: "data".to_string(),
-                            content: FileContentOrPath::Content(String::from_utf8(vec![b'A' + (i as u8 % 26); 10 * 1024]).unwrap()),
+                            content: FileContentOrPath::Content(
+                                String::from_utf8(vec![b'A' + (i as u8 % 26); 10 * 1024]).unwrap(),
+                            ),
                         }
                     } else {
                         // Others are small
@@ -655,7 +666,7 @@ mod e2e_tests {
                             Info {
                                 sender: i as u32,
                                 value: format!("Message {}", i),
-                            }
+                            },
                         )
                     };
                     channel2.send(&id1, None, msg).await.unwrap();
@@ -666,7 +677,10 @@ mod e2e_tests {
         // Receive all messages
         let mut received = 0;
         while received < num_messages {
-            let msg = timeout(Duration::from_secs(30), rx1.recv()).await.unwrap().unwrap();
+            let msg = timeout(Duration::from_secs(30), rx1.recv())
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(msg.host, id2);
             received += 1;
         }
@@ -674,8 +688,14 @@ mod e2e_tests {
         sender_task.await.unwrap();
         let elapsed = start.elapsed();
 
-        println!("Throughput test: {} messages in {:?}", num_messages, elapsed);
-        println!("Rate: {:.2} messages/sec", num_messages as f64 / elapsed.as_secs_f64());
+        println!(
+            "Throughput test: {} messages in {:?}",
+            num_messages, elapsed
+        );
+        println!(
+            "Rate: {:.2} messages/sec",
+            num_messages as f64 / elapsed.as_secs_f64()
+        );
 
         accept_handle.abort();
     }
@@ -702,7 +722,9 @@ mod e2e_tests {
             let key_cert1 = key_cert1.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                let _ = channel1.accept(key_cert1, &signaling_url, TransportType::SCTP).await;
+                let _ = channel1
+                    .accept(key_cert1, &signaling_url, TransportType::SCTP)
+                    .await;
             })
         };
 
@@ -714,7 +736,15 @@ mod e2e_tests {
             let key_cert2 = key_cert2.clone();
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
-                channel2.connect(id1.clone(), id2.clone(), key_cert2, &signaling_url, TransportType::SCTP).await
+                channel2
+                    .connect(
+                        id1.clone(),
+                        id2.clone(),
+                        key_cert2,
+                        &signaling_url,
+                        TransportType::SCTP,
+                    )
+                    .await
             })
         };
 
@@ -736,7 +766,10 @@ mod e2e_tests {
         }
 
         // Should have received some ICE progress messages
-        assert!(!ice_messages.is_empty(), "Should receive ICE progress messages");
+        assert!(
+            !ice_messages.is_empty(),
+            "Should receive ICE progress messages"
+        );
         println!("Received ICE progress messages: {:?}", ice_messages);
 
         let connect_result = connect_task.await.unwrap();

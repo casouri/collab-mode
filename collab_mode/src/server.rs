@@ -469,42 +469,6 @@ impl Server {
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
         match orig_req.method.as_str() {
-            "ListFiles" => {
-                let resp: ListFilesResp = serde_json::from_value(result.unwrap_or_default())
-                    .with_context(|| "Failed to parse ListFiles response")?;
-                send_to_remote(
-                    webchannel,
-                    &orig_req.host_id,
-                    Some(orig_req.req_id),
-                    Msg::FileList(resp.files),
-                )
-                .await;
-            }
-            "RequestFile" => {
-                // Parse the Snapshot response from editor
-                let snapshot_val = result.unwrap_or_default();
-                let buffer = snapshot_val["buffer"].as_str().unwrap_or("");
-                let filename = snapshot_val["fileName"].as_str().unwrap_or("untitled");
-                let seq = snapshot_val["seq"].as_u64().unwrap_or(0);
-
-                let snapshot = NewSnapshot {
-                    content: buffer.to_string(),
-                    name: filename.to_string(),
-                    seq: seq as u32,
-                    site_id: 0,                          // Will be set by receiver
-                    file_desc: FileDesc::File { id: 0 }, // Placeholder
-                    doc_id: 0,                            // Placeholder
-                };
-
-                // Send snapshot back to remote
-                send_to_remote(
-                    webchannel,
-                    &orig_req.host_id,
-                    Some(orig_req.req_id),
-                    Msg::Snapshot(snapshot),
-                )
-                .await;
-            }
             _ => {
                 tracing::warn!(
                     "Unknown method read from editor response: {}",
@@ -973,9 +937,10 @@ impl Server {
                         next_site_seq: 1,
                         meta: JsonMap::new(),
                         remote_op_buffer: Vec::new(),
-                        engine: ClientEngine::new(self.site_id, 0, 0),
+                        engine: ClientEngine::new(self.site_id, 1, content.chars().count() as u64),
                     };
-                    self.remote_docs.insert((self.host_id.clone(), doc_id), remote_doc);
+                    self.remote_docs
+                        .insert((self.host_id.clone(), doc_id), remote_doc);
 
                     // Send response
                     let resp = OpenFileResp {
@@ -1186,7 +1151,10 @@ impl Server {
             if host == &remote_host_id && remote_doc.file_desc == snapshot.file_desc {
                 let err = lsp_server::ResponseError {
                     code: ErrorCode::BadRequest as i32,
-                    message: format!("File {} is already opened from {}", remote_doc.name, remote_host_id),
+                    message: format!(
+                        "File {} is already opened from {}",
+                        remote_doc.name, remote_host_id
+                    ),
                     data: None,
                 };
                 send_response(editor_tx, req_id, (), Some(err)).await;
@@ -1202,11 +1170,16 @@ impl Server {
             next_site_seq: 1,
             meta: serde_json::Map::new(),
             remote_op_buffer: Vec::new(),
-            engine: ClientEngine::new(snapshot.site_id, snapshot.seq, 0),
+            engine: ClientEngine::new(
+                snapshot.site_id,
+                snapshot.seq,
+                snapshot.content.chars().count() as u64,
+            ),
         };
 
         // Store with (host_id, remote_doc_id) as key
-        self.remote_docs.insert((remote_host_id.clone(), snapshot.doc_id), remote_doc);
+        self.remote_docs
+            .insert((remote_host_id.clone(), snapshot.doc_id), remote_doc);
 
         // Send response to editor with the remote doc_id
         let resp = OpenFileResp {
@@ -1277,7 +1250,8 @@ impl Server {
 
         // Update subscriber's local seq to latest
         if let Some(last_op) = context_ops.ops.last() {
-            doc.subscribers.insert(remote_host_id.clone(), last_op.site_seq);
+            doc.subscribers
+                .insert(remote_host_id.clone(), last_op.site_seq);
         }
 
         // Apply ops to doc buffer
@@ -1293,10 +1267,7 @@ impl Server {
         );
         for (subscriber_host_id, _) in &doc.subscribers {
             if subscriber_host_id != &remote_host_id {
-                tracing::debug!(
-                    "Sending OpFromServer to subscriber {}",
-                    subscriber_host_id
-                );
+                tracing::debug!("Sending OpFromServer to subscriber {}", subscriber_host_id);
                 send_to_remote(
                     webchannel,
                     subscriber_host_id,
@@ -1323,9 +1294,14 @@ impl Server {
         let doc_id = ops[0].doc;
 
         // Find doc in remote_docs with (host_id, doc_id) key
-        let remote_doc = self.remote_docs.get_mut(&(remote_host_id.clone(), doc_id));
+        let key = (remote_host_id.clone(), doc_id);
+        let remote_doc = self.remote_docs.get_mut(&key);
         if remote_doc.is_none() {
-            tracing::warn!("Received OpFromServer for unknown doc {} from {}", doc_id, remote_host_id);
+            tracing::warn!(
+                "Received OpFromServer for unknown doc {} from {}",
+                doc_id,
+                remote_host_id
+            );
             return Ok(());
         }
         let remote_doc = remote_doc.unwrap();
