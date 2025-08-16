@@ -16,6 +16,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::mpsc;
+use tracing::instrument;
 
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
@@ -990,6 +991,8 @@ impl Server {
             return Ok(());
         }
 
+        // Open remote file.
+
         // Check if we already have this file in remote_docs
         for (doc_id, remote_doc) in &self.remote_docs {
             if remote_doc.file_desc == file_desc {
@@ -1275,23 +1278,16 @@ impl Server {
             doc.apply_op(op.clone())?;
         }
 
-        // Send OpFromServer to all other subscribers
-        tracing::debug!(
-            "Sending OpFromServer to subscribers. Current subscribers: {:?}, sending from: {}",
-            doc.subscribers,
-            remote_host_id
-        );
+        // Send OpFromServer to all subscribers (including the sender)
+        // The sender needs to receive the globally sequenced version of their op
         for (subscriber_host_id, _) in &doc.subscribers {
-            if subscriber_host_id != &remote_host_id {
-                tracing::debug!("Sending OpFromServer to subscriber {}", subscriber_host_id);
-                send_to_remote(
-                    webchannel,
-                    subscriber_host_id,
-                    None,
-                    Msg::OpFromServer(processed_ops.clone()),
-                )
-                .await;
-            }
+            send_to_remote(
+                webchannel,
+                subscriber_host_id,
+                None,
+                Msg::OpFromServer(processed_ops.clone()),
+            )
+            .await;
         }
 
         Ok(())

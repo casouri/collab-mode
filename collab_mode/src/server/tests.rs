@@ -2055,14 +2055,15 @@ async fn test_send_ops_e2e() {
         serde_json::to_string_pretty(op).unwrap()
     );
 
-    // Basic verification that it's an insert operation from Spoke2
-    assert!(op["op"]["Ins"].is_array());
-    let ins_array = op["op"]["Ins"].as_array().unwrap();
-    assert_eq!(ins_array.len(), 2);
-    assert!(ins_array[1].as_str().unwrap().contains("[Spoke2]"));
-
-    // The siteId should be 2 (Spoke2's site ID)
-    assert_eq!(op["siteId"], 2);
+    let expected_op = serde_json::json!({
+                "op": {
+                    "Ins": [
+                        [18, "[Spoke2]"]
+                    ]
+                },
+                "siteId": 2, // site is 2 because the op is from spoke 2
+    });
+    assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
 
     setup.cleanup();
 }
