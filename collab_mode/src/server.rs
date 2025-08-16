@@ -370,6 +370,12 @@ impl Server {
                 .await?;
                 Ok(())
             }
+            "Undo" => {
+                let params: UndoParams = serde_json::from_value(req.params)?;
+                let resp = self.handle_undo_from_editor(params)?;
+                send_response(editor_tx, req.id, resp, None).await;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -1447,6 +1453,20 @@ impl Server {
         };
         send_response(editor_tx, req_id, resp, None).await;
         Ok(())
+    }
+
+    fn handle_undo_from_editor(&mut self, params: UndoParams) -> anyhow::Result<UndoResp> {
+        // Check if it's a remote doc
+        let key = (params.host_id.clone(), params.doc_id.clone());
+        let remote_doc = self.remote_docs.get_mut(&key)
+            .ok_or_else(|| anyhow::anyhow!("Remote doc not found: {:?}", key))?;
+        
+        let ops = match params.kind {
+            UndoKind::Undo => remote_doc.engine.generate_undo_op(),
+            UndoKind::Redo => remote_doc.engine.generate_redo_op(),
+        };
+        let resp = UndoResp { ops };
+        Ok(resp)
     }
 }
 

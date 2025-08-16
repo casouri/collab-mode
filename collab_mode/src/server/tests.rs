@@ -2067,3 +2067,209 @@ async fn test_send_ops_e2e() {
 
     setup.cleanup();
 }
+
+#[tokio::test]
+async fn test_undo_e2e() {
+    // Test: End-to-end test for Undo functionality
+    // Sends an op, then sends an undo request, and verifies the returned undo op
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+
+    // Create test project with a file
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path.clone(),
+                    "name": "TestProject",
+                    "meta": {}
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Spoke opens the file
+    let spoke_req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            spoke_req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": project_path.clone(),
+                    "file": "test.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let spoke_resp = setup.spokes[0]
+        .editor
+        .wait_for_response(spoke_req_id, 5)
+        .await
+        .unwrap();
+    assert_eq!(spoke_resp["content"], "Hello from test.txt");
+    let doc_id = spoke_resp["docId"].as_u64().unwrap() as u32;
+
+    sleep(Duration::from_millis(200)).await;
+
+    // Send an insert operation
+    let send_ops_req_id = 2;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            send_ops_req_id,
+            "SendOps",
+            serde_json::json!({
+                "docId": doc_id,
+                "hostId": setup.hub.id.clone(),
+                "ops": [{
+                    "op": {
+                        "Ins": [0, "UNDO_TEST: "]
+                    },
+                    "groupSeq": 1
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for SendOps response
+    let send_ops_resp = setup.spokes[0]
+        .editor
+        .wait_for_response(send_ops_req_id, 5)
+        .await
+        .unwrap();
+    tracing::info!("SendOps response: {:?}", send_ops_resp);
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Send an undo request
+    let undo_req_id = 3;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            undo_req_id,
+            "Undo",
+            serde_json::json!({
+                "docId": doc_id,
+                "hostId": setup.hub.id.clone(),
+                "kind": "Undo"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for Undo response
+    let undo_resp = setup.spokes[0]
+        .editor
+        .wait_for_response(undo_req_id, 5)
+        .await
+        .unwrap();
+    
+    tracing::info!("Undo response: {:?}", undo_resp);
+    
+    // Verify that the undo response contains the delete operation
+    let ops = undo_resp["ops"].as_array().unwrap();
+    assert!(!ops.is_empty(), "Undo should return at least one operation");
+    
+    // The undo operation should be a deletion of the inserted text
+    let actual_op = &ops[0];
+    let expected_op = serde_json::json!({
+        "Del": [[0, "UNDO_TEST: "]]
+    });
+    
+    assert_eq!(
+        serde_json::to_string(&actual_op).unwrap(),
+        serde_json::to_string(&expected_op).unwrap(),
+        "Undo operation should delete the inserted text"
+    );
+
+    // Send the undo operation back as a SendOps request  
+    // The undo operation needs to be sent as "Undo" not as a delete
+    let send_undo_req_id = 4;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            send_undo_req_id,
+            "SendOps",
+            serde_json::json!({
+                "docId": doc_id,
+                "hostId": setup.hub.id.clone(),
+                "ops": [{
+                    "op": "Undo",
+                    "groupSeq": 2
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for SendOps response
+    let send_undo_resp = setup.spokes[0]
+        .editor
+        .wait_for_response(send_undo_req_id, 5)
+        .await
+        .unwrap();
+    tracing::info!("SendOps (undo) response: {:?}", send_undo_resp);
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Test redo
+    let redo_req_id = 5;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            redo_req_id,
+            "Undo",
+            serde_json::json!({
+                "docId": doc_id,
+                "hostId": setup.hub.id.clone(),
+                "kind": "Redo"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for Redo response
+    let redo_resp = setup.spokes[0]
+        .editor
+        .wait_for_response(redo_req_id, 5)
+        .await
+        .unwrap();
+    
+    tracing::info!("Redo response: {:?}", redo_resp);
+    
+    // Verify that the redo response contains the insert operation
+    let redo_ops = redo_resp["ops"].as_array().unwrap();
+    assert!(!redo_ops.is_empty(), "Redo should return at least one operation");
+    
+    // The redo operation should be an insertion of the text back
+    let actual_redo_op = &redo_ops[0];
+    let expected_redo_op = serde_json::json!({
+        "Ins": [[0, "UNDO_TEST: "]]
+    });
+    
+    assert_eq!(
+        serde_json::to_string(&actual_redo_op).unwrap(),
+        serde_json::to_string(&expected_redo_op).unwrap(),
+        "Redo operation should reinsert the text"
+    );
+
+    setup.cleanup();
+}
