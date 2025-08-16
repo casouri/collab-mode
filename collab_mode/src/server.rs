@@ -602,7 +602,7 @@ impl Server {
             }
             Msg::Snapshot(snapshot) => {
                 if let Some(req_id) = msg.req_id {
-                    self.handle_snapshot(editor_tx, snapshot, req_id, msg.host.clone())
+                    self.handle_snapshot(editor_tx, webchannel, snapshot, req_id, msg.host.clone())
                         .await?;
                 } else {
                     tracing::warn!("Received Snapshot without req_id, ignoring.");
@@ -616,6 +616,11 @@ impl Server {
             }
             Msg::OpFromServer(ops) => {
                 self.handle_op_from_server(editor_tx, ops, msg.host.clone())
+                    .await?;
+                Ok(())
+            }
+            Msg::RequestOps { doc, after } => {
+                self.handle_request_ops(webchannel, doc, after, msg.host.clone())
                     .await?;
                 Ok(())
             }
@@ -937,7 +942,10 @@ impl Server {
                         next_site_seq: 1,
                         meta: JsonMap::new(),
                         remote_op_buffer: Vec::new(),
-                        engine: ClientEngine::new(self.site_id, 1, content.chars().count() as u64),
+                        // Global seq starts from 1. So use 1 for the
+                        // base_seq, meaning we expect next global seq
+                        // to be 1.
+                        engine: ClientEngine::new(self.site_id, 0, content.chars().count() as u64),
                     };
                     self.remote_docs
                         .insert((self.host_id.clone(), doc_id), remote_doc);
@@ -1073,8 +1081,8 @@ impl Server {
                     ServerEngine::new(content.len() as u64),
                 );
 
-                // Add remote as subscriber
-                doc.subscribers.insert(remote_host_id.clone(), 0);
+                // Don’t add remote as subscriber, wait until we
+                // receive RequestOps message.
 
                 self.docs.insert(doc_id, doc);
 
@@ -1142,6 +1150,7 @@ impl Server {
     async fn handle_snapshot(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
         snapshot: NewSnapshot,
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
@@ -1183,17 +1192,24 @@ impl Server {
 
         // Send response to editor with the remote doc_id
         let resp = OpenFileResp {
-            content: snapshot.content,
+            content: snapshot.content.clone(),
             site_id: snapshot.site_id,
             filename: snapshot.name,
             doc_id: snapshot.doc_id,
         };
         send_response(editor_tx, req_id, resp, None).await;
+
+        // Send RequestOps to subscribe and get any ops after the snapshot
+        let msg = Msg::RequestOps {
+            doc: snapshot.doc_id,
+            after: snapshot.seq,
+        };
+        send_to_remote(webchannel, &remote_host_id, None, msg).await;
+
         Ok(())
     }
 
-    /// Get the site_of assigned to host. Create one if not assigned
-    /// yet.
+    /// Get the site id assigned to host. Create one if not assigned yet.
     fn site_id_of(&mut self, host_id: &ServerId) -> SiteId {
         if let Some(&site_id) = self.site_id_map.get(host_id) {
             site_id
@@ -1281,6 +1297,46 @@ impl Server {
         Ok(())
     }
 
+    async fn handle_request_ops(
+        &mut self,
+        webchannel: &WebChannel,
+        doc_id: DocId,
+        after: GlobalSeq,
+        remote_host_id: ServerId,
+    ) -> anyhow::Result<()> {
+        // Find the doc in self.docs
+        let doc = self.docs.get_mut(&doc_id);
+        if doc.is_none() {
+            tracing::warn!(
+                "Received RequestOps for unknown doc {} from {}",
+                doc_id,
+                remote_host_id
+            );
+            send_to_remote(
+                webchannel,
+                &remote_host_id,
+                None,
+                Msg::BadRequest(format!("Doc {} not found", doc_id)),
+            )
+            .await;
+            return Ok(());
+        }
+        let doc = doc.unwrap();
+
+        // Add remote as subscriber
+        doc.subscribers.insert(remote_host_id.clone(), 0);
+
+        // Get all ops after the specified sequence
+        let ops = doc.engine.global_ops_after(after);
+
+        // Send OpFromServer message with the ops
+        if !ops.is_empty() {
+            send_to_remote(webchannel, &remote_host_id, None, Msg::OpFromServer(ops)).await;
+        }
+
+        Ok(())
+    }
+
     async fn handle_op_from_server(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
@@ -1306,16 +1362,13 @@ impl Server {
         }
         let remote_doc = remote_doc.unwrap();
 
-        // Save remote ops to buffer
-        remote_doc.remote_op_buffer.extend(ops.clone());
-
-        // Check if ops are from a different site (not from us)
-        // We need to check against the site_id assigned to us by the remote server
         let our_site_id = remote_doc.engine.site();
-        let ops_from_other_site = ops[0].site() != our_site_id;
+        let op_is_not_ours = ops[0].site() != our_site_id;
 
-        if ops_from_other_site {
-            // Send RemoteOpsArrived notification to editor
+        // Save remote ops to buffer
+        remote_doc.remote_op_buffer.extend(ops);
+
+        if op_is_not_ours {
             send_notification(
                 editor_tx,
                 NotificationCode::RemoteOpsArrived,
@@ -1355,7 +1408,8 @@ impl Server {
         // Drain remote ops from buffer
         let remote_ops: Vec<FatOp> = remote_doc.remote_op_buffer.drain(..).collect();
 
-        // Process local ops from editor
+        // Process local ops from editor first, because we want to
+        // pretent the local ops arrives before the remote ops.
         for editor_op in ops {
             // Process the op with the engine
             let site_seq = remote_doc.next_site_seq;
@@ -1376,7 +1430,7 @@ impl Server {
             }
         }
 
-        // Process the drained remote ops
+        // Process the drained remote ops.
         let mut lean_ops = Vec::new();
         for remote_op in remote_ops {
             if let Some((lean_op, _seq)) = remote_doc.engine.process_remote_op(remote_op)? {

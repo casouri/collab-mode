@@ -1255,7 +1255,7 @@ pub struct ClientEngine {
     current_seq: GlobalSeq,
     /// The largest local sequence number we've seen. Any local op we
     /// receive should be have local sequence equal to this number plus
-    /// one.
+    /// one. Starts from 1.
     current_site_seq: LocalSeq,
     /// When we send local `ops` to server, record the largest site
     /// seq in `ops`. Before server acked the op with this site seq,
@@ -1271,7 +1271,7 @@ pub struct ServerEngine {
     gh: GlobalHistory,
     /// The internal document.
     internal_doc: InternalDoc,
-    /// The largest global sequence number we've assigned.
+    /// The largest global sequence number we've assigned. Starts from 1.
     current_seq: GlobalSeq,
     /// The length of the document. This is used to check that after
     /// applying every op, the length of the document and the length
@@ -1557,7 +1557,7 @@ impl ClientEngine {
     pub fn current_gseq(&self) -> GlobalSeq {
         self.current_seq
     }
-    
+
     /// Return the site id for this client.
     pub fn site(&self) -> SiteId {
         self.site

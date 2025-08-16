@@ -1930,9 +1930,6 @@ async fn test_send_ops_e2e() {
     });
     assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
 
-    return;
-    // Skip the tests below (unverified).
-
     // Now Spoke 1 sends its own op
     // Insert at position 10 (after "Modified: ")
     let send_ops_req_id_spoke1 = 7;
@@ -1962,7 +1959,7 @@ async fn test_send_ops_e2e() {
         .unwrap();
 
     // Give time for ops to propagate and for Spoke2 to receive notification
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(1000)).await;
 
     // Spoke 2 sends its own op - this will also fetch Spoke1's op in the response
     // Insert at position 10 (also after "Modified: ", will be transformed by OT)
@@ -1993,9 +1990,79 @@ async fn test_send_ops_e2e() {
         .unwrap();
     // The response should contain Spoke1's op that was buffered
     tracing::info!("Spoke2 SendOps response: {:?}", send_ops_resp_spoke2);
+    let remote_ops = send_ops_resp_spoke2["ops"].as_array().unwrap();
 
-    // TODO:
+    // Should have received the insert op from spoke 1
+    assert_eq!(remote_ops.len(), 1);
+    let op = &remote_ops[0];
+    let expected_op = serde_json::json!({
+                "op": {
+                    "Ins": [
+                        [10, "[Spoke1]"]
+                    ]
+                },
+                "siteId": 1, // site is 1 because the op is from spoke 1
+    });
+    assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
 
-    tracing::info!("test_send_ops_e2e completed successfully - all editors sent ops");
+    // Wait for RemoteOpsArrived notification in Spoke1
+    let notification_spoke1_from_spoke2 = setup.spokes[0]
+        .editor
+        .wait_for_notification("RemoteOpsArrived", 5)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        notification_spoke1_from_spoke2["hostId"],
+        setup.hub.id.clone()
+    );
+    assert_eq!(notification_spoke1_from_spoke2["docId"], spoke1_doc_id);
+
+    // Spoke1 sends empty SendOps to fetch the new ops
+    let fetch_ops_req_id_spoke1_2 = 9;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            fetch_ops_req_id_spoke1_2,
+            "SendOps",
+            serde_json::json!({
+                "docId": spoke1_doc_id,
+                "hostId": setup.hub.id.clone(),
+                "ops": []
+            }),
+        )
+        .await
+        .unwrap();
+
+    let fetch_ops_resp_spoke1_2 = setup.spokes[0]
+        .editor
+        .wait_for_response(fetch_ops_req_id_spoke1_2, 5)
+        .await
+        .unwrap();
+
+    // Print out the ops received for debugging
+    let ops_from_spoke2 = fetch_ops_resp_spoke1_2["ops"].as_array().unwrap();
+    tracing::info!("Spoke1 received ops from Spoke2: {:?}", ops_from_spoke2);
+
+    // Verify we received Spoke2's op
+    assert_eq!(ops_from_spoke2.len(), 1);
+    let op = &ops_from_spoke2[0];
+
+    // The op should be Spoke2's insertion, transformed if necessary
+    // The exact position might be transformed due to OT
+    tracing::info!(
+        "Spoke1 received op details: {}",
+        serde_json::to_string_pretty(op).unwrap()
+    );
+
+    // Basic verification that it's an insert operation from Spoke2
+    assert!(op["op"]["Ins"].is_array());
+    let ins_array = op["op"]["Ins"].as_array().unwrap();
+    assert_eq!(ins_array.len(), 2);
+    assert!(ins_array[1].as_str().unwrap().contains("[Spoke2]"));
+
+    // The siteId should be 2 (Spoke2's site ID)
+    assert_eq!(op["siteId"], 2);
+
     setup.cleanup();
 }
