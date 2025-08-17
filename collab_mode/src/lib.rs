@@ -20,3 +20,4 @@ mod webchannel;
 mod webrpc;
 pub mod websocket_receptor;
 pub mod server;
+pub mod transcript_runner;

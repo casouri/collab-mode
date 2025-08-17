@@ -1,0 +1,5 @@
+Name: Single Insert Test
+
+E1 INSERT A
+E1 SEND
+===CHECK===

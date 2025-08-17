@@ -1,0 +1,9 @@
+Name: Insert and Delete Test
+
+E1 INSERT Hello World
+E1 SEND
+E1 MOVE 6
+E1 DELETE 6
+E1 SEND
+E2 SEND
+===CHECK===

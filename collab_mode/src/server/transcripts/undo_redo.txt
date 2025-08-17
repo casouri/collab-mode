@@ -1,0 +1,10 @@
+Name: Undo and Redo Test
+
+E1 INSERT First
+E1 SEND
+E1 INSERT Second
+E1 SEND
+E1 UNDO
+E1 SEND
+E2 SEND
+===CHECK===

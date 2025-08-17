@@ -24,7 +24,8 @@ fn init_test_tracing() {
         .try_init();
 }
 
-struct TestEnvironment {
+#[cfg(any(test, feature = "test-runner"))]
+pub struct TestEnvironment {
     signaling_addr: String,
     signaling_task: Option<tokio::task::JoinHandle<()>>,
     temp_dir: tempfile::TempDir,
@@ -37,7 +38,8 @@ fn get_random_port() -> u16 {
 }
 
 impl TestEnvironment {
-    async fn new() -> anyhow::Result<Self> {
+    #[cfg(any(test, feature = "test-runner"))]
+    pub async fn new() -> anyhow::Result<Self> {
         init_test_tracing();
 
         tracing::info!("Creating new test environment");
@@ -75,7 +77,8 @@ impl TestEnvironment {
         })
     }
 
-    fn signaling_url(&self) -> &str {
+    #[cfg(any(test, feature = "test-runner"))]
+    pub fn signaling_url(&self) -> &str {
         &self.signaling_addr
     }
 }
@@ -94,14 +97,16 @@ fn create_test_id(prefix: &str) -> ServerId {
     format!("{}-{}", prefix, Uuid::new_v4())
 }
 
-struct MockEditor {
+#[cfg(any(test, feature = "test-runner"))]
+pub struct MockEditor {
     tx: mpsc::Sender<lsp_server::Message>,
     rx: mpsc::Receiver<lsp_server::Message>,
     next_request_id: Arc<AtomicI32>,
 }
 
 impl MockEditor {
-    fn new() -> (
+    #[cfg(any(test, feature = "test-runner"))]
+    pub fn new() -> (
         Self,
         mpsc::Sender<lsp_server::Message>,
         mpsc::Receiver<lsp_server::Message>,
@@ -360,7 +365,8 @@ impl MockEditor {
     // Test-specific helper methods
 
     /// Helper: Open a file and return doc_id, site_id, and content
-    async fn open_file(
+    #[cfg(any(test, feature = "test-runner"))]
+    pub async fn open_file(
         &mut self,
         host_id: &str,
         file_desc: serde_json::Value,
@@ -392,7 +398,8 @@ impl MockEditor {
     }
 
     /// Helper: Send ops to a document
-    async fn send_ops(
+    #[cfg(any(test, feature = "test-runner"))]
+    pub async fn send_ops(
         &mut self,
         doc_id: u32,
         host_id: &str,
@@ -410,7 +417,8 @@ impl MockEditor {
     }
 
     /// Helper: Send undo/redo request
-    async fn send_undo(
+    #[cfg(any(test, feature = "test-runner"))]
+    pub async fn send_undo(
         &mut self,
         doc_id: u32,
         host_id: &str,
@@ -448,7 +456,8 @@ impl MockEditor {
         .await
     }
 
-    async fn share_file(
+    #[cfg(any(test, feature = "test-runner"))]
+    pub async fn share_file(
         &mut self,
         filename: &str,
         content: &str,
@@ -478,20 +487,23 @@ impl MockEditor {
     }
 }
 
-struct ServerSetup {
-    id: ServerId,
-    handle: tokio::task::JoinHandle<()>,
-    editor: MockEditor,
-    _temp_dir: tempfile::TempDir,
+#[cfg(any(test, feature = "test-runner"))]
+pub struct ServerSetup {
+    pub id: ServerId,
+    pub handle: tokio::task::JoinHandle<()>,
+    pub editor: MockEditor,
+    pub _temp_dir: tempfile::TempDir,
 }
 
-struct HubAndSpokeSetup {
-    hub: ServerSetup,
-    spokes: Vec<ServerSetup>,
+#[cfg(any(test, feature = "test-runner"))]
+pub struct HubAndSpokeSetup {
+    pub hub: ServerSetup,
+    pub spokes: Vec<ServerSetup>,
 }
 
 impl HubAndSpokeSetup {
-    fn cleanup(self) {
+    #[cfg(any(test, feature = "test-runner"))]
+    pub fn cleanup(self) {
         self.hub.handle.abort();
         for spoke in self.spokes {
             spoke.handle.abort();
@@ -502,7 +514,8 @@ impl HubAndSpokeSetup {
 /// Creates a hub-and-spoke topology with one central server and multiple spoke servers.
 /// The hub server accepts connections and all spoke servers connect to it.
 /// Returns the hub and spoke setups with established connections.
-async fn setup_hub_and_spoke_servers(
+#[cfg(any(test, feature = "test-runner"))]
+pub async fn setup_hub_and_spoke_servers(
     env: &TestEnvironment,
     num_spokes: usize,
 ) -> anyhow::Result<HubAndSpokeSetup> {

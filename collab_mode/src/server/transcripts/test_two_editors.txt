@@ -1,0 +1,6 @@
+Name: Two Editors Test
+
+E1 INSERT A
+E1 SEND
+E2 SEND
+===CHECK===

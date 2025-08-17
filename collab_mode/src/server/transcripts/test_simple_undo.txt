@@ -1,0 +1,6 @@
+Name: Simple Undo Test
+
+E1 INSERT A
+E1 SEND
+E1 UNDO
+===CHECK===

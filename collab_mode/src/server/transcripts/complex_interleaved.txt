@@ -1,0 +1,14 @@
+Name: Complex Interleaved Operations
+
+E1 INSERT Line1\n
+E1 SEND
+E2 INSERT Line2\n
+E2 SEND
+E1 MOVE 6
+E1 INSERT Inserted
+E2 MOVE 6
+E2 INSERT Also
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===

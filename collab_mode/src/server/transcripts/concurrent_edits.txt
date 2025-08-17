@@ -1,0 +1,7 @@
+Name: Concurrent Edits Test
+
+E1 INSERT Hello
+E2 INSERT World
+E1 SEND
+E2 SEND
+===CHECK===

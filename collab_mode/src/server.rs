@@ -1622,5 +1622,8 @@ fn unwrap_req_id(req_id: &lsp_server::RequestId) -> anyhow::Result<i32> {
         .map_err(|_| anyhow!("Can’t parse request id: {:?}", &req_id).into())
 }
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test-runner"))]
+pub mod tests;
+
+#[cfg(any(test, feature = "test-runner"))]
+pub mod transcript_tests;

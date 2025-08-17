@@ -1,0 +1,6 @@
+Name: Simple Insert Test
+
+E1 INSERT Hello
+E1 SEND
+E2 SEND
+===CHECK===
