@@ -4,6 +4,8 @@ use crate::signaling;
 use std::time::Duration;
 // use tokio::net::TcpListener;
 use rand::Rng;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 use tracing_subscriber::EnvFilter;
@@ -95,6 +97,7 @@ fn create_test_id(prefix: &str) -> ServerId {
 struct MockEditor {
     tx: mpsc::Sender<lsp_server::Message>,
     rx: mpsc::Receiver<lsp_server::Message>,
+    next_request_id: Arc<AtomicI32>,
 }
 
 impl MockEditor {
@@ -109,9 +112,14 @@ impl MockEditor {
         let mock = MockEditor {
             tx: editor_to_server_tx,
             rx: server_to_editor_rx,
+            next_request_id: Arc::new(AtomicI32::new(1)),
         };
 
         (mock, server_to_editor_tx, editor_to_server_rx)
+    }
+
+    fn next_request_id(&self) -> i32 {
+        self.next_request_id.fetch_add(1, Ordering::SeqCst)
     }
 
     async fn send_notification(
@@ -307,6 +315,137 @@ impl MockEditor {
             .unwrap_or("")
             .to_string();
         Ok((host_id, message))
+    }
+
+    // Helper method: Send request and wait for response in one call
+    async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.request_expect(method, params, 5).await
+    }
+
+    // Helper method: Send request and wait for response with custom timeout
+    async fn request_expect(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout_secs: u64,
+    ) -> anyhow::Result<serde_json::Value> {
+        let req_id = self.next_request_id();
+        self.send_request(req_id, method, params).await?;
+        self.wait_for_response(req_id, timeout_secs).await
+    }
+
+    // Helper method: Drain any pending response without waiting
+    async fn drain_response(&mut self) -> Option<serde_json::Value> {
+        match self.rx.try_recv() {
+            Ok(lsp_server::Message::Response(resp)) => {
+                tracing::debug!("Drained response: {:?}", resp);
+                if resp.error.is_some() {
+                    None
+                } else {
+                    resp.result
+                }
+            }
+            Ok(msg) => {
+                tracing::debug!("Drained non-response message: {:?}", msg);
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    // Test-specific helper methods
+
+    /// Helper: Open a file and return doc_id, site_id, and content
+    async fn open_file(
+        &mut self,
+        host_id: &str,
+        file_desc: serde_json::Value,
+    ) -> anyhow::Result<(u32, u32, String)> {
+        let resp = self
+            .request(
+                "OpenFile",
+                serde_json::json!({
+                    "hostId": host_id,
+                    "fileDesc": file_desc,
+                }),
+            )
+            .await?;
+
+        let doc_id = resp["docId"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("Missing docId in response"))?
+            as u32;
+        let site_id = resp["siteId"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("Missing siteId in response"))?
+            as u32;
+        let content = resp["content"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing content in response"))?
+            .to_string();
+
+        Ok((doc_id, site_id, content))
+    }
+
+    /// Helper: Send ops to a document
+    async fn send_ops(
+        &mut self,
+        doc_id: u32,
+        host_id: &str,
+        ops: Vec<serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.request(
+            "SendOps",
+            serde_json::json!({
+                "docId": doc_id,
+                "hostId": host_id,
+                "ops": ops,
+            }),
+        )
+        .await
+    }
+
+    /// Helper: Send undo/redo request
+    async fn send_undo(
+        &mut self,
+        doc_id: u32,
+        host_id: &str,
+        kind: &str,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let resp = self
+            .request(
+                "Undo",
+                serde_json::json!({
+                    "docId": doc_id,
+                    "hostId": host_id,
+                    "kind": kind,
+                }),
+            )
+            .await?;
+
+        resp["ops"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Missing ops in undo response"))
+            .map(|ops| ops.clone())
+    }
+
+    /// Helper: Declare a project
+    async fn declare_project(&self, project_path: &str, project_name: &str) -> anyhow::Result<()> {
+        self.send_notification(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "filename": project_path,
+                    "name": project_name,
+                    "meta": {},
+                }],
+            }),
+        )
+        .await
     }
 }
 
@@ -2084,146 +2223,87 @@ async fn test_undo_e2e() {
     setup
         .hub
         .editor
-        .send_notification(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "filename": project_path.clone(),
-                    "name": "TestProject",
-                    "meta": {}
-                }]
-            }),
-        )
+        .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
     // Spoke opens the file
-    let spoke_req_id = 1;
-    setup.spokes[0]
+    let (doc_id, _site_id, content) = setup.spokes[0]
         .editor
-        .send_request(
-            spoke_req_id,
-            "OpenFile",
+        .open_file(
+            &setup.hub.id,
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
-                "fileDesc": {
-                    "type": "projectFile",
-                    "project": project_path.clone(),
-                    "file": "test.txt"
-                }
+                "type": "projectFile",
+                "project": project_path.clone(),
+                "file": "test.txt"
             }),
         )
         .await
         .unwrap();
-
-    let spoke_resp = setup.spokes[0]
-        .editor
-        .wait_for_response(spoke_req_id, 5)
-        .await
-        .unwrap();
-    assert_eq!(spoke_resp["content"], "Hello from test.txt");
-    let doc_id = spoke_resp["docId"].as_u64().unwrap() as u32;
+    assert_eq!(content, "Hello from test.txt");
 
     sleep(Duration::from_millis(200)).await;
 
     // Send an insert operation
-    let send_ops_req_id = 2;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            send_ops_req_id,
-            "SendOps",
-            serde_json::json!({
-                "docId": doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": [{
-                    "op": {
-                        "Ins": [0, "UNDO_TEST: "]
-                    },
-                    "groupSeq": 1
-                }]
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for SendOps response
     let send_ops_resp = setup.spokes[0]
         .editor
-        .wait_for_response(send_ops_req_id, 5)
+        .send_ops(
+            doc_id,
+            &setup.hub.id,
+            vec![serde_json::json!({
+                "op": {
+                    "Ins": [0, "UNDO_TEST: "]
+                },
+                "groupSeq": 1
+            })],
+        )
         .await
         .unwrap();
     tracing::info!("SendOps response: {:?}", send_ops_resp);
 
     sleep(Duration::from_millis(100)).await;
 
-    // Send an undo request
-    let undo_req_id = 3;
-    setup.spokes[0]
+    // Send an undo request and get the undo operations
+    let undo_ops = setup.spokes[0]
         .editor
-        .send_request(
-            undo_req_id,
-            "Undo",
-            serde_json::json!({
-                "docId": doc_id,
-                "hostId": setup.hub.id.clone(),
-                "kind": "Undo"
-            }),
-        )
+        .send_undo(doc_id, &setup.hub.id, "Undo")
         .await
         .unwrap();
 
-    // Wait for Undo response
-    let undo_resp = setup.spokes[0]
-        .editor
-        .wait_for_response(undo_req_id, 5)
-        .await
-        .unwrap();
-    
-    tracing::info!("Undo response: {:?}", undo_resp);
-    
+    tracing::info!("Undo operations: {:?}", undo_ops);
+
     // Verify that the undo response contains the delete operation
-    let ops = undo_resp["ops"].as_array().unwrap();
-    assert!(!ops.is_empty(), "Undo should return at least one operation");
-    
+    assert!(
+        !undo_ops.is_empty(),
+        "Undo should return at least one operation"
+    );
+
     // The undo operation should be a deletion of the inserted text
-    let actual_op = &ops[0];
+    let actual_op = &undo_ops[0];
     let expected_op = serde_json::json!({
         "Del": [[0, "UNDO_TEST: "]]
     });
-    
+
     assert_eq!(
         serde_json::to_string(&actual_op).unwrap(),
         serde_json::to_string(&expected_op).unwrap(),
         "Undo operation should delete the inserted text"
     );
 
-    // Send the undo operation back as a SendOps request  
+    // Send the undo operation back as a SendOps request
     // The undo operation needs to be sent as "Undo" not as a delete
-    let send_undo_req_id = 4;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            send_undo_req_id,
-            "SendOps",
-            serde_json::json!({
-                "docId": doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": [{
-                    "op": "Undo",
-                    "groupSeq": 2
-                }]
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for SendOps response
     let send_undo_resp = setup.spokes[0]
         .editor
-        .wait_for_response(send_undo_req_id, 5)
+        .send_ops(
+            doc_id,
+            &setup.hub.id,
+            vec![serde_json::json!({
+                "op": "Undo",
+                "groupSeq": 2
+            })],
+        )
         .await
         .unwrap();
     tracing::info!("SendOps (undo) response: {:?}", send_undo_resp);
@@ -2231,40 +2311,26 @@ async fn test_undo_e2e() {
     sleep(Duration::from_millis(100)).await;
 
     // Test redo
-    let redo_req_id = 5;
-    setup.spokes[0]
+    let redo_ops = setup.spokes[0]
         .editor
-        .send_request(
-            redo_req_id,
-            "Undo",
-            serde_json::json!({
-                "docId": doc_id,
-                "hostId": setup.hub.id.clone(),
-                "kind": "Redo"
-            }),
-        )
+        .send_undo(doc_id, &setup.hub.id, "Redo")
         .await
         .unwrap();
 
-    // Wait for Redo response
-    let redo_resp = setup.spokes[0]
-        .editor
-        .wait_for_response(redo_req_id, 5)
-        .await
-        .unwrap();
-    
-    tracing::info!("Redo response: {:?}", redo_resp);
-    
+    tracing::info!("Redo operations: {:?}", redo_ops);
+
     // Verify that the redo response contains the insert operation
-    let redo_ops = redo_resp["ops"].as_array().unwrap();
-    assert!(!redo_ops.is_empty(), "Redo should return at least one operation");
-    
+    assert!(
+        !redo_ops.is_empty(),
+        "Redo should return at least one operation"
+    );
+
     // The redo operation should be an insertion of the text back
     let actual_redo_op = &redo_ops[0];
     let expected_redo_op = serde_json::json!({
         "Ins": [[0, "UNDO_TEST: "]]
     });
-    
+
     assert_eq!(
         serde_json::to_string(&actual_redo_op).unwrap(),
         serde_json::to_string(&expected_redo_op).unwrap(),
