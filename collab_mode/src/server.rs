@@ -376,6 +376,12 @@ impl Server {
                 send_response(editor_tx, req.id, resp, None).await;
                 Ok(())
             }
+            "ShareFile" => {
+                let params: ShareFileParams = serde_json::from_value(req.params)?;
+                let resp = self.handle_share_file_from_editor(params)?;
+                send_response(editor_tx, req.id, resp, None).await;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -955,7 +961,7 @@ impl Server {
                         engine: ClientEngine::new(self.site_id, 0, content.chars().count() as u64),
                     };
                     self.remote_docs
-                        .insert((self.host_id.clone(), doc_id), remote_doc);
+                        .insert((SERVER_ID_SELF.to_string(), doc_id), remote_doc);
 
                     // Send response
                     let resp = OpenFileResp {
@@ -1458,14 +1464,58 @@ impl Server {
     fn handle_undo_from_editor(&mut self, params: UndoParams) -> anyhow::Result<UndoResp> {
         // Check if it's a remote doc
         let key = (params.host_id.clone(), params.doc_id.clone());
-        let remote_doc = self.remote_docs.get_mut(&key)
+        let remote_doc = self
+            .remote_docs
+            .get_mut(&key)
             .ok_or_else(|| anyhow::anyhow!("Remote doc not found: {:?}", key))?;
-        
+
         let ops = match params.kind {
             UndoKind::Undo => remote_doc.engine.generate_undo_op(),
             UndoKind::Redo => remote_doc.engine.generate_redo_op(),
         };
         let resp = UndoResp { ops };
+        Ok(resp)
+    }
+
+    fn handle_share_file_from_editor(
+        &mut self,
+        params: ShareFileParams,
+    ) -> anyhow::Result<ShareFileResp> {
+        // Generate a new doc_id
+        let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+
+        // Create a new owned Doc
+        let mut doc = Doc::new(
+            params.filename.clone(),
+            params.meta.clone(),
+            None, // No abs_filename since this is content-based
+            &params.content,
+            ServerEngine::new(params.content.len() as u64),
+        );
+
+        // Add ourselves as a subscriber since we're also a client
+        doc.subscribers.insert(self.host_id.clone(), 0);
+
+        // Store the doc in our owned docs
+        self.docs.insert(doc_id, doc);
+
+        // Also create a RemoteDoc for ourselves (we act as both server and client)
+        let remote_doc = RemoteDoc {
+            name: params.filename.clone(),
+            file_desc: FileDesc::File { id: doc_id },
+            next_site_seq: 1,
+            meta: params.meta,
+            remote_op_buffer: Vec::new(),
+            engine: ClientEngine::new(self.site_id, 0, params.content.chars().count() as u64),
+        };
+        self.remote_docs
+            .insert((SERVER_ID_SELF.to_string(), doc_id), remote_doc);
+
+        // Return response with doc_id and site_id
+        let resp = ShareFileResp {
+            doc_id,
+            site_id: self.site_id,
+        };
         Ok(resp)
     }
 }

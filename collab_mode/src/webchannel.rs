@@ -316,7 +316,7 @@ impl WebChannel {
             req_id,
         };
 
-        if recipient == &self.my_hostid {
+        if recipient == &self.my_hostid || recipient == &SERVER_ID_SELF {
             // If recipient is ourselves, send to our own message channel.
             return self
                 .msg_tx
