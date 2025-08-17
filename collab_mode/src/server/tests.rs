@@ -851,52 +851,24 @@ async fn test_open_file_basic() {
     let project_path = project_dir.path().to_string_lossy().to_string();
 
     // Hub declares project
-    setup
-        .hub
-        .editor
-        .send_notification(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "filename": project_path.clone(),
-                    "name": "TestProject",
-                    "meta": {}
-                }]
-            }),
-        )
-        .await
-        .unwrap();
+    setup.hub.editor.declare_project(&project_path, "TestProject").await.unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
     // Request to open a file
-    let req_id = 1;
-    setup
-        .hub
-        .editor
-        .send_request(
-            req_id,
-            "OpenFile",
-            serde_json::json!({
-                "hostId": setup.hub.id.clone(),
-                "fileDesc": {
-                    "type": "projectFile",
-                    "project": project_path.clone(),
-                    "file": "test.txt"
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for response
-    let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let (doc_id, site_id, content) = setup.hub.editor.open_file(
+        &setup.hub.id,
+        serde_json::json!({
+            "type": "projectFile",
+            "project": project_path.clone(),
+            "file": "test.txt"
+        }),
+    ).await.unwrap();
 
     // Verify response
-    assert_eq!(resp["content"], "Hello from test.txt");
-    assert_eq!(resp["filename"], "test.txt");
-    assert!(resp["docId"].is_number());
-    assert!(resp["siteId"].is_number());
+    assert_eq!(content, "Hello from test.txt");
+    assert!(doc_id > 0);
+    assert!(site_id >= 0); // site_id is 0 for the hub itself
 
     tracing::info!("test_open_file_basic completed successfully");
     setup.cleanup();
@@ -920,55 +892,24 @@ async fn test_open_file_from_remote() {
     let project_path = project_dir.path().to_string_lossy().to_string();
 
     // Hub declares project
-    setup
-        .hub
-        .editor
-        .send_notification(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "filename": project_path.clone(),
-                    "name": "TestProject",
-                    "meta": {}
-                }]
-            }),
-        )
-        .await
-        .unwrap();
+    setup.hub.editor.declare_project(&project_path, "TestProject").await.unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
     // Spoke requests to open a file from hub
-    let req_id = 1;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            req_id,
-            "OpenFile",
-            serde_json::json!({
-                "hostId": setup.hub.id.clone(),
-                "fileDesc": {
-                    "type": "projectFile",
-                    "project": project_path.clone(),
-                    "file": "src/main.rs"
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for response
-    let resp = setup.spokes[0]
-        .editor
-        .wait_for_response(req_id, 5)
-        .await
-        .unwrap();
+    let (doc_id, site_id, content) = setup.spokes[0].editor.open_file(
+        &setup.hub.id,
+        serde_json::json!({
+            "type": "projectFile",
+            "project": project_path.clone(),
+            "file": "src/main.rs"
+        }),
+    ).await.unwrap();
 
     // Verify response
-    assert_eq!(resp["content"], "fn main() {\n    println!(\"Hello\");\n}");
-    assert_eq!(resp["filename"], "main.rs");
-    assert!(resp["docId"].is_number());
-    assert!(resp["siteId"].is_number());
+    assert_eq!(content, "fn main() {\n    println!(\"Hello\");\n}");
+    assert!(doc_id > 0);
+    assert!(site_id > 0);
 
     tracing::info!("test_open_file_from_remote completed successfully");
     setup.cleanup();
@@ -1834,139 +1775,55 @@ async fn test_send_ops_e2e() {
     let project_path = project_dir.path().to_string_lossy().to_string();
 
     // Hub declares project
-    setup
-        .hub
-        .editor
-        .send_notification(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "filename": project_path.clone(),
-                    "name": "TestProject",
-                    "meta": {}
-                }]
-            }),
-        )
-        .await
-        .unwrap();
+    setup.hub.editor.declare_project(&project_path, "TestProject").await.unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
     // Hub opens the file first (to create it in both docs and remote_docs)
-    let hub_req_id = 1;
-    setup
-        .hub
-        .editor
-        .send_request(
-            hub_req_id,
-            "OpenFile",
-            serde_json::json!({
-                "hostId": setup.hub.id.clone(),
-                "fileDesc": {
-                    "type": "projectFile",
-                    "project": project_path.clone(),
-                    "file": "test.txt"
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-    let hub_resp = setup
-        .hub
-        .editor
-        .wait_for_response(hub_req_id, 5)
-        .await
-        .unwrap();
-    let hub_doc_id = hub_resp["docId"].as_u64().unwrap() as u32;
+    let (hub_doc_id, _hub_site_id, _hub_content) = setup.hub.editor.open_file(
+        &setup.hub.id,
+        serde_json::json!({
+            "type": "projectFile",
+            "project": project_path.clone(),
+            "file": "test.txt"
+        }),
+    ).await.unwrap();
 
     // Spoke 1 requests the file
-    let spoke1_req_id = 2;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            spoke1_req_id,
-            "OpenFile",
-            serde_json::json!({
-                "hostId": setup.hub.id.clone(),
-                "fileDesc": {
-                    "type": "projectFile",
-                    "project": project_path.clone(),
-                    "file": "test.txt"
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-    let spoke1_resp = setup.spokes[0]
-        .editor
-        .wait_for_response(spoke1_req_id, 5)
-        .await
-        .unwrap();
-    assert_eq!(spoke1_resp["content"], "Hello from test.txt");
-    let spoke1_doc_id = spoke1_resp["docId"].as_u64().unwrap() as u32;
-    let spoke1_site_id = spoke1_resp["siteId"].as_u64().unwrap() as u32;
+    let (spoke1_doc_id, _spoke1_site_id, spoke1_content) = setup.spokes[0].editor.open_file(
+        &setup.hub.id,
+        serde_json::json!({
+            "type": "projectFile",
+            "project": project_path.clone(),
+            "file": "test.txt"
+        }),
+    ).await.unwrap();
+    assert_eq!(spoke1_content, "Hello from test.txt");
 
     // Spoke 2 requests the file
-    let spoke2_req_id = 3;
-    setup.spokes[1]
-        .editor
-        .send_request(
-            spoke2_req_id,
-            "OpenFile",
-            serde_json::json!({
-                "hostId": setup.hub.id.clone(),
-                "fileDesc": {
-                    "type": "projectFile",
-                    "project": project_path.clone(),
-                    "file": "test.txt"
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-    let spoke2_resp = setup.spokes[1]
-        .editor
-        .wait_for_response(spoke2_req_id, 5)
-        .await
-        .unwrap();
-    assert_eq!(spoke2_resp["content"], "Hello from test.txt");
-    let spoke2_doc_id = spoke2_resp["docId"].as_u64().unwrap() as u32;
-    let spoke2_site_id = spoke2_resp["siteId"].as_u64().unwrap() as u32;
+    let (spoke2_doc_id, _spoke2_site_id, spoke2_content) = setup.spokes[1].editor.open_file(
+        &setup.hub.id,
+        serde_json::json!({
+            "type": "projectFile",
+            "project": project_path.clone(),
+            "file": "test.txt"
+        }),
+    ).await.unwrap();
+    assert_eq!(spoke2_content, "Hello from test.txt");
 
     sleep(Duration::from_millis(200)).await;
 
     // Hub sends ops to insert text at the beginning (hub acts as a client to itself)
-    let send_ops_req_id = 4;
-    setup
-        .hub
-        .editor
-        .send_request(
-            send_ops_req_id,
-            "SendOps",
-            serde_json::json!({
-                "docId": hub_doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": [{
-                    "op": {
-                        "Ins": [0, "Modified: "]
-                    },
-                    "groupSeq": 1
-                }]
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for SendOps response
-    let send_ops_resp = setup
-        .hub
-        .editor
-        .wait_for_response(send_ops_req_id, 5)
-        .await
-        .unwrap();
+    let send_ops_resp = setup.hub.editor.send_ops(
+        hub_doc_id,
+        &setup.hub.id,
+        vec![serde_json::json!({
+            "op": {
+                "Ins": [0, "Modified: "]
+            },
+            "groupSeq": 1
+        })],
+    ).await.unwrap();
 
     // Hub shouldn't receive any remote ops in response initially (ops are from itself)
     assert!(send_ops_resp["ops"].as_array().unwrap().is_empty());
@@ -1985,27 +1842,11 @@ async fn test_send_ops_e2e() {
     assert_eq!(notification["docId"], spoke2_doc_id);
 
     // Spoke 2 sends SendOps with empty ops to fetch remote ops
-    let fetch_ops_req_id = 5;
-    setup.spokes[1]
-        .editor
-        .send_request(
-            fetch_ops_req_id,
-            "SendOps",
-            serde_json::json!({
-                "docId": spoke2_doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": []
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Wait for response with remote ops
-    let fetch_ops_resp = setup.spokes[1]
-        .editor
-        .wait_for_response(fetch_ops_req_id, 5)
-        .await
-        .unwrap();
+    let fetch_ops_resp = setup.spokes[1].editor.send_ops(
+        spoke2_doc_id,
+        &setup.hub.id,
+        vec![],
+    ).await.unwrap();
     let remote_ops = fetch_ops_resp["ops"].as_array().unwrap();
 
     // Should have received the insert op
@@ -2033,28 +1874,13 @@ async fn test_send_ops_e2e() {
     assert_eq!(notification_spoke1["hostId"], setup.hub.id.clone());
 
     // Spoke 1 fetches remote ops
-    let fetch_ops_req_id_spoke1 = 6;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            fetch_ops_req_id_spoke1,
-            "SendOps",
-            serde_json::json!({
-                "docId": spoke1_doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": []
-            }),
-        )
-        .await
-        .unwrap();
-
-    let fetch_ops_resp_spoke1 = setup.spokes[0]
-        .editor
-        .wait_for_response(fetch_ops_req_id_spoke1, 5)
-        .await
-        .unwrap();
-    assert_eq!(fetch_ops_resp_spoke1["ops"].as_array().unwrap().len(), 1);
+    let fetch_ops_resp_spoke1 = setup.spokes[0].editor.send_ops(
+        spoke1_doc_id,
+        &setup.hub.id,
+        vec![],
+    ).await.unwrap();
     let remote_ops = fetch_ops_resp_spoke1["ops"].as_array().unwrap();
+    assert_eq!(remote_ops.len(), 1);
 
     // Should have received the insert op
     assert_eq!(remote_ops.len(), 1);
@@ -2071,62 +1897,32 @@ async fn test_send_ops_e2e() {
 
     // Now Spoke 1 sends its own op
     // Insert at position 10 (after "Modified: ")
-    let send_ops_req_id_spoke1 = 7;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            send_ops_req_id_spoke1,
-            "SendOps",
-            serde_json::json!({
-                "docId": spoke1_doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": [{
-                    "op": {
-                        "Ins": [10, "[Spoke1]"]  // Insert after "Modified: "
-                    },
-                    "groupSeq": 1
-                }]
-            }),
-        )
-        .await
-        .unwrap();
-
-    let _send_ops_resp_spoke1 = setup.spokes[0]
-        .editor
-        .wait_for_response(send_ops_req_id_spoke1, 5)
-        .await
-        .unwrap();
+    let _send_ops_resp_spoke1 = setup.spokes[0].editor.send_ops(
+        spoke1_doc_id,
+        &setup.hub.id,
+        vec![serde_json::json!({
+            "op": {
+                "Ins": [10, "[Spoke1]"]  // Insert after "Modified: "
+            },
+            "groupSeq": 1
+        })],
+    ).await.unwrap();
 
     // Give time for ops to propagate and for Spoke2 to receive notification
     sleep(Duration::from_millis(1000)).await;
 
     // Spoke 2 sends its own op - this will also fetch Spoke1's op in the response
     // Insert at position 10 (also after "Modified: ", will be transformed by OT)
-    let send_ops_req_id_spoke2 = 8;
-    setup.spokes[1]
-        .editor
-        .send_request(
-            send_ops_req_id_spoke2,
-            "SendOps",
-            serde_json::json!({
-                "docId": spoke2_doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": [{
-                    "op": {
-                        "Ins": [10, "[Spoke2]"]  // Also insert after "Modified: "
-                    },
-                    "groupSeq": 1
-                }]
-            }),
-        )
-        .await
-        .unwrap();
-
-    let send_ops_resp_spoke2 = setup.spokes[1]
-        .editor
-        .wait_for_response(send_ops_req_id_spoke2, 5)
-        .await
-        .unwrap();
+    let send_ops_resp_spoke2 = setup.spokes[1].editor.send_ops(
+        spoke2_doc_id,
+        &setup.hub.id,
+        vec![serde_json::json!({
+            "op": {
+                "Ins": [10, "[Spoke2]"]  // Also insert after "Modified: "
+            },
+            "groupSeq": 1
+        })],
+    ).await.unwrap();
     // The response should contain Spoke1's op that was buffered
     tracing::info!("Spoke2 SendOps response: {:?}", send_ops_resp_spoke2);
     let remote_ops = send_ops_resp_spoke2["ops"].as_array().unwrap();
@@ -2158,26 +1954,11 @@ async fn test_send_ops_e2e() {
     assert_eq!(notification_spoke1_from_spoke2["docId"], spoke1_doc_id);
 
     // Spoke1 sends empty SendOps to fetch the new ops
-    let fetch_ops_req_id_spoke1_2 = 9;
-    setup.spokes[0]
-        .editor
-        .send_request(
-            fetch_ops_req_id_spoke1_2,
-            "SendOps",
-            serde_json::json!({
-                "docId": spoke1_doc_id,
-                "hostId": setup.hub.id.clone(),
-                "ops": []
-            }),
-        )
-        .await
-        .unwrap();
-
-    let fetch_ops_resp_spoke1_2 = setup.spokes[0]
-        .editor
-        .wait_for_response(fetch_ops_req_id_spoke1_2, 5)
-        .await
-        .unwrap();
+    let fetch_ops_resp_spoke1_2 = setup.spokes[0].editor.send_ops(
+        spoke1_doc_id,
+        &setup.hub.id,
+        vec![],
+    ).await.unwrap();
 
     // Print out the ops received for debugging
     let ops_from_spoke2 = fetch_ops_resp_spoke1_2["ops"].as_array().unwrap();
