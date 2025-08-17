@@ -1259,9 +1259,16 @@ impl Server {
         }
         let doc = doc.unwrap();
 
+        let subscriber_data = doc.subscribers.get(&remote_host_id).copied();
+        if subscriber_data.is_none() {
+            let msg = Msg::BadRequest(format!("Doc {} ({}) not open", doc.name, doc_id));
+            send_to_remote(webchannel, &remote_host_id, None, msg).await;
+            return Ok(());
+        }
+        let expected_seq = subscriber_data.unwrap() + 1;
+
         // Check if first op's local site seq matches subscriber's saved seq
         if let Some(first_op) = context_ops.ops.first() {
-            let expected_seq = doc.subscribers.get(&remote_host_id).copied().unwrap_or(0) + 1;
             if first_op.site_seq != expected_seq {
                 // Send DocFatal message back
                 let err = format!(
