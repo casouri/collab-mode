@@ -1363,6 +1363,8 @@ impl Server {
         }
 
         let doc_id = ops[0].doc;
+        // Unwrap because server only sends global ops.
+        let first_gseq = ops[0].seq.unwrap();
 
         // Find doc in remote_docs with (host_id, doc_id) key
         let key = (remote_host_id.clone(), doc_id);
@@ -1380,8 +1382,15 @@ impl Server {
         let our_site_id = remote_doc.engine.site();
         let op_is_not_ours = ops[0].site() != our_site_id;
 
-        // Save remote ops to buffer
-        remote_doc.remote_op_buffer.extend(ops);
+        if remote_doc.engine.current_gseq() + 1 != first_gseq {
+            // Probably because of disconnect, just don’t add the op
+            // to remote_ops and instead get them when next time we
+            // send ops to server.
+            tracing::info!("Received remote op with larger gseq than expected, ignoring")
+        } else {
+            // Save remote ops to buffer
+            remote_doc.remote_op_buffer.extend(ops);
+        }
 
         if op_is_not_ours {
             send_notification(
