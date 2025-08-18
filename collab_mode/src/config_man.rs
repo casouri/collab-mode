@@ -89,8 +89,11 @@ impl ConfigManager {
     /// standard (XDG) config location. The subject alt names of the
     /// certificate would be `uuid`.
     pub fn get_key_and_cert(&self, uuid: String) -> CollabResult<KeyCert> {
+        if let Some(config_dir) = &self.config_dir {
+            let _ = std::fs::create_dir_all(config_dir.join("secrets"));
+        }
         let key_file = if let Some(config_dir) = &self.config_dir {
-            config_dir.join(format!("{uuid}.key.pem"))
+            config_dir.join(format!("secrets/{uuid}.key.pem"))
         } else {
             self.base_dirs
                 .place_config_file(format!("{uuid}.key.pem"))
@@ -99,7 +102,7 @@ impl ConfigManager {
                 })?
         };
         let cert_file = if let Some(config_dir) = &self.config_dir {
-            config_dir.join(format!("{uuid}.cert.pem"))
+            config_dir.join(format!("secrets/{uuid}.cert.pem"))
         } else {
             self.base_dirs
                 .place_config_file(format!("{uuid}.cert.pem"))
@@ -155,7 +158,8 @@ impl ConfigManager {
 
     pub fn get_db(&self) -> anyhow::Result<rusqlite::Connection> {
         let db_file = if let Some(config_dir) = &self.config_dir {
-            config_dir.join("backups.sqlite3")
+            let _ = std::fs::create_dir_all(config_dir.join("var"));
+            config_dir.join("var/backups.sqlite3")
         } else {
             self.base_dirs.place_data_file("backups.sqlite3")?
         };
