@@ -16,7 +16,6 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::mpsc;
-use tracing::instrument;
 
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
@@ -236,8 +235,9 @@ impl Server {
                 let req_id = req.id.clone();
                 if let Err(err) = self.handle_editor_request(req, editor_tx, webchannel).await {
                     tracing::error!("Failed to handle editor request: {}", err);
+                    // Errors that reach this level are internal error.
                     let err = lsp_server::ResponseError {
-                        code: 30000, // FIXME: Use appropriate error code.
+                        code: ErrorCode::InternalError as i32,
                         message: err.to_string(),
                         data: None,
                     };
@@ -245,69 +245,7 @@ impl Server {
                 }
                 Ok(())
             }
-            lsp_server::Message::Response(resp) => {
-                let resp_id = unwrap_req_id(&resp.id);
-                if resp_id.is_err() {
-                    tracing::error!("Failed to parse request id: {:?}", &resp_id);
-                    send_notification(
-                        editor_tx,
-                        NotificationCode::Error,
-                        serde_json::json!({
-                            "message": format!("Failed to parse request id: {}", resp_id.unwrap_err()),
-                        }),
-                    )
-                        .await;
-                    return Ok(());
-                }
-                let resp_id = resp_id.unwrap();
-                let orig_req = self.orig_req_map.remove(&resp_id);
-                if orig_req.is_none() {
-                    tracing::warn!(
-                        "Received ListFiles response without a matching request id: {}, ignoring",
-                        resp_id
-                    );
-                    return Ok(());
-                }
-                let orig_req = orig_req.unwrap();
-
-                // Check if the response has an error
-                if let Some(error) = resp.error {
-                    // Send ErrorResp to the remote
-                    send_to_remote(
-                        webchannel,
-                        &orig_req.host_id,
-                        Some(orig_req.req_id),
-                        Msg::ErrorResp(format!("{}: {}", error.code, error.message)),
-                    )
-                    .await;
-                    return Ok(());
-                }
-
-                // Only handle successful responses
-                if let Err(err) = self
-                    .handle_editor_response(orig_req, resp.result, editor_tx, webchannel)
-                    .await
-                {
-                    match err.downcast_ref::<serde_json::Error>() {
-                        Some(err) => {
-                            send_notification(
-                                editor_tx,
-                                NotificationCode::Error,
-                                serde_json::json!({
-                                    "message": format!("Failed to parse response: {}", err),
-                                }),
-                            )
-                            .await;
-                        }
-                        None => (),
-                    }
-                    tracing::error!("Failed to handle editor response: {}", err);
-                    // If it’s not a parsing error, it’s some error
-                    // sending the response back to remote, don’t need
-                    // to bother our editor in that case.
-                }
-                Ok(())
-            }
+            lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
                 if let Err(err) = self
                     .handle_editor_notification(notif, editor_tx, webchannel)
@@ -571,7 +509,7 @@ impl Server {
                 send_response(editor_tx, resp_id, ListFilesResp { files }, None).await;
                 Ok(())
             }
-            Msg::ErrorResp(error_msg) => {
+            Msg::ErrorResp(_, error_msg) => {
                 if msg.req_id.is_none() {
                     tracing::warn!("Received ErrorResp without req_id, ignoring");
                     send_notification(editor_tx, NotificationCode::Error, serde_json::json!({
@@ -713,13 +651,21 @@ impl Server {
             return Ok(());
         }
 
-        let files = self
-            .list_files_from_disk(dir)
-            .await
-            .with_context(|| "Failed to list files from disk")?;
+        let files = self.list_files_from_disk(dir).await;
 
-        send_response(editor_tx, req_id, ListFilesResp { files }, None).await;
-
+        match files {
+            Ok(files) => {
+                send_response(editor_tx, req_id, ListFilesResp { files }, None).await;
+            }
+            Err(err) => {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: err.to_string(),
+                    data: None,
+                };
+                send_response(editor_tx, req_id, (), Some(err)).await;
+            }
+        }
         Ok(())
     }
 
@@ -739,7 +685,7 @@ impl Server {
                 send_to_remote(webchannel, &remote_host_id, Some(req_id), msg).await;
             }
             Err(err) => {
-                let msg = Msg::ErrorResp(err.to_string());
+                let msg = Msg::ErrorResp(ErrorCode::IoError, err.to_string());
                 send_to_remote(webchannel, &remote_host_id, Some(req_id), msg).await;
             }
         }
@@ -1073,7 +1019,7 @@ impl Server {
                         webchannel,
                         &remote_host_id,
                         Some(req_id),
-                        Msg::ErrorResp(format!("File not found: {}", err)),
+                        Msg::ErrorResp(ErrorCode::FileNotFound, format!("File not found: {}", err)),
                     )
                     .await;
                     return Ok(());
@@ -1144,7 +1090,7 @@ impl Server {
                         webchannel,
                         &remote_host_id,
                         Some(req_id),
-                        Msg::ErrorResp(format!("Doc {} not found", id)),
+                        Msg::ErrorResp(ErrorCode::FileNotFound, format!("Doc {} not found", id)),
                     )
                     .await;
                 }
@@ -1420,7 +1366,7 @@ impl Server {
         let remote_doc = self.remote_docs.get_mut(&(host_id.clone(), doc_id));
         if remote_doc.is_none() {
             let err = lsp_server::ResponseError {
-                code: ErrorCode::DocNotFound as i32,
+                code: ErrorCode::FileNotFound as i32,
                 message: format!("Doc {} from host {} not found", doc_id, host_id),
                 data: None,
             };

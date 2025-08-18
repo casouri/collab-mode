@@ -20,11 +20,10 @@ pub enum NotificationCode {
     Error, // Generic error, like bad notification arguments.
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorCode {
-    // Defined by JSON RPC. Generally means editor has programming
-    // error and sent a malformed request.
+    // Defined by JSON RPC.
     ParseError = -32700,
     InvalidRequest = -32600,
     MethodNotFound = -32601,
@@ -38,31 +37,12 @@ pub enum ErrorCode {
     NotInitialized = -32002,
 
     // Collab-mode errors.
-    //
-    /// Doc non-fatal. Transient error, will retry again later, editor
-    /// doesn't need to do anything (except for informing the user).
-    DocNonFatal = 100,
-    /// Server fatal error, editor must restart the server.
-    ServerFatal = 102,
     /// Server is unaffected, but editor must reconnect/recreate the doc.
     DocFatal = 103,
-
-    /// For errors below, editor must retry the operation or give up.
-
     /// Permission denied.
     PermissionDenied = 104,
-    /// Doc not found.
-    DocNotFound = 105,
-    /// Doc already exists.
-    DocAlreadyExists = 106,
-    /// Local IO error.
-    // IOError = 107,
-    /// Not a regular file
-    NotRegularFile = 108,
-    /// Not a directory
-    NotDirectory = 109,
-    /// Can't find this file on disk.
-    FileNotFound = 112,
+    /// IO error, like file not found or permission denied.
+    IoError = 105,
     /// Wrong arguments like empty filename.
     BadRequest = 113,
 }

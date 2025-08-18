@@ -86,7 +86,7 @@ pub enum Msg {
     DocFatal(DocId, String),
     // If we need to respond to a request from a remote’s editor with
     // an error, use this message.
-    ErrorResp(String),
+    ErrorResp(crate::message::ErrorCode, String),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
