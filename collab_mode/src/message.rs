@@ -14,10 +14,9 @@ pub enum NotificationCode {
     AcceptingConnection, // Editor should show that we're accepting connections.
     AcceptStopped,       // Editor should show that we're not accepting connections anymore.
     Hey,                 // A ping from a remote, editor should mark the remote as connected.
-    WriteFile,
 
-    Misc,  // Editor should display the notification.
-    Error, // Generic error, like bad notification arguments.
+    UnimportantError, // Editor should log it but not display it.
+    InternalError,    // Error that user should see, display it.
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]

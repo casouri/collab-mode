@@ -3,6 +3,10 @@
 //! multiple remote connections are lumped into a single channel. We !
 //! also don't do chunking anymore, instead we create a SCTP stream for
 //! every request.
+//!
+//! We could’ve defined message to take a impl Serialize +
+//! Deserialize, but there’s really no need for it. So we just make
+//! it take a Msg, it’s convenient and simple.
 
 use crate::ice::{ice_accept, ice_bind, ice_connect};
 use crate::{config_man::hash_der, signaling::CertDerHash, types::*};

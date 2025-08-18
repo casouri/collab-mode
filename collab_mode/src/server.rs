@@ -255,7 +255,7 @@ impl Server {
                     let params = serde_json::json!({
                         "message": err.to_string(),
                     });
-                    send_notification(editor_tx, NotificationCode::Error, params).await;
+                    send_notification(editor_tx, NotificationCode::InternalError, params).await;
                 }
                 Ok(())
             }
@@ -500,7 +500,7 @@ impl Server {
                         "Received FileList from remote {} without req_id, ignoring",
                         msg.host
                     );
-                    send_notification(editor_tx, NotificationCode::Error, serde_json::json!({
+                    send_notification(editor_tx, NotificationCode::UnimportantError, serde_json::json!({
                         "message": format!("Received file list from remote {}, but without req_id", msg.host),
                     })).await;
                     return Ok(());
@@ -512,7 +512,7 @@ impl Server {
             Msg::ErrorResp(_, error_msg) => {
                 if msg.req_id.is_none() {
                     tracing::warn!("Received ErrorResp without req_id, ignoring");
-                    send_notification(editor_tx, NotificationCode::Error, serde_json::json!({
+                    send_notification(editor_tx, NotificationCode::UnimportantError, serde_json::json!({
                         "message": format!("Received error response from remote {}, but without response id: {}", msg.host, error_msg),
                     })).await;
                     return Ok(());
@@ -864,7 +864,7 @@ impl Server {
                     let content = self.open_file_from_disk(project, file).await;
                     if let Err(err) = content {
                         let err = lsp_server::ResponseError {
-                            code: ErrorCode::FileNotFound as i32,
+                            code: ErrorCode::IoError as i32,
                             message: err.to_string(),
                             data: None,
                         };
@@ -930,7 +930,7 @@ impl Server {
                         send_response(editor_tx, req_id, resp, None).await;
                     } else {
                         let err = lsp_server::ResponseError {
-                            code: ErrorCode::FileNotFound as i32,
+                            code: ErrorCode::IoError as i32,
                             message: format!("Doc {} not found", id),
                             data: None,
                         };
@@ -1019,7 +1019,7 @@ impl Server {
                         webchannel,
                         &remote_host_id,
                         Some(req_id),
-                        Msg::ErrorResp(ErrorCode::FileNotFound, format!("File not found: {}", err)),
+                        Msg::ErrorResp(ErrorCode::IoError, format!("File not found: {}", err)),
                     )
                     .await;
                     return Ok(());
@@ -1090,7 +1090,7 @@ impl Server {
                         webchannel,
                         &remote_host_id,
                         Some(req_id),
-                        Msg::ErrorResp(ErrorCode::FileNotFound, format!("Doc {} not found", id)),
+                        Msg::ErrorResp(ErrorCode::IoError, format!("Doc {} not found", id)),
                     )
                     .await;
                 }
@@ -1366,7 +1366,7 @@ impl Server {
         let remote_doc = self.remote_docs.get_mut(&(host_id.clone(), doc_id));
         if remote_doc.is_none() {
             let err = lsp_server::ResponseError {
-                code: ErrorCode::FileNotFound as i32,
+                code: ErrorCode::IoError as i32,
                 message: format!("Doc {} from host {} not found", doc_id, host_id),
                 data: None,
             };
