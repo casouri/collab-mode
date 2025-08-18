@@ -21,6 +21,10 @@ enum Commands {
         #[arg(long)]
         #[arg(default_value_t = 7701)]
         socket_port: u16,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
         // /// Port used by the file server.
         // #[arg(long)]
         // #[arg(default_value_t = 7702)]
@@ -37,9 +41,12 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Run {
             socket,
             socket_port,
+            config,
+            profile,
         }) => {
             let runtime = tokio::runtime::Runtime::new().unwrap();
-            let config_man = config_man::ConfigManager::new(None);
+            let config_location = config.as_ref().map(|c| c.into());
+            let config_man = config_man::ConfigManager::new(config_location, profile.to_owned());
 
             if !socket {
                 return jsonrpc::run_stdio(runtime, config_man);

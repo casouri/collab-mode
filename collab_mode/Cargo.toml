@@ -34,7 +34,7 @@ clap = { version = "4.3.3", features = ["derive", "cargo"] }
 enum_dispatch = "0.3.11"
 uuid = { version = "1.3.4", features = ["v4"]}
 pathdiff = "0.2.1"
-xdg = "2.5.2"
+xdg = "3.0.0"
 sha2 = "0.10.8"
 pem = "3.0.4"
 expanduser = "1.2.2"

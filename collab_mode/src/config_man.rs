@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{error::CollabError, signaling::CertDerHash};
 use sha2::{Digest, Sha256};
 
@@ -67,32 +69,44 @@ pub fn create_key_cert(name: &str) -> KeyCert {
 
 #[derive(Debug, Clone)]
 pub struct ConfigManager {
-    config_location: Option<String>,
+    config_dir: Option<PathBuf>,
+    base_dirs: xdg::BaseDirectories,
 }
 
 impl ConfigManager {
-    pub fn new(config_location: Option<String>) -> ConfigManager {
-        ConfigManager { config_location }
+    pub fn new(config_location: Option<PathBuf>, profile: Option<String>) -> ConfigManager {
+        ConfigManager {
+            config_dir: config_location,
+            base_dirs: if let Some(profile) = profile {
+                xdg::BaseDirectories::with_profile("collab-mode", profile)
+            } else {
+                xdg::BaseDirectories::with_prefix("collab-mode")
+            },
+        }
     }
 
     /// Either load or create keys and a certificate for `uuid` in
     /// standard (XDG) config location. The subject alt names of the
     /// certificate would be `uuid`.
     pub fn get_key_and_cert(&self, uuid: String) -> CollabResult<KeyCert> {
-        let xdg_dirs = xdg::BaseDirectories::with_prefix("collab-mode/secrets").unwrap();
-        let key_file = xdg_dirs
-            .place_config_file(format!("{uuid}.key.pem"))
-            .map_err(|err| {
-                CollabError::Fatal(format!("Failed to find/create private key: {:#?}", err))
-            })?;
-        let cert_file = xdg_dirs
-            .place_config_file(format!("{uuid}.cert.pem"))
-            .map_err(|err| {
-                CollabError::Fatal(format!(
-                    "Failed to find/create self-signed certificate: {:#?}",
-                    err
-                ))
-            })?;
+        let key_file = if let Some(config_dir) = &self.config_dir {
+            config_dir.join(format!("{uuid}.key.pem"))
+        } else {
+            self.base_dirs
+                .place_config_file(format!("{uuid}.key.pem"))
+                .map_err(|err| {
+                    CollabError::Fatal(format!("Failed to find/create private key: {:#?}", err))
+                })?
+        };
+        let cert_file = if let Some(config_dir) = &self.config_dir {
+            config_dir.join(format!("{uuid}.cert.pem"))
+        } else {
+            self.base_dirs
+                .place_config_file(format!("{uuid}.cert.pem"))
+                .map_err(|err| {
+                    CollabError::Fatal(format!("Failed to find/create certificate: {:#?}", err))
+                })?
+        };
 
         let (key_pair, key_der) = if key_file.exists() {
             let key_pem = std::fs::read_to_string(key_file).map_err(|err| {
@@ -137,5 +151,16 @@ impl ConfigManager {
         };
 
         Ok(KeyCert { key_der, cert_der })
+    }
+
+    pub fn get_db(&self) -> anyhow::Result<rusqlite::Connection> {
+        let db_file = if let Some(config_dir) = &self.config_dir {
+            config_dir.join("backups.sqlite3")
+        } else {
+            self.base_dirs.place_data_file("backups.sqlite3")?
+        };
+
+        let conn = rusqlite::Connection::open(db_file)?;
+        Ok(conn)
     }
 }
