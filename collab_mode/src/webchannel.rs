@@ -9,6 +9,7 @@
 //! it take a Msg, it’s convenient and simple.
 
 use crate::ice::{ice_accept, ice_bind, ice_connect};
+use crate::message::Msg;
 use crate::{config_man::hash_der, signaling::CertDerHash, types::*};
 use anyhow::anyhow;
 use lsp_server::RequestId;
@@ -47,50 +48,6 @@ pub struct Message {
     pub host: ServerId,
     pub body: Msg,
     pub req_id: Option<RequestId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Msg {
-    ShareSingleFile {
-        filename: String,
-        meta: String,
-        content: FileContentOrPath,
-    },
-    FileShared(DocId),
-    ListFiles {
-        dir: Option<FileDesc>,
-    },
-    FileList(Vec<crate::message::ListFileEntry>),
-    DeclareProjects(Vec<DeclareProjectEntry>),
-    OpFromClient(ContextOps),
-    OpFromServer(Vec<FatOp>),
-    RequestOps {
-        doc: DocId,
-        after: GlobalSeq,
-    },
-    RequestFile(FileDesc),
-    Snapshot(NewSnapshot),
-    TakeDownFile(DocId),
-    ResetFile(DocId),
-    Login(Credential),
-    LoggedYouIn(SiteId),
-    Info(DocId, Info),
-
-    // Misc
-    IceProgress(String),
-    Hey(String),
-
-    // Errors
-    ConnectionBroke(ServerId),
-    StopSendingOps(DocId),
-    SerializationErr(String),
-    BadRequest(String),
-    // Fatal error that shouldn’t happen (not a fault, ie, a bug in
-    // code), must reset the doc.
-    DocFatal(DocId, String),
-    // If we need to respond to a request from a remote’s editor with
-    // an error, use this message.
-    ErrorResp(crate::message::ErrorCode, String),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

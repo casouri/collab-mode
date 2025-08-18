@@ -2,6 +2,8 @@ use crate::{types::*, webchannel::TransportType};
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
 
+// *** Notifications
+
 #[derive(Clone, Copy, fmt_derive::Debug, fmt_derive::Display)]
 #[non_exhaustive]
 pub enum NotificationCode {
@@ -46,8 +48,6 @@ pub enum ErrorCode {
     BadRequest = 113,
 }
 
-// Non-simple notifications
-
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SuggestOpenFileParams {
@@ -70,9 +70,9 @@ pub struct RemoteOpsArrivedParams {
     pub doc_id: DocId,
 }
 
-// Requests and responses
+// *** Requests and responses
 
-// *** Init
+// **** Init
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,7 +80,7 @@ pub struct InitParams {
     pub host_id: ServerId,
 }
 
-// *** Accept
+// **** Accept
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,7 +97,7 @@ pub struct ConnectionBrokeParams {
     pub desc: String,
 }
 
-// *** Connect
+// **** Connect
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +107,7 @@ pub struct ConnectParams {
     pub transport_type: TransportType,
 }
 
-// *** ShareFile
+// **** ShareFile
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,7 +124,7 @@ pub struct ShareFileResp {
     pub site_id: SiteId,
 }
 
-// *** DeclareProjects
+// **** DeclareProjects
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,7 +142,7 @@ pub struct DeclareProjectEntry {
     pub meta: JsonMap,
 }
 
-// *** ListFiles
+// **** ListFiles
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,7 +169,7 @@ pub struct ListFileEntry {
     pub meta: JsonMap,
 }
 
-// *** OpenFile
+// **** OpenFile
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,7 +187,7 @@ pub struct OpenFileResp {
     pub doc_id: DocId,
 }
 
-// *** WriteFile
+// **** WriteFile
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,7 +196,7 @@ pub struct WriteFileParams {
     pub file_desc: FileDesc,
 }
 
-// *** SendOpEditor
+// **** SendOpEditor
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,7 +213,7 @@ pub struct SendOpsResp {
     pub last_seq: GlobalSeq,
 }
 
-// *** SendInfo
+// **** SendInfo
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -223,7 +223,7 @@ pub struct SendInfoParams {
     pub host_id: ServerId,
 }
 
-// *** Undo
+// **** Undo
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum UndoKind {
@@ -245,7 +245,7 @@ pub struct UndoResp {
     pub ops: Vec<EditInstruction>,
 }
 
-// *** Etc
+// **** Etc
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -253,6 +253,52 @@ pub struct PrintHistoryParams {
     pub doc_id: DocId,
     pub host_id: ServerId,
     pub debug: bool,
+}
+
+/// *** Peer messages
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Msg {
+    ShareSingleFile {
+        filename: String,
+        meta: String,
+        content: FileContentOrPath,
+    },
+    FileShared(DocId),
+    ListFiles {
+        dir: Option<FileDesc>,
+    },
+    FileList(Vec<crate::message::ListFileEntry>),
+    DeclareProjects(Vec<DeclareProjectEntry>),
+    OpFromClient(ContextOps),
+    OpFromServer(Vec<FatOp>),
+    RequestOps {
+        doc: DocId,
+        after: GlobalSeq,
+    },
+    RequestFile(FileDesc),
+    Snapshot(NewSnapshot),
+    TakeDownFile(DocId),
+    ResetFile(DocId),
+    Login(Credential),
+    LoggedYouIn(SiteId),
+    Info(DocId, Info),
+
+    // Misc
+    IceProgress(String),
+    Hey(String),
+
+    // Errors
+    ConnectionBroke(ServerId),
+    StopSendingOps(DocId),
+    SerializationErr(String),
+    BadRequest(String),
+    // Fatal error that shouldn’t happen (not a fault, ie, a bug in
+    // code), must reset the doc.
+    DocFatal(DocId, String),
+    // If we need to respond to a request from a remote’s editor with
+    // an error, use this message.
+    ErrorResp(ErrorCode, String),
 }
 
 // *** Functions
