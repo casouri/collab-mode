@@ -1,5 +1,6 @@
 use std::process::exit;
 
+use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, jsonrpc};
 
@@ -45,7 +46,14 @@ fn main() -> anyhow::Result<()> {
             profile,
         }) => {
             let runtime = tokio::runtime::Runtime::new().unwrap();
-            let config_location = config.as_ref().map(|c| c.into());
+            let config_location = if let Some(config_path) = config {
+                Some(
+                    expanduser::expanduser(config_path)
+                        .with_context(|| format!("Can't expand filename to absolute path"))?,
+                )
+            } else {
+                None
+            };
             let config_man = config_man::ConfigManager::new(config_location, profile.to_owned());
 
             if !socket {
