@@ -522,7 +522,7 @@ pub async fn setup_hub_and_spoke_servers(
     // Create hub server
     let hub_id = create_test_id("hub");
     let hub_temp_dir = tempfile::TempDir::new()?;
-    let hub_config = ConfigManager::new(Some(hub_temp_dir.path().to_string_lossy().to_string()));
+    let hub_config = ConfigManager::new(Some(hub_temp_dir.path().to_path_buf()), None);
     let mut hub_server = Server::new(hub_id.clone(), true, hub_config)?;
 
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
@@ -561,7 +561,7 @@ pub async fn setup_hub_and_spoke_servers(
         let spoke_id = create_test_id(&format!("spoke{}", i + 1));
         let spoke_temp_dir = tempfile::TempDir::new()?;
         let spoke_config =
-            ConfigManager::new(Some(spoke_temp_dir.path().to_string_lossy().to_string()));
+            ConfigManager::new(Some(spoke_temp_dir.path().to_path_buf()), None);
         let mut spoke_server = Server::new(spoke_id.clone(), true, spoke_config)?;
 
         let (mut spoke_editor, spoke_tx, spoke_rx) = MockEditor::new();
@@ -716,11 +716,11 @@ async fn test_accept_connect() {
     tracing::info!("Creating servers with IDs: {} and {}", id1, id2);
 
     let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_string_lossy().to_string()));
+    let config1 = ConfigManager::new(Some(temp_dir1.path().to_path_buf()), None);
     let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
 
     let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_string_lossy().to_string()));
+    let config2 = ConfigManager::new(Some(temp_dir2.path().to_path_buf()), None);
     let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
 
     let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
@@ -910,7 +910,7 @@ async fn test_open_file_basic() {
             &setup.hub.id,
             serde_json::json!({
                 "type": "projectFile",
-                "project": project_path.clone(),
+                "project": "TestProject",
                 "file": "test.txt"
             }),
         )
@@ -960,7 +960,7 @@ async fn test_open_file_from_remote() {
             &setup.hub.id,
             serde_json::json!({
                 "type": "projectFile",
-                "project": project_path.clone(),
+                "project": "TestProject",
                 "file": "src/main.rs"
             }),
         )
@@ -1022,7 +1022,7 @@ async fn test_open_file_not_found() {
                 "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "TestProject",
                     "file": "non_existent.txt"
                 }
             }),
@@ -1066,7 +1066,7 @@ async fn test_open_file_bad_request() {
                 "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "project",
-                    "id": project_path.clone()
+                    "id": "TestProject"
                 }
             }),
         )
@@ -1129,7 +1129,7 @@ async fn test_open_file_already_open() {
                 "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "TestProject",
                     "file": "test.txt"
                 }
             }),
@@ -1152,7 +1152,7 @@ async fn test_open_file_already_open() {
                 "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "TestProject",
                     "file": "test.txt"
                 }
             }),
@@ -1349,7 +1349,7 @@ async fn test_list_files_project_directory() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "ComplexProject",
                     "file": "src"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1395,7 +1395,7 @@ async fn test_list_files_project_directory() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "ComplexProject",
                     "file": "src/modules"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1465,7 +1465,7 @@ async fn test_list_files_from_remote() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
-                    "id": project_path.clone()
+                    "id": "SharedProject"
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1495,7 +1495,7 @@ async fn test_list_files_from_remote() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
-                    "id": project_path.clone()
+                    "id": "SharedProject"
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1606,7 +1606,7 @@ async fn test_list_files_not_directory() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "TestProject",
                     "file": "test.txt"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1671,7 +1671,7 @@ async fn test_list_files_empty_directory() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "ProjectWithEmpty",
                     "file": "empty"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1741,7 +1741,7 @@ async fn test_list_files_nested_structure() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
-                    "id": project_path.clone()
+                    "id": "NestedProject"
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1786,7 +1786,7 @@ async fn test_list_files_nested_structure() {
                 "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
-                    "project": project_path.clone(),
+                    "project": "NestedProject",
                     "file": "src/modules"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1850,10 +1850,10 @@ async fn test_send_ops_e2e() {
         .hub
         .editor
         .open_file(
-            &setup.hub.id,
+            "self",
             serde_json::json!({
                 "type": "projectFile",
-                "project": project_path.clone(),
+                "project": "TestProject",
                 "file": "test.txt"
             }),
         )
@@ -1867,7 +1867,7 @@ async fn test_send_ops_e2e() {
             &setup.hub.id,
             serde_json::json!({
                 "type": "projectFile",
-                "project": project_path.clone(),
+                "project": "TestProject",
                 "file": "test.txt"
             }),
         )
@@ -1882,7 +1882,7 @@ async fn test_send_ops_e2e() {
             &setup.hub.id,
             serde_json::json!({
                 "type": "projectFile",
-                "project": project_path.clone(),
+                "project": "TestProject",
                 "file": "test.txt"
             }),
         )
@@ -1898,7 +1898,7 @@ async fn test_send_ops_e2e() {
         .editor
         .send_ops(
             hub_doc_id,
-            &setup.hub.id,
+            "self",
             vec![serde_json::json!({
                 "op": {
                     "Ins": [0, "Modified: "]
@@ -2109,7 +2109,7 @@ async fn test_undo_e2e() {
             &setup.hub.id,
             serde_json::json!({
                 "type": "projectFile",
-                "project": project_path.clone(),
+                "project": "TestProject",
                 "file": "test.txt"
             }),
         )

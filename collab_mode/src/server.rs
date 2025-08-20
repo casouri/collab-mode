@@ -400,7 +400,7 @@ impl Server {
                         root: project_entry.filename,
                         meta: project_entry.meta,
                     };
-                    self.projects.insert(project.root.clone(), project);
+                    self.projects.insert(project.name.clone(), project);
                 }
             }
             _ => {
@@ -787,7 +787,7 @@ impl Server {
                 for (_, project) in self.projects.iter() {
                     result.push(ListFileEntry {
                         file: FileDesc::Project {
-                            id: project.root.clone(),
+                            id: project.name.clone(),
                         },
                         filename: project.name.clone(),
                         is_directory: true,
@@ -837,12 +837,18 @@ impl Server {
         file_desc: FileDesc,
         req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
-        if self.host_id == host_id {
+        if self.host_id == host_id || host_id == SERVER_ID_SELF {
             // Handle local file opening
             match &file_desc {
                 FileDesc::ProjectFile { project, file } => {
+                    // Look up project by name
+                    let project_data = self
+                        .projects
+                        .get(project)
+                        .ok_or_else(|| anyhow!("Project {} not found", project))?;
+                    
                     // Check if already open
-                    let full_path = std::path::PathBuf::from(&project).join(&file);
+                    let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
                     for (doc_id, doc) in &self.docs {
                         if let Some(ref abs_filename) = doc.abs_filename {
                             if abs_filename == &full_path {
@@ -980,8 +986,14 @@ impl Server {
 
         match &file_desc {
             FileDesc::ProjectFile { project, file } => {
+                // Look up project by name
+                let project_data = self
+                    .projects
+                    .get(project)
+                    .ok_or_else(|| anyhow!("Project {} not found", project))?;
+                
                 // Check if already open
-                let full_path = std::path::PathBuf::from(&project).join(&file);
+                let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
 
                 // Look for existing doc with same abs_filename
                 for (doc_id, doc) in &mut self.docs {

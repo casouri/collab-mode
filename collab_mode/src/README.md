@@ -21,8 +21,10 @@ I want collab-mode to be:
   people to use collab-mode. (Well, I still need to set up a signaling
   server, but the load on a signaling server should be relatively
   light.)
-- Simple in design and implementation, I’m willing to trade
-  feature/efficiency for simplicity (to a certain degree, of course).
+- Simple in design and implementation, I’m willing to aggressively
+  trade feature/efficiency for simplicity. Because correctness is so
+  important for collaborative-editing, it’s important to keep things
+  as simple as possible.
 - Lean, meaning it has a small binary size and doesn’t use much
   memory. This one has lower priority but is still on the list.
 - Stable and secure. These two are standard requirements, collab-mode
@@ -35,6 +37,15 @@ source-of-truth. Each client sends ops to the server and the server
 broadcasts the op to all other clients. Clients join the group by
 contacting server and get a copy of the document. Collab-mode is p2p
 in the sense that every host is both a client and a server.
+
+So we have a central server for each doc. Apart from the fact that our
+control algorithm doesn’t support truly distributed gossip
+propagation, I don’t really believe in distributed collab editing.
+Like, what’s the point? To have any reasonable level of speed and
+availability, you inevitably have to have some central server to
+synchronize the messages and keep track of peers. At that point might
+as well make it fully centralized for simpler design and better
+performance.
 
 # Connection and RPC
 

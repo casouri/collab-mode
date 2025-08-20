@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-
-use crate::{error::CollabError, signaling::CertDerHash};
-use sha2::{Digest, Sha256};
-
 use crate::error::CollabResult;
+use crate::types::*;
+use crate::{error::CollabError, signaling::CertDerHash};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 
 pub struct KeyCert {
     /// The private key. I don't know if the [rcgen::KeyPair] is the
@@ -65,6 +65,19 @@ pub fn create_key_cert(name: &str) -> KeyCert {
     let cert_der = cert.serialize_der().unwrap();
     let key_der = cert.get_key_pair().serialize_der();
     KeyCert { key_der, cert_der }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConfigProject {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Config {
+    pub host_id: String,
+    pub projects: Vec<String>,
+    pub trusted_hosts: Vec<ServerId>,
 }
 
 #[derive(Debug, Clone)]

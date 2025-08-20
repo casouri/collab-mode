@@ -18,7 +18,7 @@ pub type Credential = String;
 /// path. We don't want to use full path since some people might
 /// consider the full path sensitive?
 pub type FilePath = (DocId, PathBuf);
-/// Project's id is it's abs filename.
+/// Project's id is a descriptive name.
 pub type ProjectId = String;
 /// A file under a project. Can be shared or not-shared.
 pub type ProjectFile = (ProjectId, String);

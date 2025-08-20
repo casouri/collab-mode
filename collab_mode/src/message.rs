@@ -137,7 +137,7 @@ pub struct DeclareProjectsParams {
 pub struct DeclareProjectEntry {
     /// Absolute path to the project root.
     pub filename: String,
-    /// Name of the project.
+    /// Name of the project, must be unique among projects.
     pub name: String,
     pub meta: JsonMap,
 }
