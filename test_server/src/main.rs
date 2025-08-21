@@ -1,13 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::Context;
-use collab_mode::{
-    config_man,
-    file_server::{self, Project},
-};
-use serde::Serialize;
-use tiny_http::{Method, Request, Response, Server, StatusCode};
-use url::{ParseError, Url};
+use collab_mode::file_server::{self};
+use tiny_http::{Request, Response, Server};
+use url::Url;
 
 fn send_400_missing(param_name: &str, request: Request) -> anyhow::Result<()> {
     request.respond(Response::new(

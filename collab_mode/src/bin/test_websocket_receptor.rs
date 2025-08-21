@@ -5,7 +5,7 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     runtime.block_on(async {
-        let sock_rx = websocket_receptor::accept(&format!("127.0.0.1:7777")).await;
+        let sock_rx = websocket_receptor::accept("127.0.0.1:7777").await;
         if let Err(err) = sock_rx {
             tracing::error!("Error accepting connections: {}", err);
             return;

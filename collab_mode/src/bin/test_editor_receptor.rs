@@ -14,7 +14,7 @@ fn main() {
         }
     });
     let res = collab_mode::editor_receptor::run_socket(
-        &format!("localhost:7777"),
+        "localhost:7777",
         to_peer_tx,
         from_peer_rx,
     );

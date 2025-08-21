@@ -1,6 +1,5 @@
-use std::process::exit;
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, jsonrpc};
 
@@ -49,7 +48,7 @@ fn main() -> anyhow::Result<()> {
             let config_location = if let Some(config_path) = config {
                 Some(
                     expanduser::expanduser(config_path)
-                        .with_context(|| format!("Can't expand filename to absolute path"))?,
+                        .with_context(|| "Can't expand filename to absolute path".to_string())?,
                 )
             } else {
                 None
@@ -57,13 +56,13 @@ fn main() -> anyhow::Result<()> {
             let config_man = config_man::ConfigManager::new(config_location, profile.to_owned())?;
 
             if !socket {
-                return jsonrpc::run_stdio(runtime, config_man);
+                jsonrpc::run_stdio(runtime, config_man)
             } else {
-                return jsonrpc::run_socket(
+                jsonrpc::run_socket(
                     &format!("localhost:{}", socket_port),
                     runtime,
                     config_man,
-                );
+                )
             }
         }
         _ => {
