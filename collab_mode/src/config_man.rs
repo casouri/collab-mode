@@ -3,6 +3,7 @@ use crate::types::*;
 use crate::{error::CollabError, signaling::CertDerHash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct KeyCert {
@@ -74,28 +75,116 @@ pub struct ConfigProject {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum AcceptMode {
+    /// Accept all hosts, even those not in the trusted hosts list.
+    All,
+    /// Accept only hosts in the trusted hosts list.
+    TrustedOnly,
+}
+
+impl Default for AcceptMode {
+    fn default() -> Self {
+        AcceptMode::All
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub host_id: String,
-    pub projects: Vec<String>,
-    pub trusted_hosts: Vec<ServerId>,
+    /// Projects that are shared by default.
+    #[serde(default = "Vec::new")]
+    pub projects: Vec<ConfigProject>,
+    // We're really only checking the hash. the ServerId is for user
+    // to know which hash belongs to which peer.
+    #[serde(default = "HashMap::new")]
+    pub trusted_hosts: HashMap<ServerId, String>,
+    #[serde(default = "AcceptMode::default")]
+    pub accept_mode: AcceptMode,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            projects: Vec::new(),
+            trusted_hosts: HashMap::new(),
+            accept_mode: AcceptMode::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ConfigManager {
     config_dir: Option<PathBuf>,
     base_dirs: xdg::BaseDirectories,
+    config: Config,
 }
 
 impl ConfigManager {
-    pub fn new(config_location: Option<PathBuf>, profile: Option<String>) -> ConfigManager {
-        ConfigManager {
+    pub fn new(
+        config_location: Option<PathBuf>,
+        profile: Option<String>,
+    ) -> anyhow::Result<ConfigManager> {
+        let base_dirs = if let Some(profile) = profile {
+            xdg::BaseDirectories::with_profile("collab-mode", profile)
+        } else {
+            xdg::BaseDirectories::with_prefix("collab-mode")
+        };
+
+        let config = Self::load_config(&config_location, &base_dirs)?;
+
+        Ok(ConfigManager {
             config_dir: config_location,
-            base_dirs: if let Some(profile) = profile {
-                xdg::BaseDirectories::with_profile("collab-mode", profile)
-            } else {
-                xdg::BaseDirectories::with_prefix("collab-mode")
-            },
+            base_dirs,
+            config,
+        })
+    }
+
+    /// Get the path where the config file should be located
+    pub fn get_config_file_path(&self) -> anyhow::Result<PathBuf> {
+        if let Some(config_dir) = &self.config_dir {
+            // If config_location is provided, use config.json there
+            Ok(config_dir.join("config.json"))
+        } else {
+            // Otherwise, use XDG base directories
+            self.base_dirs
+                .place_config_file("config.json")
+                .map_err(|err| anyhow::anyhow!("Failed to determine config file location: {}", err))
         }
+    }
+
+    fn load_config(
+        config_location: &Option<PathBuf>,
+        base_dirs: &xdg::BaseDirectories,
+    ) -> anyhow::Result<Config> {
+        let config_file = if let Some(config_dir) = config_location {
+            // If config_location is provided, look for config.json there
+            config_dir.join("config.json")
+        } else {
+            // Otherwise, try to find config.json in XDG base directories
+            match base_dirs.find_config_file("config.json") {
+                Some(path) => path,
+                None => {
+                    // No config file found, return default config
+                    return Ok(Config::default());
+                }
+            }
+        };
+
+        // Check if the config file exists
+        if !config_file.exists() {
+            // Return default config if file doesn't exist
+            return Ok(Config::default());
+        }
+
+        // Read and parse the config file
+        let config_content = std::fs::read_to_string(&config_file).map_err(|err| {
+            anyhow::anyhow!("Failed to read config file {:?}: {}", config_file, err)
+        })?;
+
+        let config: Config = serde_json::from_str(&config_content).map_err(|err| {
+            anyhow::anyhow!("Failed to parse config file {:?}: {}", config_file, err)
+        })?;
+
+        Ok(config)
     }
 
     /// Either load or create keys and a certificate for `uuid` in
@@ -179,5 +268,37 @@ impl ConfigManager {
 
         let conn = rusqlite::Connection::open(db_file)?;
         Ok(conn)
+    }
+
+    /// Get a copy of the loaded configuration
+    pub fn config(&self) -> Config {
+        self.config.clone()
+    }
+
+    /// Add a trusted host to the configuration
+    pub fn add_trusted_host(&mut self, server_id: ServerId, cert_hash: String) {
+        self.config.trusted_hosts.insert(server_id, cert_hash);
+    }
+
+    /// Write the current configuration to disk
+    pub fn save_config(&self) -> anyhow::Result<()> {
+        let config_file = self.get_config_file_path()?;
+
+        // Ensure the parent directory exists
+        if let Some(parent) = config_file.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| anyhow::anyhow!("Failed to create config directory: {}", err))?;
+        }
+
+        // Serialize the config to pretty JSON
+        let config_json = serde_json::to_string_pretty(&self.config)
+            .map_err(|err| anyhow::anyhow!("Failed to serialize config: {}", err))?;
+
+        // Write to file
+        std::fs::write(&config_file, config_json).map_err(|err| {
+            anyhow::anyhow!("Failed to write config file {:?}: {}", config_file, err)
+        })?;
+
+        Ok(())
     }
 }

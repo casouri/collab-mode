@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let config_man = config_man::ConfigManager::new(config_location, profile.to_owned());
+            let config_man = config_man::ConfigManager::new(config_location, profile.to_owned())?;
 
             if !socket {
                 return jsonrpc::run_stdio(runtime, config_man);
