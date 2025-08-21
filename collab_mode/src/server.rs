@@ -168,11 +168,7 @@ impl Doc {
 // *** Impl Server
 
 impl Server {
-    pub fn new(
-        host_id: ServerId,
-        attached: bool,
-        mut config: ConfigManager,
-    ) -> anyhow::Result<Self> {
+    pub fn new(host_id: ServerId, attached: bool, config: ConfigManager) -> anyhow::Result<Self> {
         let key_cert = config.get_key_and_cert(host_id.clone())?;
 
         // Get config values for trusted_hosts and accept_mode
@@ -217,6 +213,16 @@ impl Server {
             self.trusted_hosts.clone(),
             self.accept_mode.clone(),
         );
+
+        // Add initial projects
+        for project in self.config.config().projects {
+            let proj = Project {
+                name: project.name.clone(),
+                root: project.path,
+                meta: serde_json::Map::new(),
+            };
+            self.projects.insert(project.name, proj);
+        }
 
         loop {
             tokio::select! {
