@@ -1,0 +1,36 @@
+MAJOR-MODE: c-mode
+MINOR-MODE: electric-pair-mode
+MINOR-MODE: aggressive-indent-mode
+HASTE: t
+
+MOVE 27
+INSERT \nint calculate(int a, int b) {
+INSERT \nif(a>b){
+INSERT \nreturn a*2;
+INSERT \n}else{
+INSERT \nreturn b*3;
+INSERT \n}
+INSERT \n}
+INSERT \n\nvoid process() {
+INSERT \nfor(int i=0;i<10;i++){
+INSERT \nif(i%2==0){
+INSERT \nprintf("%d ", i);
+INSERT \n}
+INSERT \n}
+INSERT \n}
+MOVE -150
+INDENT
+MOVE 20
+INDENT
+MOVE 15
+INDENT
+MOVE 25
+INDENT
+MOVE 100
+INDENT
+
+#include <stdio.h>
+
+int main() {
+    return 0;
+}

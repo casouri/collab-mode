@@ -1,0 +1,20 @@
+MAJOR-MODE: fundamental-mode
+HASTE: nil
+
+MOVE 15
+INSERT // Simple program
+INSERT \n
+MOVE 8
+INSERT void
+DELETE -4
+INSERT  test() {\n    printf("Testing");\n}
+INSERT \n\n
+MOVE -50
+DELETE 7
+INSERT stdlib
+
+#include <stdio.h>
+
+int main() {
+    return 0;
+}

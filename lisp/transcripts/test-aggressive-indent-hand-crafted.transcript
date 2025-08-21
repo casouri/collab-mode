@@ -1,0 +1,20 @@
+MAJOR-MODE: c-mode
+MINOR-MODE: electric-pair-mode
+MINOR-MODE: aggressive-indent-mode
+
+MOVE 32
+INSERT  
+INSERT  
+INSERT  
+INSERT  
+INSERT  
+INSERT  
+INSERT  
+INSERT (
+MOVE 1
+
+int calculate(int a, int b) {
+  if (true) {
+    return 0;
+  }
+}

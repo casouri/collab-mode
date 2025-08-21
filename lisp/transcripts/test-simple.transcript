@@ -1,0 +1,18 @@
+MAJOR-MODE: fundamental-mode
+HASTE: nil
+
+INSERT Hello
+INSERT  
+INSERT World
+DELETE 1
+INSERT ,
+MOVE -6
+INSERT Great 
+MOVE 12
+INSERT !
+
+#include <stdio.h>
+
+int main() {
+    return 0;
+}

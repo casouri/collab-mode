@@ -1,0 +1,23 @@
+MAJOR-MODE: c-mode
+MINOR-MODE: electric-pair-mode
+HASTE: nil
+
+MOVE 27
+INSERT \n    int x = 5;
+INSERT \n    if (
+INSERT x > 0
+INSERT \n        printf(
+INSERT "positive"
+INSERT ;\n    
+INSERT \n    for (
+INSERT int i = 0; i < 10; i++
+INSERT  {
+INSERT \n        x += i;
+INSERT \n    
+INSERT \n    return x;
+
+#include <stdio.h>
+
+int main() {
+    return 0;
+}

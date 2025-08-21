@@ -1,0 +1,33 @@
+MAJOR-MODE: c-mode
+MINOR-MODE: electric-pair-mode
+HASTE: nil
+
+MOVE 19
+INSERT \n\n/* Function to calculate factorial */
+INSERT \nint factorial(
+INSERT int n
+INSERT  {\n    if (
+INSERT n <= 1
+INSERT \n        return 1;\n    return n * factorial(
+INSERT n - 1
+INSERT ;\n}
+INSERT \n\n/* Main function with some logic */\n
+MOVE 33
+DELETE 4
+INSERT void
+INSERT  {\n    int result = factorial(
+INSERT 5
+INSERT ;\n    printf(
+INSERT "Factorial of 5 is %d\\n", result
+INSERT ;\n    
+INSERT \n    // Test loop\n    for (
+INSERT int i = 0; i < 3; i++
+INSERT  {\n        printf(
+INSERT "Iteration %d\\n", i
+INSERT ;\n    }
+
+#include <stdio.h>
+
+int main() {
+    return 0;
+}
