@@ -100,6 +100,10 @@ pub struct Server {
     config: ConfigManager,
     /// Key and certificate for the server.
     key_cert: Arc<KeyCert>,
+    /// Trusted hosts with their certificate hashes (shared with WebChannel)
+    trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
+    /// Accept mode for incoming connections (shared with WebChannel)
+    accept_mode: Arc<Mutex<AcceptMode>>,
     /// If we get a remote request with a request id and we send a
     /// request to editor to handle, the request id of the request to
     /// editor maps to the request id of the received request in this
@@ -164,8 +168,18 @@ impl Doc {
 // *** Impl Server
 
 impl Server {
-    pub fn new(host_id: ServerId, attached: bool, config: ConfigManager) -> anyhow::Result<Self> {
+    pub fn new(
+        host_id: ServerId,
+        attached: bool,
+        mut config: ConfigManager,
+    ) -> anyhow::Result<Self> {
         let key_cert = config.get_key_and_cert(host_id.clone())?;
+
+        // Get config values for trusted_hosts and accept_mode
+        let current_config = config.config();
+        let trusted_hosts = Arc::new(Mutex::new(current_config.trusted_hosts));
+        let accept_mode = Arc::new(Mutex::new(current_config.accept_mode));
+
         let server = Server {
             host_id,
             site_id: 0,
@@ -182,6 +196,8 @@ impl Server {
             accepting: HashMap::new(),
             config,
             key_cert: Arc::new(key_cert),
+            trusted_hosts,
+            accept_mode,
             orig_req_map: HashMap::new(),
         };
         Ok(server)
@@ -194,18 +210,13 @@ impl Server {
     ) -> anyhow::Result<()> {
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
 
-        // Get trusted hosts and accept mode from config
-        let (trusted_hosts, accept_mode) = {
-            let config = self.config.config();
-            let hosts = Arc::new(Mutex::new(config.trusted_hosts));
-            let mode = config.accept_mode;
-            if matches!(mode, AcceptMode::TrustedOnly) && hosts.lock().unwrap().is_empty() {
-                tracing::warn!("AcceptMode is TrustedOnly but no trusted hosts configured");
-            }
-            (hosts, Arc::new(Mutex::new(mode)))
-        };
-
-        let webchannel = WebChannel::new(self.host_id.clone(), msg_tx, trusted_hosts, accept_mode);
+        // Use the Server's shared trusted_hosts and accept_mode
+        let webchannel = WebChannel::new(
+            self.host_id.clone(),
+            msg_tx,
+            self.trusted_hosts.clone(),
+            self.accept_mode.clone(),
+        );
 
         loop {
             tokio::select! {
@@ -329,6 +340,12 @@ impl Server {
                 let params: ShareFileParams = serde_json::from_value(req.params)?;
                 let resp = self.handle_share_file_from_editor(params)?;
                 send_response(editor_tx, req.id, resp, None).await;
+                Ok(())
+            }
+            "UpdateConfig" => {
+                let params: UpdateConfigParams = serde_json::from_value(req.params)?;
+                self.handle_update_config_from_editor(params)?;
+                send_response(editor_tx, req.id, (), None).await;
                 Ok(())
             }
             _ => {
@@ -480,6 +497,12 @@ impl Server {
                     }),
                 )
                 .await;
+
+                // We might get new trusted host from accepting
+                // connection, try to save it.
+                let mut config = self.config.config();
+                config.trusted_hosts = self.trusted_hosts.lock().unwrap().clone();
+                let _ = self.config.replace_and_save(config);
                 Ok(())
             }
             Msg::ListFiles { dir } => {
@@ -1502,6 +1525,49 @@ impl Server {
             site_id: self.site_id,
         };
         Ok(resp)
+    }
+
+    fn handle_update_config_from_editor(
+        &mut self,
+        params: UpdateConfigParams,
+    ) -> anyhow::Result<()> {
+        // Get current config
+        let mut config = self.config.config();
+
+        // Update accept_mode if provided
+        if let Some(mode) = params.accept_mode {
+            config.accept_mode = mode;
+            // Update the shared accept_mode
+            *self.accept_mode.lock().unwrap() = mode;
+        }
+
+        // Add trusted hosts if provided
+        if let Some(hosts_to_add) = params.add_trusted_hosts {
+            for (host_id, cert_hash) in hosts_to_add {
+                config
+                    .trusted_hosts
+                    .insert(host_id.clone(), cert_hash.clone());
+                // Update the shared trusted_hosts
+                self.trusted_hosts
+                    .lock()
+                    .unwrap()
+                    .insert(host_id, cert_hash);
+            }
+        }
+
+        // Remove trusted hosts if provided
+        if let Some(hosts_to_remove) = params.remove_trusted_hosts {
+            for host_id in hosts_to_remove {
+                config.trusted_hosts.remove(&host_id);
+                // Update the shared trusted_hosts
+                self.trusted_hosts.lock().unwrap().remove(&host_id);
+            }
+        }
+
+        // Save the updated config to disk
+        self.config.replace_and_save(config)?;
+
+        Ok(())
     }
 }
 

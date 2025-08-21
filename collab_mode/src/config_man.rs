@@ -280,6 +280,14 @@ impl ConfigManager {
         self.config.trusted_hosts.insert(server_id, cert_hash);
     }
 
+    /// Override with a new config and save to disk
+    pub fn replace_and_save(&mut self, new_config: Config) -> anyhow::Result<()> {
+        // Override the internal config with the new one
+        self.config = new_config;
+        // Save to disk
+        self.save_config()
+    }
+
     /// Write the current configuration to disk
     pub fn save_config(&self) -> anyhow::Result<()> {
         let config_file = self.get_config_file_path()?;

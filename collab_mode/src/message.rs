@@ -1,6 +1,7 @@
-use crate::{types::*, webchannel::TransportType};
+use crate::{config_man::AcceptMode, types::*, webchannel::TransportType};
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // *** Notifications
 
@@ -95,6 +96,19 @@ pub struct AcceptConnectionParams {
 pub struct ConnectionBrokeParams {
     /// Description of how kind of connection broke and why.
     pub desc: String,
+}
+
+// **** Update config (accept mode and trusted hosts)
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConfigParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_mode: Option<AcceptMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_trusted_hosts: Option<HashMap<ServerId, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remove_trusted_hosts: Option<Vec<ServerId>>,
 }
 
 // **** Connect
