@@ -60,7 +60,7 @@ impl MockDocument {
         if count == 0 {
             return None;
         }
-        
+
         let (start, end) = if count > 0 {
             // Delete backward
             let start = self.cursor.saturating_sub(count as usize);
@@ -112,16 +112,18 @@ impl MockDocument {
                         let pos = inner[0].as_u64().unwrap() as usize;
                         let text = inner[1].as_str().unwrap();
                         let len = text.chars().count();
-                        
+
                         // Verify we're deleting the expected text
                         let actual_text: String = self.content[pos..pos + len].iter().collect();
                         if actual_text != text {
                             return Err(anyhow::anyhow!(
                                 "Remote delete mismatch at pos {}: expected '{}', got '{}'",
-                                pos, text, actual_text
+                                pos,
+                                text,
+                                actual_text
                             ));
                         }
-                        
+
                         self.content.drain(pos..pos + len);
                     }
                 }
@@ -148,11 +150,13 @@ pub enum TranscriptCommand {
 }
 
 // Parse transcript file
-pub fn parse_transcript(content: &str) -> anyhow::Result<(HashMap<String, String>, Vec<TranscriptCommand>)> {
+pub fn parse_transcript(
+    content: &str,
+) -> anyhow::Result<(HashMap<String, String>, Vec<TranscriptCommand>)> {
     let mut lines = content.lines();
     let mut headers = HashMap::new();
     let mut commands = Vec::new();
-    
+
     // Parse headers until empty line
     let mut in_headers = true;
     for line in lines.by_ref() {
@@ -163,57 +167,55 @@ pub fn parse_transcript(content: &str) -> anyhow::Result<(HashMap<String, String
             }
             continue;
         }
-        
+
         if in_headers {
             if let Some((key, value)) = line.split_once(':') {
                 headers.insert(key.trim().to_string(), value.trim().to_string());
             }
         }
     }
-    
+
     // Parse commands
     for line in lines {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        
+
         if line == "===CHECK===" {
             commands.push(TranscriptCommand::Check);
             continue;
         }
-        
+
         // Parse E<n> <command> format
         if line.starts_with('E') {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
             if parts.len() < 2 {
                 continue;
             }
-            
+
             let editor_num = parts[0][1..].parse::<usize>()?;
             let cmd = parts[1];
-            
+
             match cmd {
                 "MOVE" => {
                     if parts.len() < 3 {
                         return Err(anyhow::anyhow!("MOVE requires offset"));
                     }
                     let offset = parts[2].parse::<i64>()?;
-                    commands.push(TranscriptCommand::Move { 
-                        editor: editor_num - 1,  // Convert to 0-indexed
-                        offset 
+                    commands.push(TranscriptCommand::Move {
+                        editor: editor_num - 1, // Convert to 0-indexed
+                        offset,
                     });
                 }
                 "INSERT" => {
                     if parts.len() < 3 {
                         return Err(anyhow::anyhow!("INSERT requires text"));
                     }
-                    let text = parts[2]
-                        .replace("\\n", "\n")
-                        .replace("\\t", "\t");
-                    commands.push(TranscriptCommand::Insert { 
+                    let text = parts[2].replace("\\n", "\n").replace("\\t", "\t");
+                    commands.push(TranscriptCommand::Insert {
                         editor: editor_num - 1,
-                        text 
+                        text,
                     });
                 }
                 "DELETE" => {
@@ -221,24 +223,24 @@ pub fn parse_transcript(content: &str) -> anyhow::Result<(HashMap<String, String
                         return Err(anyhow::anyhow!("DELETE requires count"));
                     }
                     let count = parts[2].parse::<i64>()?;
-                    commands.push(TranscriptCommand::Delete { 
+                    commands.push(TranscriptCommand::Delete {
                         editor: editor_num - 1,
-                        count 
+                        count,
                     });
                 }
                 "UNDO" => {
-                    commands.push(TranscriptCommand::Undo { 
-                        editor: editor_num - 1 
+                    commands.push(TranscriptCommand::Undo {
+                        editor: editor_num - 1,
                     });
                 }
                 "REDO" => {
-                    commands.push(TranscriptCommand::Redo { 
-                        editor: editor_num - 1 
+                    commands.push(TranscriptCommand::Redo {
+                        editor: editor_num - 1,
                     });
                 }
                 "SEND" => {
-                    commands.push(TranscriptCommand::Send { 
-                        editor: editor_num - 1 
+                    commands.push(TranscriptCommand::Send {
+                        editor: editor_num - 1,
                     });
                 }
                 _ => {
@@ -247,7 +249,7 @@ pub fn parse_transcript(content: &str) -> anyhow::Result<(HashMap<String, String
             }
         }
     }
-    
+
     Ok((headers, commands))
 }
 
@@ -256,46 +258,51 @@ pub fn get_editor_count(commands: &[TranscriptCommand]) -> usize {
     let mut max_editor = 0;
     for cmd in commands {
         let editor = match cmd {
-            TranscriptCommand::Move { editor, .. } |
-            TranscriptCommand::Insert { editor, .. } |
-            TranscriptCommand::Delete { editor, .. } |
-            TranscriptCommand::Undo { editor } |
-            TranscriptCommand::Redo { editor } |
-            TranscriptCommand::Send { editor } => *editor,
+            TranscriptCommand::Move { editor, .. }
+            | TranscriptCommand::Insert { editor, .. }
+            | TranscriptCommand::Delete { editor, .. }
+            | TranscriptCommand::Undo { editor }
+            | TranscriptCommand::Redo { editor }
+            | TranscriptCommand::Send { editor } => *editor,
             TranscriptCommand::Check => continue,
         };
         max_editor = max_editor.max(editor);
     }
-    max_editor + 1  // Convert from 0-indexed to count
+    max_editor + 1 // Convert from 0-indexed to count
 }
 
 // Run a transcript test
 pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     init_test_tracing();
-    
+
     // Read transcript file
     let content = std::fs::read_to_string(transcript_path)?;
     let (headers, commands) = parse_transcript(&content)?;
-    
-    let test_name = headers.get("Name").cloned().unwrap_or_else(|| "Unnamed Test".to_string());
+
+    let test_name = headers
+        .get("Name")
+        .cloned()
+        .unwrap_or_else(|| "Unnamed Test".to_string());
     tracing::info!("Running transcript test: {}", test_name);
-    
+
     // Determine number of editors needed
     let num_editors = get_editor_count(&commands);
     if num_editors == 0 {
         return Err(anyhow::anyhow!("No editors found in transcript"));
     }
-    
+
     // Setup test environment
     let env = TestEnvironment::new().await?;
     let mut setup = setup_hub_and_spoke_servers(&env, num_editors).await?;
-    
+
     // Hub shares the initial file
-    let initial_content = "";  // Start with empty document
-    let (hub_doc_id, _hub_site_id) = setup.hub.editor
+    let initial_content = ""; // Start with empty document
+    let (hub_doc_id, _hub_site_id) = setup
+        .hub
+        .editor
         .share_file("test.txt", initial_content, serde_json::json!({}))
         .await?;
-    
+
     // Create spoke editor states and open the shared file
     // We keep the MockDocument separate and just store doc_id and site_id
     let mut spoke_docs = Vec::new();
@@ -303,9 +310,10 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     let mut spoke_doc_ids = Vec::new();
     let mut spoke_site_ids = Vec::new();
     let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
-    
+
     for i in 0..num_editors {
-        let (doc_id, site_id, content) = setup.spokes[i].editor
+        let (doc_id, site_id, content) = setup.spokes[i]
+            .editor
             .open_file(
                 &setup.hub.id,
                 serde_json::json!({
@@ -314,19 +322,19 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 }),
             )
             .await?;
-        
+
         spoke_docs.push(MockDocument::new(&content));
         spoke_pending_ops.push(Vec::new());
         spoke_doc_ids.push(doc_id);
         spoke_site_ids.push(site_id);
     }
-    
+
     sleep(Duration::from_millis(200)).await;
-    
+
     // Execute commands
     for (cmd_idx, cmd) in commands.iter().enumerate() {
         tracing::debug!("Executing command {}: {:?}", cmd_idx + 1, cmd);
-        
+
         match cmd {
             TranscriptCommand::Move { editor, offset } => {
                 spoke_docs[*editor].move_cursor(*offset);
@@ -355,25 +363,31 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
             TranscriptCommand::Undo { editor } => {
                 // First send pending ops and apply received ops
                 if !spoke_pending_ops[*editor].is_empty() {
-                    let resp = setup.spokes[*editor].editor
-                        .send_ops(spoke_doc_ids[*editor], &setup.hub.id, spoke_pending_ops[*editor].clone())
+                    let resp = setup.spokes[*editor]
+                        .editor
+                        .send_ops(
+                            spoke_doc_ids[*editor],
+                            &setup.hub.id,
+                            spoke_pending_ops[*editor].clone(),
+                        )
                         .await?;
-                    
+
                     // Apply remote ops
                     if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
                         for op in ops {
                             spoke_docs[*editor].apply_remote_op(op)?;
                         }
                     }
-                    
+
                     spoke_pending_ops[*editor].clear();
                 }
-                
+
                 // Then send undo request
-                let ops = setup.spokes[*editor].editor
+                let ops = setup.spokes[*editor]
+                    .editor
                     .send_undo(spoke_doc_ids[*editor], &setup.hub.id, "Undo")
                     .await?;
-                
+
                 // Apply the undo ops locally
                 for op in ops {
                     // op is like {"Del": [[pos1, text1], [pos2, text2]]} or {"Ins": [[pos1, text1], ...]}
@@ -391,51 +405,58 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         }))?;
                     }
                 }
-                
+
                 // Then send the Undo operation to server
                 let group_seq = group_seq_counters[*editor];
-                let resp = setup.spokes[*editor].editor
+                let resp = setup.spokes[*editor]
+                    .editor
                     .send_ops(
-                        spoke_doc_ids[*editor], 
-                        &setup.hub.id, 
+                        spoke_doc_ids[*editor],
+                        &setup.hub.id,
                         vec![serde_json::json!({
                             "op": "Undo",
                             "groupSeq": group_seq
-                        })]
+                        })],
                     )
                     .await?;
-                
+
                 // Apply any remote ops from sending Undo
                 if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
                     for op in ops {
                         spoke_docs[*editor].apply_remote_op(op)?;
                     }
                 }
-                
+
                 group_seq_counters[*editor] += 1;
             }
             TranscriptCommand::Redo { editor } => {
                 // First send pending ops and apply received ops
                 if !spoke_pending_ops[*editor].is_empty() {
-                    let resp = setup.spokes[*editor].editor
-                        .send_ops(spoke_doc_ids[*editor], &setup.hub.id, spoke_pending_ops[*editor].clone())
+                    let resp = setup.spokes[*editor]
+                        .editor
+                        .send_ops(
+                            spoke_doc_ids[*editor],
+                            &setup.hub.id,
+                            spoke_pending_ops[*editor].clone(),
+                        )
                         .await?;
-                    
+
                     // Apply remote ops
                     if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
                         for op in ops {
                             spoke_docs[*editor].apply_remote_op(op)?;
                         }
                     }
-                    
+
                     spoke_pending_ops[*editor].clear();
                 }
-                
+
                 // Then send redo request
-                let ops = setup.spokes[*editor].editor
+                let ops = setup.spokes[*editor]
+                    .editor
                     .send_undo(spoke_doc_ids[*editor], &setup.hub.id, "Redo")
                     .await?;
-                
+
                 // Apply the redo ops locally
                 for op in ops {
                     // op can be either {"Del": [[pos1, text1], ...]} or {"Ins": [[pos1, text1], ...]}
@@ -453,41 +474,47 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         }))?;
                     }
                 }
-                
+
                 // Then send the Redo operation to server
                 let group_seq = group_seq_counters[*editor];
-                let resp = setup.spokes[*editor].editor
+                let resp = setup.spokes[*editor]
+                    .editor
                     .send_ops(
-                        spoke_doc_ids[*editor], 
-                        &setup.hub.id, 
+                        spoke_doc_ids[*editor],
+                        &setup.hub.id,
                         vec![serde_json::json!({
                             "op": "Redo",
                             "groupSeq": group_seq
-                        })]
+                        })],
                     )
                     .await?;
-                
+
                 // Apply any remote ops from sending Redo
                 if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
                     for op in ops {
                         spoke_docs[*editor].apply_remote_op(op)?;
                     }
                 }
-                
+
                 group_seq_counters[*editor] += 1;
             }
             TranscriptCommand::Send { editor } => {
-                let resp = setup.spokes[*editor].editor
-                    .send_ops(spoke_doc_ids[*editor], &setup.hub.id, spoke_pending_ops[*editor].clone())
+                let resp = setup.spokes[*editor]
+                    .editor
+                    .send_ops(
+                        spoke_doc_ids[*editor],
+                        &setup.hub.id,
+                        spoke_pending_ops[*editor].clone(),
+                    )
                     .await?;
-                
+
                 // Apply remote ops
                 if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
                     for op in ops {
                         spoke_docs[*editor].apply_remote_op(op)?;
                     }
                 }
-                
+
                 spoke_pending_ops[*editor].clear();
                 sleep(Duration::from_millis(100)).await;
             }
@@ -495,28 +522,34 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 // Send all pending ops for all editors
                 for i in 0..num_editors {
                     let resp = if !spoke_pending_ops[i].is_empty() {
-                        setup.spokes[i].editor
-                            .send_ops(spoke_doc_ids[i], &setup.hub.id, spoke_pending_ops[i].clone())
+                        setup.spokes[i]
+                            .editor
+                            .send_ops(
+                                spoke_doc_ids[i],
+                                &setup.hub.id,
+                                spoke_pending_ops[i].clone(),
+                            )
                             .await?
                     } else {
                         // Send empty request to fetch remote ops
-                        setup.spokes[i].editor
+                        setup.spokes[i]
+                            .editor
                             .send_ops(spoke_doc_ids[i], &setup.hub.id, vec![])
                             .await?
                     };
-                    
+
                     // Apply remote ops
                     if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
                         for op in ops {
                             spoke_docs[i].apply_remote_op(op)?;
                         }
                     }
-                    
+
                     spoke_pending_ops[i].clear();
                 }
-                
+
                 sleep(Duration::from_millis(500)).await;
-                
+
                 // Verify all documents have the same content
                 if !spoke_docs.is_empty() {
                     let expected_content = spoke_docs[0].get_content();
@@ -525,20 +558,25 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         if content != expected_content {
                             return Err(anyhow::anyhow!(
                                 "Content mismatch at CHECK: Editor {} has '{}', expected '{}'",
-                                i + 1, content, expected_content
+                                i + 1,
+                                content,
+                                expected_content
                             ));
                         }
                     }
-                    
+
                     // Also verify hub content (if we can fetch it)
                     // For now we trust that if all spokes agree, the hub should too
-                    tracing::info!("CHECK passed: All {} editors have content: '{}'", 
-                                   spoke_docs.len(), expected_content);
+                    tracing::info!(
+                        "CHECK passed: All {} editors have content: '{}'",
+                        spoke_docs.len(),
+                        expected_content
+                    );
                 }
             }
         }
     }
-    
+
     tracing::info!("Transcript test '{}' completed successfully", test_name);
     setup.cleanup();
     Ok(())
@@ -547,17 +585,19 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 // Test discovery - scan transcripts directory and run all tests
 #[tokio::test]
 async fn test_all_transcripts() {
-    let transcripts_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/server/transcripts");
-    
+    let transcripts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/transcripts");
+
     if !transcripts_dir.exists() {
-        tracing::warn!("Transcripts directory does not exist: {:?}", transcripts_dir);
+        tracing::warn!(
+            "Transcripts directory does not exist: {:?}",
+            transcripts_dir
+        );
         return;
     }
-    
+
     let mut test_count = 0;
     let mut failed_tests = Vec::new();
-    
+
     // Read all transcript files
     if let Ok(entries) = std::fs::read_dir(&transcripts_dir) {
         for entry in entries.flatten() {
@@ -565,7 +605,7 @@ async fn test_all_transcripts() {
             if path.extension().and_then(|s| s.to_str()) == Some("txt") {
                 test_count += 1;
                 let test_name = path.file_name().unwrap().to_string_lossy().to_string();
-                
+
                 tracing::info!("Running transcript: {}", test_name);
                 match run_transcript_test(path.to_str().unwrap()).await {
                     Ok(_) => {
@@ -579,12 +619,12 @@ async fn test_all_transcripts() {
             }
         }
     }
-    
+
     if test_count == 0 {
         tracing::warn!("No transcript tests found in {:?}", transcripts_dir);
         return;
     }
-    
+
     // Report results
     if !failed_tests.is_empty() {
         let msg = failed_tests
@@ -594,9 +634,9 @@ async fn test_all_transcripts() {
             .join("\n");
         panic!("{} transcript test(s) failed:\n{}", failed_tests.len(), msg);
     }
-    
+
     tracing::info!("All {} transcript tests passed", test_count);
 }
 
 // Mock structures from tests.rs - these need to be available
-use super::tests::{MockEditor, TestEnvironment, setup_hub_and_spoke_servers};
+use super::tests::{setup_hub_and_spoke_servers, MockEditor, TestEnvironment};

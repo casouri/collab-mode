@@ -1,4 +1,4 @@
-use crate::config_man::ConfigManager;
+use crate::config_man::{AcceptMode, ConfigManager};
 use crate::engine::{ClientEngine, ServerEngine};
 use crate::message::{self, *};
 use crate::signaling::SignalingError;
@@ -12,7 +12,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use tokio::sync::mpsc;
 
@@ -193,7 +193,19 @@ impl Server {
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
     ) -> anyhow::Result<()> {
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
-        let webchannel = WebChannel::new(self.host_id.clone(), msg_tx);
+
+        // Get trusted hosts and accept mode from config
+        let (trusted_hosts, accept_mode) = {
+            let config = self.config.config();
+            let hosts = Arc::new(Mutex::new(config.trusted_hosts));
+            let mode = config.accept_mode;
+            if matches!(mode, AcceptMode::TrustedOnly) && hosts.lock().unwrap().is_empty() {
+                tracing::warn!("AcceptMode is TrustedOnly but no trusted hosts configured");
+            }
+            (hosts, Arc::new(Mutex::new(mode)))
+        };
+
+        let webchannel = WebChannel::new(self.host_id.clone(), msg_tx, trusted_hosts, accept_mode);
 
         loop {
             tokio::select! {
@@ -846,7 +858,7 @@ impl Server {
                         .projects
                         .get(project)
                         .ok_or_else(|| anyhow!("Project {} not found", project))?;
-                    
+
                     // Check if already open
                     let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
                     for (doc_id, doc) in &self.docs {
@@ -991,7 +1003,7 @@ impl Server {
                     .projects
                     .get(project)
                     .ok_or_else(|| anyhow!("Project {} not found", project))?;
-                
+
                 // Check if already open
                 let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
 

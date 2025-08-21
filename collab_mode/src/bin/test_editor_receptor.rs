@@ -13,11 +13,7 @@ fn main() {
             }
         }
     });
-    let res = collab_mode::editor_receptor::run_socket(
-        "localhost:7777",
-        to_peer_tx,
-        from_peer_rx,
-    );
+    let res = collab_mode::editor_receptor::run_socket("localhost:7777", to_peer_tx, from_peer_rx);
     if let Err(err) = res {
         tracing::error!("Failed to start collab peer: {:#?}", err);
         std::process::exit(1);

@@ -10,7 +10,11 @@
 
 use crate::ice::{ice_accept, ice_bind, ice_connect};
 use crate::message::Msg;
-use crate::{config_man::hash_der, signaling::CertDerHash, types::*};
+use crate::{
+    config_man::{hash_der, AcceptMode},
+    signaling::CertDerHash,
+    types::*,
+};
 use anyhow::anyhow;
 use lsp_server::RequestId;
 use serde::{Deserialize, Serialize};
@@ -66,19 +70,30 @@ pub struct WebChannel {
     msg_tx: mpsc::Sender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
     next_stream_id: Arc<AtomicU16>,
-    /// Wether there’s an accepting thread running already for a
+    /// Wether there's an accepting thread running already for a
     /// signaling server URL.
     accepting: Arc<Mutex<HashMap<String, bool>>>,
+    /// Trusted hosts with their certificate hashes for verification
+    trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
+    /// Accept mode controlling how to handle incoming connections
+    accept_mode: Arc<Mutex<AcceptMode>>,
 }
 
 impl WebChannel {
-    pub fn new(my_hostid: ServerId, msg_tx: mpsc::Sender<Message>) -> Self {
+    pub fn new(
+        my_hostid: ServerId,
+        msg_tx: mpsc::Sender<Message>,
+        trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
+        accept_mode: Arc<Mutex<AcceptMode>>,
+    ) -> Self {
         Self {
             my_hostid,
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU16::new(STREAM_ID_INIT)),
             accepting: Arc::new(Mutex::new(HashMap::new())),
+            trusted_hosts,
+            accept_mode,
         }
     }
 
@@ -120,6 +135,41 @@ impl WebChannel {
         }
     }
 
+    /// Check if a certificate hash is trusted based on the configured trusted hosts
+    fn is_cert_trusted(&self, cert_hash: &str, remote_hostid: &str) -> bool {
+        // Check accept mode first
+        let accept_mode = self.accept_mode.lock().unwrap().clone();
+        let mut trusted = self.trusted_hosts.lock().unwrap();
+
+        let is_trusted = if matches!(accept_mode, AcceptMode::All) {
+            tracing::info!(
+                "Accepted connection from {} with certificate hash {} (AcceptMode::All)",
+                remote_hostid,
+                cert_hash
+            );
+            true
+        } else {
+            let cert_found = trusted.values().any(|hash| hash == cert_hash);
+            if cert_found {
+                tracing::info!(
+                    "Accepted connection from {} with trusted certificate hash {}",
+                    remote_hostid,
+                    cert_hash
+                );
+            } else {
+                tracing::warn!(
+                    "Refusing connection from {}, certificate hash {} not in trusted hosts",
+                    remote_hostid,
+                    cert_hash
+                );
+            }
+            cert_found
+        };
+
+        trusted.insert(remote_hostid.to_string(), cert_hash.to_string());
+        is_trusted
+    }
+
     pub async fn accept_inner(
         &self,
         my_key_cert: ArcKeyCert,
@@ -131,6 +181,12 @@ impl WebChannel {
             let sock = listener.accept().await?;
             let their_cert = sock.cert_hash();
             let remote_hostid = sock.id();
+
+            // Check if the certificate is trusted
+            if !self.is_cert_trusted(&their_cert, &remote_hostid) {
+                // Continue to next connection attempt
+                continue;
+            }
 
             let self_clone = self.clone();
             let my_key_cert = listener.my_key_cert.clone();

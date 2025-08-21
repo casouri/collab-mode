@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use collab_mode::transcript_runner::{list_transcripts, display_transcript, get_transcripts_dir, run_single_transcript};
+use collab_mode::transcript_runner::{
+    display_transcript, get_transcripts_dir, list_transcripts, run_single_transcript,
+};
 
 #[derive(Parser)]
 #[command(name = "transcript-runner")]
@@ -27,11 +29,11 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    
+
     match cli.command {
         Commands::List => {
             let transcripts = list_transcripts()?;
-            
+
             if transcripts.is_empty() {
                 println!("No transcript tests found.");
                 println!("Transcript files should be placed in: src/server/transcripts/");
@@ -57,18 +59,16 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Commands::Show { transcript } => {
-            display_transcript(&transcript)
-        }
+        Commands::Show { transcript } => display_transcript(&transcript),
         Commands::Test { transcript } => {
             // Initialize logging
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
                 )
                 .init();
-                
+
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 match run_single_transcript(&transcript).await {

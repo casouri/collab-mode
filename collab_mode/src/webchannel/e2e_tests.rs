@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod e2e_tests {
     use super::super::*;
-    use crate::config_man::{create_key_cert, ArcKeyCert};
+    use crate::config_man::{create_key_cert, AcceptMode, ArcKeyCert};
     use crate::signaling;
     use crate::types::{FileContentOrPath, Info};
     use std::sync::Arc;
@@ -124,8 +124,18 @@ mod e2e_tests {
         tracing::info!("Created test IDs: {} and {}", id1, id2);
 
         // Create WebChannels
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
 
         // Create key/cert pairs
         let key_cert1 = create_test_key_cert(&id1);
@@ -218,8 +228,18 @@ mod e2e_tests {
         let id1 = create_test_id("chunk-1");
         let id2 = create_test_id("chunk-2");
 
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
 
         let key_cert1 = create_test_key_cert(&id1);
         let key_cert2 = create_test_key_cert(&id2);
@@ -315,7 +335,12 @@ mod e2e_tests {
 
         let (hub_tx, mut hub_rx) = mpsc::channel::<Message>(1000);
         let hub_id = create_test_id("hub");
-        let hub_channel = WebChannel::new(hub_id.clone(), hub_tx);
+        let hub_channel = WebChannel::new(
+            hub_id.clone(),
+            hub_tx,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
         let hub_key_cert = create_test_key_cert(&hub_id);
 
         // Start hub accepting connections
@@ -341,7 +366,12 @@ mod e2e_tests {
         for i in 0..num_clients {
             let (tx, rx) = mpsc::channel::<Message>(100);
             let id = create_test_id(&format!("client-{}", i));
-            let channel = WebChannel::new(id.clone(), tx);
+            let channel = WebChannel::new(
+                id.clone(),
+                tx,
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(AcceptMode::All)),
+            );
             let key_cert = create_test_key_cert(&id);
 
             // Start client accepting connections too
@@ -490,8 +520,18 @@ mod e2e_tests {
         let id1 = create_test_id("recovery-1");
         let id2 = create_test_id("recovery-2");
 
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
 
         let key_cert1 = create_test_key_cert(&id1);
         let key_cert2 = create_test_key_cert(&id2);
@@ -568,8 +608,18 @@ mod e2e_tests {
         let id1 = create_test_id("cert-1");
         let id2 = create_test_id("cert-2");
 
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
 
         let key_cert1 = create_test_key_cert(&id1);
         let key_cert2 = create_test_key_cert(&id2);
@@ -618,8 +668,18 @@ mod e2e_tests {
         let id1 = create_test_id("throughput-1");
         let id2 = create_test_id("throughput-2");
 
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
 
         let key_cert1 = create_test_key_cert(&id1);
         let key_cert2 = create_test_key_cert(&id2);
@@ -718,8 +778,18 @@ mod e2e_tests {
         let id1 = create_test_id("ice-1");
         let id2 = create_test_id("ice-2");
 
-        let channel1 = WebChannel::new(id1.clone(), tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(AcceptMode::All)),
+        );
 
         let key_cert1 = create_test_key_cert(&id1);
         let key_cert2 = create_test_key_cert(&id2);

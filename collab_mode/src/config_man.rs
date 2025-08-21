@@ -74,7 +74,7 @@ pub struct ConfigProject {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub enum AcceptMode {
     /// Accept all hosts, even those not in the trusted hosts list.
     All,

@@ -1,4 +1,3 @@
-
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, jsonrpc};
@@ -58,11 +57,7 @@ fn main() -> anyhow::Result<()> {
             if !socket {
                 jsonrpc::run_stdio(runtime, config_man)
             } else {
-                jsonrpc::run_socket(
-                    &format!("localhost:{}", socket_port),
-                    runtime,
-                    config_man,
-                )
+                jsonrpc::run_socket(&format!("localhost:{}", socket_port), runtime, config_man)
             }
         }
         _ => {
