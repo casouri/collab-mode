@@ -94,7 +94,8 @@ impl Drop for TestEnvironment {
 }
 
 fn create_test_id(prefix: &str) -> ServerId {
-    format!("{}-{}", prefix, Uuid::new_v4())
+    // format!("{}-{}", prefix, Uuid::new_v4())
+    prefix.to_string()
 }
 
 #[cfg(any(test, feature = "test-runner"))]
@@ -1841,7 +1842,7 @@ async fn test_send_ops_e2e() {
         .hub
         .editor
         .open_file(
-            "self",
+            &setup.hub.id,
             serde_json::json!({
                 "type": "projectFile",
                 "project": "TestProject",
@@ -1885,6 +1886,8 @@ async fn test_send_ops_e2e() {
     // Step 1: Hub sends op
     //
 
+    tracing::info!("\n\nStep 1: Hub sends op\n\n");
+
     // Hub sends ops to insert text at the beginning (hub acts as a client to itself)
     let ops = vec![serde_json::json!({
                 "op": {
@@ -1892,10 +1895,10 @@ async fn test_send_ops_e2e() {
                 },
                 "groupSeq": 1
     })];
-    let send_ops_resp = setup
+    let _ = setup
         .hub
         .editor
-        .send_ops(hub_doc_id, "self", ops)
+        .send_ops(hub_doc_id, &setup.hub.id, ops)
         .await
         .unwrap();
 
@@ -1965,6 +1968,8 @@ async fn test_send_ops_e2e() {
     // Step 2: Spoke 1 sends op
     //
 
+    tracing::info!("\n\nStep 2: Spoke 1 sends op\n\n");
+
     // Now Spoke 1 sends its own op
     // Insert at position 10 (after "Modified: ")
     let _send_ops_resp_spoke1 = setup.spokes[0]
@@ -1986,10 +1991,17 @@ async fn test_send_ops_e2e() {
     // Step 3: Spoke 2 sends op in the same time
     //
 
+    tracing::info!("\n\nStep 3: Spoke 2 sends op in the same time\n\n");
+
     // Spoke 2 sends its own op before processing spoke 1’s op. This
     // will also fetch Spoke1's op in the response.
 
     // First wait until spoke 2 receives spoke 1’s op.
+    setup.spokes[1]
+        .editor
+        .wait_for_notification("RemoteOpsArrived", 5)
+        .await
+        .unwrap();
     setup.spokes[1]
         .editor
         .wait_for_notification("RemoteOpsArrived", 5)
@@ -2029,6 +2041,8 @@ async fn test_send_ops_e2e() {
     //
     // Step 4: In spoke 1, should receive its op’s ack and spoke 2’s op.
     //
+
+    tracing::info!("\n\nStep 4: In spoke 1, should receive its op’s ack and spoke 2’s op.\n\n");
 
     // Wait for RemoteOpsArrived notification in Spoke1
     setup.spokes[0]
@@ -2235,7 +2249,7 @@ async fn test_share_file_e2e() {
     let _ = setup
         .hub
         .editor
-        .send_ops(doc_id, SERVER_ID_SELF, ops)
+        .send_ops(doc_id, &setup.hub.id, ops)
         .await
         .unwrap();
 
