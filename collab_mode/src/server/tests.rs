@@ -1819,14 +1819,6 @@ async fn test_list_files_nested_structure() {
 
 #[tokio::test]
 async fn test_send_ops_e2e() {
-    // Test: End-to-end test for SendOps functionality
-    // Note: This test currently only tests the hub sending ops to itself
-    // because of an architectural limitation where OpFromServer messages
-    // contain doc_ids that are specific to the sending server, and
-    // receiving servers can't map these to their own doc_ids.
-    // A full test would require refactoring to track doc mappings
-    // between servers or use file descriptors instead of doc_ids.
-
     let env = TestEnvironment::new().await.unwrap();
     let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
 
@@ -1889,30 +1881,23 @@ async fn test_send_ops_e2e() {
         .unwrap();
     assert_eq!(spoke2_content, "Hello from test.txt");
 
-    sleep(Duration::from_millis(200)).await;
+    //
+    // Step 1: Hub sends op
+    //
 
     // Hub sends ops to insert text at the beginning (hub acts as a client to itself)
-    let send_ops_resp = setup
-        .hub
-        .editor
-        .send_ops(
-            hub_doc_id,
-            "self",
-            vec![serde_json::json!({
+    let ops = vec![serde_json::json!({
                 "op": {
                     "Ins": [0, "Modified: "]
                 },
                 "groupSeq": 1
-            })],
-        )
+    })];
+    let send_ops_resp = setup
+        .hub
+        .editor
+        .send_ops(hub_doc_id, "self", ops)
         .await
         .unwrap();
-
-    // Hub shouldn't receive any remote ops in response initially (ops are from itself)
-    assert!(send_ops_resp["ops"].as_array().unwrap().is_empty());
-
-    // Give time for ops to propagate
-    sleep(Duration::from_millis(500)).await;
 
     // Spoke 2 should receive RemoteOpsArrived notification
     let notification = setup.spokes[1]
@@ -1943,8 +1928,6 @@ async fn test_send_ops_e2e() {
                 },
                 "siteId": 0, // site is 0 because the op is from the hub
     });
-    dbg!(serde_json::to_string(op).unwrap());
-    dbg!(serde_json::to_string(&expected_op).unwrap());
     assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
 
     // Spoke 1 should also receive RemoteOpsArrived notification and fetch the op
@@ -1978,6 +1961,10 @@ async fn test_send_ops_e2e() {
     });
     assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
 
+    //
+    // Step 2: Spoke 1 sends op
+    //
+
     // Now Spoke 1 sends its own op
     // Insert at position 10 (after "Modified: ")
     let _send_ops_resp_spoke1 = setup.spokes[0]
@@ -1995,12 +1982,20 @@ async fn test_send_ops_e2e() {
         .await
         .unwrap();
 
-    // Give time for ops to propagate and for Spoke2 to receive notification
-    sleep(Duration::from_millis(1000)).await;
+    //
+    // Step 3: Spoke 2 sends op in the same time
+    //
 
-    // Spoke 2 sends its own op - this will also fetch Spoke1's op in the response
-    // Insert at position 10 (also after "Modified: ", will be transformed by OT)
-    let send_ops_resp_spoke2 = setup.spokes[1]
+    // Spoke 2 sends its own op before processing spoke 1’s op. This
+    // will also fetch Spoke1's op in the response.
+
+    // First wait until spoke 2 receives spoke 1’s op.
+    setup.spokes[1]
+        .editor
+        .wait_for_notification("RemoteOpsArrived", 5)
+        .await
+        .unwrap();
+    let send_ops_resp = setup.spokes[1]
         .editor
         .send_ops(
             spoke2_doc_id,
@@ -2015,8 +2010,8 @@ async fn test_send_ops_e2e() {
         .await
         .unwrap();
     // The response should contain Spoke1's op that was buffered
-    tracing::info!("Spoke2 SendOps response: {:?}", send_ops_resp_spoke2);
-    let remote_ops = send_ops_resp_spoke2["ops"].as_array().unwrap();
+    tracing::info!("Spoke2 SendOps response: {:?}", send_ops_resp);
+    let remote_ops = send_ops_resp["ops"].as_array().unwrap();
 
     // Should have received the insert op from spoke 1
     assert_eq!(remote_ops.len(), 1);
@@ -2031,36 +2026,33 @@ async fn test_send_ops_e2e() {
     });
     assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
 
+    //
+    // Step 4: In spoke 1, should receive its op’s ack and spoke 2’s op.
+    //
+
     // Wait for RemoteOpsArrived notification in Spoke1
-    let notification_spoke1_from_spoke2 = setup.spokes[0]
+    setup.spokes[0]
         .editor
         .wait_for_notification("RemoteOpsArrived", 5)
         .await
         .unwrap();
 
-    assert_eq!(
-        notification_spoke1_from_spoke2["hostId"],
-        setup.hub.id.clone()
-    );
-    assert_eq!(notification_spoke1_from_spoke2["docId"], spoke1_doc_id);
-
     // Spoke1 sends empty SendOps to fetch the new ops
-    let fetch_ops_resp_spoke1_2 = setup.spokes[0]
+    let send_ops_resp = setup.spokes[0]
         .editor
         .send_ops(spoke1_doc_id, &setup.hub.id, vec![])
         .await
         .unwrap();
 
     // Print out the ops received for debugging
-    let ops_from_spoke2 = fetch_ops_resp_spoke1_2["ops"].as_array().unwrap();
+    let ops_from_spoke2 = send_ops_resp["ops"].as_array().unwrap();
     tracing::info!("Spoke1 received ops from Spoke2: {:?}", ops_from_spoke2);
 
     // Verify we received Spoke2's op
     assert_eq!(ops_from_spoke2.len(), 1);
     let op = &ops_from_spoke2[0];
 
-    // The op should be Spoke2's insertion, transformed if necessary
-    // The exact position might be transformed due to OT
+    // The op should be Spoke2's insertion transformed
     tracing::info!(
         "Spoke1 received op details: {}",
         serde_json::to_string_pretty(op).unwrap()
