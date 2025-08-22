@@ -1,6 +1,7 @@
-;;; record-change-test.el --- Testing framework for collab-mode edit recording -*- lexical-binding: t; -*-
+;;; edit-tracking-test.el --- Testing framework for collab-mode edit recording -*- lexical-binding: t; -*-
 
 ;;; Commentary:
+;;
 ;; This file provides a testing framework for the edit recording
 ;; functionality in collab-mode.el. It creates two buffers (work and mirror),
 ;; executes commands from transcript files, and verifies that recorded
@@ -26,19 +27,6 @@
 
 ;;; Test minor mode
 
-(defun collab-test--post-command ()
-  "Test version of collab--post-command that applies ops directly to mirror."
-  (when collab--ops-current-command
-    ;; Apply the recorded ops to mirror buffer
-    (collab-test--apply-ops-to-mirror (nreverse collab--ops-current-command))
-    (setq collab--ops-current-command nil)))
-
-(defun collab-test--post-command-hasty ()
-  "Test version of collab--post-command-hasty that applies ops directly to mirror."
-  (when collab--ops-current-command
-    (collab-test--apply-ops-to-mirror (nreverse collab--ops-current-command))
-    (setq collab--ops-current-command nil)))
-
 (define-minor-mode collab-test-mode
   "Test mode for collab-mode edit recording.
 This mode sets up the same hooks as `collab-monitored-mode' but
@@ -50,14 +38,13 @@ to a mirror buffer for testing."
         ;; Use the actual collab-mode hooks for recording changes
         (add-hook 'before-change-functions #'collab--before-change 0 t)
         (add-hook 'after-change-functions #'collab--after-change 0 t)
-        (add-hook 'pre-command-hook #'collab--pre-command 0 t)
-        ;; Use our test post-command hook instead of collab's
         (if collab-hasty-p
-            (add-hook 'post-command-hook
-                      #'collab-test--post-command-hasty 0 t)
-          (add-hook 'post-command-hook
-                    #'collab-test--post-command 0 t))
+            (add-hook 'collab--after-change-hook #'collab--after-change-hasty 0 t)
+          (add-hook 'collab--after-change-hook #'collab--after-change-default 0 t))
+        (setq-local collab--send-ops-fn #'collab-test--apply-ops-to-mirror)
+
         ;; Initialize collab-mode variables
+        (setq-local collab--verbose t)
         (setq-local collab--pending-ops nil)
         (setq-local collab--ops-current-command nil)
         (setq-local collab--group-seq 1)
@@ -65,9 +52,8 @@ to a mirror buffer for testing."
     ;; Disable - remove all hooks
     (remove-hook 'before-change-functions #'collab--before-change t)
     (remove-hook 'after-change-functions #'collab--after-change t)
-    (remove-hook 'pre-command-hook #'collab--pre-command t)
-    (remove-hook 'post-command-hook #'collab-test--post-command t)
-    (remove-hook 'post-command-hook #'collab-test--post-command-hasty t)))
+    (remove-hook 'collab--after-change-hook #'collab--after-change-default)
+    (remove-hook 'collab--after-change-hook #'collab--after-change-hasty)))
 
 ;;; Operation processing
 
@@ -247,32 +233,38 @@ This uses timers to ensure proper event processing between commands."
 
 ;;; Public interface
 
-(defun collab-test-run-transcript (transcript-file)
-  "Run a single TRANSCRIPT-FILE and verify results."
+(defun collab-test-setup-transcript (transcript-file)
+  "Setup the buffer for a single TRANSCRIPT-FILE.
+
+Return the commands in the transcript file."
   (interactive "fTranscript file: ")
   (let* ((parsed (collab-test--parse-transcript transcript-file))
          (headers (nth 0 parsed))
          (commands (nth 1 parsed))
          (initial-content (nth 2 parsed)))
-    
+
     ;; Setup buffers
     (collab-test--setup-buffers initial-content)
-    
+
     ;; Apply headers and enable test mode
     (collab-test--apply-headers headers)
-    
+
     ;; Show buffers side-by-side when running interactively
-    (when (called-interactively-p 'any)
-      (delete-other-windows)
-      (switch-to-buffer collab-test--work-buffer)
-      (split-window-horizontally)
-      (other-window 1)
-      (switch-to-buffer collab-test--mirror-buffer)
-      (other-window 1))
+    (delete-other-windows)
+    (switch-to-buffer collab-test--work-buffer)
+    (split-window-horizontally)
+    (other-window 1)
+    (switch-to-buffer collab-test--mirror-buffer)
+    (other-window 1)
 
     (select-window (get-buffer-window collab-test--work-buffer))
     (collab-test-mode)
+    commands))
 
+(defun collab-test-run-transcript (transcript-file)
+  "Run a single TRANSCRIPT-FILE and verify results."
+  (interactive "fTranscript file: ")
+  (let ((commands (collab-test-setup-transcript transcript-file)))
     ;; Execute commands asynchronously
     (collab-test--execute-commands-async
      commands
@@ -309,5 +301,6 @@ This uses timers to ensure proper event processing between commands."
                    (format "(collab-test-run-transcript %S)"
                            transcript-file))))
 
-(provide 'record-change-test)
+(provide 'edit-tracking-test)
+
 ;;; record-change-test.el ends here
