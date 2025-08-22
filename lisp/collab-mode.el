@@ -425,7 +425,7 @@ delay (‘collab-send-ops-delay’).")
                        (collab--maybe-amalgamate last-pending-op this-op))))))
       (if (null amalgamated-op)
           ;; No amalgamate.
-          (nconc ops collab--pending-ops)
+          (setq collab--pending-ops (nconc ops collab--pending-ops))
         ;; Amalgamated.
         (setcar collab--pending-ops amalgamated-op)
         (when collab--verbose
