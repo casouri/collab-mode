@@ -421,8 +421,8 @@ delay (‘collab-send-ops-delay’).")
            (and (eq 1 (length ops))
                 (let ((this-op (car ops))
                       (last-pending-op (car collab--pending-ops)))
-                  (and last-op
-                       (collab--maybe-amalgamate last-op this-op))))))
+                  (and last-pending-op
+                       (collab--maybe-amalgamate last-pending-op this-op))))))
       (if (null amalgamated-op)
           ;; No amalgamate.
           (nconc ops collab--pending-ops)
