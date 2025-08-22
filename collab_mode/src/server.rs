@@ -623,7 +623,7 @@ impl Server {
                 Ok(())
             }
             Msg::OpFromServer(ops) => {
-                self.handle_op_from_server(editor_tx, ops, msg.host.clone())
+                self.handle_op_from_server(editor_tx, webchannel, ops, msg.host.clone())
                     .await?;
                 Ok(())
             }
@@ -1108,7 +1108,7 @@ impl Server {
                     .unwrap_or(file)
                     .to_string();
 
-                let mut doc = Doc::new(
+                let doc = Doc::new(
                     filename.clone(),
                     JsonMap::new(),
                     Some(full_path),
@@ -1377,6 +1377,7 @@ impl Server {
     async fn handle_op_from_server(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
         ops: Vec<FatOp>,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
@@ -1385,8 +1386,6 @@ impl Server {
         }
 
         let doc_id = ops[0].doc;
-        // Unwrap because server only sends global ops.
-        let first_gseq = ops[0].seq.unwrap();
 
         // Find doc in remote_docs with (host_id, doc_id) key
         let key = (remote_host_id.clone(), doc_id);
@@ -1409,21 +1408,55 @@ impl Server {
         let our_site_id = remote_doc.engine.site();
         let op_is_not_ours = ops[0].site() != our_site_id;
 
-        let expected_gseq =
-            remote_doc.engine.current_gseq() + remote_doc.remote_op_buffer.len() as u32 + 1;
-        if expected_gseq != first_gseq {
-            // Probably because of disconnect, just don’t add the op
-            // to remote_ops and instead get them when next time we
-            // send ops to server.
-            tracing::warn!(
-                "Received remote op with different gseq than expected, ignoring, expecting {} got {}", expected_gseq, first_gseq,
-            )
-        } else {
-            // Save remote ops to buffer
-            remote_doc.remote_op_buffer.extend(ops);
+        let old_buffer_len = remote_doc.remote_op_buffer.len();
+        for remote_op in ops {
+            let expected_gseq =
+                remote_doc.engine.current_gseq() + remote_doc.remote_op_buffer.len() as u32 + 1;
+            let gseq = remote_op.seq;
+            // This shouldn’t ever happen.
+            if gseq.is_none() {
+                tracing::error!("Received remote op without global seq: {:?}", &remote_op);
+                send_notification(
+                    editor_tx,
+                    NotificationCode::InternalError,
+                    serde_json::json!({
+                        "message": "Received remote op without global seq, terminating doc",
+                    }),
+                )
+                .await;
+                self.remote_docs.remove(&key);
+                return Ok(());
+            }
+            let gseq = gseq.unwrap();
+
+            if gseq < expected_gseq {
+                // Outdated, ignore.
+                tracing::warn!(
+                    "Received remote op with smaller gseq ({}) than expected ({}), ignoring",
+                    gseq,
+                    expected_gseq,
+                )
+            } else if gseq > expected_gseq {
+                // Missing ops in the middle, probably due to disconnection.
+                tracing::warn!(
+                    "Received remote op with larger gseq ({}) than expected ({}), ignoring",
+                    gseq,
+                    expected_gseq,
+                );
+                let msg = Msg::RequestOps {
+                    doc: doc_id,
+                    after: expected_gseq - 1,
+                };
+                send_to_remote(webchannel, &remote_host_id, None, msg).await;
+            } else {
+                // Save remote ops to buffer
+                remote_doc.remote_op_buffer.push(remote_op);
+            }
         }
 
-        if op_is_not_ours {
+        // Notify editor to get the new remote ops.
+        let new_buffer_len = remote_doc.remote_op_buffer.len();
+        if op_is_not_ours && new_buffer_len > old_buffer_len {
             send_notification(
                 editor_tx,
                 NotificationCode::RemoteOpsArrived,
