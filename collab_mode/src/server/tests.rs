@@ -2002,11 +2002,6 @@ async fn test_send_ops_e2e() {
         .wait_for_notification("RemoteOpsArrived", 5)
         .await
         .unwrap();
-    setup.spokes[1]
-        .editor
-        .wait_for_notification("RemoteOpsArrived", 5)
-        .await
-        .unwrap();
     let send_ops_resp = setup.spokes[1]
         .editor
         .send_ops(
