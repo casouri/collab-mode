@@ -1420,13 +1420,15 @@ impl ClientEngine {
         converted_ops
     }
 
-    /// Process local op, possibly transform it and add it to history.
+    /// Process local op, convert each op to two things: FatOp and
+    /// EditInstruction. Apply FatOps to internal doc, and add to
+    /// history; return the EditInstructions.
     pub fn process_local_op(
         &mut self,
         editor_op: EditorFatOp,
         doc: DocId,
         site_seq: LocalSeq,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<Vec<EditInstruction>> {
         tracing::debug!(?editor_op, ?self.current_site_seq, "process_local_op");
 
         let op = editor_op.op;
@@ -1438,51 +1440,55 @@ impl ClientEngine {
         }
         self.current_site_seq = site_seq;
 
-        let ops = match &op {
-            EditorOp::Ins(_, ref text) => {
+        let mut ops = Vec::new();
+        let mut instructions = Vec::new();
+        match op.clone() {
+            EditorOp::Ins(pos, text) => {
                 if (text.chars().count() as u64) == 0 {
                     return Err(EngineError::EmptyInsert(op));
                 }
-                vec![self.internal_doc.convert_editor_op_and_apply(op, self.site)]
+                ops.push(self.internal_doc.convert_editor_op_and_apply(op, self.site));
+                instructions.push(EditInstruction::Ins(vec![(pos, text)]));
             }
-            EditorOp::Del(_, _) => {
+            EditorOp::Del(pos, text) => {
                 if self.internal_doc.ranges.len() == 0 {
                     return Err(EngineError::DeleteInEmptyDoc);
                 }
-                vec![self.internal_doc.convert_editor_op_and_apply(op, self.site)]
+                ops.push(self.internal_doc.convert_editor_op_and_apply(op, self.site));
+                instructions.push(EditInstruction::Del(vec![(pos, text)]));
             }
-            EditorOp::Undo => self
-                .generate_undo_op_1(false)
-                .into_iter()
-                .map(|op| {
-                    let _ = self.convert_internal_op_and_apply(op.op.clone());
-                    op.op
-                })
-                .collect(),
-            EditorOp::Redo => self
-                .generate_undo_op_1(true)
-                .into_iter()
-                .map(|op| {
-                    let _ = self.convert_internal_op_and_apply(op.op.clone());
-                    op.op
-                })
-                .collect(),
+            EditorOp::Undo => {
+                for fat_op in self.generate_undo_op_1(false) {
+                    let lean_op = self.convert_internal_op_and_apply(fat_op.op.clone());
+                    ops.push(fat_op.op);
+                    instructions.push(lean_op.op);
+                }
+            }
+            EditorOp::Redo => {
+                for fat_op in self.generate_undo_op_1(true) {
+                    let lean_op = self.convert_internal_op_and_apply(fat_op.op.clone());
+                    ops.push(fat_op.op);
+                    instructions.push(lean_op.op);
+                }
+            }
         };
 
         for op in ops {
             let inferred_seq = (self.gh.global.len() + self.gh.local.len() + 1) as GlobalSeq;
             let op_kind = self.gh.process_opkind(kind, inferred_seq)?;
 
-            self.gh.local.push(crate::op::FatOp {
+            let fat_op = crate::op::FatOp {
                 seq: None,
                 doc,
                 op,
                 site_seq,
                 kind: op_kind,
                 group_seq,
-            });
+            };
+            self.gh.local.push(fat_op);
         }
-        Ok(())
+
+        Ok(instructions)
     }
 
     /// Process remote op, transform it and add it to history. Return

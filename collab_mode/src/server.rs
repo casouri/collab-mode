@@ -53,6 +53,8 @@ struct RemoteDoc {
     remote_op_buffer: Vec<FatOp>,
     /// The server engine that transforms and stores ops for this doc.
     engine: ClientEngine,
+    /// The document buffer.
+    buffer: GapBuffer<char>,
 }
 
 /// When remote sends a request and we delegate it to the editor, we
@@ -153,14 +155,25 @@ impl Doc {
         }
         Ok(())
     }
+}
 
-    /// Return the current snapshot of the document.
-    pub fn snapshot(&self, doc_id: DocId) -> Snapshot {
-        Snapshot {
-            buffer: self.buffer.iter().collect::<String>(),
-            file_name: self.name.clone(),
-            seq: self.engine.current_seq(),
-            doc_id,
+// *** Impl RemoteDoc
+
+impl RemoteDoc {
+    /// Apply an EditInstruction to the buffer.
+    pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) {
+        match instruction {
+            EditInstruction::Ins(edits) => {
+                for (pos, str) in edits.iter().rev() {
+                    self.buffer.insert_many(*pos as usize, str.chars());
+                }
+            }
+            EditInstruction::Del(edits) => {
+                for (pos, str) in edits.iter().rev() {
+                    let end = *pos as usize + str.chars().count();
+                    self.buffer.drain((*pos as usize)..end);
+                }
+            }
         }
     }
 }
@@ -941,16 +954,19 @@ impl Server {
                     self.docs.insert(doc_id, doc);
 
                     // Also create a RemoteDoc for ourselves (we act as both server and client)
+                    let mut buffer = GapBuffer::new();
+                    buffer.insert_many(0, content.chars());
                     let remote_doc = RemoteDoc {
                         name: filename.clone(),
                         file_desc: file_desc.clone(),
                         next_site_seq: 1,
                         meta: JsonMap::new(),
                         remote_op_buffer: Vec::new(),
-                        // Global seq starts from 1. So use 1 for the
+                        // Global seq starts from 1. So use 0 for the
                         // base_seq, meaning we expect next global seq
                         // to be 1.
                         engine: ClientEngine::new(self.site_id, 0, content.chars().count() as u64),
+                        buffer,
                     };
                     self.remote_docs
                         .insert((SERVER_ID_SELF.to_string(), doc_id), remote_doc);
@@ -998,14 +1014,16 @@ impl Server {
         // Open remote file.
 
         // Check if we already have this file in remote_docs
-        for (doc_id, remote_doc) in &self.remote_docs {
-            if remote_doc.file_desc == file_desc {
-                let err = lsp_server::ResponseError {
-                    code: ErrorCode::BadRequest as i32,
-                    message: format!("File {} ({:?}) is already opened", remote_doc.name, doc_id),
-                    data: None,
+        for ((doc_host_id, doc_id), remote_doc) in &self.remote_docs {
+            if doc_host_id == &host_id && remote_doc.file_desc == file_desc {
+                // Return the current buffer content instead of error
+                let resp = OpenFileResp {
+                    content: remote_doc.buffer.iter().collect(),
+                    site_id: remote_doc.engine.site(),
+                    filename: remote_doc.name.clone(),
+                    doc_id: *doc_id,
                 };
-                send_response(editor_tx, req_id, (), Some(err)).await;
+                send_response(editor_tx, req_id, resp, None).await;
                 return Ok(());
             }
         }
@@ -1186,6 +1204,8 @@ impl Server {
 
         // Create RemoteDoc
         // Use the site_id assigned by the remote server (from snapshot)
+        let mut buffer = GapBuffer::new();
+        buffer.insert_many(0, snapshot.content.chars());
         let remote_doc = RemoteDoc {
             name: snapshot.name.clone(),
             file_desc: snapshot.file_desc.clone(),
@@ -1197,6 +1217,7 @@ impl Server {
                 snapshot.seq,
                 snapshot.content.chars().count() as u64,
             ),
+            buffer,
         };
 
         // Store with (host_id, remote_doc_id) as key
@@ -1437,18 +1458,28 @@ impl Server {
             let site_seq = remote_doc.next_site_seq;
             remote_doc.next_site_seq += 1;
 
-            if let Err(err) = remote_doc
+            let instructions = remote_doc
                 .engine
-                .process_local_op(editor_op, doc_id, site_seq)
-            {
-                tracing::error!("Failed to process local op: {}", err);
-                let err = lsp_server::ResponseError {
-                    code: ErrorCode::DocFatal as i32,
-                    message: format!("Failed to process op: {}", err),
-                    data: None,
-                };
-                send_response(editor_tx, req_id, (), Some(err)).await;
-                return Ok(());
+                .process_local_op(editor_op, doc_id, site_seq);
+
+            match instructions {
+                Ok(instrs) => {
+                    // Apply each processed op to the buffer
+                    for instr in instrs {
+                        remote_doc.apply_edit_instruction(&instr);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("Failed to process local op: {}", err);
+                    let err = lsp_server::ResponseError {
+                        code: ErrorCode::DocFatal as i32,
+                        message: format!("Failed to process op: {}", err),
+                        data: None,
+                    };
+                    send_response(editor_tx, req_id, (), Some(err)).await;
+                    self.remote_docs.remove(&(host_id, doc_id));
+                    return Ok(());
+                }
             }
         }
 
@@ -1456,6 +1487,7 @@ impl Server {
         let mut lean_ops = Vec::new();
         for remote_op in remote_ops {
             if let Some((lean_op, _seq)) = remote_doc.engine.process_remote_op(remote_op)? {
+                remote_doc.apply_edit_instruction(&lean_op.op);
                 lean_ops.push(lean_op);
             }
         }
@@ -1514,6 +1546,8 @@ impl Server {
         self.docs.insert(doc_id, doc);
 
         // Also create a RemoteDoc for ourselves (we act as both server and client)
+        let mut buffer = GapBuffer::new();
+        buffer.insert_many(0, params.content.chars());
         let remote_doc = RemoteDoc {
             name: params.filename.clone(),
             file_desc: FileDesc::File { id: doc_id },
@@ -1521,6 +1555,7 @@ impl Server {
             meta: params.meta,
             remote_op_buffer: Vec::new(),
             engine: ClientEngine::new(self.site_id, 0, params.content.chars().count() as u64),
+            buffer,
         };
         self.remote_docs
             .insert((SERVER_ID_SELF.to_string(), doc_id), remote_doc);
