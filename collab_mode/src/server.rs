@@ -1400,15 +1400,24 @@ impl Server {
             return Ok(());
         }
         let remote_doc = remote_doc.unwrap();
+        tracing::info!(
+            "Received OpFromServer for doc {} from {}",
+            doc_id,
+            remote_host_id
+        );
 
         let our_site_id = remote_doc.engine.site();
         let op_is_not_ours = ops[0].site() != our_site_id;
 
-        if remote_doc.engine.current_gseq() + 1 != first_gseq {
+        let expected_gseq =
+            remote_doc.engine.current_gseq() + remote_doc.remote_op_buffer.len() as u32 + 1;
+        if expected_gseq != first_gseq {
             // Probably because of disconnect, just don’t add the op
             // to remote_ops and instead get them when next time we
             // send ops to server.
-            tracing::info!("Received remote op with larger gseq than expected, ignoring")
+            tracing::warn!(
+                "Received remote op with different gseq than expected, ignoring, expecting {} got {}", expected_gseq, first_gseq,
+            )
         } else {
             // Save remote ops to buffer
             remote_doc.remote_op_buffer.extend(ops);
