@@ -341,16 +341,14 @@ If MARK non-nil, show active region."
 ;; increment the group sequence in pre-command-hook, so ops make in
 ;; the same command are grouped together.
 ;;
-;; Amalgamation is done in post-command-hook. If the current command
-;; only created one op (usually inserting or deleting one character),
-;; we try to amalgamate it with the previous op.
+;; Amalgamation is done when adding ops to pending-ops. If the current
+;; command only created one op (usually inserting or deleting one
+;; character), we try to amalgamate it with the previous op.
 ;;
-;; Because future op might be able to amalgamate with the current op,
-;; we delay sending ops to the collab process until a) user created an
-;; op that can’t amalgamate with the pending ops, in which case we
-;; send the pending ops and keep the new op to be amalgamated in the
-;; future; or b) 1s (‘collab-send-ops-delay’ passed, in which case we
-;; send the op regardless. Case b) uses an idle timer.
+;; Originally we use a complicated condition to decide when to send
+;; out ops. But now we follow eglot’s example and simply use an idle
+;; timer (default to 0.5s) to send out ops. Every op in the same
+;; “batch” has the same group seq.
 
 (defvar-local collab--doc-and-host nil
   "(DOC-ID . HOST-ID) for the current buffer.
@@ -508,9 +506,12 @@ delay (‘collab-send-ops-delay’).")
       ;; TODO, send full buffer.
       (when collab--verbose
         (message "Hit a tracking error! Sending full buffer"))
-    (let ((ops (nreverse collab--pending-ops)))
-      (setq collab--pending-ops nil)
-      (funcall collab--send-ops-fn ops))))
+    (unwind-protect
+        (let ((ops (nreverse collab--pending-ops)))
+          (setq collab--pending-ops nil)
+          (funcall collab--send-ops-fn ops))
+      (when (numberp collab--group-seq)
+        (cl-incf collab--group-seq)))))
 
 ;; https://stackoverflow.com/questions/6590889
 ;; TODO: Support for overwrite-mode, abbrev-mode, auto-fill.
