@@ -68,7 +68,8 @@ struct OrigRequest {
 
 /// Stores relevant for the server.
 pub struct Server {
-    /// Host id of this server.
+    /// Host id of this server. Once set, this cannot change, because
+    /// we use our own host_id in remote_docs, etc too.
     host_id: ServerId,
     /// SiteId given to ourselves.
     site_id: SiteId,
@@ -894,7 +895,7 @@ impl Server {
         file_desc: FileDesc,
         req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
-        if self.host_id == host_id || host_id == SERVER_ID_SELF {
+        if self.host_id == host_id {
             // Handle local file opening
             match &file_desc {
                 FileDesc::ProjectFile { project, file } => {
@@ -952,7 +953,7 @@ impl Server {
                     );
 
                     // Add ourselves as a subscriber since we're also a client
-                    doc.subscribers.insert(SERVER_ID_SELF.to_string(), 0);
+                    doc.subscribers.insert(self.host_id.clone(), 0);
 
                     self.docs.insert(doc_id, doc);
 
@@ -972,7 +973,7 @@ impl Server {
                         buffer,
                     };
                     self.remote_docs
-                        .insert((SERVER_ID_SELF.to_string(), doc_id), remote_doc);
+                        .insert((self.host_id.clone(), doc_id), remote_doc);
 
                     // Send response
                     let resp = OpenFileResp {
@@ -1560,7 +1561,7 @@ impl Server {
             buffer,
         };
         self.remote_docs
-            .insert((SERVER_ID_SELF.to_string(), doc_id), remote_doc);
+            .insert((self.host_id.clone(), doc_id), remote_doc);
 
         // Return response with doc_id and site_id
         let resp = ShareFileResp {
