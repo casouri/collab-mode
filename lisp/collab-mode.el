@@ -402,21 +402,25 @@ delay (‘collab-send-ops-delay’).")
   (cons '("self" . ("" ""))
         collab-host-alist))
 
+(defun collab--op-empty-p (op)
+  "Return non-nil if OP is an empty ins/del op."
+  (eq 0 (length (nth 2 op))))
+
 (defun collab--before-change (beg end)
   "Records the region (BEG . END) to be changed."
-  ;; Each before-change should be followed by at least one
-  ;; after-change. ‘collab--changing-region’ being non-nil means the
-  ;; previous before-change wasn’t followed by a after-change.
+  ;; Each before-change can be followed by zero or more after-change.
+  ;; So collab--changing-region could be non-nil when we enter this
+  ;; function. In that case, just override it.
   (when (not collab--inhibit-hooks)
-    (when collab--changing-region
-      (setq collab--pending-ops 'tracking-error))
     (when (not (eq beg end))
       (setq collab--changing-region
             (list beg end (buffer-substring-no-properties beg end))))))
 
 (defun collab--push-to-pending-ops (ops)
   "Push OPS to ‘collab--pending-ops’, amalgamate if possible."
-  (when (not (eq collab--pending-ops 'tracking-error))
+  (when collab--verbose
+    (message "Push ops: %s" ops))
+  (when (not (eq (car collab--pending-ops) 'tracking-error))
     (let ((amalgamated-op
            (and (eq 1 (length ops))
                 (let ((this-op (car ops))
@@ -427,7 +431,10 @@ delay (‘collab-send-ops-delay’).")
           ;; No amalgamate.
           (setq collab--pending-ops (nconc ops collab--pending-ops))
         ;; Amalgamated.
-        (setcar collab--pending-ops amalgamated-op)
+        (if (collab--op-empty-p amalgamated-op)
+            (setq collab--pending-ops (cdr collab--pending-ops))
+          (setcar collab--pending-ops amalgamated-op))
+
         (when collab--verbose
           (message "%s "
                    (string-replace
@@ -462,8 +469,7 @@ delay (‘collab-send-ops-delay’).")
                      ;; d) Replace.
                      (if (string-prefix-p old current)
                          ;; If OLD is a prefix of CURRENT, this is
-                         ;; actually an insert. ‘electric-pair-mode’
-                         ;; does this: replace "(" with "()".
+                         ;; actually an insert.
                          (push (list (+ beg (length old))
                                      (substring current (length old))
                                      group-seq)
@@ -472,8 +478,8 @@ delay (‘collab-send-ops-delay’).")
                        (push (list 'del beg old group-seq) ops)
                        (push (list 'ins beg current group-seq) ops)))))
 
-             (setq collab--pending-ops 'tracking-error)))
-          (_ (setq collab--pending-ops 'tracking-error))))
+             (setq collab--pending-ops `(tracking-error (format "Assertion failed: (<= rbeg beg end rend): %s" (rbeg beg end rend))))))
+          (_ (setq collab--pending-ops `(tracking-error (format "Unexpected ‘collab--changing-region’ shape: %s" collab--changing-region))))))
 
       ;; Update state.
       (setq collab--changing-region nil)
@@ -502,12 +508,15 @@ delay (‘collab-send-ops-delay’).")
 
 (defun collab--send-ops-now ()
   "Run in ‘collab--send-ops-hook’, send ‘collab--pending-ops’."
-  (if (eq collab--pending-ops 'tracking-error)
+  (if (eq (car collab--pending-ops) 'tracking-error)
       ;; TODO, send full buffer.
       (when collab--verbose
-        (message "Hit a tracking error! Sending full buffer"))
+        (message "Hit a tracking error! Sending full buffer")
+        (message "Reason: %s" (cadr collab--pending-ops)))
     (unwind-protect
         (let ((ops (nreverse collab--pending-ops)))
+          (when collab--verbose
+            (message "Sending ops: %s" ops))
           (setq collab--pending-ops nil)
           (funcall collab--send-ops-fn ops))
       (when (numberp collab--group-seq)
@@ -534,7 +543,17 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
      (if (and (< (string-width str1) 20)
               (eq (+ pos2 (length str2)) pos1))
          (list 'del pos2 (concat str2 str1) seq1)
-       nil))))
+       nil))
+    (`((ins ,pos1 ,str1 ,seq1) . (del ,pos2 ,str2 ,_))
+     ;; Amalgamate if OP2 deletes the end of OP1. If the result is an
+     ;; empty op, the caller will remove it from pending ops.
+     ;; ‘electric-pair-mode’ does this: when you insert "(", it first
+     ;; deletes the "(", then inserts "(" and ")" LOL.
+     (let ((del-end-pos (+ pos2 (length str2)))
+           (ins-end-pos (+ pos1 (length str1))))
+       (if (and (<= pos1 pos2) (eq del-end-pos ins-end-pos))
+           (list 'ins pos1 (substring str1 0 (- pos2 pos1)) seq1)
+         nil)))))
 
 (defvar collab--mode-line
   `(collab-monitored-mode
