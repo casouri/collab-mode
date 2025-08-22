@@ -35,9 +35,8 @@ The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   "Cursor color ring."
   :type '(list string))
 
-(defcustom collab-send-ops-delay 1
-  "Collab waits for this much of idle time before sending ops.
-Ops are sent immediately when user has typed ~20 characters."
+(defcustom collab-send-ops-delay 0.5
+  "Collab sends ops when Emacs is idle for this much time."
   :type 'number)
 
 (defcustom collab-receive-ops-delay 1
@@ -88,18 +87,6 @@ reconnect to the doc.")
 
 (defvar collab--verbose nil
   "If non-nil, print debugging information.")
-
-(defvar collab-backup-dir
-  (let* ((var-dir (expand-file-name "var" user-emacs-directory))
-         (backup-dir (expand-file-name "collab-mode/backups"
-                                       (if (file-exists-p var-dir)
-                                           var-dir
-                                         user-emacs-directory))))
-    (unless (file-exists-p backup-dir)
-      (mkdir backup-dir t))
-    backup-dir)
-  "Backup directory for collab-mode.
-When you save a remote file, it’s saved to this directory.")
 
 ;;; Generic helpers
 
@@ -198,16 +185,10 @@ substitutes command keys like docstring, see
 
     (-32002 . NotInitialized)
 
-    (100 . NetworkError)
-    (101 . ServerNonFatalDocFatal)
-    (102 . ServerFatalError)
-
+    (103 . DocFatal)
     (104 . PermissionDenied)
-    (105 . DocNotFound)
-    (106 . DocAlreadyExists)
-    (107 . IOError)
-    (108 . NotRegularFile)
-    (109 . UnsupportedOperation))
+    (105 . IoError)
+    (113 . BadRequest))
   "An alist of JSONRPC error codes.")
 
 (defun collab--error-code-jsonrpc-error-p (code)
@@ -385,7 +366,7 @@ For ‘collab-dired-mode’ buffers, it’s (DOC-DESC . HOST-ID.")
   "A has table that maps (DOC . HOST) to their corresponding buffer.")
 
 (defvar-local collab--inhibit-hooks nil
-  "When non-nil, post command hooks don’t run.")
+  "When non-nil, before/after-change hooks don’t run.")
 
 (defvar-local collab--changing-region nil
   "Records information of the region to be changed.
@@ -394,9 +375,6 @@ content between BEG and END.")
 
 (defvar-local collab--pending-ops nil
   "Ops waiting to be sent out. In reverse order.")
-
-(defvar-local collab--ops-current-command nil
-  "Ops created in the current command. In reverse order.")
 
 (defvar-local collab--group-seq nil
   "Group sequence number.
@@ -410,6 +388,17 @@ even if the user only typed a few characters and stopped, we
 still want to send them out after a short idle
 delay (‘collab-send-ops-delay’).")
 
+(defvar-local collab--send-ops-idle-timer nil
+  "Idle timer for sending out ops.")
+
+(defvar collab--after-change-hook nil
+  "Hook ran in ‘collab--after-change’.")
+
+;; This is for easier testing: we can set this to a mock function for
+;; tests.
+(defvar-local collab--send-ops-fn #'collab--send-ops
+  "Function for sendint ops.")
+
 (defun collab--host-alist ()
   "Return ‘collab--host-alist’ plus “self”."
   (cons '("self" . ("" ""))
@@ -417,22 +406,43 @@ delay (‘collab-send-ops-delay’).")
 
 (defun collab--before-change (beg end)
   "Records the region (BEG . END) to be changed."
-  (when (not (eq beg end))
-    (setq collab--changing-region
-          (list beg end (buffer-substring-no-properties beg end)))))
+  ;; Each before-change should be followed by at least one
+  ;; after-change. ‘collab--changing-region’ being non-nil means the
+  ;; previous before-change wasn’t followed by a after-change.
+  (when (not collab--inhibit-hooks)
+    (when collab--changing-region
+      (setq collab--pending-ops 'tracking-error))
+    (when (not (eq beg end))
+      (setq collab--changing-region
+            (list beg end (buffer-substring-no-properties beg end))))))
+
+(defun collab--push-to-pending-ops (ops)
+  "Push OPS to ‘collab--pending-ops’, amalgamate if possible."
+  (when (not (eq collab--pending-ops 'tracking-error))
+    (let ((amalgamated-op
+           (and (eq 1 (length ops))
+                (let ((this-op (car ops))
+                      (last-pending-op (car collab--pending-ops)))
+                  (and last-op
+                       (collab--maybe-amalgamate last-op this-op))))))
+      (if (null amalgamated-op)
+          ;; No amalgamate.
+          (nconc ops collab--pending-ops)
+        ;; Amalgamated.
+        (setcar collab--pending-ops amalgamated-op)
+        (when collab--verbose
+          (message "%s "
+                   (string-replace
+                    "\n" "\\n"
+                    (format "Amalgamate, %s" collab--pending-ops))))))))
 
 (defun collab--after-change (beg end len)
   "Record the changed region (BEG END LEN)."
-  (let ((error-fn (lambda ()
-                    (display-warning
-                     'collab
-                     "Buffer change not correctly recorded (exceeds recorded region: %s)"
-                     collab--changing-region)
-                    (collab-monitored-mode -1)
-                    (throw 'term nil)))
-        (group-seq collab--group-seq)
+  (let ((group-seq collab--group-seq)
         ops)
     (catch 'term
+      (when collab--inhibit-hooks
+        (throw 'term nil))
       (if (eq len 0)
           ;; a) Insert.
           (push (list 'ins beg (buffer-substring-no-properties beg end)
@@ -442,7 +452,6 @@ delay (‘collab-send-ops-delay’).")
         (pcase collab--changing-region
           (`(,rbeg ,rend ,content)
            (if (<= rbeg beg end rend)
-
                (let ((old (substring
                            content (- beg rbeg) (+ (- beg rbeg) len)))
                      (current (buffer-substring-no-properties beg end)))
@@ -453,94 +462,55 @@ delay (‘collab-send-ops-delay’).")
                        ;; c) Text prop change.
                        nil
                      ;; d) Replace.
-                     (push (list 'del beg old group-seq) ops)
-                     (push (list 'ins beg current group-seq) ops))))
+                     (if (string-prefix-p old current)
+                         ;; If OLD is a prefix of CURRENT, this is
+                         ;; actually an insert. ‘electric-pair-mode’
+                         ;; does this: replace "(" with "()".
+                         (push (list (+ beg (length old))
+                                     (substring current (length old))
+                                     group-seq)
+                               ops)
+                       ;; Actual replace.
+                       (push (list 'del beg old group-seq) ops)
+                       (push (list 'ins beg current group-seq) ops)))))
 
-             (funcall error-fn)))
-          (_ (funcall error-fn))))
+             (setq collab--pending-ops 'tracking-error)))
+          (_ (setq collab--pending-ops 'tracking-error))))
 
+      ;; Update state.
       (setq collab--changing-region nil)
-      (setq collab--ops-current-command
-            (nconc ops collab--ops-current-command)))))
+      (collab--push-to-pending-ops ops)
 
-(defun collab--pre-command ()
-  "Increment ‘collab--group-seq’."
-  (when (numberp collab--group-seq)
-    (cl-incf collab--group-seq)))
+      (run-hooks 'collab--after-change-hook))))
 
-(defun collab--post-command-hasty ()
-  "Like ‘collab--post-command’ but just send ops out."
-  (when (not collab--inhibit-hooks)
-    (if (not collab--ops-current-command)
-        (collab--send-cursor-pos)
-      (collab--send-ops (nreverse collab--ops-current-command))
-      (setq collab--ops-current-command nil))))
+(defun collab--after-change-default ()
+  "Default send-ops behavior: setup an idle timer to send ops."
+  (when collab--send-ops-idle-timer
+    (cancel-timer collab--send-ops-idle-timer))
+  (let ((buf (current-buffer)))
+    (setq collab--send-ops-idle-timer
+          (run-with-idle-timer
+           collab-send-ops-delay nil
+           (lambda ()
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (unwind-protect
+                     (collab--send-ops-now)
+                   (setq collab--send-ops-idle-timer nil)))))))))
 
-(defun collab--cancel-send-ops-timer ()
-  "Cancel the send ops timer."
-  (when collab--send-ops-timer
-    (cancel-timer collab--send-ops-timer)
-    (setq collab--send-ops-timer nil)))
+(defun collab--after-change-hasty ()
+  "Send ops in every after-change function."
+  (collab--send-ops-now))
 
-(defsubst collab--send-ops-shortly ()
-  "Send pending ops after a short delay."
-  ;; TODO: We can extend unactivated timer instead of cancel and
-  ;; re-create. I don’t know how much time it saves tho.
-  (collab--cancel-send-ops-timer)
-  (setq collab--send-ops-timer
-        (run-with-timer collab-send-ops-delay nil
-                        #'collab--send-ops-now (current-buffer))))
-
-(defun collab--post-command ()
-  "Convert ops in the buffer and send them to the collab process.
-Then apply the returned remote ops."
-  (when (not collab--inhibit-hooks)
-    (if (not collab--ops-current-command)
-        (collab--send-cursor-pos)
-      (unwind-protect
-          (if-let* ((amalgamated-op
-                     (and (eq 1 (length collab--ops-current-command))
-                          (let ((this-op
-                                 (car collab--ops-current-command))
-                                (last-op (car collab--pending-ops)))
-                            (and last-op
-                                 (collab--maybe-amalgamate
-                                  last-op this-op))))))
-              ;; Amalgamated, don’t send ops yet.
-              (progn
-                (setcar collab--pending-ops amalgamated-op)
-                (when collab--verbose
-                  (message "%s "
-                           (string-replace
-                            "\n" "\\n"
-                            (format "Amalgamate, %s" collab--pending-ops))))
-                (collab--cancel-get-ops-timer)
-                (collab--send-ops-shortly))
-            ;; Didn’t amalgamate, send ops.
-            (when collab--verbose
-              (message "%s" (string-replace
-                             "\n" "\\n"
-                             (format "No amalgamate, %s %s"
-                                     collab--pending-ops
-                                     collab--ops-current-command))))
-            (unwind-protect
-                (progn
-                  (collab--cancel-get-ops-timer)
-                  (collab--send-ops (nreverse collab--pending-ops)))
-              (setq collab--pending-ops collab--ops-current-command))
-            (when collab--pending-ops
-              (collab--send-ops-shortly)))
-        (setq collab--ops-current-command nil)))))
-
-(defun collab--send-ops-now (&optional buffer)
-  "Immediately send any pending ops to the collab process.
-Run in BUFFER, if non-nil."
-  (cl-assert (null collab--ops-current-command))
-  (with-current-buffer (or buffer (current-buffer))
-    (collab--cancel-get-ops-timer)
+(defun collab--send-ops-now ()
+  "Run in ‘collab--send-ops-hook’, send ‘collab--pending-ops’."
+  (if (eq collab--pending-ops 'tracking-error)
+      ;; TODO, send full buffer.
+      (when collab--verbose
+        (message "Hit a tracking error! Sending full buffer"))
     (let ((ops (nreverse collab--pending-ops)))
       (setq collab--pending-ops nil)
-      (collab--send-ops ops))))
+      (funcall collab--send-ops-fn ops))))
 
 ;; https://stackoverflow.com/questions/6590889
 ;; TODO: Support for overwrite-mode, abbrev-mode, auto-fill.
@@ -608,11 +578,9 @@ To prevent them from being invoked."
         (add-hook 'before-change-functions
                   #'collab--before-change 0 t)
         (add-hook 'after-change-functions #'collab--after-change 0 t)
-        (add-hook 'pre-command-hook #'collab--pre-command 0 t)
         (if collab-hasty-p
-            (add-hook 'post-command-hook
-                      #'collab--post-command-hasty 0 t)
-          (add-hook 'post-command-hook #'collab--post-command 0 t))
+            (add-hook 'collab--after-change-hook #'collab--after-change-default 0 t)
+          (add-hook 'collab--after-change-hook #'collab--after-change-hasty 0 t))
 
         (unless (member collab--mode-line mode-line-misc-info)
           (setq-local mode-line-misc-info
@@ -630,9 +598,8 @@ To prevent them from being invoked."
 
     (remove-hook 'before-change-functions #'collab--before-change t)
     (remove-hook 'after-change-functions #'collab--after-change t)
-    (remove-hook 'pre-command-hook #'collab--pre-command t)
-    (remove-hook 'post-command-hook #'collab--post-command t)
-    (remove-hook 'post-command-hook #'collab--post-command-hasty t)
+    (remove-hook 'collab--after-change-hook #'collab--after-change-default)
+    (remove-hook 'collab--after-change-hook #'collab--after-change-hasty)
 
     (remhash collab--doc-and-host
              collab--buffer-table)
@@ -1038,6 +1005,7 @@ If MOVE-POINT non-nil, move point as the edit would."
     (unless move-point
       (goto-char start))))
 
+;; Untested since refactor.
 (defun collab--send-ops (ops &optional encoded)
   "Send OPS to the collab process and apply returned remote ops.
 
@@ -1684,20 +1652,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
               (funcall (intern-soft suggested-major-mode))
             (let ((buffer-file-name file-name))
               (set-auto-mode)))
-          (collab--enable doc-id host-id site-id)
-
-          ;; Save remote files to backup dir.
-          (unless (equal host-id "self")
-            (let ((host-dir (expand-file-name
-                             host-id collab-backup-dir)))
-              (unless (file-exists-p host-dir)
-                (mkdir host-dir t))
-              (set-visited-file-name
-               (expand-file-name
-                (format "%s/(%s)%s" host-id doc-id file-name)
-                collab-backup-dir)
-               t)
-              (save-buffer)))))))
+          (collab--enable doc-id host-id site-id)))))
     ;; Refresh the hub buffer with cached file list, just to
     ;; add the green dot after just-opened doc.
     (with-current-buffer (collab--hub-buffer)
