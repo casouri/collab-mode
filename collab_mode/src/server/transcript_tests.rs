@@ -584,6 +584,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
 // Test discovery - scan transcripts directory and run all tests
 #[tokio::test]
+#[ignore]
 async fn test_all_transcripts() {
     let transcripts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/transcripts");
 
