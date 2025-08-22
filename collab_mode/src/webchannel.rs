@@ -327,8 +327,14 @@ impl WebChannel {
         req_id: Option<RequestId>,
         msg: Msg,
     ) -> anyhow::Result<()> {
+        let host = if recipient == &self.my_hostid || recipient == &SERVER_ID_SELF {
+            SERVER_ID_SELF.to_string()
+        } else {
+            self.my_hostid.clone()
+        };
+
         let message = Message {
-            host: self.my_hostid.clone(),
+            host,
             body: msg,
             req_id,
         };

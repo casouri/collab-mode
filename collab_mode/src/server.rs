@@ -265,6 +265,7 @@ impl Server {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
     async fn handle_editor_message(
         &mut self,
         msg: lsp_server::Message,
@@ -476,6 +477,8 @@ impl Server {
         }
         Ok(())
     }
+
+    #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
     async fn handle_remote_message(
         &mut self,
         msg: webchannel::Message,
@@ -949,7 +952,7 @@ impl Server {
                     );
 
                     // Add ourselves as a subscriber since we're also a client
-                    doc.subscribers.insert(self.host_id.clone(), 0);
+                    doc.subscribers.insert(SERVER_ID_SELF.to_string(), 0);
 
                     self.docs.insert(doc_id, doc);
 
@@ -1266,7 +1269,6 @@ impl Server {
         // Find doc in docs (as the server/owner of the doc)
         let doc = self.docs.get_mut(&doc_id);
         if doc.is_none() {
-            // Send DocFatal message back
             send_to_remote(
                 webchannel,
                 &remote_host_id,
