@@ -183,13 +183,21 @@ pub struct ListFileEntry {
     pub meta: JsonMap,
 }
 
-// **** OpenFile
+// **** OpenFile & CreateFile
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OpenMode {
+    Create,
+    Open,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenFileParams {
     pub host_id: ServerId,
     pub file_desc: FileDesc,
+    pub mode: OpenMode,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -201,13 +209,23 @@ pub struct OpenFileResp {
     pub doc_id: DocId,
 }
 
-// **** WriteFile
+// **** MoveFile
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WriteFileParams {
+pub struct MoveFileParams {
     pub host_id: ServerId,
-    pub file_desc: FileDesc,
+    pub old_file_desc: FileDesc,
+    pub new_file_desc: FileDesc,
+}
+
+// **** SaveFile
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveFileParams {
+    pub host_id: ServerId,
+    pub doc_id: DocId,
 }
 
 // **** SendOpEditor
@@ -290,7 +308,7 @@ pub enum Msg {
         doc: DocId,
         after: GlobalSeq,
     },
-    RequestFile(FileDesc),
+    RequestFile(FileDesc, OpenMode),
     Snapshot(NewSnapshot),
     TakeDownFile(DocId),
     ResetFile(DocId),

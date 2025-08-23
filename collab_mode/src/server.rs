@@ -9,6 +9,8 @@ use gapbuf::GapBuffer;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
@@ -27,6 +29,7 @@ struct Doc {
     /// used for automatically saving the file to disk. This is also
     /// used for checking whether a file is already opened as a doc.
     abs_filename: Option<PathBuf>,
+    disk_file: Option<std::fs::File>,
     /// The server engine that transforms and stores ops for this doc.
     engine: ServerEngine,
     /// The document itself.
@@ -124,6 +127,7 @@ impl Doc {
         abs_filename: Option<PathBuf>,
         content: &str,
         engine: ServerEngine,
+        disk_file: Option<File>,
     ) -> Self {
         let mut buffer = GapBuffer::new();
         buffer.insert_many(0, content.chars());
@@ -135,6 +139,7 @@ impl Doc {
             engine,
             buffer,
             subscribers: HashMap::new(),
+            disk_file,
         }
     }
 
@@ -334,6 +339,7 @@ impl Server {
                     params.host_id,
                     params.file_desc,
                     req.id,
+                    params.mode,
                 )
                 .await?;
                 Ok(())
@@ -586,16 +592,10 @@ impl Server {
 
                 Ok(())
             }
-            Msg::RequestFile(file_desc) => {
+            Msg::RequestFile(file_desc, mode) => {
                 if let Some(req_id) = msg.req_id {
-                    self.handle_request_file(
-                        webchannel,
-                        file_desc,
-                        req_id,
-                        msg.host.clone(),
-                        editor_tx,
-                    )
-                    .await?;
+                    self.handle_request_file(webchannel, file_desc, req_id, msg.host.clone(), mode)
+                        .await?;
                 } else {
                     tracing::warn!("Received RequestFile without req_id, ignoring.");
                     send_to_remote(
@@ -870,7 +870,8 @@ impl Server {
         &self,
         project_id: &ProjectId,
         rel_path: &str,
-    ) -> anyhow::Result<String> {
+        mode: OpenMode,
+    ) -> anyhow::Result<(String, File)> {
         // Look up project
         let project = self
             .projects
@@ -879,12 +880,21 @@ impl Server {
 
         // Construct full path
         let full_path = std::path::PathBuf::from(&project.root).join(rel_path);
+        let mut open_options = std::fs::OpenOptions::new();
+        open_options.read(true).write(true);
+        if matches!(mode, OpenMode::Create) {
+            open_options.create(true);
+        }
 
-        // Read file content
-        let content = std::fs::read_to_string(&full_path)
+        let mut file = open_options
+            .open(&full_path)
+            .with_context(|| format!("Failed to create/open file: {}", full_path.display()))?;
+
+        let mut content = String::new();
+        file.read_to_string(&mut content)
             .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
 
-        Ok(content)
+        Ok((content, file))
     }
 
     async fn open_file_from_editor(
@@ -894,6 +904,7 @@ impl Server {
         host_id: ServerId,
         file_desc: FileDesc,
         req_id: lsp_server::RequestId,
+        mode: OpenMode,
     ) -> anyhow::Result<()> {
         if self.host_id == host_id {
             // Handle local file opening
@@ -924,8 +935,8 @@ impl Server {
                     }
 
                     // Read from disk
-                    let content = self.open_file_from_disk(project, file).await;
-                    if let Err(err) = content {
+                    let res = self.open_file_from_disk(project, file, mode).await;
+                    if let Err(err) = res {
                         let err = lsp_server::ResponseError {
                             code: ErrorCode::IoError as i32,
                             message: err.to_string(),
@@ -934,7 +945,7 @@ impl Server {
                         send_response(editor_tx, req_id, (), Some(err)).await;
                         return Ok(());
                     }
-                    let content = content.unwrap();
+                    let (content, disk_file) = res.unwrap();
 
                     // Create new doc
                     let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
@@ -950,6 +961,7 @@ impl Server {
                         Some(full_path),
                         &content,
                         ServerEngine::new(content.len() as u64),
+                        Some(disk_file),
                     );
 
                     // Add ourselves as a subscriber since we're also a client
@@ -1032,7 +1044,7 @@ impl Server {
             }
         }
 
-        let msg = Msg::RequestFile(file_desc);
+        let msg = Msg::RequestFile(file_desc, mode);
         send_to_remote(webchannel, &host_id, Some(req_id), msg).await;
         Ok(())
     }
@@ -1043,7 +1055,7 @@ impl Server {
         file_desc: FileDesc,
         req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
-        _editor_tx: &mpsc::Sender<lsp_server::Message>,
+        mode: OpenMode,
     ) -> anyhow::Result<()> {
         let site_id = self.site_id_of(&remote_host_id);
 
@@ -1087,8 +1099,8 @@ impl Server {
                 }
 
                 // Not open, read from disk
-                let content = self.open_file_from_disk(project, file).await;
-                if let Err(err) = content {
+                let res = self.open_file_from_disk(project, file, mode).await;
+                if let Err(err) = res {
                     send_to_remote(
                         webchannel,
                         &remote_host_id,
@@ -1098,7 +1110,7 @@ impl Server {
                     .await;
                     return Ok(());
                 }
-                let content = content.unwrap();
+                let (content, disk_file) = res.unwrap();
 
                 // Create new doc
                 let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
@@ -1114,6 +1126,7 @@ impl Server {
                     Some(full_path),
                     &content,
                     ServerEngine::new(content.len() as u64),
+                    Some(disk_file),
                 );
 
                 // Don’t add remote as subscriber, wait until we
@@ -1579,9 +1592,10 @@ impl Server {
         let mut doc = Doc::new(
             params.filename.clone(),
             params.meta.clone(),
-            None, // No abs_filename since this is content-based
+            None,
             &params.content,
             ServerEngine::new(params.content.len() as u64),
+            None,
         );
 
         // Add ourselves as a subscriber since we're also a client
