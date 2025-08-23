@@ -378,6 +378,7 @@ impl MockEditor {
                 serde_json::json!({
                     "hostId": host_id,
                     "fileDesc": file_desc,
+                    "mode": "open",
                 }),
             )
             .await?;
@@ -1024,7 +1025,8 @@ async fn test_open_file_not_found() {
                     "type": "projectFile",
                     "project": "TestProject",
                     "file": "non_existent.txt"
-                }
+                },
+                "mode": "open"
             }),
         )
         .await
@@ -1034,7 +1036,7 @@ async fn test_open_file_not_found() {
     let result = setup.hub.editor.wait_for_response(req_id, 5).await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("112") || err_msg.contains("Failed to read file"));
+    assert!(err_msg.contains("not found"));
 
     tracing::info!("test_open_file_not_found completed successfully");
     setup.cleanup();
@@ -1067,7 +1069,8 @@ async fn test_open_file_bad_request() {
                 "fileDesc": {
                     "type": "project",
                     "id": "TestProject"
-                }
+                },
+                "mode": "open"
             }),
         )
         .await
@@ -1131,7 +1134,8 @@ async fn test_open_file_already_open() {
                     "type": "projectFile",
                     "project": "TestProject",
                     "file": "test.txt"
-                }
+                },
+                "mode": "open"
             }),
         )
         .await
@@ -1154,7 +1158,8 @@ async fn test_open_file_already_open() {
                     "type": "projectFile",
                     "project": "TestProject",
                     "file": "test.txt"
-                }
+                },
+                "mode": "open"
             }),
         )
         .await
@@ -1194,7 +1199,8 @@ async fn test_open_file_doc_id_not_found() {
                 "fileDesc": {
                     "type": "file",
                     "id": 9999
-                }
+                },
+                "mode": "open"
             }),
         )
         .await
