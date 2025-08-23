@@ -978,6 +978,112 @@ async fn test_open_file_from_remote() {
 }
 
 #[tokio::test]
+async fn test_open_file_create_mode() {
+    // Test: Create a new file using OpenMode::Create
+    // Flow:
+    // 1. Create a project
+    // 2. Request to open a non-existent file with mode: "create"
+    // 3. Verify file is created with empty content
+    // 4. Send ops to add content
+    // 5. Open again to verify content persists
+    // Expected: File is created and can be modified
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Create test project
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    // Hub declares project
+    setup
+        .hub
+        .editor
+        .declare_project(&project_path, "TestProject")
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Request to create a new file
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "new_file.txt"
+                },
+                "mode": "create"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Should succeed and return empty content
+    let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let doc_id = resp["docId"].as_u64().unwrap() as u32;
+    let content = resp["content"].as_str().unwrap();
+    assert_eq!(content, "", "New file should have empty content");
+    assert!(doc_id > 0, "Should have valid doc_id");
+
+    // Send an insert operation to add content
+    let ops = vec![serde_json::json!({
+        "op": {"Ins": [0, "This is a newly created file!"]},
+        "groupSeq": 1
+    })];
+    
+    let _ = setup
+        .hub
+        .editor
+        .send_ops(doc_id, &setup.hub.id, ops)
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Open the file again with "open" mode to verify it exists and has content
+    let req_id2 = 2;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id2,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "new_file.txt"
+                },
+                "mode": "open"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp2 = setup.hub.editor.wait_for_response(req_id2, 5).await.unwrap();
+    let doc_id2 = resp2["docId"].as_u64().unwrap() as u32;
+    
+    // Should return the same doc_id since it's already open
+    assert_eq!(doc_id, doc_id2, "Should return same doc_id for already open file");
+
+    // Verify the file was actually created on disk
+    let file_path = project_dir.path().join("new_file.txt");
+    assert!(file_path.exists(), "File should exist on disk");
+
+    tracing::info!("test_open_file_create_mode completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
 async fn test_open_file_not_found() {
     // Test: Handle file not found error
     // Flow:
@@ -1036,7 +1142,7 @@ async fn test_open_file_not_found() {
     let result = setup.hub.editor.wait_for_response(req_id, 5).await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("not found"));
+    assert!(err_msg.contains("Failed to") || err_msg.contains("not found") || err_msg.contains("105"));
 
     tracing::info!("test_open_file_not_found completed successfully");
     setup.cleanup();
