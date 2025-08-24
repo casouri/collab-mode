@@ -375,6 +375,20 @@ impl Server {
                 send_response(editor_tx, req.id, (), None).await;
                 Ok(())
             }
+            "MoveFile" => {
+                let params: MoveFileParams = serde_json::from_value(req.params)?;
+                self.handle_move_file_from_editor(
+                    editor_tx,
+                    webchannel,
+                    params.host_id,
+                    params.project,
+                    params.old_path,
+                    params.new_path,
+                    req.id,
+                )
+                .await?;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -630,6 +644,78 @@ impl Server {
             Msg::RequestOps { doc, after } => {
                 self.handle_request_ops(webchannel, doc, after, msg.host.clone())
                     .await?;
+                Ok(())
+            }
+            Msg::MoveFile(project_id, old_path, new_path) => {
+                let res = self
+                    .move_file_on_disk(&project_id, &old_path, &new_path)
+                    .await;
+
+                match res {
+                    Ok(subscribers) => {
+                        // Send FileMoved notification to all other
+                        // subscribers, including ourselves and
+                        // originall caller.
+                        for subscriber_id in subscribers {
+                            let req_id = if msg.host == subscriber_id {
+                                msg.req_id.clone()
+                            } else {
+                                None
+                            };
+                            send_to_remote(
+                                webchannel,
+                                &subscriber_id,
+                                req_id,
+                                Msg::FileMoved(
+                                    project_id.clone(),
+                                    old_path.clone(),
+                                    new_path.clone(),
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(req_id) = msg.req_id {
+                            send_to_remote(
+                                webchannel,
+                                &msg.host,
+                                Some(req_id),
+                                Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Msg::FileMoved(project, old_path, new_path) => {
+                // Non-nil req_id, meaning this is a response to our
+                // request.
+                if let Some(req_id) = msg.req_id {
+                    // Send MoveFileResp to editor.
+                    let resp = MoveFileResp {
+                        host_id: msg.host.clone(),
+                        project: project.clone(),
+                        old_path: old_path.clone(),
+                        new_path: new_path.clone(),
+                    };
+                    send_response(editor_tx, req_id, resp, None).await;
+                } else {
+                    // No req_id, meaning we’re receiving this message
+                    // because a doc we’re subscribed to moved.
+                    send_notification(
+                        editor_tx,
+                        NotificationCode::FileMoved,
+                        serde_json::json!({
+                            "hostId": msg.host,
+                            "project": project,
+                            "oldPath": old_path,
+                            "newPath": new_path,
+                        }),
+                    )
+                    .await;
+                }
                 Ok(())
             }
             _ => {
@@ -1625,6 +1711,113 @@ impl Server {
             site_id: self.site_id,
         };
         Ok(resp)
+    }
+
+    async fn handle_move_file_from_editor(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+        host_id: ServerId,
+        project: ProjectId,
+        old_path: String,
+        new_path: String,
+        req_id: lsp_server::RequestId,
+    ) -> anyhow::Result<()> {
+        if self.host_id != host_id {
+            // Handle remotely.
+            send_to_remote(
+                webchannel,
+                &host_id,
+                Some(req_id),
+                Msg::MoveFile(project, old_path, new_path),
+            )
+            .await;
+        } else {
+            // Handle locally.
+            let res = self.move_file_on_disk(&project, &old_path, &new_path).await;
+            match res {
+                Err(err) => {
+                    let err = lsp_server::ResponseError {
+                        code: ErrorCode::IoError as i32,
+                        message: err.to_string(),
+                        data: None,
+                    };
+                    send_response(editor_tx, req_id, (), Some(err)).await;
+                }
+                Ok(subscribers) => {
+                    // Send response to original caller
+                    let resp = MoveFileParams {
+                        host_id: self.host_id.clone(),
+                        project: project.clone(),
+                        old_path: old_path.clone(),
+                        new_path: new_path.clone(),
+                    };
+                    send_response(editor_tx, req_id, resp, None).await;
+
+                    // Send FileMoved notification to all subscribers
+                    // if doc was affected.
+                    for subscriber_id in subscribers {
+                        if subscriber_id != self.host_id {
+                            send_to_remote(
+                                webchannel,
+                                &subscriber_id,
+                                None,
+                                Msg::FileMoved(project.clone(), old_path.clone(), new_path.clone()),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn move_file_on_disk(
+        &mut self,
+        project_id: &ProjectId,
+        old_path: &str,
+        new_path: &str,
+    ) -> anyhow::Result<Vec<ServerId>> {
+        // Look up project
+        let project = self
+            .projects
+            .get(project_id)
+            .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+
+        // Construct full paths
+        let old_full_path = std::path::PathBuf::from(&project.root).join(old_path);
+        let new_full_path = std::path::PathBuf::from(&project.root).join(new_path);
+
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = new_full_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory: {}", parent.display())
+            })?;
+        }
+
+        // Move the file
+        std::fs::rename(&old_full_path, &new_full_path).with_context(|| {
+            format!(
+                "Failed to move file from {} to {}",
+                old_full_path.display(),
+                new_full_path.display()
+            )
+        })?;
+
+        // Update doc's abs_filename if the file is currently open and
+        // collect subscribers.
+        for doc in self.docs.values_mut() {
+            if let Some(ref mut abs_filename) = doc.abs_filename {
+                if abs_filename == &old_full_path {
+                    *abs_filename = new_full_path.clone();
+                    let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
+                    return Ok(subscribers);
+                }
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     fn handle_update_config_from_editor(

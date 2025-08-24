@@ -17,6 +17,7 @@ pub enum NotificationCode {
     AcceptingConnection, // Editor should show that we're accepting connections.
     AcceptStopped,       // Editor should show that we're not accepting connections anymore.
     Hey,                 // A ping from a remote, editor should mark the remote as connected.
+    FileMoved,           // A file moved, editor should update it accordingly.
 
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
@@ -215,9 +216,12 @@ pub struct OpenFileResp {
 #[serde(rename_all = "camelCase")]
 pub struct MoveFileParams {
     pub host_id: ServerId,
-    pub old_file_desc: FileDesc,
-    pub new_file_desc: FileDesc,
+    pub project: ProjectId,
+    pub old_path: String,
+    pub new_path: String,
 }
+
+pub type MoveFileResp = MoveFileParams;
 
 // **** SaveFile
 
@@ -309,6 +313,8 @@ pub enum Msg {
         after: GlobalSeq,
     },
     RequestFile(FileDesc, OpenMode),
+    MoveFile(ProjectId, String, String),
+    FileMoved(ProjectId, String, String),
     Snapshot(NewSnapshot),
     TakeDownFile(DocId),
     ResetFile(DocId),

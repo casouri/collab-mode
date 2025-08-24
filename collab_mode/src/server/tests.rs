@@ -1038,7 +1038,7 @@ async fn test_open_file_create_mode() {
         "op": {"Ins": [0, "This is a newly created file!"]},
         "groupSeq": 1
     })];
-    
+
     let _ = setup
         .hub
         .editor
@@ -1069,11 +1069,19 @@ async fn test_open_file_create_mode() {
         .await
         .unwrap();
 
-    let resp2 = setup.hub.editor.wait_for_response(req_id2, 5).await.unwrap();
+    let resp2 = setup
+        .hub
+        .editor
+        .wait_for_response(req_id2, 5)
+        .await
+        .unwrap();
     let doc_id2 = resp2["docId"].as_u64().unwrap() as u32;
-    
+
     // Should return the same doc_id since it's already open
-    assert_eq!(doc_id, doc_id2, "Should return same doc_id for already open file");
+    assert_eq!(
+        doc_id, doc_id2,
+        "Should return same doc_id for already open file"
+    );
 
     // Verify the file was actually created on disk
     let file_path = project_dir.path().join("new_file.txt");
@@ -1142,7 +1150,9 @@ async fn test_open_file_not_found() {
     let result = setup.hub.editor.wait_for_response(req_id, 5).await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Failed to") || err_msg.contains("not found") || err_msg.contains("105"));
+    assert!(
+        err_msg.contains("Failed to") || err_msg.contains("not found") || err_msg.contains("105")
+    );
 
     tracing::info!("test_open_file_not_found completed successfully");
     setup.cleanup();
