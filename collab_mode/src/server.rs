@@ -481,24 +481,6 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_editor_response(
-        &mut self,
-        orig_req: OrigRequest,
-        result: Option<serde_json::Value>,
-        _editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
-    ) -> anyhow::Result<()> {
-        match orig_req.method.as_str() {
-            _ => {
-                tracing::warn!(
-                    "Unknown method read from editor response: {}",
-                    orig_req.method
-                );
-            }
-        }
-        Ok(())
-    }
-
     #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
     async fn handle_remote_message(
         &mut self,
@@ -511,9 +493,10 @@ impl Server {
                 send_notification(
                     editor_tx,
                     NotificationCode::ConnectionProgress,
-                    serde_json::json!({
-                        "message": progress,
-                    }),
+                    HostAndMessageNote {
+                        host_id: msg.host,
+                        message: progress,
+                    },
                 )
                 .await;
                 Ok(())
@@ -522,10 +505,10 @@ impl Server {
                 send_notification(
                     editor_tx,
                     NotificationCode::ConnectionBroke,
-                    serde_json::json!({
-                        "hostId": host_id,
-                        "reason": "",
-                    }),
+                    ConnectionBrokeNote {
+                        host_id,
+                        reason: "".to_string(),
+                    },
                 )
                 .await;
                 Ok(())
@@ -534,10 +517,10 @@ impl Server {
                 send_notification(
                     editor_tx,
                     NotificationCode::Hey,
-                    serde_json::json!({
-                        "hostId": msg.host,
-                        "message": message,
-                    }),
+                    HostAndMessageNote {
+                        host_id: msg.host,
+                        message,
+                    },
                 )
                 .await;
 
@@ -577,9 +560,14 @@ impl Server {
                         "Received FileList from remote {} without req_id, ignoring",
                         msg.host
                     );
-                    send_notification(editor_tx, NotificationCode::UnimportantError, serde_json::json!({
-                        "message": format!("Received file list from remote {}, but without req_id", msg.host),
-                    })).await;
+                    let msg = HostAndMessageNote {
+                        host_id: msg.host.clone(),
+                        message: format!(
+                            "Received file list from remote {}, but without req_id",
+                            msg.host
+                        ),
+                    };
+                    send_notification(editor_tx, NotificationCode::UnimportantError, msg).await;
                     return Ok(());
                 }
                 let resp_id = resp_id.unwrap();
@@ -589,9 +577,14 @@ impl Server {
             Msg::ErrorResp(_, error_msg) => {
                 if msg.req_id.is_none() {
                     tracing::warn!("Received ErrorResp without req_id, ignoring");
-                    send_notification(editor_tx, NotificationCode::UnimportantError, serde_json::json!({
-                        "message": format!("Received error response from remote {}, but without response id: {}", msg.host, error_msg),
-                    })).await;
+                    let msg = HostAndMessageNote {
+                        host_id: msg.host.clone(),
+                        message: format!(
+                            "Received error response from remote {}, but without response id: {}",
+                            msg.host, error_msg
+                        ),
+                    };
+                    send_notification(editor_tx, NotificationCode::UnimportantError, msg).await;
                     return Ok(());
                 }
                 let req_id = msg.req_id.unwrap();
@@ -704,17 +697,13 @@ impl Server {
                 } else {
                     // No req_id, meaning we’re receiving this message
                     // because a doc we’re subscribed to moved.
-                    send_notification(
-                        editor_tx,
-                        NotificationCode::FileMoved,
-                        serde_json::json!({
-                            "hostId": msg.host,
-                            "project": project,
-                            "oldPath": old_path,
-                            "newPath": new_path,
-                        }),
-                    )
-                    .await;
+                    let msg = MoveFileResp {
+                        host_id: msg.host,
+                        project,
+                        old_path,
+                        new_path,
+                    };
+                    send_notification(editor_tx, NotificationCode::FileMoved, msg).await;
                 }
                 Ok(())
             }
@@ -740,9 +729,9 @@ impl Server {
         send_notification(
             editor_tx,
             NotificationCode::Connecting,
-            serde_json::json!({
-                "hostId": host_id,
-            }),
+            ConnectingNote {
+                host_id: host_id.clone(),
+            },
         )
         .await;
         let key_cert = self.key_cert.clone();
@@ -765,10 +754,10 @@ impl Server {
                 send_notification(
                     &editor_tx_1,
                     NotificationCode::ConnectionBroke,
-                    serde_json::json!({
-                        "hostId": host_id,
-                        "reason": err.to_string(),
-                    }),
+                    HostAndMessageNote {
+                        host_id,
+                        message: err.to_string(),
+                    },
                 )
                 .await;
             }
@@ -1518,9 +1507,11 @@ impl Server {
                 send_notification(
                     editor_tx,
                     NotificationCode::InternalError,
-                    serde_json::json!({
-                        "message": "Received remote op without global seq, terminating doc",
-                    }),
+                    HostAndMessageNote {
+                        host_id: remote_host_id,
+                        message: "Received remote op without global seq, terminating doc"
+                            .to_string(),
+                    },
                 )
                 .await;
                 self.remote_docs.remove(&key);
@@ -1559,10 +1550,10 @@ impl Server {
             send_notification(
                 editor_tx,
                 NotificationCode::RemoteOpsArrived,
-                serde_json::json!({
-                    "hostId": remote_host_id,
-                    "docId": doc_id,
-                }),
+                RemoteOpsArrivedNote {
+                    host_id: remote_host_id,
+                    doc_id,
+                },
             )
             .await;
         }
@@ -1869,11 +1860,11 @@ impl Server {
 pub async fn send_notification<T: Display>(
     editor_tx: &mpsc::Sender<lsp_server::Message>,
     method: T,
-    params: serde_json::Value,
+    params: impl Serialize,
 ) {
     let notif = lsp_server::Notification {
         method: method.to_string(),
-        params,
+        params: serde_json::to_value(params).unwrap(),
     };
     if let Err(err) = editor_tx
         .send(lsp_server::Message::Notification(notif))

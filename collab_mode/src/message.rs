@@ -67,9 +67,29 @@ pub struct HeyParams {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemoteOpsArrivedParams {
+pub struct RemoteOpsArrivedNote {
     pub host_id: ServerId,
     pub doc_id: DocId,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionBrokeNote {
+    pub host_id: ServerId,
+    pub reason: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostAndMessageNote {
+    pub host_id: ServerId,
+    pub message: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectingNote {
+    pub host_id: ServerId,
 }
 
 // *** Requests and responses
