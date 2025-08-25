@@ -322,14 +322,7 @@ impl Server {
             }
             "SendOps" => {
                 let params: SendOpsParams = serde_json::from_value(req.params)?;
-                self.handle_send_ops_from_editor(
-                    next,
-                    params.doc_id,
-                    params.host_id,
-                    params.ops,
-                    req.id,
-                )
-                .await?;
+                self.handle_send_ops_from_editor(next, params).await?;
                 Ok(())
             }
             "Undo" => {
@@ -352,14 +345,7 @@ impl Server {
             }
             "MoveFile" => {
                 let params: MoveFileParams = serde_json::from_value(req.params)?;
-                self.handle_move_file_from_editor(
-                    next,
-                    params.host_id,
-                    params.project,
-                    params.old_path,
-                    params.new_path,
-                )
-                .await?;
+                self.handle_move_file_from_editor(next, params).await?;
                 Ok(())
             }
             _ => {
@@ -458,10 +444,10 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
+        let next = Next::new(editor_tx, None, webchannel);
         match msg.body {
             Msg::IceProgress(progress) => {
-                send_notification(
-                    editor_tx,
+                next.send_notif(
                     NotificationCode::ConnectionProgress,
                     HostAndMessageNote {
                         host_id: msg.host,
@@ -472,8 +458,7 @@ impl Server {
                 Ok(())
             }
             Msg::ConnectionBroke(host_id) => {
-                send_notification(
-                    editor_tx,
+                next.send_notif(
                     NotificationCode::ConnectionBroke,
                     ConnectionBrokeNote {
                         host_id,
@@ -484,8 +469,7 @@ impl Server {
                 Ok(())
             }
             Msg::Hey(message) => {
-                send_notification(
-                    editor_tx,
+                next.send_notif(
                     NotificationCode::Hey,
                     HostAndMessageNote {
                         host_id: msg.host,
@@ -502,19 +486,13 @@ impl Server {
                 Ok(())
             }
             Msg::ListFiles { dir } => {
-                if let Some(req_id) = msg.req_id {
-                    self.list_files_from_remote(
-                        editor_tx,
-                        webchannel,
-                        dir,
-                        req_id,
-                        msg.host.clone(),
-                    )
-                    .await?;
+                if msg.req_id.is_some() {
+                    self.list_files_from_remote(&next, dir, msg.host.clone())
+                        .await?;
                 } else {
                     tracing::warn!("Received ListFiles without req_id, ignoring.");
                     send_to_remote(
-                        webchannel,
+                        next.webchannel,
                         &msg.host,
                         None,
                         Msg::BadRequest("Missing req_id".to_string()),
@@ -524,8 +502,7 @@ impl Server {
                 Ok(())
             }
             Msg::FileList(files) => {
-                let resp_id = msg.req_id;
-                if resp_id.is_none() {
+                if msg.req_id.is_none() {
                     tracing::warn!(
                         "Received FileList from remote {} without req_id, ignoring",
                         msg.host
@@ -537,11 +514,11 @@ impl Server {
                             msg.host
                         ),
                     };
-                    send_notification(editor_tx, NotificationCode::UnimportantError, msg).await;
+                    next.send_notif(NotificationCode::UnimportantError, msg)
+                        .await;
                     return Ok(());
                 }
-                let resp_id = resp_id.unwrap();
-                send_response(editor_tx, resp_id, ListFilesResp { files }, None).await;
+                next.send_resp(ListFilesResp { files }, None).await;
                 Ok(())
             }
             Msg::ErrorResp(_, error_msg) => {
@@ -554,10 +531,10 @@ impl Server {
                             msg.host, error_msg
                         ),
                     };
-                    send_notification(editor_tx, NotificationCode::UnimportantError, msg).await;
+                    next.send_notif(NotificationCode::UnimportantError, msg)
+                        .await;
                     return Ok(());
                 }
-                let req_id = msg.req_id.unwrap();
 
                 // Send error response back to the editor
                 let err = lsp_server::ResponseError {
@@ -565,29 +542,24 @@ impl Server {
                     message: error_msg,
                     data: None,
                 };
-                send_response(editor_tx, req_id, (), Some(err)).await;
+                next.send_resp((), Some(err)).await;
 
                 Ok(())
             }
             Msg::RequestFile(file_desc, mode) => {
-                if let Some(req_id) = msg.req_id {
-                    self.handle_request_file(webchannel, file_desc, req_id, msg.host.clone(), mode)
+                if msg.req_id.is_some() {
+                    self.handle_request_file(&next, file_desc, msg.host.clone(), mode)
                         .await?;
                 } else {
                     tracing::warn!("Received RequestFile without req_id, ignoring.");
-                    send_to_remote(
-                        webchannel,
-                        &msg.host,
-                        None,
-                        Msg::BadRequest("Missing req_id".to_string()),
-                    )
-                    .await;
+                    next.send_to_remote(&msg.host, Msg::BadRequest("Missing req_id".to_string()))
+                        .await;
                 }
                 Ok(())
             }
             Msg::Snapshot(snapshot) => {
-                if let Some(req_id) = msg.req_id {
-                    self.handle_snapshot(editor_tx, webchannel, snapshot, req_id, msg.host.clone())
+                if msg.req_id.is_some() {
+                    self.handle_snapshot(&next, snapshot, msg.host.clone())
                         .await?;
                 } else {
                     tracing::warn!("Received Snapshot without req_id, ignoring.");
@@ -595,67 +567,29 @@ impl Server {
                 Ok(())
             }
             Msg::OpFromClient(context_ops) => {
-                self.handle_op_from_client(editor_tx, webchannel, context_ops, msg.host.clone())
+                self.handle_op_from_client(&next, context_ops, msg.host.clone())
                     .await?;
                 Ok(())
             }
             Msg::OpFromServer(ops) => {
-                self.handle_op_from_server(editor_tx, webchannel, ops, msg.host.clone())
+                self.handle_op_from_server(&next, ops, msg.host.clone())
                     .await?;
                 Ok(())
             }
             Msg::RequestOps { doc, after } => {
-                self.handle_request_ops(webchannel, doc, after, msg.host.clone())
+                self.handle_request_ops(&next, doc, after, msg.host.clone())
                     .await?;
                 Ok(())
             }
             Msg::MoveFile(project_id, old_path, new_path) => {
-                let res = self
-                    .move_file_on_disk(&project_id, &old_path, &new_path)
-                    .await;
-
-                match res {
-                    Ok(subscribers) => {
-                        // Send FileMoved notification to all other
-                        // subscribers, including ourselves and
-                        // originall caller.
-                        for subscriber_id in subscribers {
-                            let req_id = if msg.host == subscriber_id {
-                                msg.req_id.clone()
-                            } else {
-                                None
-                            };
-                            send_to_remote(
-                                webchannel,
-                                &subscriber_id,
-                                req_id,
-                                Msg::FileMoved(
-                                    project_id.clone(),
-                                    old_path.clone(),
-                                    new_path.clone(),
-                                ),
-                            )
-                            .await;
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(req_id) = msg.req_id {
-                            send_to_remote(
-                                webchannel,
-                                &msg.host,
-                                Some(req_id),
-                                Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
-                            )
-                            .await;
-                        }
-                    }
-                }
+                self.handle_move_file(&next, project_id, old_path, new_path, msg.host.clone())
+                    .await?;
                 Ok(())
             }
             Msg::FileMoved(project, old_path, new_path) => {
                 // Non-nil req_id, meaning this is a response to our
                 // request.
-                if let Some(req_id) = msg.req_id {
+                if msg.req_id.is_some() {
                     // Send MoveFileResp to editor.
                     let resp = MoveFileResp {
                         host_id: msg.host.clone(),
@@ -663,7 +597,7 @@ impl Server {
                         old_path: old_path.clone(),
                         new_path: new_path.clone(),
                     };
-                    send_response(editor_tx, req_id, resp, None).await;
+                    next.send_resp(resp, None).await;
                 } else {
                     // No req_id, meaning we’re receiving this message
                     // because a doc we’re subscribed to moved.
@@ -673,7 +607,7 @@ impl Server {
                         old_path,
                         new_path,
                     };
-                    send_notification(editor_tx, NotificationCode::FileMoved, msg).await;
+                    next.send_notif(NotificationCode::FileMoved, msg).await;
                 }
                 Ok(())
             }
@@ -769,22 +703,20 @@ impl Server {
 
     // In attached mode, delegate to editor, otherwise read from disk
     // and response immediately.
-    async fn list_files_from_remote(
+    async fn list_files_from_remote<'a>(
         &mut self,
-        _editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         dir: Option<FileDesc>,
-        req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
         match self.list_files_from_disk(dir).await {
             Ok(files) => {
                 let msg = Msg::FileList(files);
-                send_to_remote(webchannel, &remote_host_id, Some(req_id), msg).await;
+                next.send_to_remote(&remote_host_id, msg).await;
             }
             Err(err) => {
                 let msg = Msg::ErrorResp(ErrorCode::IoError, err.to_string());
-                send_to_remote(webchannel, &remote_host_id, Some(req_id), msg).await;
+                next.send_to_remote(&remote_host_id, msg).await;
             }
         }
         Ok(())
@@ -1089,11 +1021,10 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_request_file(
+    async fn handle_request_file<'a>(
         &mut self,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         file_desc: FileDesc,
-        req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
         mode: OpenMode,
     ) -> anyhow::Result<()> {
@@ -1126,13 +1057,8 @@ impl Server {
                                 file_desc: file_desc.clone(),
                                 doc_id: *doc_id,
                             };
-                            send_to_remote(
-                                webchannel,
-                                &remote_host_id,
-                                Some(req_id),
-                                Msg::Snapshot(snapshot),
-                            )
-                            .await;
+                            next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                                .await;
                             return Ok(());
                         }
                     }
@@ -1141,10 +1067,8 @@ impl Server {
                 // Not open, read from disk
                 let res = self.open_file_from_disk(project, file, mode).await;
                 if let Err(err) = res {
-                    send_to_remote(
-                        webchannel,
+                    next.send_to_remote(
                         &remote_host_id,
-                        Some(req_id),
                         Msg::ErrorResp(ErrorCode::IoError, format!("File not found: {}", err)),
                     )
                     .await;
@@ -1183,13 +1107,8 @@ impl Server {
                     file_desc,
                     doc_id,
                 };
-                send_to_remote(
-                    webchannel,
-                    &remote_host_id,
-                    Some(req_id),
-                    Msg::Snapshot(snapshot),
-                )
-                .await;
+                next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                    .await;
             }
             FileDesc::File { id } => {
                 // Look up existing doc
@@ -1205,28 +1124,19 @@ impl Server {
                         file_desc: file_desc.clone(),
                         doc_id: *id,
                     };
-                    send_to_remote(
-                        webchannel,
-                        &remote_host_id,
-                        Some(req_id),
-                        Msg::Snapshot(snapshot),
-                    )
-                    .await;
+                    next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                        .await;
                 } else {
-                    send_to_remote(
-                        webchannel,
+                    next.send_to_remote(
                         &remote_host_id,
-                        Some(req_id),
                         Msg::ErrorResp(ErrorCode::IoError, format!("Doc {} not found", id)),
                     )
                     .await;
                 }
             }
             FileDesc::Project { .. } => {
-                send_to_remote(
-                    webchannel,
+                next.send_to_remote(
                     &remote_host_id,
-                    Some(req_id),
                     Msg::BadRequest("Cannot open a project directory".to_string()),
                 )
                 .await;
@@ -1235,15 +1145,14 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_snapshot(
+    async fn handle_snapshot<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         snapshot: NewSnapshot,
-        req_id: lsp_server::RequestId,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
-        // First check if there's existing doc with the same file_desc from the same host.
+        // First check if there's existing doc with the same file_desc
+        // from the same host.
         for ((host, _), remote_doc) in &self.remote_docs {
             if host == &remote_host_id && remote_doc.file_desc == snapshot.file_desc {
                 let err = lsp_server::ResponseError {
@@ -1254,7 +1163,7 @@ impl Server {
                     ),
                     data: None,
                 };
-                send_response(editor_tx, req_id, (), Some(err)).await;
+                next.send_resp((), Some(err)).await;
                 return Ok(());
             }
         }
@@ -1288,15 +1197,14 @@ impl Server {
             filename: snapshot.name,
             doc_id: snapshot.doc_id,
         };
-        send_response(editor_tx, req_id, resp, None).await;
+        next.send_resp(resp, None).await;
 
         // Send RequestOps to subscribe and get any ops after the snapshot
         let msg = Msg::RequestOps {
             doc: snapshot.doc_id,
             after: snapshot.seq,
         };
-        send_to_remote(webchannel, &remote_host_id, None, msg).await;
-
+        next.send_to_remote(&remote_host_id, msg).await;
         Ok(())
     }
 
@@ -1311,10 +1219,9 @@ impl Server {
         }
     }
 
-    async fn handle_op_from_client(
+    async fn handle_op_from_client<'a>(
         &mut self,
-        _editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         context_ops: ContextOps,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
@@ -1323,10 +1230,8 @@ impl Server {
         // Find doc in docs (as the server/owner of the doc)
         let doc = self.docs.get_mut(&doc_id);
         if doc.is_none() {
-            send_to_remote(
-                webchannel,
+            next.send_to_remote(
                 &remote_host_id,
-                None,
                 Msg::BadRequest(format!("Doc {} not found", doc_id)),
             )
             .await;
@@ -1337,7 +1242,7 @@ impl Server {
         let subscriber_data = doc.subscribers.get(&remote_host_id).copied();
         if subscriber_data.is_none() {
             let msg = Msg::BadRequest(format!("Doc {} ({}) not open", doc.name, doc_id));
-            send_to_remote(webchannel, &remote_host_id, None, msg).await;
+            next.send_to_remote(&remote_host_id, msg).await;
             return Ok(());
         }
         let expected_seq = subscriber_data.unwrap() + 1;
@@ -1351,7 +1256,7 @@ impl Server {
                     expected_seq, first_op.site_seq
                 );
                 let msg = Msg::DocFatal(doc_id, err);
-                send_to_remote(webchannel, &remote_host_id, None, msg).await;
+                next.send_to_remote(&remote_host_id, msg).await;
                 return Ok(());
             }
         }
@@ -1375,21 +1280,16 @@ impl Server {
         // Send OpFromServer to all subscribers (including the sender)
         // The sender needs to receive the globally sequenced version of their op
         for (subscriber_host_id, _) in &doc.subscribers {
-            send_to_remote(
-                webchannel,
-                subscriber_host_id,
-                None,
-                Msg::OpFromServer(processed_ops.clone()),
-            )
-            .await;
+            next.send_to_remote(subscriber_host_id, Msg::OpFromServer(processed_ops.clone()))
+                .await;
         }
 
         Ok(())
     }
 
-    async fn handle_request_ops(
+    async fn handle_request_ops<'a>(
         &mut self,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         doc_id: DocId,
         after: GlobalSeq,
         remote_host_id: ServerId,
@@ -1402,10 +1302,8 @@ impl Server {
                 doc_id,
                 remote_host_id
             );
-            send_to_remote(
-                webchannel,
+            next.send_to_remote(
                 &remote_host_id,
-                None,
                 Msg::BadRequest(format!("Doc {} not found", doc_id)),
             )
             .await;
@@ -1421,16 +1319,59 @@ impl Server {
 
         // Send OpFromServer message with the ops
         if !ops.is_empty() {
-            send_to_remote(webchannel, &remote_host_id, None, Msg::OpFromServer(ops)).await;
+            next.send_to_remote(&remote_host_id, Msg::OpFromServer(ops))
+                .await;
         }
 
         Ok(())
     }
 
-    async fn handle_op_from_server(
+    async fn handle_move_file<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
+        project_id: ProjectId,
+        old_path: String,
+        new_path: String,
+        remote_host_id: ServerId,
+    ) -> anyhow::Result<()> {
+        let res = self
+            .move_file_on_disk(&project_id, &old_path, &new_path)
+            .await;
+
+        match res {
+            Ok(subscribers) => {
+                // Send FileMoved notification to all other
+                // subscribers, including ourselves and
+                // originall caller.
+                for subscriber_id in subscribers {
+                    let req_id = if remote_host_id == subscriber_id {
+                        next.req_id.clone()
+                    } else {
+                        None
+                    };
+                    send_to_remote(
+                        next.webchannel,
+                        &subscriber_id,
+                        req_id,
+                        Msg::FileMoved(project_id.clone(), old_path.clone(), new_path.clone()),
+                    )
+                    .await;
+                }
+            }
+            Err(err) => {
+                next.send_to_remote(
+                    &remote_host_id,
+                    Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_op_from_server<'a>(
+        &mut self,
+        next: &Next<'a>,
         ops: Vec<FatOp>,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
@@ -1469,8 +1410,7 @@ impl Server {
             // This shouldn’t ever happen.
             if gseq.is_none() {
                 tracing::error!("Received remote op without global seq: {:?}", &remote_op);
-                send_notification(
-                    editor_tx,
+                next.send_notif(
                     NotificationCode::InternalError,
                     HostAndMessageNote {
                         host_id: remote_host_id,
@@ -1502,7 +1442,7 @@ impl Server {
                     doc: doc_id,
                     after: expected_gseq - 1,
                 };
-                send_to_remote(webchannel, &remote_host_id, None, msg).await;
+                next.send_to_remote(&remote_host_id, msg).await;
             } else {
                 // Save remote ops to buffer
                 remote_doc.remote_op_buffer.push(remote_op);
@@ -1512,8 +1452,7 @@ impl Server {
         // Notify editor to get the new remote ops.
         let new_buffer_len = remote_doc.remote_op_buffer.len();
         if op_is_not_ours && new_buffer_len > old_buffer_len {
-            send_notification(
-                editor_tx,
+            next.send_notif(
                 NotificationCode::RemoteOpsArrived,
                 RemoteOpsArrivedNote {
                     host_id: remote_host_id,
@@ -1529,11 +1468,13 @@ impl Server {
     async fn handle_send_ops_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
-        doc_id: DocId,
-        host_id: ServerId,
-        ops: Vec<EditorFatOp>,
-        req_id: lsp_server::RequestId,
+        params: SendOpsParams,
     ) -> anyhow::Result<()> {
+        let SendOpsParams {
+            ops,
+            doc_id,
+            host_id,
+        } = params;
         // Look in remote_docs with (host_id, doc_id) key
         let remote_doc = self.remote_docs.get_mut(&(host_id.clone(), doc_id));
         if remote_doc.is_none() {
@@ -1672,11 +1613,14 @@ impl Server {
     async fn handle_move_file_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
-        host_id: ServerId,
-        project: ProjectId,
-        old_path: String,
-        new_path: String,
+        params: MoveFileParams,
     ) -> anyhow::Result<()> {
+        let MoveFileParams {
+            host_id,
+            project,
+            old_path,
+            new_path,
+        } = params;
         if self.host_id != host_id {
             // Handle remotely.
             next.send_to_remote(&host_id, Msg::MoveFile(project, old_path, new_path))
