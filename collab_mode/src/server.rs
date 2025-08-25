@@ -450,7 +450,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
-        let next = Next::new(editor_tx, None, webchannel);
+        let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
             Msg::IceProgress(progress) => {
                 next.send_notif(
