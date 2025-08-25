@@ -87,10 +87,6 @@ pub struct Server {
     active_remotes: Vec<SiteId>,
     /// Maps host id to site id.
     site_id_map: HashMap<ServerId, SiteId>,
-    /// When in attached mode (attached to an editor), list files and
-    /// request file operation are delegated to the editor; otherwise
-    /// read from disk directly.
-    attached: bool,
     /// Whether the server is currently accepting new connections on a
     /// particular signaling server.
     accepting: HashMap<String, ()>,
@@ -173,7 +169,7 @@ impl RemoteDoc {
 // *** Impl Server
 
 impl Server {
-    pub fn new(host_id: ServerId, attached: bool, config: ConfigManager) -> anyhow::Result<Self> {
+    pub fn new(host_id: ServerId, config: ConfigManager) -> anyhow::Result<Self> {
         let key_cert = config.get_key_and_cert(host_id.clone())?;
 
         // Get config values for trusted_hosts and accept_mode
@@ -193,7 +189,6 @@ impl Server {
             users: HashMap::new(),
             active_remotes: Vec::new(),
             site_id_map: HashMap::new(),
-            attached,
             accepting: HashMap::new(),
             config,
             key_cert: Arc::new(key_cert),
