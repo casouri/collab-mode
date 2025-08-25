@@ -212,9 +212,9 @@ MSG should be something like “can’t do xxx”."
                          (format "collab %s: %s" ,msg ,err))))))
 
 (defvar collab--jsonrpc-connection)
-(defvar collab--doc-and-host)
+(defvar collab--doc-host)
 (defun collab--check-precondition ()
-  "Check ‘collab--jsonrpc-connection’ and ‘collab--doc-and-host’.
+  "Check ‘collab--jsonrpc-connection’ and ‘collab--doc-host’.
 
 If they are invalid, turn off ‘collab-monitored-mode’ and raise
 an error. This function should be called before any interactive
@@ -222,7 +222,7 @@ command that acts on a collab-monitored buffer."
   (unless collab--jsonrpc-connection
     (collab-monitored-mode -1)
     (display-warning 'collab "Connection to collab host broke"))
-  (unless collab--doc-and-host
+  (unless collab--doc-host
     (collab-monitored-mode -1)
     (display-warning
      'collab "Current buffer doesn’t have a doc id or host id")))
@@ -283,8 +283,8 @@ If MARK non-nil, show active region."
   (when (equal buffer (current-buffer))
     (collab--check-precondition)
     (collab--catch-error "can’t send cursor position to remote"
-      (let* ((doc-id (car collab--doc-and-host))
-             (host-id (cdr collab--doc-and-host)))
+      (let* ((doc-id (car collab--doc-host))
+             (host-id (cdr collab--doc-host)))
         (collab--send-info-req
          doc-id host-id
          (if (region-active-p)
@@ -292,19 +292,19 @@ If MARK non-nil, show active region."
                 :mark ,(mark))
            `(:type "common.pos" :point ,(point))))))
 
-    (remhash collab--doc-and-host
+    (remhash collab--doc-host
              collab--sync-cursor-timer-table)))
 
 (defun collab--send-cursor-pos ()
   "Move user (SITE-ID)’s cursor overlay to POS."
   (collab--check-precondition)
-  (when (null (gethash collab--doc-and-host
+  (when (null (gethash collab--doc-host
                        collab--sync-cursor-timer-table))
     ;; Run with an idle timer to we don’t interrupt scrolling, etc.
     (let ((timer (run-with-idle-timer
                   0.5 nil #'collab--send-cursor-pos-1
                   (current-buffer))))
-      (puthash collab--doc-and-host timer
+      (puthash collab--doc-host timer
                collab--sync-cursor-timer-table))))
 
 
@@ -350,7 +350,7 @@ If MARK non-nil, show active region."
 ;; timer (default to 0.5s) to send out ops. Every op in the same
 ;; “batch” has the same group seq.
 
-(defvar-local collab--doc-and-host nil
+(defvar-local collab--doc-host nil
   "(DOC-ID . HOST-ID) for the current buffer.
 For ‘collab-dired-mode’ buffers, it’s (DOC-DESC . HOST-ID.")
 
@@ -613,7 +613,7 @@ To prevent them from being invoked."
         (setq-local collab--group-seq 1))
 
     ;; Disable.
-    (remhash collab--doc-and-host
+    (remhash collab--doc-host
              collab--dispatcher-timer-table)
 
     (remove-hook 'before-change-functions #'collab--before-change t)
@@ -621,7 +621,7 @@ To prevent them from being invoked."
     (remove-hook 'collab--after-change-hook #'collab--after-change-default)
     (remove-hook 'collab--after-change-hook #'collab--after-change-hasty)
 
-    (remhash collab--doc-and-host
+    (remhash collab--doc-host
              collab--buffer-table)
 
     (dolist (ov collab--cursor-ov-alist)
@@ -630,7 +630,7 @@ To prevent them from being invoked."
 
     ;; Don’t set doc and host to nil, so that ‘collab-reconnect’ can
     ;; auto-resume.
-    ;; (setq-local collab--doc-and-host nil)
+    ;; (setq-local collab--doc-host nil)
 
     (setq-local collab--my-site-id nil)))
 
@@ -638,9 +638,9 @@ To prevent them from being invoked."
   "Enable ‘collab-monitored-mode’ in the current buffer.
 DOC-ID and HOST-ID are associated with the current buffer.
 MY-SITE-ID is the site id of this editor."
-  (setq collab--doc-and-host (cons doc-id host-id))
+  (setq collab--doc-host (cons doc-id host-id))
   (setq collab--my-site-id my-site-id)
-  (puthash collab--doc-and-host
+  (puthash collab--doc-host
            (current-buffer)
            collab--buffer-table)
   (collab-monitored-mode)
@@ -663,7 +663,7 @@ MY-SITE-ID is the site id of this editor."
   (setq collab--stashed-state-plist
         (plist-put collab--stashed-state-plist
                    (current-buffer)
-                   `( :doc-host ,collab--doc-and-host
+                   `( :doc-host ,collab--doc-host
                       :site-id ,collab--my-site-id))))
 
 (defun collab--maybe-recover ()
@@ -773,7 +773,7 @@ If DOC-DESC is at the top-level, return itself."
 The purpose of this function is to cancel get ops timer when we
 know that we’re gonna send ops (which gets remotes ops too) very
 soon."
-  (when-let* ((timer (gethash collab--doc-and-host
+  (when-let* ((timer (gethash collab--doc-host
                               collab--dispatcher-timer-table)))
     (cancel-timer timer))  )
 
@@ -1045,8 +1045,8 @@ collab process; return nil if we didn’t get any ops."
       (setq resp
             (jsonrpc-request
              conn 'SendOp
-             `( :docId ,(car collab--doc-and-host)
-                :hostId ,(cdr collab--doc-and-host)
+             `( :docId ,(car collab--doc-host)
+                :hostId ,(cdr collab--doc-host)
                 :ops ,(if encoded ops
                         (if ops (vconcat (mapcar #'collab--encode-op ops))
                           [])))
@@ -1092,8 +1092,8 @@ If REDO is non-nil, redo the most recent undo instead."
     (collab--catch-error "can’t undo/redo"
       (setq resp
             (jsonrpc-request conn 'Undo
-                             `( :hostId ,(cdr collab--doc-and-host)
-                                :docId ,(car collab--doc-and-host)
+                             `( :hostId ,(cdr collab--doc-host)
+                                :docId ,(car collab--doc-host)
                                 :kind ,(if redo "Redo" "Undo"))
                              :timeout collab-rpc-timeout))
       (if-let* ((instructions (plist-get resp :ops)))
@@ -1542,12 +1542,12 @@ immediately."
 
 (defun collab--dired-render ()
   "Draw the current ‘collab-dired-mode’ buffer from scratch."
-  (when (and (derived-mode-p 'collab-dired-mode) collab--doc-and-host)
+  (when (and (derived-mode-p 'collab-dired-mode) collab--doc-host)
     (cl-labels ((root-dir-p (path) (equal path ".")))
       (collab--catch-error (format "can’t connect to %s"
-                                   (car collab--doc-and-host))
-        (let* ((doc-desc (car collab--doc-and-host))
-               (host-id (cdr collab--doc-and-host))
+                                   (car collab--doc-host))
+        (let* ((doc-desc (car collab--doc-host))
+               (host-id (cdr collab--doc-host))
                (info (alist-get host-id (collab--host-alist)
                                 nil nil #'equal))
                (file-list-resp (collab--list-files-req
@@ -1641,7 +1641,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                (format "*collab dired: %s" (or root-name file-name))
              (format "*collab dired: %s/%s*" root-name file-name)))))
         (collab-dired-mode)
-        (setq collab--doc-and-host (cons doc-desc host-id))
+        (setq collab--doc-host (cons doc-desc host-id))
         (if (equal (collab--doc-desc-path doc-desc) ".")
             (setq collab--dired-root-name (or root-name file-name)
                   collab--dired-rel-path ".")
@@ -1802,8 +1802,8 @@ Reconnecting will override the current content of the buffer.
 The document to reconnect to is determined by DOC-ID. But if
 called interactively, prompt the user to select a document (by
 its name rather than doc id) to connect."
-  (interactive (list (cdr collab--doc-and-host)
-                     (car collab--doc-and-host)))
+  (interactive (list (cdr collab--doc-host)
+                     (car collab--doc-host)))
   (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
     (let* ((info (alist-get host (collab--host-alist)
                             nil nil #'equal))
@@ -1839,8 +1839,8 @@ its name rather than doc id) to connect."
   "Disconnect current buffer, returning it to a regular buffer."
   (interactive)
   (collab--check-precondition)
-  (let ((doc-id (car collab--doc-and-host))
-        (host-id (cdr collab--doc-and-host)))
+  (let ((doc-id (car collab--doc-host))
+        (host-id (cdr collab--doc-host)))
     (collab--catch-error
         (format "can’t disconnect from Doc(%s)" doc-id)
       (collab--disconnect-from-file-req doc-id host-id)))
@@ -1854,7 +1854,7 @@ its name rather than doc id) to connect."
              (if (derived-mode-p 'collab-hub-mode)
                  (collab--doc-desc-id
                   (get-text-property (point) 'collab-doc-desc))
-               (car collab--doc-and-host))))
+               (car collab--doc-host))))
       (let ((link (format "%s/%s/%s"
                           (nth 1 collab-local-host-config)
                           (nth 0 collab-local-host-config)
@@ -1895,8 +1895,8 @@ If called with an interactive argument (DEBUG), print more
 detailed history."
   (interactive "p")
   (collab--check-precondition)
-  (let ((doc-id (car collab--doc-and-host))
-        (host-id (cdr collab--doc-and-host))
+  (let ((doc-id (car collab--doc-host))
+        (host-id (cdr collab--doc-host))
         (debug (eq debug 4)))
     (collab--catch-error
         (format "can’t print history of Doc(%s)" doc-id)
