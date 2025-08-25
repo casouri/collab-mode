@@ -60,15 +60,6 @@ struct RemoteDoc {
     buffer: GapBuffer<char>,
 }
 
-/// When remote sends a request and we delegate it to the editor, we
-/// store the original request so we can route the response back to
-/// the remote.
-struct OrigRequest {
-    req_id: lsp_server::RequestId,
-    method: String,
-    host_id: ServerId,
-}
-
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server. Once set, this cannot change, because
@@ -110,12 +101,6 @@ pub struct Server {
     trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
     /// Accept mode for incoming connections (shared with WebChannel)
     accept_mode: Arc<Mutex<AcceptMode>>,
-    /// If we get a remote request with a request id and we send a
-    /// request to editor to handle, the request id of the request to
-    /// editor maps to the request id of the received request in this
-    /// map. Also record the method name of the request sent to the
-    /// editor, and the remote host.
-    orig_req_map: HashMap<i32, OrigRequest>,
 }
 
 // *** Impl Doc
@@ -213,7 +198,6 @@ impl Server {
             key_cert: Arc::new(key_cert),
             trusted_hosts,
             accept_mode,
-            orig_req_map: HashMap::new(),
         };
         Ok(server)
     }
@@ -281,61 +265,53 @@ impl Server {
         match msg {
             lsp_server::Message::Request(req) => {
                 let req_id = req.id.clone();
-                if let Err(err) = self.handle_editor_request(req, editor_tx, webchannel).await {
-                    tracing::error!("Failed to handle editor request: {}", err);
+                let next = Next::new(editor_tx, Some(req_id), webchannel);
+                if let Err(err) = self.handle_editor_request(req, &next).await {
+                    tracing::error!("Uncaught error when handling editor request: {}", err);
                     // Errors that reach this level are internal error.
                     let err = lsp_server::ResponseError {
                         code: ErrorCode::InternalError as i32,
                         message: err.to_string(),
                         data: None,
                     };
-                    send_response(editor_tx, req_id, (), Some(err)).await;
+                    next.send_resp((), Some(err)).await;
                 }
                 Ok(())
             }
             lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
-                if let Err(err) = self
-                    .handle_editor_notification(notif, editor_tx, webchannel)
-                    .await
-                {
+                let next = Next::new(editor_tx, None, webchannel);
+                if let Err(err) = self.handle_editor_notification(&next, notif).await {
                     tracing::error!("Failed to handle editor notification: {}", err);
                     let params = serde_json::json!({
                         "message": err.to_string(),
                     });
-                    send_notification(editor_tx, NotificationCode::InternalError, params).await;
+                    next.send_notif(NotificationCode::InternalError, params)
+                        .await;
                 }
                 Ok(())
             }
         }
     }
 
-    async fn handle_editor_request(
+    async fn handle_editor_request<'a>(
         &mut self,
         req: lsp_server::Request,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
     ) -> anyhow::Result<()> {
         match req.method.as_str() {
             "ListFiles" => {
                 let params: message::ListFilesParams = serde_json::from_value(req.params)?;
                 // Either sends a request to remote or sends a
                 // response to editor.
-                self.list_files_from_editor(
-                    editor_tx,
-                    webchannel,
-                    params.host_id,
-                    params.dir,
-                    req.id,
-                )
-                .await?;
+                self.list_files_from_editor(next, params.host_id, params.dir)
+                    .await?;
                 Ok(())
             }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
                 self.open_file_from_editor(
-                    editor_tx,
-                    webchannel,
+                    next,
                     params.host_id,
                     params.file_desc,
                     req.id,
@@ -347,8 +323,7 @@ impl Server {
             "SendOps" => {
                 let params: SendOpsParams = serde_json::from_value(req.params)?;
                 self.handle_send_ops_from_editor(
-                    editor_tx,
-                    webchannel,
+                    next,
                     params.doc_id,
                     params.host_id,
                     params.ops,
@@ -360,31 +335,29 @@ impl Server {
             "Undo" => {
                 let params: UndoParams = serde_json::from_value(req.params)?;
                 let resp = self.handle_undo_from_editor(params)?;
-                send_response(editor_tx, req.id, resp, None).await;
+                next.send_resp(resp, None).await;
                 Ok(())
             }
             "ShareFile" => {
                 let params: ShareFileParams = serde_json::from_value(req.params)?;
                 let resp = self.handle_share_file_from_editor(params)?;
-                send_response(editor_tx, req.id, resp, None).await;
+                next.send_resp(resp, None).await;
                 Ok(())
             }
             "UpdateConfig" => {
                 let params: UpdateConfigParams = serde_json::from_value(req.params)?;
                 self.handle_update_config_from_editor(params)?;
-                send_response(editor_tx, req.id, (), None).await;
+                next.send_resp((), None).await;
                 Ok(())
             }
             "MoveFile" => {
                 let params: MoveFileParams = serde_json::from_value(req.params)?;
                 self.handle_move_file_from_editor(
-                    editor_tx,
-                    webchannel,
+                    next,
                     params.host_id,
                     params.project,
                     params.old_path,
                     params.new_path,
-                    req.id,
                 )
                 .await?;
                 Ok(())
@@ -397,11 +370,10 @@ impl Server {
         }
     }
 
-    async fn handle_editor_notification(
+    async fn handle_editor_notification<'a>(
         &mut self,
+        next: &Next<'a>,
         notif: lsp_server::Notification,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
@@ -410,8 +382,7 @@ impl Server {
                     return Ok(());
                 }
                 self.accepting.insert(params.signaling_addr.clone(), ());
-                send_notification(
-                    editor_tx,
+                next.send_notif(
                     NotificationCode::AcceptingConnection,
                     serde_json::json!({
                         "signaling_addr": params.signaling_addr,
@@ -419,8 +390,8 @@ impl Server {
                 )
                 .await;
                 let key_cert = self.key_cert.clone();
-                let mut webchannel_1 = webchannel.clone();
-                let editor_tx_1 = editor_tx.clone();
+                let mut webchannel_1 = next.webchannel.clone();
+                let editor_tx_1 = next.editor_tx.clone();
 
                 tokio::spawn(async move {
                     let res = webchannel_1
@@ -454,8 +425,7 @@ impl Server {
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
                 self.connect(
-                    editor_tx,
-                    webchannel,
+                    next,
                     params.host_id,
                     params.signaling_addr,
                     params.transport_type,
@@ -715,10 +685,9 @@ impl Server {
 
     // **** Handler functions
 
-    async fn connect(
+    async fn connect<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         host_id: ServerId,
         signaling_addr: String,
         transpot_type: webchannel::TransportType,
@@ -726,8 +695,7 @@ impl Server {
         if host_id == self.host_id {
             return;
         }
-        send_notification(
-            editor_tx,
+        next.send_notif(
             NotificationCode::Connecting,
             ConnectingNote {
                 host_id: host_id.clone(),
@@ -735,8 +703,8 @@ impl Server {
         )
         .await;
         let key_cert = self.key_cert.clone();
-        let webchannel_1 = webchannel.clone();
-        let editor_tx_1 = editor_tx.clone();
+        let webchannel_1 = next.webchannel.clone();
+        let editor_tx_1 = next.editor_tx.clone();
         let my_host_id = self.host_id.clone();
 
         tokio::spawn(async move {
@@ -770,16 +738,14 @@ impl Server {
     // In non-attached mode read files from disk. If dir is None, list
     // top-level projects and docs, if dir non-nil, list files in that
     // dir.
-    async fn list_files_from_editor(
+    async fn list_files_from_editor<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         host_id: ServerId,
         dir: Option<FileDesc>,
-        req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
         if self.host_id != host_id {
-            send_to_remote(webchannel, &host_id, Some(req_id), Msg::ListFiles { dir }).await;
+            next.send_to_remote(&host_id, Msg::ListFiles { dir }).await;
             return Ok(());
         }
 
@@ -787,7 +753,7 @@ impl Server {
 
         match files {
             Ok(files) => {
-                send_response(editor_tx, req_id, ListFilesResp { files }, None).await;
+                next.send_resp(ListFilesResp { files }, None).await;
             }
             Err(err) => {
                 let err = lsp_server::ResponseError {
@@ -795,7 +761,7 @@ impl Server {
                     message: err.to_string(),
                     data: None,
                 };
-                send_response(editor_tx, req_id, (), Some(err)).await;
+                next.send_resp((), Some(err)).await;
             }
         }
         Ok(())
@@ -972,10 +938,9 @@ impl Server {
         Ok((content, file))
     }
 
-    async fn open_file_from_editor(
+    async fn open_file_from_editor<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         host_id: ServerId,
         file_desc: FileDesc,
         req_id: lsp_server::RequestId,
@@ -1003,7 +968,7 @@ impl Server {
                                     filename: doc.name.clone(),
                                     doc_id: *doc_id,
                                 };
-                                send_response(editor_tx, req_id, resp, None).await;
+                                next.send_resp(resp, None).await;
                                 return Ok(());
                             }
                         }
@@ -1017,7 +982,7 @@ impl Server {
                             message: err.to_string(),
                             data: None,
                         };
-                        send_response(editor_tx, req_id, (), Some(err)).await;
+                        next.send_resp((), Some(err)).await;
                         return Ok(());
                     }
                     let (content, disk_file) = res.unwrap();
@@ -1069,7 +1034,7 @@ impl Server {
                         filename,
                         doc_id,
                     };
-                    send_response(editor_tx, req_id, resp, None).await;
+                    next.send_resp(resp, None).await;
                 }
                 FileDesc::File { id } => {
                     // Look up existing doc
@@ -1080,14 +1045,14 @@ impl Server {
                             filename: doc.name.clone(),
                             doc_id: *id,
                         };
-                        send_response(editor_tx, req_id, resp, None).await;
+                        next.send_resp(resp, None).await;
                     } else {
                         let err = lsp_server::ResponseError {
                             code: ErrorCode::IoError as i32,
                             message: format!("Doc {} not found", id),
                             data: None,
                         };
-                        send_response(editor_tx, req_id, (), Some(err)).await;
+                        next.send_resp((), Some(err)).await;
                     }
                 }
                 FileDesc::Project { .. } => {
@@ -1096,7 +1061,7 @@ impl Server {
                         message: "Cannot open a project directory".to_string(),
                         data: None,
                     };
-                    send_response(editor_tx, req_id, (), Some(err)).await;
+                    next.send_resp((), Some(err)).await;
                 }
             }
             return Ok(());
@@ -1114,13 +1079,13 @@ impl Server {
                     filename: remote_doc.name.clone(),
                     doc_id: *doc_id,
                 };
-                send_response(editor_tx, req_id, resp, None).await;
+                next.send_resp(resp, None).await;
                 return Ok(());
             }
         }
 
         let msg = Msg::RequestFile(file_desc, mode);
-        send_to_remote(webchannel, &host_id, Some(req_id), msg).await;
+        next.send_to_remote(&host_id, msg).await;
         Ok(())
     }
 
@@ -1561,10 +1526,9 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_send_ops_from_editor(
+    async fn handle_send_ops_from_editor<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         doc_id: DocId,
         host_id: ServerId,
         ops: Vec<EditorFatOp>,
@@ -1578,7 +1542,7 @@ impl Server {
                 message: format!("Doc {} from host {} not found", doc_id, host_id),
                 data: None,
             };
-            send_response(editor_tx, req_id, (), Some(err)).await;
+            next.send_resp((), Some(err)).await;
             return Ok(());
         }
         let remote_doc = remote_doc.unwrap();
@@ -1611,7 +1575,7 @@ impl Server {
                         message: format!("Failed to process op: {}", err),
                         data: None,
                     };
-                    send_response(editor_tx, req_id, (), Some(err)).await;
+                    next.send_resp((), Some(err)).await;
                     self.remote_docs.remove(&(host_id, doc_id));
                     return Ok(());
                 }
@@ -1630,7 +1594,8 @@ impl Server {
         // Package local ops if any
         if let Some(context_ops) = remote_doc.engine.maybe_package_local_ops() {
             // Send to the owner (could be ourselves or a remote)
-            send_to_remote(webchannel, &host_id, None, Msg::OpFromClient(context_ops)).await;
+            next.send_to_remote(&host_id, Msg::OpFromClient(context_ops))
+                .await;
         }
 
         // Send response with processed remote ops
@@ -1638,7 +1603,7 @@ impl Server {
             ops: lean_ops,
             last_seq: remote_doc.engine.current_gseq(),
         };
-        send_response(editor_tx, req_id, resp, None).await;
+        next.send_resp(resp, None).await;
         Ok(())
     }
 
@@ -1704,25 +1669,18 @@ impl Server {
         Ok(resp)
     }
 
-    async fn handle_move_file_from_editor(
+    async fn handle_move_file_from_editor<'a>(
         &mut self,
-        editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        next: &Next<'a>,
         host_id: ServerId,
         project: ProjectId,
         old_path: String,
         new_path: String,
-        req_id: lsp_server::RequestId,
     ) -> anyhow::Result<()> {
         if self.host_id != host_id {
             // Handle remotely.
-            send_to_remote(
-                webchannel,
-                &host_id,
-                Some(req_id),
-                Msg::MoveFile(project, old_path, new_path),
-            )
-            .await;
+            next.send_to_remote(&host_id, Msg::MoveFile(project, old_path, new_path))
+                .await;
         } else {
             // Handle locally.
             let res = self.move_file_on_disk(&project, &old_path, &new_path).await;
@@ -1733,7 +1691,7 @@ impl Server {
                         message: err.to_string(),
                         data: None,
                     };
-                    send_response(editor_tx, req_id, (), Some(err)).await;
+                    next.send_resp((), Some(err)).await;
                 }
                 Ok(subscribers) => {
                     // Send response to original caller
@@ -1743,14 +1701,14 @@ impl Server {
                         old_path: old_path.clone(),
                         new_path: new_path.clone(),
                     };
-                    send_response(editor_tx, req_id, resp, None).await;
+                    next.send_resp(resp, None).await;
 
                     // Send FileMoved notification to all subscribers
                     // if doc was affected.
                     for subscriber_id in subscribers {
                         if subscriber_id != self.host_id {
                             send_to_remote(
-                                webchannel,
+                                next.webchannel,
                                 &subscriber_id,
                                 None,
                                 Msg::FileMoved(project.clone(), old_path.clone(), new_path.clone()),
@@ -1857,6 +1815,38 @@ impl Server {
 
 // *** Helper functions
 
+struct Next<'a> {
+    editor_tx: &'a mpsc::Sender<lsp_server::Message>,
+    req_id: Option<lsp_server::RequestId>,
+    webchannel: &'a WebChannel,
+}
+
+impl<'a> Next<'a> {
+    fn new(
+        editor_tx: &'a mpsc::Sender<lsp_server::Message>,
+        req_id: Option<lsp_server::RequestId>,
+        webchannel: &'a WebChannel,
+    ) -> Self {
+        Next {
+            editor_tx,
+            req_id,
+            webchannel,
+        }
+    }
+
+    async fn send_notif<T: Display>(&self, method: T, params: impl Serialize) {
+        send_notification(self.editor_tx, method, params).await
+    }
+
+    async fn send_resp(&self, result: impl Serialize, error: Option<lsp_server::ResponseError>) {
+        send_response(self.editor_tx, self.req_id.clone().unwrap(), result, error).await
+    }
+
+    async fn send_to_remote(&self, host_id: &ServerId, msg: Msg) {
+        send_to_remote(self.webchannel, host_id, self.req_id.clone(), msg).await
+    }
+}
+
 pub async fn send_notification<T: Display>(
     editor_tx: &mpsc::Sender<lsp_server::Message>,
     method: T,
@@ -1890,45 +1880,6 @@ async fn send_response(
         .await
     {
         tracing::error!("Failed to send response to editor: {}", err);
-    }
-}
-
-async fn send_request(
-    editor_tx: &mpsc::Sender<lsp_server::Message>,
-    req_id: i32,
-    method: &str,
-    params: impl Serialize,
-) {
-    let request = lsp_server::Request {
-        id: lsp_server::RequestId::from(req_id),
-        method: method.to_string(),
-        params: serde_json::to_value(params).unwrap(),
-    };
-    if let Err(err) = editor_tx.send(lsp_server::Message::Request(request)).await {
-        tracing::error!("Failed to send request to editor: {}", err);
-    }
-}
-
-async fn send_connection_broke(
-    editor_tx: &mpsc::Sender<lsp_server::Message>,
-    host_id: ServerId,
-    reason: String,
-) {
-    let notif = lsp_server::Notification {
-        method: NotificationCode::ConnectionBroke.to_string(),
-        params: serde_json::json!({
-            "hostId": host_id,
-            "reason": reason,
-        }),
-    };
-    if let Err(err) = editor_tx
-        .send(lsp_server::Message::Notification(notif))
-        .await
-    {
-        tracing::error!(
-            "Failed to send connection broke notification to editor: {}",
-            err
-        );
     }
 }
 
