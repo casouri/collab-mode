@@ -252,6 +252,8 @@ pub struct SaveFileParams {
     pub doc_id: DocId,
 }
 
+pub type SaveFileResp = SaveFileParams;
+
 // **** SendOpEditor
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -335,6 +337,8 @@ pub enum Msg {
     RequestFile(FileDesc, OpenMode),
     MoveFile(ProjectId, String, String),
     FileMoved(ProjectId, String, String),
+    SaveFile(DocId),
+    FileSaved(DocId),
     Snapshot(NewSnapshot),
     TakeDownFile(DocId),
     ResetFile(DocId),

@@ -6,11 +6,12 @@ use crate::types::*;
 use crate::webchannel::{self, WebChannel};
 use anyhow::{anyhow, Context};
 use gapbuf::GapBuffer;
+use lsp_server::ResponseError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
@@ -348,6 +349,11 @@ impl Server {
                 self.handle_move_file_from_editor(next, params).await?;
                 Ok(())
             }
+            "SaveFile" => {
+                let params: SaveFileParams = serde_json::from_value(req.params)?;
+                self.handle_save_file_from_editor(next, params).await?;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -551,7 +557,7 @@ impl Server {
                     self.handle_request_file(&next, file_desc, msg.host.clone(), mode)
                         .await?;
                 } else {
-                    tracing::warn!("Received RequestFile without req_id, ignoring.");
+                    tracing::warn!("Received RequestFile without req_id, ignoring");
                     next.send_to_remote(&msg.host, Msg::BadRequest("Missing req_id".to_string()))
                         .await;
                 }
@@ -562,7 +568,7 @@ impl Server {
                     self.handle_snapshot(&next, snapshot, msg.host.clone())
                         .await?;
                 } else {
-                    tracing::warn!("Received Snapshot without req_id, ignoring.");
+                    tracing::warn!("Received Snapshot without req_id, ignoring");
                 }
                 Ok(())
             }
@@ -609,6 +615,31 @@ impl Server {
                     };
                     next.send_notif(NotificationCode::FileMoved, msg).await;
                 }
+                Ok(())
+            }
+            Msg::SaveFile(doc_id) => {
+                let res = self.save_file_to_disk(&doc_id).await;
+                let resp = if let Err(err) = res {
+                    Msg::ErrorResp(ErrorCode::IoError, err.to_string())
+                } else {
+                    Msg::FileSaved(doc_id)
+                };
+                next.send_to_remote(&msg.host, resp).await;
+                Ok(())
+            }
+            Msg::FileSaved(doc_id) => {
+                if msg.req_id.is_none() {
+                    tracing::warn!("Received FileSaved without req_id, ignoring");
+                    next.send_to_remote(&msg.host, Msg::BadRequest("Missing req_id".to_string()))
+                        .await;
+                    return Ok(());
+                }
+
+                let resp = SaveFileResp {
+                    host_id: msg.host,
+                    doc_id,
+                };
+                next.send_resp(resp, None).await;
                 Ok(())
             }
             _ => {
@@ -1711,6 +1742,54 @@ impl Server {
         }
 
         Ok(Vec::new())
+    }
+
+    async fn handle_save_file_from_editor<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: SaveFileParams,
+    ) -> anyhow::Result<()> {
+        let SaveFileParams { host_id, doc_id } = params.clone();
+        if host_id != self.host_id {
+            // Handle remotely.
+            next.send_to_remote(&host_id, Msg::SaveFile(doc_id)).await;
+            return Ok(());
+        }
+
+        // Handle locally.
+        let res = self.save_file_to_disk(&doc_id).await;
+
+        if let Err(err) = res {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::IoError as i32,
+                message: err.to_string(),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+        } else {
+            next.send_resp(params, None).await;
+        }
+        Ok(())
+    }
+
+    async fn save_file_to_disk(&mut self, doc_id: &DocId) -> anyhow::Result<()> {
+        let doc = self.docs.get(doc_id);
+        if doc.is_none() {
+            return Err(anyhow!("Doc {} not found", doc_id));
+        }
+        let doc = doc.unwrap();
+        let file = &doc.disk_file;
+        if file.is_none() {
+            // TODO: Should we return an error to remote?
+            tracing::warn!("Remote requeste to save a buffer to disk");
+            return Ok(());
+        }
+        let file = file.as_ref().unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        let content: String = doc.buffer.iter().collect();
+        writer
+            .write_all(content.as_bytes())
+            .with_context(|| anyhow!("Error writing to {:?}", doc.abs_filename))
     }
 
     fn handle_update_config_from_editor(
