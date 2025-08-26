@@ -99,6 +99,10 @@ pub struct Config {
     pub trusted_hosts: HashMap<ServerId, String>,
     #[serde(default = "AcceptMode::default")]
     pub accept_mode: AcceptMode,
+    // The host id of this server. User can put it in the config if
+    // they run the server in headless mode and not connect an editor
+    // to it.
+    pub host_id: Option<ServerId>,
 }
 
 impl Default for Config {
@@ -107,6 +111,7 @@ impl Default for Config {
             projects: Vec::new(),
             trusted_hosts: HashMap::new(),
             accept_mode: AcceptMode::default(),
+            host_id: None,
         }
     }
 }

@@ -58,24 +58,6 @@ fn main_loop(
         let msg = msg.unwrap();
         trace!("Received message from editor: {:?}", msg);
 
-        if let Message::Request(req) = &msg {
-            if req.method == "Initialize" {
-                let res =
-                    connection
-                        .sender
-                        .send(lsp_server::Message::Response(lsp_server::Response {
-                            id: req.id.clone(),
-                            result: Some(serde_json::json!({})),
-                            error: None,
-                        }));
-                if let Err(err) = res {
-                    tracing::error!("Failed to send Initialize response to editor: {:#?}", err);
-                    break;
-                }
-                continue;
-            }
-        }
-
         let res = msg_tx.blocking_send(msg);
         if let Err(err) = res {
             let _ = err_tx.blocking_send(format!(

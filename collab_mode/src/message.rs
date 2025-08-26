@@ -98,7 +98,7 @@ pub struct ConnectingNote {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InitParams {
+pub struct InitResp {
     pub host_id: ServerId,
 }
 

@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, editor_receptor, jsonrpc, server::Server};
+use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
@@ -16,10 +17,6 @@ enum Commands {
         /// editor and collab process.
         #[arg(long)]
         socket: bool,
-        /// Host id of this server. Should be a UUIDv4. This is your
-        /// “account” known to other servers.
-        #[arg(long)]
-        id: String,
         /// Port used by the socket.
         #[arg(long, short = 'p')]
         #[arg(default_value_t = 7701)]
@@ -40,7 +37,6 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Run {
             socket,
             socket_port,
-            id,
             config,
             profile,
         }) => {
@@ -55,7 +51,14 @@ fn main() -> anyhow::Result<()> {
             };
             let config_man = config_man::ConfigManager::new(config_location, profile.to_owned())?;
 
-            let mut server = Server::new(id.clone(), config_man)?;
+            // Determine host_id with priority: config file > generate UUID v4
+            let host_id = if let Some(config_id) = config_man.config().host_id.clone() {
+                config_id
+            } else {
+                Uuid::new_v4().to_string()
+            };
+
+            let mut server = Server::new(host_id, config_man)?;
             let (server_in_tx, server_in_rx) = tokio::sync::mpsc::channel(32);
             let (server_out_tx, server_out_rx) = tokio::sync::mpsc::channel(32);
             let port = socket_port.clone();

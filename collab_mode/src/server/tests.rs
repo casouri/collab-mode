@@ -525,7 +525,7 @@ pub async fn setup_hub_and_spoke_servers(
     let hub_id = create_test_id("hub");
     let hub_temp_dir = tempfile::TempDir::new()?;
     let hub_config = ConfigManager::new(Some(hub_temp_dir.path().to_path_buf()), None)?;
-    let mut hub_server = Server::new(hub_id.clone(), true, hub_config)?;
+    let mut hub_server = Server::new(hub_id.clone(), hub_config)?;
 
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
 
@@ -563,7 +563,7 @@ pub async fn setup_hub_and_spoke_servers(
         let spoke_id = create_test_id(&format!("spoke{}", i + 1));
         let spoke_temp_dir = tempfile::TempDir::new()?;
         let spoke_config = ConfigManager::new(Some(spoke_temp_dir.path().to_path_buf()), None)?;
-        let mut spoke_server = Server::new(spoke_id.clone(), true, spoke_config)?;
+        let mut spoke_server = Server::new(spoke_id.clone(), spoke_config)?;
 
         let (mut spoke_editor, spoke_tx, spoke_rx) = MockEditor::new();
 
@@ -718,11 +718,11 @@ async fn test_accept_connect() {
 
     let temp_dir1 = tempfile::TempDir::new().unwrap();
     let config1 = ConfigManager::new(Some(temp_dir1.path().to_path_buf()), None).unwrap();
-    let mut server1 = Server::new(id1.clone(), true, config1).unwrap();
+    let mut server1 = Server::new(id1.clone(), config1).unwrap();
 
     let temp_dir2 = tempfile::TempDir::new().unwrap();
     let config2 = ConfigManager::new(Some(temp_dir2.path().to_path_buf()), None).unwrap();
-    let mut server2 = Server::new(id2.clone(), true, config2).unwrap();
+    let mut server2 = Server::new(id2.clone(), config2).unwrap();
 
     let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
     let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();

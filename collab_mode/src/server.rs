@@ -296,6 +296,14 @@ impl Server {
         next: &Next<'a>,
     ) -> anyhow::Result<()> {
         match req.method.as_str() {
+            "Initialize" => {
+                // Return InitResp with host_id for Initialize request
+                let resp = message::InitResp {
+                    host_id: self.host_id.clone(),
+                };
+                next.send_resp(resp, None).await;
+                Ok(())
+            }
             "ListFiles" => {
                 let params: message::ListFilesParams = serde_json::from_value(req.params)?;
                 // Either sends a request to remote or sends a
