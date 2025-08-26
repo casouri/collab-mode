@@ -68,7 +68,7 @@ pub fn create_key_cert(name: &str) -> KeyCert {
     KeyCert { key_der, cert_der }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ConfigProject {
     pub name: String,
     pub path: String,

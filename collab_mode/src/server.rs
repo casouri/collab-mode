@@ -353,44 +353,29 @@ impl Server {
                 Ok(())
             }
             "DeclareProjects" => {
-                let params: DeclareProjectsParams = serde_json::from_value(req.params)?;
-                let mut processed_projects = Vec::new();
+                let mut params: DeclareProjectsParams = serde_json::from_value(req.params)?;
 
-                for mut project_entry in params.projects {
-                    // Try to expand the project path to absolute
-                    match expanduser::expanduser(&project_entry.filename) {
-                        Ok(expanded_path) => {
-                            let absolute_path = expanded_path.to_string_lossy().to_string();
-                            project_entry.filename = absolute_path.clone();
-
-                            let project = Project {
-                                name: project_entry.name.clone(),
-                                root: absolute_path,
-                                meta: project_entry.meta.clone(),
-                            };
-                            self.projects.insert(project.name.clone(), project);
-                            processed_projects.push(project_entry);
-                        }
-                        Err(err) => {
-                            // Return IoError if path expansion fails
-                            let error = lsp_server::ResponseError {
-                                code: ErrorCode::IoError as i32,
-                                message: format!(
-                                    "Failed to expand path '{}': {}",
-                                    project_entry.filename, err
-                                ),
-                                data: None,
-                            };
-                            next.send_resp((), Some(error)).await;
-                            return Ok(());
-                        }
-                    }
+                let res = expand_project_paths(&mut params.projects);
+                if let Err(err) = res {
+                    let error = lsp_server::ResponseError {
+                        code: ErrorCode::IoError as i32,
+                        message: err.to_string(),
+                        data: None,
+                    };
+                    next.send_resp((), Some(error)).await;
+                    return Ok(());
                 }
 
-                let resp = DeclareProjectsResp {
-                    projects: processed_projects,
-                };
-                next.send_resp(resp, None).await;
+                for project_entry in params.projects {
+                    let project = Project {
+                        name: project_entry.name.clone(),
+                        root: project_entry.path,
+                        meta: JsonMap::new(),
+                    };
+                    self.projects.insert(project.name.clone(), project);
+                }
+
+                next.send_resp((), None).await;
                 Ok(())
             }
             "MoveFile" => {

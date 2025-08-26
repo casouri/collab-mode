@@ -1,4 +1,8 @@
-use crate::{config_man::AcceptMode, types::*, webchannel::TransportType};
+use crate::{
+    config_man::{AcceptMode, ConfigProject},
+    types::*,
+    webchannel::TransportType,
+};
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,23 +168,7 @@ pub struct ShareFileResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeclareProjectsParams {
-    pub projects: Vec<DeclareProjectEntry>,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeclareProjectEntry {
-    /// Absolute path to the project root.
-    pub filename: String,
-    /// Name of the project, must be unique among projects.
-    pub name: String,
-    pub meta: JsonMap,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeclareProjectsResp {
-    pub projects: Vec<DeclareProjectEntry>,
+    pub projects: Vec<ConfigProject>,
 }
 
 // **** ListFiles
@@ -332,8 +320,7 @@ pub enum Msg {
     ListFiles {
         dir: Option<FileDesc>,
     },
-    FileList(Vec<crate::message::ListFileEntry>),
-    DeclareProjects(Vec<DeclareProjectEntry>),
+    FileList(Vec<ListFileEntry>),
     OpFromClient(ContextOps),
     OpFromServer(Vec<FatOp>),
     RequestOps {
