@@ -278,6 +278,7 @@ If MARK non-nil, show active region."
           (overlay-put ov 'after-string nil))))))
 
 (defvar collab-monitored-mode)
+;; FIXME: Need update.
 (defun collab--send-cursor-pos-1 (buffer)
   "Send cursor position of BUFFER to the collab process."
   (when (equal buffer (current-buffer))
@@ -295,6 +296,7 @@ If MARK non-nil, show active region."
     (remhash collab--doc-host
              collab--sync-cursor-timer-table)))
 
+;; FIXME: Use a global idle time like send-ops.
 (defun collab--send-cursor-pos ()
   "Move user (SITE-ID)’s cursor overlay to POS."
   (collab--check-precondition)
@@ -357,6 +359,7 @@ For ‘collab-dired-mode’ buffers, it’s (DOC-DESC . HOST-ID.")
 (defvar-local collab--accepting-connection nil
   "If non-nil, our collab process is accepting remote connections.")
 
+;; FIXME: Change into error log.
 (defvar-local collab--most-recent-error nil
   "Most recent error message.")
 
@@ -555,6 +558,7 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
            (list 'ins pos1 (substring str1 0 (- pos2 pos1)) seq1)
          nil)))))
 
+;; FIXME: Add reconnect state.
 (defvar collab--mode-line
   `(collab-monitored-mode
     ,(propertize "CONNECTED " 'face
@@ -565,7 +569,7 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
   "This is bound to undo commands that we don’t support.
 To prevent them from being invoked."
   (interactive)
-  (message (collab--fairy "Other undo won’t work in this mode, use ‘collab-undo/redo’ is what I was told: (undo → \\[collab-undo], redo → \\[collab-redo])")))
+  (message (collab--fairy "Other undo won’t work in this mode, use ‘collab-undo/redo’: (undo → \\[collab-undo], redo → \\[collab-redo])")))
 
 (defvar collab-monitored-mode-map
   (let ((map (make-sparse-keymap)))
@@ -582,6 +586,9 @@ To prevent them from being invoked."
                 #'collab--warn-for-unsupported-undo)
     (define-key map [remap undo-tree-visualize]
                 #'collab--warn-for-unsupported-undo)
+    ;; Other commands
+    ;; FIXME: add collab-save-buffer.
+    (define-key map [remap save-buffer] #'collab-save-buffer)
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
@@ -682,29 +689,20 @@ MY-SITE-ID is the site id of this editor."
 
 ;;; JSON-RPC
 
-(defun collab--doc-desc-id (doc-desc)
-  "Return the doc-id in DOC-DESC if it has one, else return nil.
+(defun collab--file-desc-id (file-desc)
+  "Return the doc-id in FILE-DESC if it has one, else return nil.
 
-DOC-DESC := (:Doc DOC-ID)
-         | (:File [DOC-ID REL-PATH])
-         | (:Dir [DOC-ID REL-PATH])
+FILE-DESC := (:type \"file\" :id doc-id)
+           | (:type \"project\" :id project-id)
+           | (:type \"projectFile\" :project project-id :file rel-path)
 
-Return DOC-ID if DOC-DESC is a :Doc or a :File, or it’s a :Dir
+Return DOC-ID if FILE-DESC is a :Doc or a :File, or it’s a :Dir
 but REL-PATH is “.” Basically, return the doc id if the doc id
-actually belongs to DOC-DESC."
-  (pcase (car doc-desc)
-    (:Doc (cadr doc-desc))
-    (:File (aref (cadr doc-desc) 0))
-    (:Dir (let ((doc-id (aref (cadr doc-desc) 0))
-                (path (aref (cadr doc-desc) 1)))
-            (if (equal path ".")
-                doc-id
-              nil)))))
+actually belongs to FILE-DESC."
+  (pcase (plist-get file-desc :type)
+    ("file" (plist-get file-desc :id))))
 
-(defun collab--doc-desc-dir-p (doc-desc)
-  "Return non-nil if DOC-DESC represents a directory."
-  (eq (car doc-desc) :Dir))
-
+;; FIXME: Update or remove.
 (defun collab--doc-desc-path (doc-desc)
   "Return the relative path in DOC-DESC."
   (pcase doc-desc
@@ -712,6 +710,7 @@ actually belongs to DOC-DESC."
     (`(:Dir [,_ ,path]) path)
     (_ nil)))
 
+;; FIXME: Update or remove.
 (defun collab--doc-desc-parent (doc-desc)
   "Return parent doc-desc of DOC-DESC.
 If DOC-DESC is a doc, return nil.
@@ -1198,16 +1197,16 @@ If no such section is found, do nothing."
 SERVER is its server id. If DISPLAY-NAME non-nil, use that as the
 display name.
 
-See ‘collab--doc-desc-id’ for the shape of DOC-DESC."
+See ‘collab--file-desc-id’ for the shape of DOC-DESC."
   (let ((beg (point)))
     (insert (or display-name file-name))
     (add-text-properties
      beg (point) `( collab-doc-desc ,doc-desc
                     collab-file-name ,file-name))
     ;; If the doc is connected, it must be a :Doc.
-    (when (and (collab--doc-desc-id doc-desc)
+    (when (and (collab--file-desc-id doc-desc)
                (collab--doc-connected
-                (collab--doc-desc-id doc-desc) server))
+                (collab--file-desc-id doc-desc) server))
       (insert " " (propertize (icon-string 'collab-status-on)
                               'collab-status t)))))
 
@@ -1619,13 +1618,13 @@ There should be three text properties at point:
 
 If HOST-ID and DOC-ID non-nil, use them instead."
   (interactive)
-  ;; See ‘collab--doc-desc-id’ for the shape of DOC-DESC.
+  ;; See ‘collab--file-desc-id’ for the shape of DOC-DESC.
   (let* ((doc-desc (or (and doc-id `(:Doc ,doc-id))
                        (get-text-property (point) 'collab-doc-desc)))
          (file-name (get-text-property (point) 'collab-file-name))
          (host-id (or host-id
                       (get-text-property (point) 'collab-host-id)))
-         (buf (when-let* ((doc-id (collab--doc-desc-id doc-desc)))
+         (buf (when-let* ((doc-id (collab--file-desc-id doc-desc)))
                 (gethash (cons doc-id host-id)
                          collab--buffer-table))))
     (cond
@@ -1683,7 +1682,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
   (interactive)
   (let* ((doc-desc (get-text-property (point) 'collab-doc-desc))
          (host-id (get-text-property (point) 'collab-host-id))
-         (doc-id (collab--doc-desc-id doc-desc)))
+         (doc-id (collab--file-desc-id doc-desc)))
     (when doc-id
       (collab--catch-error
           (format "can’t disconnect from Doc(%s)" doc-id)
@@ -1705,7 +1704,7 @@ If HOST-ID and DOC-ID non-nil, use them instead."
 (defun collab--delete-doc ()
   "Delete the file at point."
   (interactive)
-  (when-let* ((doc-id (collab--doc-desc-id
+  (when-let* ((doc-id (collab--file-desc-id
                        (get-text-property (point) 'collab-doc-desc)))
               (host-id (get-text-property (point) 'collab-host-id)))
     (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
@@ -1812,7 +1811,7 @@ its name rather than doc id) to connect."
            (file-list (seq-map #'identity (plist-get file-list-resp :files)))
            (doc-desc `(:Doc ,doc-id))
            (file-name (cl-loop for elm in file-list
-                               if (equal (collab--doc-desc-id
+                               if (equal (collab--file-desc-id
                                           (plist-get elm :docDesc))
                                          doc-id)
                                return (plist-get elm :fileName))))
@@ -1852,7 +1851,7 @@ its name rather than doc id) to connect."
   (interactive)
   (if-let* ((doc-id
              (if (derived-mode-p 'collab-hub-mode)
-                 (collab--doc-desc-id
+                 (collab--file-desc-id
                   (get-text-property (point) 'collab-doc-desc))
                (car collab--doc-host))))
       (let ((link (format "%s/%s/%s"

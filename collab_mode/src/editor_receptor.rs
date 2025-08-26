@@ -44,6 +44,7 @@ fn main_loop(
     // `connection`.
     let connection_1 = connection.clone();
     let err_tx_1 = err_tx.clone();
+    let msg_tx_1 = msg_tx.clone();
 
     // Read from editor and send to msg_tx.
     std::thread::spawn(move || loop {
@@ -56,7 +57,27 @@ fn main_loop(
         }
         let msg = msg.unwrap();
         trace!("Received message from editor: {:?}", msg);
-        if let Err(err) = msg_tx.blocking_send(msg) {
+
+        if let Message::Request(req) = &msg {
+            if req.method == "Initialize" {
+                let res =
+                    connection
+                        .sender
+                        .send(lsp_server::Message::Response(lsp_server::Response {
+                            id: req.id.clone(),
+                            result: Some(serde_json::json!({})),
+                            error: None,
+                        }));
+                if let Err(err) = res {
+                    tracing::error!("Failed to send Initialize response to editor: {:#?}", err);
+                    break;
+                }
+                continue;
+            }
+        }
+
+        let res = msg_tx.blocking_send(msg);
+        if let Err(err) = res {
             let _ = err_tx.blocking_send(format!(
                 "Failed to send editor message to collab peer: {:#?}",
                 err
