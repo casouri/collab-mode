@@ -177,6 +177,12 @@ pub struct DeclareProjectEntry {
     pub meta: JsonMap,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclareProjectsResp {
+    pub projects: Vec<DeclareProjectEntry>,
+}
+
 // **** ListFiles
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

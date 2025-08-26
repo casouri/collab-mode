@@ -445,7 +445,7 @@ impl MockEditor {
 
     /// Helper: Declare a project
     async fn declare_project(&self, project_path: &str, project_name: &str) -> anyhow::Result<()> {
-        self.send_notification(
+        self.send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -454,8 +454,10 @@ impl MockEditor {
                     "meta": {},
                 }],
             }),
+            5,
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-runner"))]
@@ -1110,7 +1112,7 @@ async fn test_open_file_not_found() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1119,6 +1121,7 @@ async fn test_open_file_not_found() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1221,7 +1224,7 @@ async fn test_open_file_already_open() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1230,6 +1233,7 @@ async fn test_open_file_already_open() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1355,7 +1359,7 @@ async fn test_list_files_top_level() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [
@@ -1371,6 +1375,7 @@ async fn test_list_files_top_level() {
                     }
                 ]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1445,7 +1450,7 @@ async fn test_list_files_project_directory() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1454,6 +1459,7 @@ async fn test_list_files_project_directory() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1561,7 +1567,7 @@ async fn test_list_files_from_remote() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1570,6 +1576,7 @@ async fn test_list_files_from_remote() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1702,7 +1709,7 @@ async fn test_list_files_not_directory() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1711,6 +1718,7 @@ async fn test_list_files_not_directory() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1767,7 +1775,7 @@ async fn test_list_files_empty_directory() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1776,6 +1784,7 @@ async fn test_list_files_empty_directory() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();
@@ -1837,7 +1846,7 @@ async fn test_list_files_nested_structure() {
     setup
         .hub
         .editor
-        .send_notification(
+        .send_request_and_wait(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
@@ -1846,6 +1855,7 @@ async fn test_list_files_nested_structure() {
                     "meta": {}
                 }]
             }),
+            5,
         )
         .await
         .unwrap();

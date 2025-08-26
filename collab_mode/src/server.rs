@@ -1,4 +1,4 @@
-use crate::config_man::{AcceptMode, ConfigManager};
+use crate::config_man::{AcceptMode, ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, ServerEngine};
 use crate::message::{self, *};
 use crate::signaling::SignalingError;
@@ -214,7 +214,12 @@ impl Server {
         );
 
         // Add initial projects
-        for project in self.config.config().projects {
+        let mut projects = self.config.config().projects;
+
+        // Expand project paths to absolute paths
+        expand_project_paths(&mut projects)?;
+
+        for project in projects {
             let proj = Project {
                 name: project.name.clone(),
                 root: project.path,
@@ -347,6 +352,47 @@ impl Server {
                 next.send_resp((), None).await;
                 Ok(())
             }
+            "DeclareProjects" => {
+                let params: DeclareProjectsParams = serde_json::from_value(req.params)?;
+                let mut processed_projects = Vec::new();
+
+                for mut project_entry in params.projects {
+                    // Try to expand the project path to absolute
+                    match expanduser::expanduser(&project_entry.filename) {
+                        Ok(expanded_path) => {
+                            let absolute_path = expanded_path.to_string_lossy().to_string();
+                            project_entry.filename = absolute_path.clone();
+
+                            let project = Project {
+                                name: project_entry.name.clone(),
+                                root: absolute_path,
+                                meta: project_entry.meta.clone(),
+                            };
+                            self.projects.insert(project.name.clone(), project);
+                            processed_projects.push(project_entry);
+                        }
+                        Err(err) => {
+                            // Return IoError if path expansion fails
+                            let error = lsp_server::ResponseError {
+                                code: ErrorCode::IoError as i32,
+                                message: format!(
+                                    "Failed to expand path '{}': {}",
+                                    project_entry.filename, err
+                                ),
+                                data: None,
+                            };
+                            next.send_resp((), Some(error)).await;
+                            return Ok(());
+                        }
+                    }
+                }
+
+                let resp = DeclareProjectsResp {
+                    projects: processed_projects,
+                };
+                next.send_resp(resp, None).await;
+                Ok(())
+            }
             "MoveFile" => {
                 let params: MoveFileParams = serde_json::from_value(req.params)?;
                 self.handle_move_file_from_editor(next, params).await?;
@@ -426,17 +472,6 @@ impl Server {
                     params.transport_type,
                 )
                 .await;
-            }
-            "DeclareProjects" => {
-                let params: DeclareProjectsParams = serde_json::from_value(notif.params)?;
-                for project_entry in params.projects {
-                    let project = Project {
-                        name: project_entry.name,
-                        root: project_entry.filename,
-                        meta: project_entry.meta,
-                    };
-                    self.projects.insert(project.name.clone(), project);
-                }
             }
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
@@ -1932,6 +1967,16 @@ fn unwrap_req_id(req_id: &lsp_server::RequestId) -> anyhow::Result<i32> {
         .to_string()
         .parse::<i32>()
         .map_err(|_| anyhow!("Can’t parse request id: {:?}", &req_id).into())
+}
+
+/// Helper function to expand project paths to absolute paths
+fn expand_project_paths(projects: &mut Vec<ConfigProject>) -> anyhow::Result<()> {
+    for project in projects {
+        let expanded_path = expanduser::expanduser(&project.path)
+            .map_err(|err| anyhow::anyhow!("Failed to expand path {}: {}", project.path, err))?;
+        project.path = expanded_path.to_string_lossy().to_string();
+    }
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-runner"))]
