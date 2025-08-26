@@ -14,6 +14,8 @@
 (require 'icons)
 (require 'pulse)
 
+;;; Custom options
+
 (defgroup collab
   ()
   "Collaboration mode."
@@ -309,6 +311,83 @@ If MARK non-nil, show active region."
       (puthash collab--doc-host timer
                collab--sync-cursor-timer-table))))
 
+;;; Global state
+
+(defvar collab--my-host-id nil
+  "Host id of our own server.")
+
+(defvar collab--jsonrpc-connection nil
+  "The JSONRPC connection to the collab process.")
+
+(defvar collab--buffer-table (make-hash-table :test #'equal)
+  "A has table that maps (DOC . HOST) to their corresponding buffer.")
+
+(defvar collab--stashed-state-plist nil
+  "Used for stashing local state when major mode changes.")
+
+(defvar collab--dispatcher-timer-table
+  (make-hash-table :test #'equal)
+  "Hash table mapping (doc-id . host-id) to dispatcher timers.")
+
+(defvar collab--current-message nil
+  "If non-nil, collab hub will show this message in the UI.
+This should be let-bound when calling ‘collab-hub’, rather than
+set globally.")
+
+;;; Local state
+
+(defvar-local collab--doc-host nil
+  "(DOC-ID . HOST-ID) for the current buffer.")
+
+(defvar-local collab--accepting-connection nil
+  "If non-nil, our collab process is accepting remote connections.")
+
+;; FIXME: Change into error log.
+(defvar-local collab--most-recent-error nil
+  "Most recent error message.")
+
+(defvar-local collab--inhibit-hooks nil
+  "When non-nil, before/after-change hooks don’t run.")
+
+(defvar-local collab--changing-region nil
+  "Records information of the region to be changed.
+The shape is (beg end content), where CONTENT is the buffer
+content between BEG and END.")
+
+(defvar-local collab--pending-ops nil
+  "Ops waiting to be sent out. In reverse order.")
+
+(defvar-local collab--group-seq nil
+  "Group sequence number.
+Group sequence is used to mark undo groups. consecutive ops with
+the same group sequence are undone together.")
+
+(defvar-local collab--send-ops-timer nil
+  "Timer used to send ops to collab process.
+When a user typed enough text, we immediately send them out, but
+even if the user only typed a few characters and stopped, we
+still want to send them out after a short idle
+delay (‘collab-send-ops-delay’).")
+
+(defvar-local collab--send-ops-idle-timer nil
+  "Idle timer for sending out ops.")
+
+(defvar-local collab--list-files-cache (make-hash-table :test #'equal)
+  "A cache of response of ListFiles.
+A hash table; keys are host ids and values are ListFiles reply
+objects.")
+
+(defvar-local collab--open-this-doc nil
+  "When non-nil, open this doc when we finish refresh.
+It should be a cons (HOST-ID . DOC-ID).
+‘collab--insert-host-callback’ will open this doc if it’s in the
+listed files.")
+
+(defvar-local collab--hl-ov-1 nil
+  "Overlay used for 1st level highlight.")
+
+(defvar-local collab--hl-ov-2 nil
+  "Overlay used for 2nd level highlight.")
 
 ;;; Edit tracking
 ;;
@@ -352,46 +431,6 @@ If MARK non-nil, show active region."
 ;; timer (default to 0.5s) to send out ops. Every op in the same
 ;; “batch” has the same group seq.
 
-(defvar-local collab--doc-host nil
-  "(DOC-ID . HOST-ID) for the current buffer.
-For ‘collab-dired-mode’ buffers, it’s (DOC-DESC . HOST-ID.")
-
-(defvar-local collab--accepting-connection nil
-  "If non-nil, our collab process is accepting remote connections.")
-
-;; FIXME: Change into error log.
-(defvar-local collab--most-recent-error nil
-  "Most recent error message.")
-
-(defvar collab--buffer-table (make-hash-table :test #'equal)
-  "A has table that maps (DOC . HOST) to their corresponding buffer.")
-
-(defvar-local collab--inhibit-hooks nil
-  "When non-nil, before/after-change hooks don’t run.")
-
-(defvar-local collab--changing-region nil
-  "Records information of the region to be changed.
-The shape is (beg end content), where CONTENT is the buffer
-content between BEG and END.")
-
-(defvar-local collab--pending-ops nil
-  "Ops waiting to be sent out. In reverse order.")
-
-(defvar-local collab--group-seq nil
-  "Group sequence number.
-Group sequence is used to mark undo groups. consecutive ops with
-the same group sequence are undone together.")
-
-(defvar-local collab--send-ops-timer nil
-  "Timer used to send ops to collab process.
-When a user typed enough text, we immediately send them out, but
-even if the user only typed a few characters and stopped, we
-still want to send them out after a short idle
-delay (‘collab-send-ops-delay’).")
-
-(defvar-local collab--send-ops-idle-timer nil
-  "Idle timer for sending out ops.")
-
 (defvar collab--after-change-hook nil
   "Hook ran in ‘collab--after-change’.")
 
@@ -400,10 +439,10 @@ delay (‘collab-send-ops-delay’).")
 (defvar-local collab--send-ops-fn #'collab--send-ops
   "Function for sendint ops.")
 
-(defun collab--host-alist ()
-  "Return ‘collab--host-alist’ plus “self”."
-  (cons '("self" . ("" ""))
-        collab-host-alist))
+;; (defun collab--host-alist ()
+;;   "Return ‘collab--host-alist’ plus “self”."
+;;   (cons '("self" . ("" ""))
+;;         collab-host-alist))
 
 (defun collab--op-empty-p (op)
   "Return non-nil if OP is an empty ins/del op."
@@ -662,9 +701,6 @@ MY-SITE-ID is the site id of this editor."
      (point-min) (point-max) 'collab-failure-background))
   (collab-monitored-mode -1))
 
-(defvar collab--stashed-state-plist nil
-  "Used for stashing local state when major mode changes.")
-
 (defun collab--rescue-state ()
   "Stash local variable elsewhere before major mode changes."
   (setq collab--stashed-state-plist
@@ -728,9 +764,6 @@ If DOC-DESC is at the top-level, return itself."
 
 ;;;; Connection
 
-(defvar collab--jsonrpc-connection nil
-  "The JSONRPC connection to the collab process.")
-
 (defun collab--connect-process ()
   "Get existing JSONRPC connection or create one."
   (or (and collab--jsonrpc-connection
@@ -748,24 +781,20 @@ If DOC-DESC is at the top-level, return itself."
                           :command (list collab-command "run")
                           :connection-type 'pipe)))))
 
-        (let ((conn (make-instance 'jsonrpc-process-connection
-                                   :name "collab"
-                                   :process process
-                                   :notification-dispatcher
-                                   #'collab--dispatch-notification)))
+        (let* ((conn (make-instance 'jsonrpc-process-connection
+                                    :name "collab"
+                                    :process process
+                                    :notification-dispatcher
+                                    #'collab--dispatch-notification))
+               (resp (jsonrpc-request conn 'Initialize nil)))
 
-          (jsonrpc-request conn 'Initialize
-                           `(:hostId ,(car collab-local-host-config)))
+          (setq collab--my-host-id (plist-get resp :hostId))
 
           (when collab--jsonrpc-connection
             (jsonrpc-shutdown collab--jsonrpc-connection))
           (setq collab--jsonrpc-connection conn)))))
 
 ;;;; Dispatcher
-
-(defvar collab--dispatcher-timer-table
-  (make-hash-table :test #'equal)
-  "Hash table mapping (doc-id . host-id) to dispatcher timers.")
 
 (defun collab--cancel-get-ops-timer ()
   "If there’s a timer for getting remote ops, cancel it.
@@ -1126,11 +1155,6 @@ If REDO is non-nil, redo the most recent undo instead."
   "Return the hub buffer."
   (get-buffer-create "*collab hub*"))
 
-(defvar collab--current-message nil
-  "If non-nil, collab hub will show this message in the UI.
-This should be let-bound when calling ‘collab-hub’, rather than
-set globally.")
-
 (defmacro collab--save-excursion (&rest body)
   "Save position, execute BODY, and restore point.
 Point is not restored in the face of non-local exit."
@@ -1149,17 +1173,6 @@ Point is not restored in the face of non-local exit."
   "Face used for files in the collab buffer.")
 
 ;;;; Drawing the hub UI
-
-(defvar-local collab--list-files-cache (make-hash-table :test #'equal)
-  "A cache of response of ListFiles.
-A hash table; keys are host ids and values are ListFiles reply
-objects.")
-
-(defvar-local collab--open-this-doc nil
-  "When non-nil, open this doc when we finish refresh.
-It should be a cons (HOST-ID . DOC-ID).
-‘collab--insert-host-callback’ will open this doc if it’s in the
-listed files.")
 
 (defun collab--replace-section (prop value content-fn)
   "Replace a section of the buffer with new content.
@@ -1455,12 +1468,6 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (insert "\n")))
 
 ;;;; Dynamic highlight
-
-(defvar-local collab--hl-ov-1 nil
-  "Overlay used for 1st level highlight.")
-
-(defvar-local collab--hl-ov-2 nil
-  "Overlay used for 2nd level highlight.")
 
 (defun collab--dynamic-highlight ()
   "Highlight host and file at point."
