@@ -13,10 +13,10 @@ test-ignored:
 	cargo test -- --ignored --show-output
 
 session-1:
-	$(RUST_ENV) cargo run --bin collab_mode -- run --socket --socket-port 7701 --config ../fixture --profile=Alice
+	$(RUST_ENV) cargo run --bin collab_mode -- run --socket --socket-port 7701 --config ../fixture/Alice/config
 
 session-2:
-	$(RUST_ENV) cargo run --bin collab_mode -- run --socket --socket-port 7702 --config ../fixture --profile=Bob
+	$(RUST_ENV) cargo run --bin collab_mode -- run --socket --socket-port 7702 --config ../fixture/Bob/config
 
 signaling:
 	$(RUST_ENV) cargo run --bin collab-signal -- run --port 6001

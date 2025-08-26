@@ -21,8 +21,13 @@ enum Commands {
         #[arg(long, short = 'p')]
         #[arg(default_value_t = 7701)]
         socket_port: u16,
+        /// If given, configuration and data files are saved in this
+        /// directory rather than the default XDG location.
         #[arg(long)]
         config: Option<String>,
+        /// If using default XDG location for config and data files,
+        /// use this to specify the XDG profile name. This flag can’t
+        /// be used with the --config flag.
         #[arg(long)]
         profile: Option<String>,
     },
@@ -40,6 +45,10 @@ fn main() -> anyhow::Result<()> {
             config,
             profile,
         }) => {
+            if config.is_some() && profile.is_some() {
+                panic!("Cannot use --config and --profile at the same time");
+            }
+
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let config_location = if let Some(config_path) = config {
                 Some(
@@ -49,14 +58,29 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let config_man = config_man::ConfigManager::new(config_location, profile.to_owned())?;
+            let mut config_man =
+                config_man::ConfigManager::new(config_location, profile.to_owned())?;
 
-            // Determine host_id with priority: config file > generate UUID v4
-            let host_id = if let Some(config_id) = config_man.config().host_id.clone() {
-                config_id
-            } else {
-                Uuid::new_v4().to_string()
-            };
+            // Determine host_id, if exists in config, use that,
+            // otherwise generate one.
+            let (host_id, generated_id) =
+                if let Some(config_id) = config_man.config().host_id.clone() {
+                    (config_id, false)
+                } else {
+                    (Uuid::new_v4().to_string(), true)
+                };
+
+            if generated_id {
+                let mut new_config = config_man.config();
+                new_config.host_id = Some(host_id.clone());
+                let res = config_man.replace_and_save(new_config);
+                if let Err(err) = res {
+                    panic!(
+                        "Failed to save generated host id to config file: {:#?}",
+                        err
+                    );
+                }
+            }
 
             let mut server = Server::new(host_id, config_man)?;
             let (server_in_tx, server_in_rx) = tokio::sync::mpsc::channel(32);

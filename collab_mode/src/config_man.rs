@@ -189,6 +189,12 @@ impl ConfigManager {
             anyhow::anyhow!("Failed to parse config file {:?}: {}", config_file, err)
         })?;
 
+        tracing::info!(
+            "Loaded config from {} : {:?}",
+            &config_file.to_string_lossy(),
+            &config
+        );
+
         Ok(config)
     }
 
