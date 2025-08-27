@@ -319,14 +319,8 @@ impl Server {
             }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
-                self.open_file_from_editor(
-                    next,
-                    params.host_id,
-                    params.file_desc,
-                    req.id,
-                    params.mode,
-                )
-                .await?;
+                self.open_file_from_editor(next, params.host_id, params.file_desc, params.mode)
+                    .await?;
                 Ok(())
             }
             "SendOps" => {
@@ -938,7 +932,6 @@ impl Server {
         next: &Next<'a>,
         host_id: ServerId,
         file_desc: FileDesc,
-        req_id: lsp_server::RequestId,
         mode: OpenMode,
     ) -> anyhow::Result<()> {
         if self.host_id == host_id {
@@ -1453,6 +1446,8 @@ impl Server {
                 doc_id,
                 remote_host_id
             );
+            next.send_to_remote(&remote_host_id, Msg::StopSendingOps(doc_id))
+                .await;
             return Ok(());
         }
         let remote_doc = remote_doc.unwrap();

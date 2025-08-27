@@ -248,6 +248,15 @@ pub struct SaveFileParams {
 
 pub type SaveFileResp = SaveFileParams;
 
+// **** DisconnectFile
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectFileParams {
+    pub host_id: ServerId,
+    pub doc_id: DocId,
+}
+
 // **** SendOpEditor
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
