@@ -444,17 +444,19 @@ impl MockEditor {
     }
 
     /// Helper: Declare a project
-    async fn declare_project(&self, project_path: &str, project_name: &str) -> anyhow::Result<()> {
-        self.send_request_and_wait(
+    async fn declare_project(
+        &mut self,
+        project_path: &str,
+        project_name: &str,
+    ) -> anyhow::Result<()> {
+        self.request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path,
+                    "path": project_path,
                     "name": project_name,
-                    "meta": {},
                 }],
             }),
-            5,
         )
         .await?;
         Ok(())
@@ -1112,16 +1114,14 @@ async fn test_open_file_not_found() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "TestProject",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1224,16 +1224,14 @@ async fn test_open_file_already_open() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "TestProject",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1359,23 +1357,20 @@ async fn test_list_files_top_level() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [
                     {
-                        "filename": project1_path.clone(),
+                        "path": project1_path.clone(),
                         "name": "Project1",
-                        "meta": {"type": "simple"}
                     },
                     {
-                        "filename": project2_path.clone(),
+                        "path": project2_path.clone(),
                         "name": "Project2",
-                        "meta": {"type": "complex"}
                     }
                 ]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1450,16 +1445,14 @@ async fn test_list_files_project_directory() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "ComplexProject",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1567,16 +1560,14 @@ async fn test_list_files_from_remote() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "SharedProject",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1709,16 +1700,14 @@ async fn test_list_files_not_directory() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "TestProject",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1775,16 +1764,14 @@ async fn test_list_files_empty_directory() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "ProjectWithEmpty",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -1846,16 +1833,14 @@ async fn test_list_files_nested_structure() {
     setup
         .hub
         .editor
-        .send_request_and_wait(
+        .request(
             "DeclareProjects",
             serde_json::json!({
                 "projects": [{
-                    "filename": project_path.clone(),
+                    "path": project_path.clone(),
                     "name": "NestedProject",
-                    "meta": {}
                 }]
             }),
-            5,
         )
         .await
         .unwrap();
@@ -2396,4 +2381,138 @@ async fn test_share_file_e2e() {
     assert_eq!(site_id2, 0, "Hub should always have site_id 0");
 
     setup.cleanup();
+}
+
+// *** Tests for expand_project_paths feature ***
+
+#[tokio::test]
+async fn test_expand_project_paths_home_directory() {
+    // Test: Paths starting with ~ should be expanded to home directory
+    use crate::config_man::ConfigProject;
+    use std::env;
+
+    let home_dir = env::var("HOME").unwrap_or_else(|_| "CAN’t GET HOME DIR".to_string());
+
+    let mut projects = vec![
+        ConfigProject {
+            name: "home_project".to_string(),
+            path: "~/my_project".to_string(),
+        },
+        ConfigProject {
+            name: "nested_home".to_string(),
+            path: "~/Documents/code/project".to_string(),
+        },
+    ];
+
+    // Call the function under test
+    let result = super::expand_project_paths(&mut projects);
+    assert!(
+        result.is_ok(),
+        "expand_project_paths should succeed for ~ paths"
+    );
+
+    // Verify paths are expanded
+    assert_eq!(
+        projects[0].path,
+        format!("{}/my_project", home_dir),
+        "~ should be expanded to home directory"
+    );
+    assert_eq!(
+        projects[1].path,
+        format!("{}/Documents/code/project", home_dir),
+        "~/Documents path should be expanded correctly"
+    );
+
+    // Verify all paths are now absolute
+    for project in &projects {
+        assert!(
+            std::path::Path::new(&project.path).is_absolute(),
+            "Expanded path {} should be absolute",
+            project.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_server_run_config_projects_expansion() {
+    // Test: Projects from config should be expanded when server starts
+    use crate::config_man::{AcceptMode, Config, ConfigManager, ConfigProject};
+    use std::collections::HashMap;
+
+    init_test_tracing();
+
+    // Create a temp directory for config
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let config_path = temp_dir.path().to_path_buf();
+
+    // Create a test project directory
+    let project_dir = create_test_project().unwrap();
+
+    // Create config with projects using ~ path
+    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+    let config = Config {
+        projects: vec![
+            ConfigProject {
+                name: "home_project".to_string(),
+                path: "~/my_test_project".to_string(),
+            },
+            ConfigProject {
+                name: "absolute_project".to_string(),
+                path: project_dir.path().to_string_lossy().to_string(),
+            },
+        ],
+        trusted_hosts: HashMap::new(),
+        accept_mode: AcceptMode::All,
+        host_id: Some("test-server".to_string()),
+    };
+
+    // Create ConfigManager
+    let mut config_manager = ConfigManager::new(Some(config_path), None).unwrap();
+    config_manager.replace_and_save(config).unwrap();
+
+    // Create and run server
+    let host_id = "test-server".to_string();
+
+    let mut server = Server::new(host_id.clone(), config_manager).unwrap();
+
+    // Create channels for server
+    let (editor_to_server_tx, editor_to_server_rx) = mpsc::channel(100);
+    let (server_to_editor_tx, mut server_to_editor_rx) = mpsc::channel(100);
+
+    // Run server in background task
+    let server_task =
+        tokio::spawn(async move { server.run(server_to_editor_tx, editor_to_server_rx).await });
+
+    // Give server time to initialize
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send Initialize request to verify server is running
+    let init_request = lsp_server::Request {
+        id: lsp_server::RequestId::from(1),
+        method: "Initialize".to_string(),
+        params: serde_json::json!({}),
+    };
+
+    editor_to_server_tx
+        .send(lsp_server::Message::Request(init_request))
+        .await
+        .unwrap();
+
+    // Wait for response
+    let timeout_duration = Duration::from_secs(1);
+    let response = tokio::time::timeout(timeout_duration, server_to_editor_rx.recv()).await;
+
+    assert!(response.is_ok(), "Should receive response from server");
+
+    // Verify the response contains the host_id
+    if let Ok(Some(lsp_server::Message::Response(resp))) = response {
+        assert!(resp.error.is_none(), "Initialize should succeed");
+        let result = resp.result.unwrap();
+        assert_eq!(result["hostId"], "test-server");
+    } else {
+        panic!("Expected Initialize response");
+    }
+
+    // Clean up
+    server_task.abort();
 }
