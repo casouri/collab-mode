@@ -382,6 +382,11 @@ impl Server {
                 self.handle_save_file_from_editor(next, params).await?;
                 Ok(())
             }
+            "DisconnectFromFile" => {
+                let params: DisconnectFileParams = serde_json::from_value(req.params)?;
+                self.handle_disconnect_from_file(next, params).await?;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -657,6 +662,23 @@ impl Server {
                     doc_id,
                 };
                 next.send_resp(resp, None).await;
+                Ok(())
+            }
+            Msg::StopSendingOps(doc_id) => {
+                // Remove the remote host from the doc's subscriber list
+                if let Some(doc) = self.docs.get_mut(&doc_id) {
+                    if doc.subscribers.remove(&msg.host).is_some() {
+                        tracing::info!("Removed {} from subscribers of doc {}", msg.host, doc_id);
+                    } else {
+                        tracing::warn!("Host {} was not subscribed to doc {}", msg.host, doc_id);
+                    }
+                } else {
+                    tracing::warn!(
+                        "Doc {} not found when handling StopSendingOps from {}",
+                        doc_id,
+                        msg.host
+                    );
+                }
                 Ok(())
             }
             _ => {
@@ -1796,6 +1818,36 @@ impl Server {
         } else {
             next.send_resp(params, None).await;
         }
+        Ok(())
+    }
+
+    async fn handle_disconnect_from_file<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: DisconnectFileParams,
+    ) -> anyhow::Result<()> {
+        let DisconnectFileParams { host_id, doc_id } = params;
+
+        let existing_doc = self.remote_docs.remove(&(host_id.clone(), doc_id));
+
+        if existing_doc.is_some() {
+            tracing::info!(
+                "Disconnected from remote doc {} on host {}",
+                doc_id,
+                host_id
+            );
+            next.send_to_remote(&host_id, Msg::StopSendingOps(doc_id))
+                .await;
+        } else {
+            tracing::info!(
+                "Doc {} not found in remote_docs for host {}, nothing to disconnect",
+                doc_id,
+                host_id
+            );
+        }
+
+        // Send empty response to indicate success
+        next.send_resp((), None).await;
         Ok(())
     }
 
