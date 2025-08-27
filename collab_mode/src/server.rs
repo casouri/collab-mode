@@ -1959,7 +1959,17 @@ fn expand_project_paths(projects: &mut Vec<ConfigProject>) -> anyhow::Result<()>
     for project in projects {
         let expanded_path = expanduser::expanduser(&project.path)
             .map_err(|err| anyhow::anyhow!("Failed to expand path {}: {}", project.path, err))?;
-        project.path = expanded_path.to_string_lossy().to_string();
+        let expanded_str = expanded_path.to_string_lossy().to_string();
+
+        // Check if the expanded path is absolute
+        if !std::path::Path::new(&expanded_str).is_absolute() {
+            return Err(anyhow::anyhow!(
+                "Project path '{}' is not absolute. All project paths must be absolute.",
+                expanded_str
+            ));
+        }
+
+        project.path = expanded_str;
     }
     Ok(())
 }

@@ -2434,6 +2434,67 @@ async fn test_expand_project_paths_home_directory() {
 }
 
 #[tokio::test]
+async fn test_expand_project_paths_relative_error() {
+    // Test: Relative paths should cause an error
+    use crate::config_man::ConfigProject;
+
+    let mut projects = vec![ConfigProject {
+        name: "relative_project".to_string(),
+        path: "./my_project".to_string(),
+    }];
+
+    // Call the function under test
+    let result = super::expand_project_paths(&mut projects);
+    assert!(
+        result.is_err(),
+        "expand_project_paths should fail for relative paths"
+    );
+
+    // Verify error message
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("is not absolute"),
+        "Error should mention path is not absolute"
+    );
+    assert!(
+        err.to_string()
+            .contains("All project paths must be absolute"),
+        "Error should mention requirement for absolute paths"
+    );
+}
+
+#[tokio::test]
+async fn test_declare_projects_relative_path_error() {
+    // Test: DeclareProjects should return error for relative paths
+
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+
+    // Try to declare a project with a relative path
+    let result = setup
+        .hub
+        .editor
+        .request(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "name": "relative_project",
+                    "path": "./my_relative_project"
+                }]
+            }),
+        )
+        .await;
+
+    // Should return an error
+    assert!(
+        result.is_err(),
+        "DeclareProjects should fail for relative paths"
+    );
+
+    setup.cleanup();
+}
+
+#[tokio::test]
 async fn test_server_run_config_projects_expansion() {
     // Test: Projects from config should be expanded when server starts
     use crate::config_man::{AcceptMode, Config, ConfigManager, ConfigProject};
