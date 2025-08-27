@@ -826,6 +826,8 @@ impl Server {
                         meta: JsonMap::new(),
                     });
                 }
+                // Sort entries alphanumerically by filename
+                result.sort_by(|a, b| a.filename.cmp(&b.filename));
                 Ok(result)
             }
             Some(FileDesc::Project { id }) => {
@@ -860,6 +862,8 @@ impl Server {
                         meta: JsonMap::new(),
                     });
                 }
+                // Sort entries alphanumerically by filename
+                result.sort_by(|a, b| a.filename.cmp(&b.filename));
                 Ok(result)
             }
             Some(FileDesc::File { .. }) => {
@@ -868,9 +872,10 @@ impl Server {
             }
             None => {
                 // List top-level projects and docs.
-                let mut result = vec![];
+                let mut proj_result = vec![];
+                let mut buf_result = vec![];
                 for (_, project) in self.projects.iter() {
-                    result.push(ListFileEntry {
+                    proj_result.push(ListFileEntry {
                         file: FileDesc::Project {
                             id: project.name.clone(),
                         },
@@ -880,14 +885,18 @@ impl Server {
                     });
                 }
                 for (docid, doc) in self.docs.iter() {
-                    result.push(ListFileEntry {
+                    buf_result.push(ListFileEntry {
                         file: FileDesc::File { id: docid.clone() },
                         is_directory: false,
                         filename: doc.name.clone(),
                         meta: doc.meta.clone(),
                     });
                 }
-                Ok(result)
+                // Sort entries alphanumerically by filename
+                proj_result.sort_by(|a, b| a.filename.cmp(&b.filename));
+                buf_result.sort_by(|a, b| a.filename.cmp(&b.filename));
+                proj_result.extend_from_slice(&buf_result[..]);
+                Ok(proj_result)
             }
         }
     }

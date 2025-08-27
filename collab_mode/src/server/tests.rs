@@ -2495,6 +2495,90 @@ async fn test_declare_projects_relative_path_error() {
 }
 
 #[tokio::test]
+async fn test_list_files_sorted_alphanumerically() {
+    let mut env = TestEnvironment::new().await.unwrap();
+    let project_dir = tempfile::TempDir::new().unwrap();
+
+    // Create files with names that would be out of order if not sorted
+    std::fs::write(project_dir.path().join("zebra.txt"), "content").unwrap();
+    std::fs::write(project_dir.path().join("apple.txt"), "content").unwrap();
+    std::fs::write(project_dir.path().join("banana.txt"), "content").unwrap();
+    std::fs::write(project_dir.path().join("1_first.txt"), "content").unwrap();
+    std::fs::write(project_dir.path().join("10_tenth.txt"), "content").unwrap();
+    std::fs::write(project_dir.path().join("2_second.txt"), "content").unwrap();
+
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    let mut setup = setup_hub_and_spoke_servers(&mut env, 1).await.unwrap();
+
+    // Declare project on hub
+    setup
+        .hub
+        .editor
+        .request(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [
+                    {
+                        "path": project_path.clone(),
+                        "name": "TestProject",
+                    }
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // List files in the project directory
+    let req_id = 1;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "",
+                },
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+
+    let files = resp["files"].as_array().unwrap();
+
+    // Verify we have 6 files
+    assert_eq!(files.len(), 6);
+
+    // Extract filenames to check order
+    let filenames: Vec<String> = files
+        .iter()
+        .map(|f| f["filename"].as_str().unwrap().to_string())
+        .collect();
+
+    // Verify files are sorted alphanumerically
+    assert_eq!(filenames[0], "10_tenth.txt");
+    assert_eq!(filenames[1], "1_first.txt");
+    assert_eq!(filenames[2], "2_second.txt");
+    assert_eq!(filenames[3], "apple.txt");
+    assert_eq!(filenames[4], "banana.txt");
+    assert_eq!(filenames[5], "zebra.txt");
+}
+
+#[tokio::test]
 async fn test_server_run_config_projects_expansion() {
     // Test: Projects from config should be expanded when server starts
     use crate::config_man::{AcceptMode, Config, ConfigManager, ConfigProject};
