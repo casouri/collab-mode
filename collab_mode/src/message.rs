@@ -111,7 +111,6 @@ pub struct InitResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
-    pub host_id: ServerId,
     pub signaling_addr: String,
     pub transport_type: TransportType,
 }
@@ -248,6 +247,15 @@ pub struct SaveFileParams {
 
 pub type SaveFileResp = SaveFileParams;
 
+// **** DeleteFile
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteFileParams {
+    pub host_id: ServerId,
+    pub file: FileDesc,
+}
+
 // **** DisconnectFile
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -341,6 +349,8 @@ pub enum Msg {
     FileMoved(ProjectId, String, String),
     SaveFile(DocId),
     FileSaved(DocId),
+    DeleteFile(ProjectId, String),
+    FileDeleted(ProjectId, String),
     Snapshot(NewSnapshot),
     TakeDownFile(DocId),
     ResetFile(DocId),

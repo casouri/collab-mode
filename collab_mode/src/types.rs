@@ -20,8 +20,6 @@ pub type Credential = String;
 pub type FilePath = (DocId, PathBuf);
 /// Project's id is a descriptive name.
 pub type ProjectId = String;
-/// A file under a project. Can be shared or not-shared.
-pub type ProjectFile = (ProjectId, String);
 
 pub type FatOp = crate::op::FatOp<Op>;
 
