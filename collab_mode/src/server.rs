@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
@@ -941,6 +941,21 @@ impl Server {
         let mut file = open_options
             .open(&full_path)
             .with_context(|| format!("Failed to create/open file: {}", full_path.display()))?;
+
+        // Check if file is binary
+        let mut buffer = vec![0; 8192]; // Read first 8KB
+        let bytes_read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
+        buffer.truncate(bytes_read);
+
+        if content_inspector::inspect(&buffer).is_binary() {
+            return Err(anyhow!("Cannot open binary file: {}", full_path.display()));
+        }
+
+        // Seek back to beginning and read as string
+        file.seek(std::io::SeekFrom::Start(0))
+            .with_context(|| format!("Failed to seek file: {}", full_path.display()))?;
 
         let mut content = String::new();
         file.read_to_string(&mut content)

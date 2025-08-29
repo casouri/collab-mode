@@ -2579,6 +2579,79 @@ async fn test_list_files_sorted_alphanumerically() {
 }
 
 #[tokio::test]
+async fn test_open_binary_file_rejected() {
+    let mut env = TestEnvironment::new().await.unwrap();
+    let project_dir = tempfile::TempDir::new().unwrap();
+
+    // Create a binary file
+    let binary_file_path = project_dir.path().join("test.bin");
+    let binary_content: Vec<u8> = vec![0x00, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x42];
+    std::fs::write(&binary_file_path, binary_content).unwrap();
+
+    let project_path = project_dir.path().to_string_lossy().to_string();
+
+    let mut setup = setup_hub_and_spoke_servers(&mut env, 1).await.unwrap();
+
+    // Declare project on hub
+    setup
+        .hub
+        .editor
+        .request(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [
+                    {
+                        "path": project_path.clone(),
+                        "name": "TestProject",
+                    }
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Try to open the binary file
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "test.bin",
+                },
+                "mode": "open"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.hub.editor.wait_for_response(req_id, 5).await;
+
+    // Verify that we get an error response
+    assert!(resp.is_err() || resp.as_ref().unwrap().get("error").is_some());
+
+    if let Ok(response) = resp {
+        if let Some(error) = response.get("error") {
+            let error_message = error.get("message").unwrap().as_str().unwrap();
+            assert!(error_message.contains("Cannot open binary file"));
+        }
+    } else if let Err(err) = resp {
+        let error_str = err.to_string();
+        assert!(error_str.contains("Cannot open binary file"));
+    }
+
+    setup.cleanup();
+}
+
+#[tokio::test]
 async fn test_server_run_config_projects_expansion() {
     // Test: Projects from config should be expanded when server starts
     use crate::config_man::{AcceptMode, Config, ConfigManager, ConfigProject};
