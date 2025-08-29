@@ -1007,6 +1007,24 @@ Return (:siteId SITE-ID :content CONTENT)."
                         :docId ,doc)
                      :timeout collab-rpc-timeout)))
 
+(defun collab--save-file-req (doc host)
+  "Save from DOC on HOST to disk."
+  (let ((conn (collab--connect-process)))
+    (jsonrpc-request conn 'SaveFile
+                     `( :hostId ,host
+                        :docId ,doc)
+                     :timeout collab-rpc-timeout)))
+
+(defun collab--move-file-req (project-id old-path new-path host)
+  "Move file from OLD-PATH to NEW-PATH in PROJECT-ID on HOST."
+  (let ((conn (collab--connect-process)))
+    (jsonrpc-request conn 'MoveFile
+                     `( :hostId ,host
+                        :project ,project-id
+                        :oldPath ,old-path
+                        :newPath ,new-path)
+                     :timeout collab-rpc-timeout)))
+
 (defun collab--delete-file-req (doc host)
   "Delete DOC on HOST."
   (let ((conn (collab--connect-process)))
