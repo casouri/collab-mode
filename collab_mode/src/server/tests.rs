@@ -2652,6 +2652,142 @@ async fn test_open_binary_file_rejected() {
 }
 
 #[tokio::test]
+async fn test_doc_project_handling() {
+    let mut env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&mut env, 1).await.unwrap();
+
+    // Test 1: Attempt to declare a project named "_doc" should be rejected.
+    let resp = setup
+        .hub
+        .editor
+        .request(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [
+                    {
+                        "name": "_doc",
+                        "path": "/tmp/test",
+                    }
+                ]
+            }),
+        )
+        .await;
+
+    // Should get an error.
+    assert!(resp.is_err());
+    if let Err(err) = resp {
+        let error_str = err.to_string();
+        assert!(error_str.contains("reserved"));
+    }
+
+    // Test 2: Create a shared file and access it via _doc project.
+    let share_resp = setup
+        .hub
+        .editor
+        .request(
+            "ShareFile",
+            serde_json::json!({
+                "filename": "test_shared.txt",
+                "content": "This is a shared document",
+                "meta": {}
+            }),
+        )
+        .await
+        .unwrap();
+
+    let doc_id = share_resp["docId"].as_u64().unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Test 3: Open the shared file using _doc project.
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "_doc",
+                    "file": "test_shared.txt",
+                },
+                "mode": "open"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let open_resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+
+    // Verify the file opened successfully.
+    assert_eq!(
+        open_resp["content"].as_str().unwrap(),
+        "This is a shared document"
+    );
+    assert_eq!(open_resp["filename"].as_str().unwrap(), "test_shared.txt");
+    assert_eq!(open_resp["docId"].as_u64().unwrap(), doc_id);
+
+    // Test 4: List files in _doc project.
+    let req_id = 2;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "ListFiles",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "dir": {
+                    "type": "project",
+                    "id": "_doc",
+                },
+                "signalingAddr": env.signaling_url(),
+                "credential": "test"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let list_resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+
+    let files = list_resp["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["filename"].as_str().unwrap(), "test_shared.txt");
+    assert_eq!(files[0]["isDirectory"].as_bool().unwrap(), false);
+
+    // Test 5: Try to open a non-existent file in _doc.
+    let req_id = 3;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "_doc",
+                    "file": "nonexistent.txt",
+                },
+                "mode": "open"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let error_resp = setup.hub.editor.wait_for_response(req_id, 5).await;
+
+    // Should get an error.
+    assert!(error_resp.is_err() || error_resp.as_ref().unwrap().get("error").is_some());
+
+    setup.cleanup();
+}
+
+#[tokio::test]
 async fn test_server_run_config_projects_expansion() {
     // Test: Projects from config should be expanded when server starts
     use crate::config_man::{AcceptMode, Config, ConfigManager, ConfigProject};

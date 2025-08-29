@@ -349,6 +349,20 @@ impl Server {
             "DeclareProjects" => {
                 let mut params: DeclareProjectsParams = serde_json::from_value(req.params)?;
 
+                // Check for reserved project name.
+                for project in &params.projects {
+                    if project.name == "_doc" {
+                        let error = lsp_server::ResponseError {
+                            code: ErrorCode::BadRequest as i32,
+                            message: "Project name '_doc' is reserved and cannot be used"
+                                .to_string(),
+                            data: None,
+                        };
+                        next.send_resp((), Some(error)).await;
+                        return Ok(());
+                    }
+                }
+
                 let res = expand_project_paths(&mut params.projects);
                 if let Err(err) = res {
                     let error = lsp_server::ResponseError {
@@ -798,6 +812,11 @@ impl Server {
     ) -> anyhow::Result<Vec<ListFileEntry>> {
         match dir {
             Some(FileDesc::ProjectFile { project, file }) => {
+                // Special handling for _doc project.
+                if project == "_doc" {
+                    return Err(anyhow!("_doc doesn’t have subdirectories"));
+                }
+
                 // List files in a project directory.
                 let project_data = self
                     .projects
@@ -847,6 +866,25 @@ impl Server {
                 Ok(result)
             }
             Some(FileDesc::Project { id }) => {
+                // Special handling for _doc project.
+                if id == "_doc" {
+                    // List owned docs without projects.
+                    let mut result = vec![];
+                    for (doc_id, doc) in &self.docs {
+                        if doc.abs_filename.is_none() {
+                            result.push(ListFileEntry {
+                                file: FileDesc::File { id: *doc_id },
+                                filename: doc.name.clone(),
+                                is_directory: false,
+                                meta: doc.meta.clone(),
+                            });
+                        }
+                    }
+                    // Sort entries alphanumerically by filename.
+                    result.sort_by(|a, b| a.filename.cmp(&b.filename));
+                    return Ok(result);
+                }
+
                 // List files in project root directory.
                 let project_data = self
                     .projects
@@ -890,7 +928,7 @@ impl Server {
                 // List top-level projects and docs.
                 let mut proj_result = vec![];
                 let mut buf_result = vec![];
-                for (_, project) in self.projects.iter() {
+                for (_, project) in &self.projects {
                     proj_result.push(ListFileEntry {
                         file: FileDesc::Project {
                             id: project.name.clone(),
@@ -900,13 +938,15 @@ impl Server {
                         meta: project.meta.clone(),
                     });
                 }
-                for (docid, doc) in self.docs.iter() {
-                    buf_result.push(ListFileEntry {
-                        file: FileDesc::File { id: docid.clone() },
-                        is_directory: false,
-                        filename: doc.name.clone(),
-                        meta: doc.meta.clone(),
-                    });
+                for (doc_id, doc) in &self.docs {
+                    if doc.abs_filename.is_none() {
+                        buf_result.push(ListFileEntry {
+                            file: FileDesc::File { id: *doc_id },
+                            filename: doc.name.clone(),
+                            is_directory: false,
+                            meta: doc.meta.clone(),
+                        });
+                    }
                 }
                 // Sort entries alphanumerically by filename
                 proj_result.sort_by(|a, b| a.filename.cmp(&b.filename));
@@ -975,7 +1015,35 @@ impl Server {
             // Handle local file opening
             match &file_desc {
                 FileDesc::ProjectFile { project, file } => {
-                    // Look up project by name
+                    // Special handling for _doc project.
+                    if project == "_doc" {
+                        // Look for owned docs without projects.
+                        for (doc_id, doc) in &self.docs {
+                            // Check if doc doesn't belong to a project (abs_filename is None)
+                            // and its name matches the requested file.
+                            if doc.abs_filename.is_none() && doc.name == *file {
+                                // Found matching doc, return it.
+                                let resp = OpenFileResp {
+                                    content: doc.buffer.iter().collect(),
+                                    site_id: self.site_id,
+                                    filename: doc.name.clone(),
+                                    doc_id: *doc_id,
+                                };
+                                next.send_resp(resp, None).await;
+                                return Ok(());
+                            }
+                        }
+                        // No matching doc found.
+                        let err = lsp_server::ResponseError {
+                            code: ErrorCode::IoError as i32,
+                            message: format!("Can’t find doc {}", file),
+                            data: None,
+                        };
+                        next.send_resp((), Some(err)).await;
+                        return Ok(());
+                    }
+
+                    // Look up project by name.
                     let project_data = self
                         .projects
                         .get(project)
@@ -1125,7 +1193,41 @@ impl Server {
 
         match &file_desc {
             FileDesc::ProjectFile { project, file } => {
-                // Look up project by name
+                // Special handling for _doc project.
+                if project == "_doc" {
+                    // Look for owned docs without projects.
+                    for (doc_id, doc) in &mut self.docs {
+                        if doc.abs_filename.is_none() && doc.name == *file {
+                            // Found matching doc, add remote as subscriber.
+                            doc.subscribers.insert(remote_host_id.clone(), 0);
+
+                            // Send snapshot.
+                            let snapshot = NewSnapshot {
+                                content: doc.buffer.iter().collect(),
+                                name: doc.name.clone(),
+                                seq: doc.engine.current_seq(),
+                                site_id,
+                                file_desc: file_desc.clone(),
+                                doc_id: *doc_id,
+                            };
+                            next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                                .await;
+                            return Ok(());
+                        }
+                    }
+                    // No matching doc found.
+                    next.send_to_remote(
+                        &remote_host_id,
+                        Msg::ErrorResp(
+                            ErrorCode::IoError,
+                            format!("Document '{}' not found in _doc", file),
+                        ),
+                    )
+                    .await;
+                    return Ok(());
+                }
+
+                // Look up project by name.
                 let project_data = self
                     .projects
                     .get(project)
