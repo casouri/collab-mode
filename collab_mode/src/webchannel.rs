@@ -47,7 +47,7 @@ pub enum TransportType {
 
 // We don't have to split into three categories, but this should make
 // it easier to manage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
 pub struct Message {
     pub host: ServerId,
     pub body: Msg,

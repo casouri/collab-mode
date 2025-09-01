@@ -332,7 +332,7 @@ pub struct PrintHistoryParams {
 
 /// *** Peer messages
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
 pub enum Msg {
     ShareSingleFile {
         filename: String,

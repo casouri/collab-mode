@@ -251,7 +251,6 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    tracing::info!("Received message from editor: {:?}", msg);
                     let res = self.handle_editor_message(msg, &editor_tx, &webchannel).await;
                     // Normally the handler shouldn’t return an error.
                     // Most errors ar handled by sending error
@@ -262,7 +261,6 @@ impl Server {
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
-                    tracing::info!("Received message from remote: {:?}", web_msg);
                     let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
                     // Normally the handler shouldn’t return an error.
                     // Most errors ar handled by sending error
@@ -282,6 +280,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
+        tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
             lsp_server::Message::Request(req) => {
                 let req_id = req.id.clone();
@@ -510,6 +509,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
+        tracing::info!("From remote: {}", &msg);
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
             Msg::IceProgress(progress) => {
@@ -2333,7 +2333,7 @@ pub async fn send_notification<T: Display>(
         method: method.to_string(),
         params: serde_json::to_value(params).unwrap(),
     };
-    tracing::info!("Notification: {:?}", &response);
+    tracing::info!("Send: {}", notification_to_string(&notif));
     if let Err(err) = editor_tx
         .send(lsp_server::Message::Notification(notif))
         .await
@@ -2353,7 +2353,7 @@ async fn send_response(
         result: Some(serde_json::to_value(result).unwrap()),
         error,
     };
-    tracing::info!("Response: {:?}", &response);
+    tracing::info!("Send: {}", response_to_string(&response));
     if let Err(err) = editor_tx
         .send(lsp_server::Message::Response(response))
         .await
@@ -2369,7 +2369,7 @@ async fn send_to_remote(
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,
 ) {
-    tracing::info!("Send to remote: {:?}", &msg);
+    tracing::info!("Send to {}: {}", host_id, &msg);
     if let Err(err) = webchannel.send(host_id, req_id, msg.clone()).await {
         tracing::error!(
             "Failed to send {:?} to remote host {}: {}",
@@ -2407,6 +2407,51 @@ fn expand_project_paths(projects: &mut Vec<ConfigProject>) -> anyhow::Result<()>
     }
     Ok(())
 }
+
+// *** Printing messages
+
+/// Convert lsp_server::Request to a human-readable string
+pub fn request_to_string(req: &lsp_server::Request) -> String {
+    format!(
+        "Req {} {} {}",
+        &req.id,
+        req.method,
+        serde_json::to_string(&req.params).unwrap_or_else(|_| "?".to_string())
+    )
+}
+
+/// Convert lsp_server::Response to a human-readable string
+pub fn response_to_string(resp: &lsp_server::Response) -> String {
+    let result_str = if let Some(ref result) = resp.result {
+        serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
+    } else if let Some(ref error) = resp.error {
+        format!("Error({}: {})", error.code, error.message)
+    } else {
+        "None".to_string()
+    };
+
+    format!("Resp {} {}", &resp.id, result_str)
+}
+
+/// Convert lsp_server::Notification to a human-readable string
+pub fn notification_to_string(notif: &lsp_server::Notification) -> String {
+    format!(
+        "Notif {} {}",
+        notif.method,
+        serde_json::to_string(&notif.params).unwrap_or_else(|_| "?".to_string())
+    )
+}
+
+/// Convert lsp_server::Message to a human-readable string
+pub fn message_to_string(msg: &lsp_server::Message) -> String {
+    match msg {
+        lsp_server::Message::Request(req) => request_to_string(req),
+        lsp_server::Message::Response(resp) => response_to_string(resp),
+        lsp_server::Message::Notification(notif) => notification_to_string(notif),
+    }
+}
+
+// *** Tests
 
 #[cfg(any(test, feature = "test-runner"))]
 pub mod tests;
