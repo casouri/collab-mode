@@ -201,7 +201,7 @@ pub struct ListFileEntry {
 
 // **** OpenFile & CreateFile
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OpenMode {
     Create,

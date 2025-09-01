@@ -1250,8 +1250,17 @@ impl Server {
         remote_host_id: ServerId,
         mode: OpenMode,
     ) -> anyhow::Result<()> {
-        let site_id = self.site_id_of(&remote_host_id);
+        // Check permission.
+        if mode == OpenMode::Create && !self.config.create_allowed(&remote_host_id) {
+            next.send_to_remote(
+                &remote_host_id,
+                Msg::PermissionDenied("Permission denied for creating file".to_string()),
+            )
+            .await;
+            return Ok(());
+        }
 
+        let site_id = self.site_id_of(&remote_host_id);
         match &file_desc {
             FileDesc::ProjectFile { project, file } => {
                 // Special handling for _doc project.
