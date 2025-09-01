@@ -1,5 +1,5 @@
 use super::*;
-use crate::config_man::ConfigManager;
+use crate::config_man::{ConfigManager, Permission};
 use crate::signaling;
 use std::time::Duration;
 // use tokio::net::TcpListener;
@@ -528,7 +528,31 @@ pub async fn setup_hub_and_spoke_servers(
     // Create hub server
     let hub_id = create_test_id("hub");
     let hub_temp_dir = tempfile::TempDir::new()?;
-    let hub_config = ConfigManager::new(Some(hub_temp_dir.path().to_path_buf()), None)?;
+    let mut hub_config = ConfigManager::new(Some(hub_temp_dir.path().to_path_buf()), None)?;
+
+    // Generate spoke IDs upfront so we can use them consistently
+    let spoke_ids: Vec<ServerId> = (0..num_spokes)
+        .map(|i| create_test_id(&format!("spoke{}", i + 1)))
+        .collect();
+
+    // Set the host_id in the config so permission checks work
+    let mut config = hub_config.config();
+    config.host_id = Some(hub_id.clone());
+
+    // Pre-add permissions for all spokes that will connect
+    for spoke_id in &spoke_ids {
+        config.permission.insert(
+            spoke_id.clone(),
+            Permission {
+                write: true,
+                create: true,
+                delete: true,
+            },
+        );
+    }
+
+    hub_config.replace_and_save(config)?;
+
     let mut hub_server = Server::new(hub_id.clone(), hub_config)?;
 
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
@@ -563,10 +587,24 @@ pub async fn setup_hub_and_spoke_servers(
     // Create and connect spoke servers
     let mut spokes = Vec::new();
 
-    for i in 0..num_spokes {
-        let spoke_id = create_test_id(&format!("spoke{}", i + 1));
+    for (i, spoke_id) in spoke_ids.iter().enumerate() {
         let spoke_temp_dir = tempfile::TempDir::new()?;
-        let spoke_config = ConfigManager::new(Some(spoke_temp_dir.path().to_path_buf()), None)?;
+        let mut spoke_config = ConfigManager::new(Some(spoke_temp_dir.path().to_path_buf()), None)?;
+
+        // Set the host_id in the config and add permission for hub
+        let mut config = spoke_config.config();
+        config.host_id = Some(spoke_id.clone());
+        // Add permission for hub to have full access to this spoke
+        config.permission.insert(
+            hub_id.clone(),
+            Permission {
+                write: true,
+                create: true,
+                delete: true,
+            },
+        );
+        spoke_config.replace_and_save(config)?;
+
         let mut spoke_server = Server::new(spoke_id.clone(), spoke_config)?;
 
         let (mut spoke_editor, spoke_tx, spoke_rx) = MockEditor::new();
@@ -595,7 +633,7 @@ pub async fn setup_hub_and_spoke_servers(
             .await?;
 
         spokes.push(ServerSetup {
-            id: spoke_id,
+            id: spoke_id.clone(),
             handle: spoke_handle,
             editor: spoke_editor,
             _temp_dir: spoke_temp_dir,

@@ -1484,7 +1484,7 @@ impl Server {
         let doc_id = context_ops.doc();
 
         // Check write permission
-        if !self.config.write_allowed(&remote_host_id, &self.host_id) {
+        if !self.config.write_allowed(&remote_host_id) {
             next.send_to_remote(
                 &remote_host_id,
                 Msg::PermissionDenied("Write permission denied".to_string()),
@@ -2091,6 +2091,16 @@ impl Server {
         file_desc: FileDesc,
         requester: ServerId,
     ) -> anyhow::Result<()> {
+        // Check delete permission
+        if !self.config.delete_allowed(&requester) {
+            next.send_to_remote(
+                &requester,
+                Msg::PermissionDenied("Delete permission denied".to_string()),
+            )
+            .await;
+            return Ok(());
+        }
+
         match self.handle_delete_file_locally(&file_desc).await {
             Ok(subscribers) => {
                 let mut requester_notified = false;

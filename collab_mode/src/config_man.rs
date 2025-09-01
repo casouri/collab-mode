@@ -308,22 +308,46 @@ impl ConfigManager {
     }
 
     /// Check if a host has write permission
-    /// Always returns true for the local host (from config.host_id)
-    /// Takes the server's actual host_id as a parameter for comparison
-    pub fn write_allowed(&self, host_id: &ServerId, my_host_id: &ServerId) -> bool {
-        // If this is our own host, always allow
-        if host_id == my_host_id {
+    /// Always returns true for ourselves.
+    pub fn write_allowed(&self, host_id: &ServerId) -> bool {
+        if Some(host_id) == self.config.host_id.as_ref() {
             return true;
         }
 
-        // Check if there's a specific permission entry for this host
         if let Some(permission) = self.config.permission.get(host_id) {
             return permission.write;
         }
 
-        // Default to true for backward compatibility - no entry means allowed
-        // Users can explicitly set write: false to deny permission
-        true
+        Permission::default().write
+    }
+
+    /// Check if a host has create permission
+    /// Always returns true for ourselves.
+    pub fn create_allowed(&self, host_id: &ServerId) -> bool {
+        // Always allow ourselves.
+        if Some(host_id) == self.config.host_id.as_ref() {
+            return true;
+        }
+
+        if let Some(permission) = self.config.permission.get(host_id) {
+            return permission.create;
+        }
+
+        Permission::default().create
+    }
+
+    /// Check if a host has delete permission
+    /// Always returns true for ourselves
+    pub fn delete_allowed(&self, host_id: &ServerId) -> bool {
+        if Some(host_id) == self.config.host_id.as_ref() {
+            return true;
+        }
+
+        if let Some(permission) = self.config.permission.get(host_id) {
+            return permission.delete;
+        }
+
+        Permission::default().delete
     }
 
     /// Add a trusted host to the configuration
