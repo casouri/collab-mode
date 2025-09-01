@@ -927,7 +927,7 @@ impl Server {
             None => {
                 // List top-level projects and docs.
                 let mut proj_result = vec![];
-                let mut buf_result = vec![];
+                // let mut buf_result = vec![];
                 for (_, project) in &self.projects {
                     proj_result.push(ListFileEntry {
                         file: FileDesc::Project {
@@ -938,20 +938,28 @@ impl Server {
                         meta: project.meta.clone(),
                     });
                 }
-                for (doc_id, doc) in &self.docs {
-                    if doc.abs_filename.is_none() {
-                        buf_result.push(ListFileEntry {
-                            file: FileDesc::File { id: *doc_id },
-                            filename: doc.name.clone(),
-                            is_directory: false,
-                            meta: doc.meta.clone(),
-                        });
-                    }
-                }
+                proj_result.push(ListFileEntry {
+                    file: FileDesc::Project {
+                        id: "_doc".to_string(),
+                    },
+                    filename: "_doc".to_string(),
+                    is_directory: true,
+                    meta: JsonMap::new(),
+                });
+                // for (doc_id, doc) in &self.docs {
+                //     if doc.abs_filename.is_none() {
+                //         buf_result.push(ListFileEntry {
+                //             file: FileDesc::File { id: *doc_id },
+                //             filename: doc.name.clone(),
+                //             is_directory: false,
+                //             meta: doc.meta.clone(),
+                //         });
+                //     }
+                // }
                 // Sort entries alphanumerically by filename
                 proj_result.sort_by(|a, b| a.filename.cmp(&b.filename));
-                buf_result.sort_by(|a, b| a.filename.cmp(&b.filename));
-                proj_result.extend_from_slice(&buf_result[..]);
+                // buf_result.sort_by(|a, b| a.filename.cmp(&b.filename));
+                // proj_result.extend_from_slice(&buf_result[..]);
                 Ok(proj_result)
             }
         }

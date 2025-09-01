@@ -192,6 +192,7 @@ pub struct ListFilesResp {
 pub struct ListFileEntry {
     pub file: FileDesc,
     // The non-directory filename (buffer/document name in editor).
+    // Must match `file` if it’s a project file.
     pub filename: String,
     pub is_directory: bool,
     pub meta: JsonMap,

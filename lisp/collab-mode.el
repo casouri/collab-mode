@@ -394,6 +394,10 @@ listed files.")
 (defvar-local collab--hl-ov-2 nil
   "Overlay used for 2nd level highlight.")
 
+(defvar-local collab--default-directory nil
+  "Default directory for ‘collab-find-file’.
+Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file.")
+
 ;;; Edit tracking
 ;;
 ;; Op := INS | DEL
@@ -445,7 +449,7 @@ listed files.")
   "Function for sendint ops.")
 
 (defun collab--host-alist ()
-  "Return ‘collab--host-alist’ plus “self”.
+  "Return ‘collab--host-alist’ plus outselves.
 
 Don’t use this function before a connection is established, because it
 uses ‘collab--my-host-id’."
@@ -1413,6 +1417,7 @@ Return t if inserted a host section into the buffer."
     (define-key map (kbd "k") #'collab--disconnect-from-doc)
     (define-key map (kbd "l") #'collab-share-link)
     (define-key map (kbd "g") #'collab--refresh)
+    (define-key map (kbd "f") #'collab-find-file)
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
@@ -1599,6 +1604,94 @@ list."
         ((derived-mode-p 'collab-dired-mode)
          (collab--dired-refresh))))
 
+;;; File finding with completion
+
+(defun collab--parse-filename (filename)
+  "Parse FILENAME into (HOST-ID . FILE-DESC).
+
+Return nil if parse failed."
+  (let ((segments (string-split filename "/" t (rx (+ whitespace)))))
+    (when (>= (length segments) 2)
+      (let ((host-id (pop segments))
+            (project (pop segments)))
+        (if (equal project "_id")
+            (let ((id (pop segments)))
+              (when id
+                (cons host-id (collab--make-file-desc "file" id))))
+          (if segments
+              (cons host-id
+                    (collab--make-file-desc
+                     "projectFile" nil project (string-join segments "/")))
+            (cons host-id (collab--make-file-desc "project" project))))))))
+
+(defun collab--encode-filename (file-desc)
+  "Encode FILE-DESC into a path."
+  (pcase (plist-get file-desc :type)
+    ("file" (format "/%s/_id" host-id))
+    ("project" (format "/%s/%s" host-id (plist-get file-desc :id)))
+    ("projectFile"
+     (let* ((project (plist-get file-desc :project))
+            (file-path (plist-get file-desc :file))
+            (parent (file-name-directory file-path)))
+       (if parent
+           (format "/%s/%s/%s" host-id project
+                   (string-trim-right parent "/"))
+         (format "/%s/%s" host-id project))))))
+
+(defun collab--complete-filename (filename _pred flag)
+  "Complete FILENAME.
+PRED and FLAG see manual."
+  (let* ((append-slash (lambda (str) (concat str "/")))
+         (dir-p (string-match-p (rx "/" eos) filename))
+         (start-with-slash-p (string-match-p (rx bos "/") filename))
+         (segments (string-split filename "/" t (rx (+ whitespace))))
+         (next (pcase (length segments)
+                 (0 (seq-map append-slash (collab--get-available-hosts)))
+                 (_ (condition-case nil
+                        (let* ((host (car segments))
+                               (host-data (alist-get host (collab--host-alist)
+                                                     nil nil #'equal))
+                               (signaling (nth 0 host-data))
+                               (credential (nth 1 host-data))
+                               (file-desc (pcase (length segments)
+                                            (1 nil)
+                                            (2 (collab--make-file-desc
+                                                "project" (nth 1 segments)))
+                                            (_ (collab--make-file-desc
+                                                "projectFile" nil
+                                                (nth 1 segments)
+                                                (string-join
+                                                 (seq-subseq segments 2 (if dir-p nil -1))
+                                                 "/")))))
+                               (resp (collab--list-files-req
+                                      file-desc host signaling credential))
+                               (files (plist-get resp :files)))
+                          (seq-map (lambda (file)
+                                     (let ((name (plist-get file :filename))
+                                           (dir-p (not (eq (plist-get file :isDirectory)
+                                                           :json-false))))
+                                       (concat name (if dir-p "/" ""))))
+                                   files))
+                      (error nil))))))
+
+    (pcase flag
+      ('nil (if (null next)
+                t
+              filename))
+      ('t next)
+      ('lambda (if (null next)
+                   t
+                 nil))
+      (`(boundaries . ,suffix) ; Mimic what ‘read-file-name-internal’ does.
+       (cons 'boundaries (cons (1+ (or (cl-position ?/ filename :from-end t) -1))
+                               (or (cl-position ?/ suffix) 0))))
+      ('metadata '(metadata (category . file)))
+      (_ nil))))
+
+(defun collab--get-available-hosts ()
+  "Return a list of available host IDs."
+  (mapcar #'car (collab--host-alist)))
+
 (defun collab--open-thing (&optional file-desc host-id)
   "Open the file (FILE-DESC) at point.
 There should be three text properties at point:
@@ -1628,14 +1721,14 @@ If HOST-ID and DOC-ID non-nil, use them instead."
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
                (doc-id (plist-get resp :docId))
-               (file-name (plist-get resp :fileName))
+               (filename (plist-get resp :filename))
                (meta (plist-get resp :fileMeta))
                (suggested-major-mode (plist-get meta :emacs.majorMode))
                (inhibit-read-only t))
           (select-window
            (display-buffer
             (generate-new-buffer
-             (format "*collab: %s (%s)*" file-name doc-id))))
+             (format "*collab: %s (%s)*" filename doc-id))))
           (collab-monitored-mode -1)
           (erase-buffer)
           (insert content)
@@ -1643,9 +1736,12 @@ If HOST-ID and DOC-ID non-nil, use them instead."
           (if (and (stringp suggested-major-mode)
                    (functionp (intern-soft suggested-major-mode)))
               (funcall (intern-soft suggested-major-mode))
-            (let ((buffer-file-name file-name))
+            (let ((buffer-file-name filename))
               (set-auto-mode)))
-          (collab--enable doc-id host-id site-id)))))))
+          (collab--enable doc-id host-id site-id)
+          ;; Save default directory for collab-find-file.
+          (setq collab--default-directory
+                (collab--encode-filename file-desc))))))))
 
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
@@ -1691,6 +1787,23 @@ If HOST-ID and DOC-ID non-nil, use them instead."
       (collab--accept-connection-notif signaling-addr))
     (setq-local collab--accepting-connection t)
     (collab--hub-refresh)))
+
+;;;###autoload
+(defun collab-find-file ()
+  "Find and open a collab file with auto-completion.
+Uses hierarchical completion: HOST/TYPE/PATH where TYPE is ‘p’ for project
+or ‘f’ for file. Uses ‘collab--default-directory’ as initial input."
+  (interactive)
+  (let ((path (completing-read
+               "Find collab file: "
+               #'collab--complete-filename
+               nil nil (or collab--default-directory "/"))))
+    (if (not (and path (not (string-empty-p path))))
+        (user-error "Path is empty")
+      (let ((parsed (collab--parse-filename path)))
+        (if (not parsed)
+            (message "Invalid path format: %s" path)
+          (collab--open-thing (cdr parsed) (car parsed)))))))
 
 ;;;###autoload
 (defun collab-hub ()
@@ -1833,7 +1946,7 @@ its name rather than doc id) to connect."
         (message (collab--fairy "Copied link to clipboard! (%s)" link))))))
 
 ;;;###autoload
-(defun collab-connect (share-link)
+(defun collab-open-link (share-link)
   "Connect to the doc at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/host-id/type/doc-id."
   (interactive (list (read-string "Share link: ")))
