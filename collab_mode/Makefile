@@ -7,7 +7,7 @@ LOG_ENV=RUST_LOG=info
 RUST_ENV=RUST_BACKTRACE=1 $(LOG_ENV)
 
 test:
-	cargo test
+	cargo test -- --test-threads=1 # Avoid too many open files, port alrady used, etc.
 
 test-ignored:
 	cargo test -- --ignored --show-output

@@ -1483,6 +1483,16 @@ impl Server {
     ) -> anyhow::Result<()> {
         let doc_id = context_ops.doc();
 
+        // Check write permission
+        if !self.config.write_allowed(&remote_host_id, &self.host_id) {
+            next.send_to_remote(
+                &remote_host_id,
+                Msg::PermissionDenied("Write permission denied".to_string()),
+            )
+            .await;
+            return Ok(());
+        }
+
         // Find doc in docs (as the server/owner of the doc)
         let doc = self.docs.get_mut(&doc_id);
         if doc.is_none() {

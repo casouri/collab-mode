@@ -1336,12 +1336,11 @@ async fn test_open_file_doc_id_not_found() {
 
 #[tokio::test]
 async fn test_list_files_top_level() {
-    // Test: List top-level projects and docs
+    // Test: List top-level projects and _doc virtual project
     // Flow:
     // 1. Hub declares multiple projects
-    // 2. Hub shares some docs
-    // 3. Spoke requests top-level listing (dir = None)
-    // Expected: Returns list of all projects and shared docs
+    // 2. Spoke requests top-level listing (dir = None)
+    // Expected: Returns list of all projects and _doc virtual project
 
     let env = TestEnvironment::new().await.unwrap();
     let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
@@ -3085,6 +3084,7 @@ async fn test_server_run_config_projects_expansion() {
         trusted_hosts: HashMap::new(),
         accept_mode: AcceptMode::All,
         host_id: Some("test-server".to_string()),
+        permission: HashMap::new(),
     };
 
     // Create ConfigManager

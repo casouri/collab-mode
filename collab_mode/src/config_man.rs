@@ -89,6 +89,24 @@ impl Default for AcceptMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[non_exhaustive]
+pub struct Permission {
+    pub write: bool,
+    pub create: bool,
+    pub delete: bool,
+}
+
+impl Default for Permission {
+    fn default() -> Self {
+        Permission {
+            write: true,
+            create: true,
+            delete: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     /// Projects that are shared by default.
     #[serde(default = "Vec::new")]
@@ -103,6 +121,8 @@ pub struct Config {
     // they run the server in headless mode and not connect an editor
     // to it.
     pub host_id: Option<ServerId>,
+    #[serde(default = "HashMap::new")]
+    pub permission: HashMap<ServerId, Permission>,
 }
 
 impl Default for Config {
@@ -112,6 +132,7 @@ impl Default for Config {
             trusted_hosts: HashMap::new(),
             accept_mode: AcceptMode::default(),
             host_id: None,
+            permission: HashMap::new(),
         }
     }
 }
@@ -284,6 +305,25 @@ impl ConfigManager {
     /// Get a copy of the loaded configuration
     pub fn config(&self) -> Config {
         self.config.clone()
+    }
+
+    /// Check if a host has write permission
+    /// Always returns true for the local host (from config.host_id)
+    /// Takes the server's actual host_id as a parameter for comparison
+    pub fn write_allowed(&self, host_id: &ServerId, my_host_id: &ServerId) -> bool {
+        // If this is our own host, always allow
+        if host_id == my_host_id {
+            return true;
+        }
+
+        // Check if there's a specific permission entry for this host
+        if let Some(permission) = self.config.permission.get(host_id) {
+            return permission.write;
+        }
+
+        // Default to true for backward compatibility - no entry means allowed
+        // Users can explicitly set write: false to deny permission
+        true
     }
 
     /// Add a trusted host to the configuration

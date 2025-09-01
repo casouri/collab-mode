@@ -380,6 +380,7 @@ pub enum Msg {
     ConnectionBroke(ServerId),
     StopSendingOps(DocId),
     SerializationErr(String),
+    PermissionDenied(String),
     BadRequest(String),
     // Fatal error that shouldn’t happen (not a fault, ie, a bug in
     // code), must reset the doc.
