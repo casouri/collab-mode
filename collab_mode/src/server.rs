@@ -534,12 +534,12 @@ impl Server {
                 .await;
                 Ok(())
             }
-            Msg::Hey(message) => {
+            Msg::Hey(hey_msg) => {
                 next.send_notif(
                     NotificationCode::Hey,
                     HostAndMessageNote {
                         host_id: msg.host,
-                        message,
+                        message: hey_msg.message,
                     },
                 )
                 .await;

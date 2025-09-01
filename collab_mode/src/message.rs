@@ -330,9 +330,18 @@ pub struct PrintHistoryParams {
     pub debug: bool,
 }
 
-/// *** Peer messages
+// *** Peer messages
 
 #[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
+#[non_exhaustive]
+pub struct HeyMessage {
+    pub message: String,
+    pub credentials: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
+#[non_exhaustive]
 pub enum Msg {
     ShareSingleFile {
         filename: String,
@@ -365,7 +374,7 @@ pub enum Msg {
 
     // Misc
     IceProgress(String),
-    Hey(String),
+    Hey(HeyMessage),
 
     // Errors
     ConnectionBroke(ServerId),

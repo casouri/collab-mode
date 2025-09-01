@@ -9,7 +9,7 @@
 //! it take a Msg, it’s convenient and simple.
 
 use crate::ice::{ice_accept, ice_bind, ice_connect};
-use crate::message::Msg;
+use crate::message::{HeyMessage, Msg};
 use crate::{
     config_man::{hash_der, AcceptMode},
     signaling::CertDerHash,
@@ -260,7 +260,11 @@ impl WebChannel {
                     .send(
                         &remote_hostid_clone,
                         None,
-                        Msg::Hey("Welcom to my server".to_string()),
+                        Msg::Hey(HeyMessage {
+                            message: "Welcom to my server".to_string(),
+                            credentials: "".to_string(),
+                            version: "v1.0.0".to_string(),
+                        }),
                     )
                     .await;
             });
@@ -313,7 +317,11 @@ impl WebChannel {
         self.send(
             &remote_hostid,
             None,
-            Msg::Hey("Nice to meet ya".to_string()),
+            Msg::Hey(HeyMessage {
+                message: "Nice to meet ya".to_string(),
+                credentials: "".to_string(),
+                version: "v1.0.0".to_string(),
+            }),
         )
         .await?;
 

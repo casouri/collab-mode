@@ -2143,8 +2143,14 @@ async fn test_delete_file() {
         .await
         .unwrap();
     // Check that we got the correct file descriptor.
-    assert_eq!(notification["file"]["type"].as_str().unwrap(), "projectFile");
-    assert_eq!(notification["file"]["project"].as_str().unwrap(), "TestProject");
+    assert_eq!(
+        notification["file"]["type"].as_str().unwrap(),
+        "projectFile"
+    );
+    assert_eq!(
+        notification["file"]["project"].as_str().unwrap(),
+        "TestProject"
+    );
     assert_eq!(notification["file"]["file"].as_str().unwrap(), "file1.txt");
 
     // Verify file1.txt is deleted from filesystem.
@@ -2179,8 +2185,14 @@ async fn test_delete_file() {
         .await
         .unwrap();
     // Check that we got the correct file descriptor for the directory.
-    assert_eq!(notification["file"]["type"].as_str().unwrap(), "projectFile");
-    assert_eq!(notification["file"]["project"].as_str().unwrap(), "TestProject");
+    assert_eq!(
+        notification["file"]["type"].as_str().unwrap(),
+        "projectFile"
+    );
+    assert_eq!(
+        notification["file"]["project"].as_str().unwrap(),
+        "TestProject"
+    );
     assert_eq!(notification["file"]["file"].as_str().unwrap(), "dir1");
 
     // Verify dir1 and its contents are deleted from filesystem.
