@@ -1402,8 +1402,8 @@ async fn test_list_files_top_level() {
         .unwrap();
     let files = resp["files"].as_array().unwrap();
 
-    // Verify we have 2 projects
-    assert_eq!(files.len(), 2);
+    // Verify we have 3 items (2 projects + _doc virtual project)
+    assert_eq!(files.len(), 3);
 
     // Check first project
     let has_project1 = files.iter().any(|f| {
@@ -1420,6 +1420,14 @@ async fn test_list_files_top_level() {
             && f["file"]["type"].as_str() == Some("project")
     });
     assert!(has_project2, "Should have Project2");
+
+    // Check _doc virtual project
+    let has_doc = files.iter().any(|f| {
+        f["filename"].as_str() == Some("_doc")
+            && f["isDirectory"].as_bool() == Some(true)
+            && f["file"]["type"].as_str() == Some("project")
+    });
+    assert!(has_doc, "Should have _doc virtual project");
 
     tracing::info!("test_list_files_top_level completed successfully");
     setup.cleanup();
@@ -1932,6 +1940,253 @@ async fn test_list_files_nested_structure() {
     assert_eq!(mod1["file"]["type"].as_str(), Some("projectFile"));
 
     tracing::info!("test_list_files_nested_structure completed successfully");
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_delete_file() {
+    let env = TestEnvironment::new().await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
+
+    // Create a test project with some files.
+    let test_dir = tempfile::tempdir().unwrap();
+    let project_path = test_dir.path().to_path_buf();
+
+    // Create directory structure:
+    // project/
+    //   file1.txt
+    //   dir1/
+    //     file2.txt
+    //     file3.txt
+    std::fs::write(project_path.join("file1.txt"), "Content 1").unwrap();
+    std::fs::create_dir(project_path.join("dir1")).unwrap();
+    std::fs::write(project_path.join("dir1/file2.txt"), "Content 2").unwrap();
+    std::fs::write(project_path.join("dir1/file3.txt"), "Content 3").unwrap();
+
+    // Declare the project.
+    let req_id = 1;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "name": "TestProject",
+                    "path": project_path.display().to_string(),
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+    setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+
+    // Share file1.txt from hub.
+    let req_id = 2;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "ShareFile",
+            serde_json::json!({
+                "filename": project_path.join("file1.txt").display().to_string(),
+                "content": "Content 1",
+                "meta": {}
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let _doc_id_1 = resp["docId"].as_u64().unwrap() as DocId;
+
+    // Share dir1/file2.txt from hub.
+    let req_id = 3;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "ShareFile",
+            serde_json::json!({
+                "filename": project_path.join("dir1/file2.txt").display().to_string(),
+                "content": "Content 2",
+                "meta": {}
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let _doc_id_2 = resp["docId"].as_u64().unwrap() as DocId;
+
+    // Share dir1/file3.txt from hub.
+    let req_id = 4;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "ShareFile",
+            serde_json::json!({
+                "filename": project_path.join("dir1/file3.txt").display().to_string(),
+                "content": "Content 3",
+                "meta": {}
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+    let _doc_id_3 = resp["docId"].as_u64().unwrap() as DocId;
+
+    // Connect spoke 0 to hub.
+    setup.spokes[0]
+        .editor
+        .send_notification(
+            "Connect",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "signalingAddr": env.signaling_url(),
+                "transportType": "websocket"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait for connection to be established.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Open file1.txt from spoke 0.
+    let req_id = 5;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "file1.txt"
+                },
+                "mode": "open"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let _remote_doc_id_1 = resp["docId"].as_u64().unwrap() as DocId;
+
+    // Open dir1/file2.txt from spoke 0.
+    let req_id = 6;
+    setup.spokes[0]
+        .editor
+        .send_request(
+            req_id,
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "dir1/file2.txt"
+                },
+                "mode": "open"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
+    let _remote_doc_id_2 = resp["docId"].as_u64().unwrap() as DocId;
+
+    // Test 1: Delete a single file (file1.txt).
+    let req_id = 7;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "DeleteFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "file": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "file1.txt"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+
+    // Spoke 0 should receive FileDeleted notification for the file.
+    let notification = setup.spokes[0]
+        .editor
+        .wait_for_notification("FileDeleted", 5)
+        .await
+        .unwrap();
+    // Check that we got the correct file descriptor.
+    assert_eq!(notification["file"]["type"].as_str().unwrap(), "projectFile");
+    assert_eq!(notification["file"]["project"].as_str().unwrap(), "TestProject");
+    assert_eq!(notification["file"]["file"].as_str().unwrap(), "file1.txt");
+
+    // Verify file1.txt is deleted from filesystem.
+    assert!(!project_path.join("file1.txt").exists());
+
+    // Test 2: Delete a directory (dir1).
+    let req_id = 8;
+    setup
+        .hub
+        .editor
+        .send_request(
+            req_id,
+            "DeleteFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "file": {
+                    "type": "projectFile",
+                    "project": "TestProject",
+                    "file": "dir1"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
+
+    // Spoke 0 should receive FileDeleted notification for the directory.
+    let notification = setup.spokes[0]
+        .editor
+        .wait_for_notification("FileDeleted", 5)
+        .await
+        .unwrap();
+    // Check that we got the correct file descriptor for the directory.
+    assert_eq!(notification["file"]["type"].as_str().unwrap(), "projectFile");
+    assert_eq!(notification["file"]["project"].as_str().unwrap(), "TestProject");
+    assert_eq!(notification["file"]["file"].as_str().unwrap(), "dir1");
+
+    // Verify dir1 and its contents are deleted from filesystem.
+    assert!(!project_path.join("dir1").exists());
+
+    tracing::info!("test_delete_file completed successfully");
     setup.cleanup();
 }
 

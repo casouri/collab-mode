@@ -8,10 +8,10 @@ use anyhow::{anyhow, Context};
 use gapbuf::GapBuffer;
 use lsp_server::ResponseError;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
@@ -141,6 +141,25 @@ impl Doc {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Save buffer content to file and close the file handle.
+    /// This is used when removing a doc to ensure changes are saved.
+    pub fn save_and_close(&mut self) -> anyhow::Result<()> {
+        if let Some(ref mut file) = self.disk_file {
+            // Write the buffer content to the file.
+            let content: String = self.buffer.iter().collect();
+            file.set_len(0)?; // Truncate the file.
+            file.seek(SeekFrom::Start(0))?; // Seek to the beginning.
+            file.write_all(content.as_bytes())
+                .with_context(|| format!("Failed to write to file: {:?}", self.abs_filename))?;
+            file.sync_all()
+                .with_context(|| format!("Failed to sync file: {:?}", self.abs_filename))?;
+            tracing::info!("Saved and closed file: {:?}", self.abs_filename);
+        }
+        // Drop the file handle by setting it to None.
+        self.disk_file = None;
         Ok(())
     }
 }
@@ -401,6 +420,11 @@ impl Server {
                 self.handle_disconnect_from_file(next, params).await?;
                 Ok(())
             }
+            "DeleteFile" => {
+                let params: DeleteFileParams = serde_json::from_value(req.params)?;
+                self.handle_delete_file_from_editor(next, params).await?;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -643,7 +667,7 @@ impl Server {
                 } else {
                     // No req_id, meaning we’re receiving this message
                     // because a doc we’re subscribed to moved.
-                    let msg = MoveFileResp {
+                    let msg = FileMovedNotif {
                         host_id: msg.host,
                         project,
                         old_path,
@@ -679,7 +703,7 @@ impl Server {
                 Ok(())
             }
             Msg::StopSendingOps(doc_id) => {
-                // Remove the remote host from the doc's subscriber list
+                // Remove the remote host from the doc's subscriber list.
                 if let Some(doc) = self.docs.get_mut(&doc_id) {
                     if doc.subscribers.remove(&msg.host).is_some() {
                         tracing::info!("Removed {} from subscribers of doc {}", msg.host, doc_id);
@@ -695,8 +719,37 @@ impl Server {
                 }
                 Ok(())
             }
+            Msg::DeleteFile(file_desc) => {
+                self.handle_delete_file_from_remote(next, file_desc, msg.host)
+                    .await?;
+                Ok(())
+            }
+            Msg::FileDeleted(file_desc) => {
+                // Response from remote that file was deleted.
+                if msg.req_id.is_some() {
+                    // This is a response to our request, send success to editor.
+                    let resp = DeleteFileResp {
+                        host_id: msg.host,
+                        file: file_desc,
+                    };
+                    next.send_resp(resp, None).await;
+                } else {
+                    // This is a notification, send to editor.
+                    let msg = FileDeletedNotif {
+                        host_id: msg.host,
+                        file: file_desc,
+                    };
+                    next.send_notif(NotificationCode::FileDeleted, msg).await;
+                }
+                Ok(())
+            }
             _ => {
-                panic!("Unhandled message type from {}: {:?}", msg.host, msg.body);
+                tracing::error!(
+                    "Unrecognized message type from {}: {:?}",
+                    msg.host,
+                    msg.body
+                );
+                Ok(())
             }
         }
     }
@@ -1903,8 +1956,10 @@ impl Server {
             )
         })?;
 
-        // Update doc's abs_filename if the file is currently open and
-        // collect subscribers.
+        // Update doc's abs_filename if the file is currently open,
+        // and collect subscribers.
+        // TODO: Go through every open doc and see if its abs_filename
+        // is under the moved directory, fix the abs_filename.
         for doc in self.docs.values_mut() {
             if let Some(ref mut abs_filename) = doc.abs_filename {
                 if abs_filename == &old_full_path {
@@ -1974,6 +2029,197 @@ impl Server {
         // Send empty response to indicate success
         next.send_resp((), None).await;
         Ok(())
+    }
+
+    async fn handle_delete_file_from_editor<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: DeleteFileParams,
+    ) -> anyhow::Result<()> {
+        let DeleteFileParams { host_id, file } = params;
+
+        // Remote.
+        if host_id != self.host_id {
+            next.send_to_remote(&host_id, Msg::DeleteFile(file)).await;
+            return Ok(());
+        }
+
+        // Local.
+        match self.handle_delete_file_locally(&file).await {
+            Ok(subscribers) => {
+                // Send response to the editor.
+                next.send_resp((), None).await;
+
+                // Send FileDeleted notification to all subscribers.
+                for subscriber_id in subscribers {
+                    if subscriber_id != self.host_id {
+                        send_to_remote(
+                            next.webchannel,
+                            &subscriber_id,
+                            None,
+                            Msg::FileDeleted(file.clone()),
+                        )
+                        .await;
+                    }
+                }
+            }
+            Err(err) => {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: err.to_string(),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_delete_file_from_remote<'a>(
+        &mut self,
+        next: Next<'a>,
+        file_desc: FileDesc,
+        requester: ServerId,
+    ) -> anyhow::Result<()> {
+        match self.handle_delete_file_locally(&file_desc).await {
+            Ok(subscribers) => {
+                let mut requester_notified = false;
+
+                // Send FileDeleted message to all subscribers.
+                for subscriber_id in &subscribers {
+                    let msg = Msg::FileDeleted(file_desc.clone());
+                    if subscriber_id == &requester {
+                        next.send_to_remote(subscriber_id, msg).await;
+                        requester_notified = true;
+                    } else if subscriber_id != &self.host_id {
+                        next.send_to_remote_no_req_id(subscriber_id, msg).await;
+                    }
+                }
+
+                // If the requester is not a subscriber, still send them a response.
+                let msg = Msg::FileDeleted(file_desc.clone());
+                if !requester_notified {
+                    next.send_to_remote(&requester, msg).await;
+                }
+            }
+            Err(err) => {
+                next.send_to_remote(
+                    &requester,
+                    Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_delete_file_locally(
+        &mut self,
+        file: &FileDesc,
+    ) -> anyhow::Result<Vec<ServerId>> {
+        let (docs_to_remove, path_to_delete, subscribers) =
+            self.find_docs_and_path_to_delete(file)?;
+
+        // Remove the docs, saving their content first.
+        for doc_id in docs_to_remove {
+            if let Some(mut doc) = self.docs.remove(&doc_id) {
+                // Save and close the file if it has a file handle.
+                if let Err(err) = doc.save_and_close() {
+                    // TODO: send this as an error to the original requester.
+                    tracing::warn!("Failed to save doc {} before deletion: {}", doc_id, err);
+                }
+                tracing::info!("Removed doc {} due to file deletion", doc_id);
+            }
+        }
+
+        // Delete the file or directory from disk if there's a path to delete.
+        if let Some(path) = path_to_delete {
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("Failed to delete directory: {}", path.display()))?;
+                tracing::info!("Deleted directory: {}", path.display());
+            } else if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Failed to delete file: {}", path.display()))?;
+                tracing::info!("Deleted file: {}", path.display());
+            }
+        }
+
+        Ok(subscribers)
+    }
+
+    // We’re trying to delete `file`, find the files we need to delete
+    // (if `file` is a directory), and find the subscribers we need to
+    // notify of the deletion. If we’re deleting a whole directory,
+    // hosts that subscribe to any of the to-be-deleted file in the
+    // directory are included.
+    fn find_docs_and_path_to_delete(
+        &self,
+        file: &FileDesc,
+    ) -> anyhow::Result<(Vec<DocId>, Option<PathBuf>, Vec<ServerId>)> {
+        let mut subscriber_set = HashSet::new();
+
+        match file {
+            FileDesc::Project { id } => {
+                let project_data = self
+                    .projects
+                    .get(id)
+                    .ok_or_else(|| anyhow!("Project {} not found", id))?;
+                let project_root = std::path::PathBuf::from(&project_data.root);
+
+                let mut docs_to_remove = Vec::new();
+                for (doc_id, doc) in &self.docs {
+                    if let Some(ref abs_filename) = doc.abs_filename {
+                        if abs_filename.starts_with(&project_root) {
+                            docs_to_remove.push(*doc_id);
+                            // Collect subscribers into the set.
+                            for subscriber_id in doc.subscribers.keys() {
+                                subscriber_set.insert(subscriber_id.clone());
+                            }
+                        }
+                    }
+                }
+
+                let subscribers: Vec<ServerId> = subscriber_set.into_iter().collect();
+                Ok((docs_to_remove, Some(project_root), subscribers))
+            }
+            FileDesc::ProjectFile {
+                project,
+                file: file_path,
+            } => {
+                let project_data = self
+                    .projects
+                    .get(project)
+                    .ok_or_else(|| anyhow!("Project {} not found", project))?;
+                let full_path = std::path::PathBuf::from(&project_data.root).join(file_path);
+
+                let mut docs_to_remove = Vec::new();
+                for (doc_id, doc) in &self.docs {
+                    if let Some(ref abs_filename) = doc.abs_filename {
+                        // Check if doc is under the path being deleted.
+                        if abs_filename.starts_with(&full_path) || abs_filename == &full_path {
+                            docs_to_remove.push(*doc_id);
+                            // Collect subscribers into the set.
+                            for subscriber_id in doc.subscribers.keys() {
+                                subscriber_set.insert(subscriber_id.clone());
+                            }
+                        }
+                    }
+                }
+
+                let subscribers: Vec<ServerId> = subscriber_set.into_iter().collect();
+                Ok((docs_to_remove, Some(full_path), subscribers))
+            }
+            FileDesc::File { id } => {
+                if let Some(doc) = self.docs.get(id) {
+                    let path_to_delete = doc.abs_filename.clone();
+                    let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
+                    Ok((vec![*id], path_to_delete, subscribers))
+                } else {
+                    Err(anyhow!("Doc {} not found", id))
+                }
+            }
+        }
     }
 
     async fn save_file_to_disk(&mut self, doc_id: &DocId) -> anyhow::Result<()> {
@@ -2072,6 +2318,10 @@ impl<'a> Next<'a> {
     async fn send_to_remote(&self, host_id: &ServerId, msg: Msg) {
         send_to_remote(self.webchannel, host_id, self.req_id.clone(), msg).await
     }
+
+    async fn send_to_remote_no_req_id(&self, host_id: &ServerId, msg: Msg) {
+        send_to_remote(self.webchannel, host_id, None, msg).await
+    }
 }
 
 pub async fn send_notification<T: Display>(
@@ -2083,6 +2333,7 @@ pub async fn send_notification<T: Display>(
         method: method.to_string(),
         params: serde_json::to_value(params).unwrap(),
     };
+    tracing::info!("Notification: {:?}", &response);
     if let Err(err) = editor_tx
         .send(lsp_server::Message::Notification(notif))
         .await
@@ -2102,6 +2353,7 @@ async fn send_response(
         result: Some(serde_json::to_value(result).unwrap()),
         error,
     };
+    tracing::info!("Response: {:?}", &response);
     if let Err(err) = editor_tx
         .send(lsp_server::Message::Response(response))
         .await
@@ -2117,6 +2369,7 @@ async fn send_to_remote(
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,
 ) {
+    tracing::info!("Send to remote: {:?}", &msg);
     if let Err(err) = webchannel.send(host_id, req_id, msg.clone()).await {
         tracing::error!(
             "Failed to send {:?} to remote host {}: {}",

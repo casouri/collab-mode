@@ -22,6 +22,7 @@ pub enum NotificationCode {
     AcceptStopped,       // Editor should show that we're not accepting connections anymore.
     Hey,                 // A ping from a remote, editor should mark the remote as connected.
     FileMoved,           // A file moved, editor should update it accordingly.
+    FileDeleted,         // A file/directory was deleted.
 
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
@@ -236,6 +237,7 @@ pub struct MoveFileParams {
 }
 
 pub type MoveFileResp = MoveFileParams;
+pub type FileMovedNotif = MoveFileParams;
 
 // **** SaveFile
 
@@ -256,6 +258,9 @@ pub struct DeleteFileParams {
     pub host_id: ServerId,
     pub file: FileDesc,
 }
+
+pub type DeleteFileResp = DeleteFileParams;
+pub type FileDeletedNotif = DeleteFileParams;
 
 // **** DisconnectFile
 
@@ -350,10 +355,9 @@ pub enum Msg {
     FileMoved(ProjectId, String, String),
     SaveFile(DocId),
     FileSaved(DocId),
-    DeleteFile(ProjectId, String),
-    FileDeleted(ProjectId, String),
+    DeleteFile(FileDesc),
+    FileDeleted(FileDesc),
     Snapshot(NewSnapshot),
-    TakeDownFile(DocId),
     ResetFile(DocId),
     Login(Credential),
     LoggedYouIn(SiteId),
