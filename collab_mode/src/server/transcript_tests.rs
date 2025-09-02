@@ -293,7 +293,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
     // Setup test environment
     let env = TestEnvironment::new().await?;
-    let mut setup = setup_hub_and_spoke_servers(&env, num_editors).await?;
+    let mut setup = setup_hub_and_spoke_servers(&env, num_editors, None).await?;
 
     // Hub shares the initial file
     let initial_content = ""; // Start with empty document

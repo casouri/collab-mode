@@ -743,6 +743,23 @@ impl Server {
                 }
                 Ok(())
             }
+            Msg::PermissionDenied(message) => {
+                if msg.req_id.is_some() {
+                    let err = lsp_server::ResponseError {
+                        code: ErrorCode::PermissionDenied as i32,
+                        message,
+                        data: None,
+                    };
+                    next.send_resp((), Some(err)).await;
+                } else {
+                    let msg = HostAndMessageNote {
+                        host_id: msg.host,
+                        message,
+                    };
+                    next.send_notif(NotificationCode::InternalError, msg).await;
+                }
+                Ok(())
+            }
             _ => {
                 tracing::error!(
                     "Unrecognized message type from {}: {:?}",
@@ -1812,7 +1829,9 @@ impl Server {
         // Package local ops if any
         if let Some(context_ops) = remote_doc.engine.maybe_package_local_ops() {
             // Send to the owner (could be ourselves or a remote)
-            next.send_to_remote(&host_id, Msg::OpFromClient(context_ops))
+            // Don't attach req_id since this isn’t a direct response
+            // (not that it matters much).
+            next.send_to_remote_no_req_id(&host_id, Msg::OpFromClient(context_ops))
                 .await;
         }
 
@@ -2104,7 +2123,7 @@ impl Server {
         if !self.config.delete_allowed(&requester) {
             next.send_to_remote(
                 &requester,
-                Msg::PermissionDenied("Delete permission denied".to_string()),
+                Msg::PermissionDenied("Permission denied for deleting file".to_string()),
             )
             .await;
             return Ok(());

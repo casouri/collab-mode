@@ -520,11 +520,26 @@ impl HubAndSpokeSetup {
 /// Creates a hub-and-spoke topology with one central server and multiple spoke servers.
 /// The hub server accepts connections and all spoke servers connect to it.
 /// Returns the hub and spoke setups with established connections.
+///
+/// If spoke_permissions is provided, it should contain exactly num_spokes permissions,
+/// one for each spoke. If not provided, all spokes get full permissions.
 #[cfg(any(test, feature = "test-runner"))]
 pub async fn setup_hub_and_spoke_servers(
     env: &TestEnvironment,
     num_spokes: usize,
+    spoke_permissions: Option<Vec<Permission>>,
 ) -> anyhow::Result<HubAndSpokeSetup> {
+    // Validate spoke_permissions if provided
+    if let Some(ref perms) = spoke_permissions {
+        if perms.len() != num_spokes {
+            return Err(anyhow::anyhow!(
+                "spoke_permissions must have exactly {} entries, got {}",
+                num_spokes,
+                perms.len()
+            ));
+        }
+    }
+
     // Create hub server
     let hub_id = create_test_id("hub");
     let hub_temp_dir = tempfile::TempDir::new()?;
@@ -540,15 +555,18 @@ pub async fn setup_hub_and_spoke_servers(
     config.host_id = Some(hub_id.clone());
 
     // Pre-add permissions for all spokes that will connect
-    for spoke_id in &spoke_ids {
-        config.permission.insert(
-            spoke_id.clone(),
+    for (i, spoke_id) in spoke_ids.iter().enumerate() {
+        let permission = if let Some(ref perms) = spoke_permissions {
+            perms[i].clone()
+        } else {
+            // Default to full permissions
             Permission {
                 write: true,
                 create: true,
                 delete: true,
-            },
-        );
+            }
+        };
+        config.permission.insert(spoke_id.clone(), permission);
     }
 
     hub_config.replace_and_save(config)?;
@@ -644,7 +662,7 @@ pub async fn setup_hub_and_spoke_servers(
     tracing::info!("Waiting for all connections to be established");
 
     // Hub should receive Hey from each spoke
-    for i in 0..num_spokes {
+    for _i in 0..num_spokes {
         let (host_id, _message) = hub_editor.expect_hey_notification(10).await?;
         tracing::info!("Hub received Hey from spoke: {}", host_id);
     }
@@ -929,7 +947,7 @@ async fn test_open_file_basic() {
     // Expected: Editor receives file content and metadata
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -980,7 +998,7 @@ async fn test_open_file_from_remote() {
     // Expected: Spoke receives file content from hub
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1031,7 +1049,7 @@ async fn test_open_file_create_mode() {
     // Expected: File is created and can be modified
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1142,7 +1160,7 @@ async fn test_open_file_not_found() {
     // Expected: Error response with FileNotFound code
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1207,7 +1225,7 @@ async fn test_open_file_bad_request() {
     // Expected: Error response with BadRequest code
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1252,7 +1270,7 @@ async fn test_open_file_already_open() {
     // Expected: Should return the same content without error
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1340,7 +1358,7 @@ async fn test_open_file_doc_id_not_found() {
     // Expected: Error response with FileNotFound code
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Request to open a non-existent doc by ID
     let req_id = 1;
@@ -1381,7 +1399,7 @@ async fn test_list_files_top_level() {
     // Expected: Returns list of all projects and _doc virtual project
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create two test projects
     let project1_dir = create_test_project().unwrap();
@@ -1480,7 +1498,7 @@ async fn test_list_files_project_directory() {
     // Expected: Returns correct files for each directory level
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create complex project
     let project_dir = create_complex_project().unwrap();
@@ -1595,7 +1613,7 @@ async fn test_list_files_from_remote() {
     // Expected: Spoke receives correct file list from hub
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1691,7 +1709,7 @@ async fn test_list_files_project_not_found() {
     // Expected: Error response
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Request listing with non-existent project
     let req_id = 1;
@@ -1735,7 +1753,7 @@ async fn test_list_files_not_directory() {
     // Expected: Error response "Not a directory"
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create test project
     let project_dir = create_test_project().unwrap();
@@ -1799,7 +1817,7 @@ async fn test_list_files_empty_directory() {
     // Expected: Returns empty list
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create project with empty directory
     let project_dir = create_complex_project().unwrap();
@@ -1868,7 +1886,7 @@ async fn test_list_files_nested_structure() {
     // Expected: Correct listings at each level with proper relative paths
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create complex project
     let project_dir = create_complex_project().unwrap();
@@ -1983,7 +2001,7 @@ async fn test_list_files_nested_structure() {
 #[tokio::test]
 async fn test_delete_file() {
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
 
     // Create a test project with some files.
     let test_dir = tempfile::tempdir().unwrap();
@@ -2242,7 +2260,7 @@ async fn test_delete_file() {
 #[tokio::test]
 async fn test_send_ops_e2e() {
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
 
     // Create test project with a file
     let project_dir = create_test_project().unwrap();
@@ -2507,7 +2525,7 @@ async fn test_undo_e2e() {
     // Sends an op, then sends an undo request, and verifies the returned undo op
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
 
     // Create test project with a file
     let project_dir = create_test_project().unwrap();
@@ -2637,7 +2655,7 @@ async fn test_undo_e2e() {
 #[tokio::test]
 async fn test_share_file_e2e() {
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Share a file with some content
     let (doc_id, site_id) = setup
@@ -2772,7 +2790,7 @@ async fn test_declare_projects_relative_path_error() {
     // Test: DeclareProjects should return error for relative paths
 
     let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Try to declare a project with a relative path
     let result = setup
@@ -2813,7 +2831,9 @@ async fn test_list_files_sorted_alphanumerically() {
 
     let project_path = project_dir.path().to_string_lossy().to_string();
 
-    let mut setup = setup_hub_and_spoke_servers(&mut env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&mut env, 1, None)
+        .await
+        .unwrap();
 
     // Declare project on hub
     setup
@@ -2894,7 +2914,9 @@ async fn test_open_binary_file_rejected() {
 
     let project_path = project_dir.path().to_string_lossy().to_string();
 
-    let mut setup = setup_hub_and_spoke_servers(&mut env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&mut env, 1, None)
+        .await
+        .unwrap();
 
     // Declare project on hub
     setup
@@ -2958,7 +2980,9 @@ async fn test_open_binary_file_rejected() {
 #[tokio::test]
 async fn test_doc_project_handling() {
     let mut env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&mut env, 1).await.unwrap();
+    let mut setup = setup_hub_and_spoke_servers(&mut env, 1, None)
+        .await
+        .unwrap();
 
     // Test 1: Attempt to declare a project named "_doc" should be rejected.
     let resp = setup
@@ -3174,4 +3198,213 @@ async fn test_server_run_config_projects_expansion() {
 
     // Clean up
     server_task.abort();
+}
+
+#[tokio::test]
+async fn test_send_ops_permission_denied() {
+    let env = TestEnvironment::new().await.unwrap();
+
+    // Set up hub and spoke with write permission denied
+    let mut setup = setup_hub_and_spoke_servers(
+        &env,
+        1,
+        Some(vec![Permission {
+            write: false,
+            create: true,
+            delete: false,
+        }]),
+    )
+    .await
+    .unwrap();
+
+    // Share a file on the hub
+    let (doc_id, _site_id) = setup
+        .hub
+        .editor
+        .share_file("test.txt", "initial content", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    // Spoke opens the file first
+    let _open_result = setup.spokes[0]
+        .editor
+        .request(
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "file",
+                    "id": doc_id,
+                },
+                "mode": "open",
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Wait a bit for the connection to stabilize
+    sleep(Duration::from_millis(100)).await;
+
+    // Try to send ops from spoke (should be denied)
+    // SendOps succeeds locally, but permission check happens async on hub
+    let result = setup.spokes[0]
+        .editor
+        .send_ops(
+            doc_id,
+            &setup.hub.id,
+            vec![serde_json::json!({
+                "op": {"Ins": [0, "new text"]},
+                "groupSeq": 0,
+            })],
+        )
+        .await;
+
+    // SendOps should succeed locally (it just queues the op)
+    assert!(
+        result.is_ok(),
+        "SendOps should succeed locally, got error: {:?}",
+        result
+    );
+
+    // Wait for InternalError notification about permission denial
+    let notification = setup.spokes[0]
+        .editor
+        .wait_for_notification(&NotificationCode::InternalError.to_string(), 5)
+        .await;
+
+    assert!(
+        notification.is_ok(),
+        "Expected InternalError notification for permission denial, timeout waiting"
+    );
+
+    // Verify the error message contains "denied"
+    if let Ok(params) = notification {
+        let message = params
+            .as_object()
+            .and_then(|obj| obj.get("message"))
+            .and_then(|msg| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            message.contains("denied"),
+            "Expected message containing 'denied', got: {}",
+            message
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_create_file_permission_denied() {
+    let env = TestEnvironment::new().await.unwrap();
+
+    // Set up hub and spoke with create permission denied
+    let mut setup = setup_hub_and_spoke_servers(
+        &env,
+        1,
+        Some(vec![Permission {
+            write: true,
+            create: false,
+            delete: false,
+        }]),
+    )
+    .await
+    .unwrap();
+
+    // Try to create a new file from spoke
+    // This should return an error response due to permission denial
+    let result = setup.spokes[0]
+        .editor
+        .request(
+            "OpenFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "fileDesc": {
+                    "type": "projectFile",
+                    "project": "test-project",
+                    "file": "new-file.txt",
+                },
+                "mode": "create",
+            }),
+        )
+        .await;
+
+    // Should receive error response
+    assert!(
+        result.is_err(),
+        "Expected error response for create permission denial, got: {:?}",
+        result
+    );
+
+    // Verify the error is permission-related
+    if let Err(e) = result {
+        let error_str = e.to_string();
+        assert!(
+            error_str.contains("Permission")
+                || error_str.contains("permission")
+                || error_str.contains("denied"),
+            "Expected permission error, got: {}",
+            error_str
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_delete_file_permission_denied() {
+    let env = TestEnvironment::new().await.unwrap();
+
+    // Set up hub and spoke with delete permission denied
+    let mut setup = setup_hub_and_spoke_servers(
+        &env,
+        1,
+        Some(vec![Permission {
+            write: true,
+            create: true,
+            delete: false,
+        }]),
+    )
+    .await
+    .unwrap();
+
+    // First, share a file on the hub
+    let (_doc_id, _site_id) = setup
+        .hub
+        .editor
+        .share_file("test.txt", "test content", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    // Try to delete the file from spoke
+    // This should return an error response due to permission denial
+    let result = setup.spokes[0]
+        .editor
+        .request(
+            "DeleteFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "file": {
+                    "type": "projectFile",
+                    "project": "test-project",
+                    "file": "test.txt",
+                },
+            }),
+        )
+        .await;
+
+    // Should receive error response
+    assert!(
+        result.is_err(),
+        "Expected error response for delete permission denial, got: {:?}",
+        result
+    );
+
+    // Verify the error is permission-related
+    if let Err(e) = result {
+        let error_str = e.to_string();
+        assert!(
+            error_str.contains("Permission")
+                || error_str.contains("permission")
+                || error_str.contains("denied"),
+            "Expected permission error, got: {}",
+            error_str
+        );
+    }
 }
