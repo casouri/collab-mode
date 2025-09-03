@@ -144,22 +144,18 @@ impl Doc {
         Ok(())
     }
 
-    /// Save buffer content to file and close the file handle.
-    /// This is used when removing a doc to ensure changes are saved.
-    pub fn save_and_close(&mut self) -> anyhow::Result<()> {
+    /// Save buffer content to file.
+    pub fn save_to_disk(&mut self) -> anyhow::Result<()> {
         if let Some(ref mut file) = self.disk_file {
-            // Write the buffer content to the file.
             let content: String = self.buffer.iter().collect();
-            file.set_len(0)?; // Truncate the file.
-            file.seek(SeekFrom::Start(0))?; // Seek to the beginning.
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
             file.write_all(content.as_bytes())
                 .with_context(|| format!("Failed to write to file: {:?}", self.abs_filename))?;
             file.sync_all()
                 .with_context(|| format!("Failed to sync file: {:?}", self.abs_filename))?;
-            tracing::info!("Saved and closed file: {:?}", self.abs_filename);
+            tracing::info!("Saved file: {:?}", self.abs_filename);
         }
-        // Drop the file handle by setting it to None.
-        self.disk_file = None;
         Ok(())
     }
 }
@@ -1051,7 +1047,7 @@ impl Server {
         // Construct full path
         let full_path = std::path::PathBuf::from(&project.root).join(rel_path);
         let mut open_options = std::fs::OpenOptions::new();
-        open_options.read(true).write(true);
+        open_options.read(true).write(true).truncate(true);
         if matches!(mode, OpenMode::Create) {
             open_options.create(true);
         }
@@ -2172,7 +2168,7 @@ impl Server {
         for doc_id in docs_to_remove {
             if let Some(mut doc) = self.docs.remove(&doc_id) {
                 // Save and close the file if it has a file handle.
-                if let Err(err) = doc.save_and_close() {
+                if let Err(err) = doc.save_to_disk() {
                     // TODO: send this as an error to the original requester.
                     tracing::warn!("Failed to save doc {} before deletion: {}", doc_id, err);
                 }
@@ -2271,7 +2267,7 @@ impl Server {
     }
 
     async fn save_file_to_disk(&mut self, doc_id: &DocId) -> anyhow::Result<()> {
-        let doc = self.docs.get(doc_id);
+        let doc = self.docs.get_mut(doc_id);
         if doc.is_none() {
             return Err(anyhow!("Doc {} not found", doc_id));
         }
@@ -2282,12 +2278,8 @@ impl Server {
             tracing::warn!("Remote requeste to save a buffer to disk");
             return Ok(());
         }
-        let file = file.as_ref().unwrap();
-        let mut writer = std::io::BufWriter::new(file);
-        let content: String = doc.buffer.iter().collect();
-        writer
-            .write_all(content.as_bytes())
-            .with_context(|| anyhow!("Error writing to {:?}", doc.abs_filename))
+        doc.save_to_disk()?;
+        Ok(())
     }
 
     fn handle_update_config_from_editor(
