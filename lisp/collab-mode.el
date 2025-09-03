@@ -972,7 +972,7 @@ response)."
                        (funcall callback :success resp))
          :error-fn (lambda (resp)
                      (funcall callback :error resp))
-         :timeout-fn (lambda (resp)
+         :timeout-fn (lambda ()
                        (funcall callback :timeout resp))
          :timeout collab-connection-timeout)
       ;; Sync request.
@@ -1223,6 +1223,15 @@ If REDO is non-nil, redo the most recent undo instead."
   "Redo the most recent undo operation."
   (interactive)
   (collab--undo t))
+
+(defun collab-save-buffer ()
+  "Save the current collab buffer.
+Saves the buffer on the owner’s machine."
+  (interactive)
+  (collab--check-precondition)
+  (collab--catch-error "Can’t save the buffer"
+    (collab--save-file-req (car collab--doc-host) (cdr collab--doc-host)))
+  (message "%s" (collab--fairy "Saved and safe on disk!")))
 
 ;;; UI
 
@@ -1526,7 +1535,7 @@ If USE-CACHE is t, don’t refetch file list, use the cached file list."
     (let ((has-some-doc
            (save-excursion
              (goto-char (point-min))
-             (text-property-search-forward 'collab-doc-desc)))
+             (text-property-search-forward 'collab-file-desc)))
           (fairy-chatter
            (propertize
             (concat
@@ -1806,8 +1815,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
      ;; Open a directory or project.
      (directory-p
       (let* ((path (collab--encode-filename file-desc host-id))
-             (buf (get-buffer-create
-                   (format "*collab dired: %s%s" host-id path))))
+             (buf (get-buffer-create (format "%s<collab>" path))))
         (select-window (display-buffer buf))
         (collab-dired-mode)
         (puthash path buf collab--buffer-table)
@@ -1827,8 +1835,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
                (inhibit-read-only t))
           (select-window
            (display-buffer
-            (generate-new-buffer
-             (format "*collab: %s (%s)*" filename doc-id))))
+            (generate-new-buffer (format "%s<collab>(%s)" filename doc-id))))
           (collab-monitored-mode -1)
           (erase-buffer)
           (insert content)
@@ -2044,15 +2051,17 @@ its name rather than doc id) to connect."
         (message (collab--fairy "Copied link to clipboard! (%s)" link))))))
 
 ;;;###autoload
-(defun collab-open-link (share-link)
+(defun collab-connect (share-link)
   "Connect to the doc at SHARE-LINK.
 SHARE-LINK should be in the form of signaling-server/host-id/#/doc-id."
   (interactive (list (read-string "Share link: ")))
   ;; signaling-server/host-id/project/path
   ;; 0                1       2       3
-  (let* ((dir-p (or (string-match-p (rx "/" eos) share-link) (<= (length segments) 3)))
-         (segments (string-split share-link "/" t t))
-         (signaling-addr (nth 0 segments))
+  (let* ((beheaded-link (string-replace "wss://" "" share-link))
+         (segments (string-split beheaded-link "/" t))
+         (dir-p (or (string-match-p (rx "/" eos) share-link)
+                    (<= (length segments) 3)))
+         (signaling-addr (concat "wss://" (nth 0 segments)))
          (host-id (nth 1 segments))
          (project (nth 2 segments))
          (path (if (> (length segments) 3)
@@ -2068,13 +2077,14 @@ SHARE-LINK should be in the form of signaling-server/host-id/#/doc-id."
         (message "You shouldn’t need to connect to a local doc")
       (switch-to-buffer (collab--hub-buffer))
       (collab-hub-mode)
-      (setq collab--open-this-doc
-            (list host-id
-                  (if path
-                      `(:type "projectFile" :project ,project :file ,path)
-                    `(:type "project" :id ,project))
-                  (if path (file-name-nondirectory path) project)
-                  dir-p))
+      (when project
+        (setq collab--open-this-doc
+              (list host-id
+                    (if path
+                        `(:type "projectFile" :project ,project :file ,path)
+                      `(:type "project" :id ,project))
+                    (if path (file-name-nondirectory path) project)
+                    dir-p)))
       (collab--hub-refresh))))
 
 (defun collab--print-history (&optional debug)
