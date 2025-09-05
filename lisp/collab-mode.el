@@ -1315,15 +1315,9 @@ Insert (empty) if RESP is nil; insert ... if STATUS is not ‘up’.
 If ERROR (string) is non-nil, also insert the error. ERROR
 shouldn’t end with a newline."
   (let* ((beg (point))
-         (files (seq-map #'identity (plist-get resp :files)))
-         (projects (seq-filter (lambda (file)
-                                 (equal (plist-get (plist-get file :file) :type) "project"))
-                               files))
-         (docs (seq-filter (lambda (file)
-                             (equal (plist-get (plist-get file :file) :type) "file"))
-                           files)))
+         (files (seq-map #'identity (plist-get resp :files))))
     ;; 1. Insert host line.
-    (insert (propertize host
+    (insert (propertize (if (equal host collab--my-host-id) "(local)" host)
                         'face 'collab-host
                         'collab-host-line t))
     ;; 1.1 Insert status.
@@ -1338,18 +1332,13 @@ shouldn’t end with a newline."
     (pcase status
       ('up (if (null files)
                (insert (propertize "(empty)\n" 'face 'shadow))
-             (cl-loop for collection in (list projects docs)
-                      for title in (list "---projects---" "---docs---")
-                      do (progn
-                           (when collection
-                             (insert (propertize title 'face 'shadow) "\n"))
-                           (dolist (entry collection)
-                             (let* ((file-desc (plist-get entry :file))
-                                    (name (plist-get entry :filename))
-                                    (directoryp (not (eq (plist-get entry :isDirectory)
-                                                         :json-false))))
-                               (collab--insert-file host file-desc name directoryp)
-                               (insert "\n")))))))
+             (dolist (entry files)
+               (let* ((file-desc (plist-get entry :file))
+                      (name (plist-get entry :filename))
+                      (directoryp (not (eq (plist-get entry :isDirectory)
+                                           :json-false))))
+                 (collab--insert-file host file-desc name directoryp)
+                 (insert "\n")))))
       ;; Delayed. Getting files async.
       (_ (insert (propertize "...\n" 'face 'shadow))))
     ;; 3. Insert error.
@@ -1810,7 +1799,12 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
          (buf (gethash (gethash path collab--doc-id-table) collab--buffer-table)))
     (cond
      ((not (and file-desc filename host-id)) nil)
-     ((buffer-live-p buf)
+     ((and (buffer-live-p buf) (if (buffer-local-value 'collab-monitored-mode buf)
+                                   t
+                                 (remhash (gethash path collab--doc-id-table)
+                                          collab--buffer-table)
+                                 (kill-buffer buf)
+                                 nil))
       (display-buffer buf))
      ;; Open a directory or project.
      (directory-p
