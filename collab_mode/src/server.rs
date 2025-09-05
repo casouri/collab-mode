@@ -2464,13 +2464,17 @@ pub fn request_to_string(req: &lsp_server::Request) -> String {
 pub fn response_to_string(resp: &lsp_server::Response) -> String {
     let result_str = if let Some(ref result) = resp.result {
         serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
-    } else if let Some(ref error) = resp.error {
-        format!("Error({}: {})", error.code, error.message)
     } else {
-        "None".to_string()
+        "null".to_string()
     };
 
-    format!("Resp {} {}", &resp.id, result_str)
+    let error_str = if let Some(ref error) = resp.error {
+        format!(" Error({}: {})", error.code, error.message)
+    } else {
+        "".to_string()
+    };
+
+    format!("Resp {} {}{}", &resp.id, result_str, error_str)
 }
 
 /// Convert lsp_server::Notification to a human-readable string
