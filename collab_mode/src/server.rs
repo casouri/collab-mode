@@ -561,13 +561,15 @@ impl Server {
             }
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
-                self.connect(
-                    next,
-                    params.host_id,
-                    params.signaling_addr,
-                    params.transport_type,
-                )
-                .await;
+                if !self.remote_connected(&params.host_id) {
+                    self.connect(
+                        next,
+                        params.host_id,
+                        params.signaling_addr,
+                        params.transport_type,
+                    )
+                    .await;
+                }
             }
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
@@ -2415,6 +2417,14 @@ impl Server {
         Ok(())
     }
 
+    fn remote_connected(&self, host_id: &ServerId) -> bool {
+        if let Some(remote) = self.active_remotes.get(host_id) {
+            remote.state == ConnectionState::Connected
+        } else {
+            false
+        }
+    }
+
     /// If connection to `host_id` isn’t active, send ConnectionBroke
     /// response and return false. Always return true of `host_id` is
     /// equal to our own host id.
@@ -2423,11 +2433,7 @@ impl Server {
             return true;
         }
 
-        let connected = if let Some(remote) = self.active_remotes.get(host_id) {
-            remote.state == ConnectionState::Connected
-        } else {
-            false
-        };
+        let connected = self.remote_connected(host_id);
 
         if !connected {
             next.send_resp(
