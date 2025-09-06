@@ -53,6 +53,8 @@ pub enum ErrorCode {
     IoError = 105,
     /// Wrong arguments like empty filename.
     BadRequest = 113,
+    /// Not connected to the remote.
+    NotConnected = 114,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

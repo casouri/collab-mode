@@ -388,14 +388,18 @@ impl Server {
             }
             "ListFiles" => {
                 let params: message::ListFilesParams = serde_json::from_value(req.params)?;
-                // Either sends a request to remote or sends a
-                // response to editor.
+                if !self.check_connection(next, &params.host_id).await {
+                    return Ok(());
+                }
                 self.list_files_from_editor(next, params.host_id, params.dir)
                     .await?;
                 Ok(())
             }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
+                if !self.check_connection(next, &params.host_id).await {
+                    return Ok(());
+                }
                 self.open_file_from_editor(next, params.host_id, params.file_desc, params.mode)
                     .await?;
                 Ok(())
@@ -465,21 +469,33 @@ impl Server {
             }
             "MoveFile" => {
                 let params: MoveFileParams = serde_json::from_value(req.params)?;
+                if !self.check_connection(next, &params.host_id).await {
+                    return Ok(());
+                }
                 self.handle_move_file_from_editor(next, params).await?;
                 Ok(())
             }
             "SaveFile" => {
                 let params: SaveFileParams = serde_json::from_value(req.params)?;
+                if !self.check_connection(next, &params.host_id).await {
+                    return Ok(());
+                }
                 self.handle_save_file_from_editor(next, params).await?;
                 Ok(())
             }
             "DisconnectFromFile" => {
                 let params: DisconnectFileParams = serde_json::from_value(req.params)?;
+                if !self.check_connection(next, &params.host_id).await {
+                    return Ok(());
+                }
                 self.handle_disconnect_from_file(next, params).await?;
                 Ok(())
             }
             "DeleteFile" => {
                 let params: DeleteFileParams = serde_json::from_value(req.params)?;
+                if !self.check_connection(next, &params.host_id).await {
+                    return Ok(());
+                }
                 self.handle_delete_file_from_editor(next, params).await?;
                 Ok(())
             }
@@ -2397,6 +2413,35 @@ impl Server {
         self.config.replace_and_save(config)?;
 
         Ok(())
+    }
+
+    /// If connection to `host_id` isn’t active, send ConnectionBroke
+    /// response and return false. Always return true of `host_id` is
+    /// equal to our own host id.
+    async fn check_connection<'a>(&self, next: &Next<'a>, host_id: &ServerId) -> bool {
+        if *host_id == self.host_id {
+            return true;
+        }
+
+        let connected = if let Some(remote) = self.active_remotes.get(host_id) {
+            remote.state == ConnectionState::Connected
+        } else {
+            false
+        };
+
+        if !connected {
+            next.send_resp(
+                (),
+                Some(lsp_server::ResponseError {
+                    code: ErrorCode::NotConnected as i32,
+                    message: format!("Not connected to remote {}", host_id),
+                    data: None,
+                }),
+            )
+            .await;
+        }
+
+        connected
     }
 }
 
