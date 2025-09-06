@@ -6,7 +6,6 @@ use crate::types::*;
 use crate::webchannel::{self, WebChannel};
 use anyhow::{anyhow, Context};
 use gapbuf::GapBuffer;
-use lsp_server::ResponseError;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -17,6 +16,7 @@ use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Stores relevant data for a document, used by the server.
@@ -61,6 +61,40 @@ struct RemoteDoc {
     buffer: GapBuffer<char>,
 }
 
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
+enum ConnectionState {
+    Connected,
+    Connecting,
+    Disconnected,
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
+struct RemoteState {
+    /// Connections state.
+    state: ConnectionState,
+    /// Signaling address used to connect to this remote.
+    signaling_addr: String,
+    /// Transport type used to connect to this remote.
+    transport_type: webchannel::TransportType,
+    /// Next reconnect should be attempted aftert this duration. We
+    /// use exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256. Max at 256.
+    next_reconnect_stride: u64,
+    /// Next reconnect attempt time.
+    next_reconnect_time: std::time::Instant,
+}
+
+impl RemoteState {
+    fn connecting(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
+        RemoteState {
+            state: ConnectionState::Connecting,
+            next_reconnect_stride: 1,
+            signaling_addr,
+            transport_type,
+            next_reconnect_time: std::time::Instant::now(),
+        }
+    }
+}
+
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server. Once set, this cannot change, because
@@ -84,7 +118,7 @@ pub struct Server {
     /// Map of recognized users.
     users: HashMap<Credential, SiteId>,
     /// Active remote peers.
-    active_remotes: Vec<SiteId>,
+    active_remotes: HashMap<ServerId, RemoteState>,
     /// Maps host id to site id.
     site_id_map: HashMap<ServerId, SiteId>,
     /// Whether the server is currently accepting new connections on a
@@ -202,7 +236,7 @@ impl Server {
             remote_docs: HashMap::new(),
             projects: HashMap::new(),
             users: HashMap::new(),
-            active_remotes: Vec::new(),
+            active_remotes: HashMap::new(),
             site_id_map: HashMap::new(),
             accepting: HashMap::new(),
             config,
@@ -265,6 +299,35 @@ impl Server {
                         tracing::error!("Failed to handle remote message: {}", err);
                     }
                 },
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
+                    for (host, remote) in self.active_remotes.iter_mut() {
+                        if remote.state != ConnectionState::Disconnected {
+                            continue;
+                        }
+                        if Instant::now() < remote.next_reconnect_time {
+                            continue;
+                        }
+                        tracing::info!("Reconnecting to remote {}", host);
+                        send_notification(&editor_tx, NotificationCode::Connecting, ConnectingNote {
+                            host_id: host.clone(),
+
+                        }).await;
+                        need_connect.push((host.clone(), remote.clone()));
+                        let stride = Duration::from_secs(remote.next_reconnect_stride);
+                        remote.next_reconnect_stride = std::cmp::min(
+                                remote.next_reconnect_stride * 2,
+                                256,
+                        );
+                        remote.next_reconnect_time = Instant::now() + stride;
+                    }
+
+                    let next = Next::new(&editor_tx, None, &webchannel);
+                    for (host, remote) in need_connect {
+                        self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type).await;
+                    }
+
+                }
             }
         }
     }
@@ -520,6 +583,11 @@ impl Server {
                 Ok(())
             }
             Msg::ConnectionBroke(host_id) => {
+                if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+                    remote.state = ConnectionState::Disconnected;
+                    remote.next_reconnect_stride = 1;
+                    remote.next_reconnect_time = Instant::now();
+                }
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
                     ConnectionBrokeNote {
@@ -531,6 +599,9 @@ impl Server {
                 Ok(())
             }
             Msg::Hey(hey_msg) => {
+                if let Some(remote) = self.active_remotes.get_mut(&msg.host) {
+                    remote.state = ConnectionState::Connected;
+                }
                 next.send_notif(
                     NotificationCode::Hey,
                     HostAndMessageNote {
@@ -774,7 +845,7 @@ impl Server {
         next: &Next<'a>,
         host_id: ServerId,
         signaling_addr: String,
-        transpot_type: webchannel::TransportType,
+        transport_type: webchannel::TransportType,
     ) {
         if host_id == self.host_id {
             return;
@@ -786,32 +857,35 @@ impl Server {
             },
         )
         .await;
+
+        // If there’s an existing remote, keep the reconnect time/stride.
+        if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+            remote.state = ConnectionState::Connecting;
+        } else {
+            self.active_remotes.insert(
+                host_id.clone(),
+                RemoteState::connecting(signaling_addr.clone(), transport_type.clone()),
+            );
+        }
+
         let key_cert = self.key_cert.clone();
         let webchannel_1 = next.webchannel.clone();
-        let editor_tx_1 = next.editor_tx.clone();
         let my_host_id = self.host_id.clone();
 
         tokio::spawn(async move {
             if let Err(err) = webchannel_1
                 .connect(
                     host_id.clone(),
-                    my_host_id,
+                    my_host_id.clone(),
                     key_cert,
                     &signaling_addr,
-                    transpot_type,
+                    transport_type,
                 )
                 .await
             {
-                tracing::error!("Failed to connect to {}: {}", host_id, err);
-                send_notification(
-                    &editor_tx_1,
-                    NotificationCode::ConnectionBroke,
-                    HostAndMessageNote {
-                        host_id,
-                        message: err.to_string(),
-                    },
-                )
-                .await;
+                let msg = format!("Failed to connect to {}: {}", host_id, err);
+                tracing::error!(msg);
+                send_to_remote(&webchannel_1, &my_host_id, None, Msg::ConnectionBroke(msg)).await;
             }
         });
     }
@@ -1047,7 +1121,7 @@ impl Server {
         // Construct full path
         let full_path = std::path::PathBuf::from(&project.root).join(rel_path);
         let mut open_options = std::fs::OpenOptions::new();
-        open_options.read(true).write(true).truncate(true);
+        open_options.read(true).write(true);
         if matches!(mode, OpenMode::Create) {
             open_options.create(true);
         }
@@ -2410,6 +2484,9 @@ async fn send_to_remote(
     msg: Msg,
 ) {
     tracing::info!("Send to {}: {}", host_id, &msg);
+    // We don’t let caller handle disconnect errors. Because
+    // disconnect error is caught by the receiving end of each
+    // connection, and it’ll send a ConnectionBroke message.
     if let Err(err) = webchannel.send(host_id, req_id, msg.clone()).await {
         tracing::error!(
             "Failed to send {:?} to remote host {}: {}",
