@@ -386,18 +386,24 @@ impl Server {
                 next.send_resp(resp, None).await;
                 Ok(())
             }
-            "ListFiles" => {
-                let params: message::ListFilesParams = serde_json::from_value(req.params)?;
-                let host_id = params
-                    .dir
-                    .as_ref()
-                    .map(|d| d.host_id().clone())
-                    .unwrap_or(self.host_id.clone());
+            "ListProjects" => {
+                let params: message::ListProjectsParams = serde_json::from_value(req.params)?;
+                let host_id = params.host_id;
                 if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                let dir = params.dir.map(|d| d.into());
-                self.list_files_from_editor(next, host_id, dir).await?;
+                self.list_files_from_editor(next, host_id, None).await?;
+                Ok(())
+            }
+            "ListFiles" => {
+                let params: message::ListFilesParams = serde_json::from_value(req.params)?;
+                let host_id = params.dir.host_id().clone();
+                if !self.check_connection(next, &host_id).await {
+                    return Ok(());
+                }
+                let dir = params.dir.into();
+                self.list_files_from_editor(next, host_id, Some(dir))
+                    .await?;
                 Ok(())
             }
             "OpenFile" => {

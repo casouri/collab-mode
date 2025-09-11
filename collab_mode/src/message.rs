@@ -177,10 +177,16 @@ pub struct DeclareProjectsParams {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListFilesParams {
-    pub dir: Option<EditorFileDesc>,
+pub struct ListProjectsParams {
+    pub host_id: ServerId,
     pub signaling_addr: String,
-    pub credential: Credential,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFilesParams {
+    pub dir: EditorFileDesc,
+    pub signaling_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

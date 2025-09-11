@@ -121,11 +121,20 @@ impl Eq for FileDesc {}
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum EditorFileDesc {
     /// A shared doc that isn't in a project.
-    File { host_id: ServerId, id: DocId },
+    File {
+        #[serde(rename = "hostId")]
+        host_id: ServerId,
+        id: DocId,
+    },
     /// A project.
-    Project { host_id: ServerId, id: ProjectId },
+    Project {
+        #[serde(rename = "hostId")]
+        host_id: ServerId,
+        id: ProjectId,
+    },
     /// A file in a project.
     ProjectFile {
+        #[serde(rename = "hostId")]
         host_id: ServerId,
         project: ProjectId,
         /// Relative path to the file in the project.

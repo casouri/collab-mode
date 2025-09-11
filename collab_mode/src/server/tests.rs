@@ -1436,11 +1436,10 @@ async fn test_list_files_top_level() {
         .editor
         .send_request(
             req_id,
-            "ListFiles",
+            "ListProjects",
             serde_json::json!({
-                "dir": null,
-                "signalingAddr": env.signaling_url(),
-                "credential": "test"
+                "hostId": setup.hub.id.clone(),
+                "signalingAddr": env.signaling_url()
             }),
         )
         .await
