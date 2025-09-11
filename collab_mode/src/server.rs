@@ -621,7 +621,7 @@ impl Server {
                     remote.state = ConnectionState::Connected;
                 }
                 next.send_notif(
-                    NotificationCode::Hey,
+                    NotificationCode::Connected,
                     HostAndMessageNote {
                         host_id: msg.host,
                         message: hey_msg.message,
@@ -1816,7 +1816,7 @@ impl Server {
             } else if gseq > expected_gseq {
                 // Missing ops in the middle, probably due to disconnection.
                 tracing::warn!(
-                    "Received remote op with larger gseq ({}) than expected ({}), ignoring",
+                    "Received remote op with larger gseq ({}) than expected ({}), skip, sent ops request to remote",
                     gseq,
                     expected_gseq,
                 );
