@@ -303,17 +303,17 @@ impl MockEditor {
         ))
     }
 
-    async fn expect_hey_notification(
+    async fn expect_connected_notification(
         &mut self,
         timeout_secs: u64,
     ) -> anyhow::Result<(ServerId, String)> {
         let params = self
-            .wait_for_notification(&NotificationCode::Hey.to_string(), timeout_secs)
+            .wait_for_notification(&NotificationCode::Connected.to_string(), timeout_secs)
             .await?;
         let host_id = params
             .get("hostId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing hostId in Hey notification"))?
+            .ok_or_else(|| anyhow::anyhow!("Missing hostId in Connected notification"))?
             .to_string();
         let message = params
             .get("message")
@@ -369,14 +369,12 @@ impl MockEditor {
     #[cfg(any(test, feature = "test-runner"))]
     pub async fn open_file(
         &mut self,
-        host_id: &str,
         file_desc: serde_json::Value,
     ) -> anyhow::Result<(u32, u32, String)> {
         let resp = self
             .request(
                 "OpenFile",
                 serde_json::json!({
-                    "hostId": host_id,
                     "fileDesc": file_desc,
                     "mode": "open",
                 }),
@@ -661,16 +659,20 @@ pub async fn setup_hub_and_spoke_servers(
     // Wait for all connections to be established
     tracing::info!("Waiting for all connections to be established");
 
-    // Hub should receive Hey from each spoke
+    // Hub should receive Connected from each spoke
     for _i in 0..num_spokes {
-        let (host_id, _message) = hub_editor.expect_hey_notification(10).await?;
-        tracing::info!("Hub received Hey from spoke: {}", host_id);
+        let (host_id, _message) = hub_editor.expect_connected_notification(10).await?;
+        tracing::info!("Hub received Connected from spoke: {}", host_id);
     }
 
-    // Each spoke should receive Hey from hub
+    // Each spoke should receive Connected from hub
     for spoke in &mut spokes {
-        let (host_id, _message) = spoke.editor.expect_hey_notification(10).await?;
-        tracing::info!("Spoke {} received Hey from hub: {}", spoke.id, host_id);
+        let (host_id, _message) = spoke.editor.expect_connected_notification(10).await?;
+        tracing::info!(
+            "Spoke {} received Connected from hub: {}",
+            spoke.id,
+            host_id
+        );
     }
 
     Ok(HubAndSpokeSetup {
@@ -766,8 +768,8 @@ async fn test_accept_connect() {
     // 2. Editor2 tells Server2 to connect to Server1 via signaling server
     // 3. Both servers establish WebRTC connection through ICE/DTLS/SCTP
     // 4. Once connected, servers exchange "Hey" messages
-    // 5. Each editor receives a Hey notification from the remote server
-    // Expected: Both editors receive Hey messages indicating successful connection
+    // 5. Each editor receives a Connected notification from the remote server
+    // Expected: Both editors receive Connected messages indicating successful connection
 
     let env = TestEnvironment::new().await.unwrap();
 
@@ -851,15 +853,15 @@ async fn test_accept_connect() {
 
     tracing::info!("Waiting for connection to be established");
 
-    // Wait for Hey messages from both sides
+    // Wait for Connected messages from both sides
     let timeout_duration = Duration::from_secs(30);
     let start_time = std::time::Instant::now();
 
-    let mut hey_received_count = 0;
+    let mut connected_received_count = 0;
     let connection_progress_method = NotificationCode::ConnectionProgress.to_string();
-    let hey_method = NotificationCode::Hey.to_string();
+    let connected_method = NotificationCode::Connected.to_string();
 
-    while hey_received_count < 2 && start_time.elapsed() < timeout_duration {
+    while connected_received_count < 2 && start_time.elapsed() < timeout_duration {
         // Check editor1 for messages
         match timeout(Duration::from_millis(100), mock_editor1.rx.recv()).await {
             Ok(Some(lsp_server::Message::Notification(notif))) => {
@@ -872,7 +874,7 @@ async fn test_accept_connect() {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                     );
-                } else if notif.method == hey_method {
+                } else if notif.method == connected_method {
                     let host_id = notif
                         .params
                         .get("hostId")
@@ -883,9 +885,9 @@ async fn test_accept_connect() {
                         .get("message")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    tracing::info!("Editor1 received Hey from {}: {}", host_id, message);
-                    assert_eq!(host_id, id2, "Hey should be from server2");
-                    hey_received_count += 1;
+                    tracing::info!("Editor1 received Connected from {}: {}", host_id, message);
+                    assert_eq!(host_id, id2, "Connected should be from server2");
+                    connected_received_count += 1;
                 }
             }
             _ => {}
@@ -903,7 +905,7 @@ async fn test_accept_connect() {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                     );
-                } else if notif.method == hey_method {
+                } else if notif.method == connected_method {
                     let host_id = notif
                         .params
                         .get("hostId")
@@ -914,9 +916,9 @@ async fn test_accept_connect() {
                         .get("message")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    tracing::info!("Editor2 received Hey from {}: {}", host_id, message);
-                    assert_eq!(host_id, id1, "Hey should be from server1");
-                    hey_received_count += 1;
+                    tracing::info!("Editor2 received Connected from {}: {}", host_id, message);
+                    assert_eq!(host_id, id1, "Connected should be from server1");
+                    connected_received_count += 1;
                 }
             }
             _ => {}
@@ -926,8 +928,8 @@ async fn test_accept_connect() {
     }
 
     assert_eq!(
-        hey_received_count, 2,
-        "Should receive Hey messages from both sides indicating connection established"
+        connected_received_count, 2,
+        "Should receive Connected messages from both sides indicating connection established"
     );
 
     tracing::info!("Test completed successfully");
@@ -967,14 +969,12 @@ async fn test_open_file_basic() {
     let (doc_id, site_id, content) = setup
         .hub
         .editor
-        .open_file(
-            &setup.hub.id,
-            serde_json::json!({
-                "type": "projectFile",
-                "project": "TestProject",
-                "file": "test.txt"
-            }),
-        )
+        .open_file(serde_json::json!({
+            "type": "projectFile",
+            "hostId": setup.hub.id.clone(),
+            "project": "TestProject",
+            "file": "test.txt"
+        }))
         .await
         .unwrap();
 
@@ -1017,14 +1017,12 @@ async fn test_open_file_from_remote() {
     // Spoke requests to open a file from hub
     let (doc_id, site_id, content) = setup.spokes[0]
         .editor
-        .open_file(
-            &setup.hub.id,
-            serde_json::json!({
-                "type": "projectFile",
-                "project": "TestProject",
-                "file": "src/main.rs"
-            }),
-        )
+        .open_file(serde_json::json!({
+            "type": "projectFile",
+            "hostId": setup.hub.id.clone(),
+            "project": "TestProject",
+            "file": "src/main.rs"
+        }))
         .await
         .unwrap();
 
@@ -1074,9 +1072,9 @@ async fn test_open_file_create_mode() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "new_file.txt"
                 },
@@ -1117,9 +1115,9 @@ async fn test_open_file_create_mode() {
             req_id2,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "new_file.txt"
                 },
@@ -1193,9 +1191,9 @@ async fn test_open_file_not_found() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "non_existent.txt"
                 },
@@ -1240,9 +1238,9 @@ async fn test_open_file_bad_request() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "project",
+                    "hostId": setup.hub.id.clone(),
                     "id": "TestProject"
                 },
                 "mode": "open"
@@ -1303,9 +1301,9 @@ async fn test_open_file_already_open() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
                 },
@@ -1327,9 +1325,9 @@ async fn test_open_file_already_open() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
                 },
@@ -1369,9 +1367,9 @@ async fn test_open_file_doc_id_not_found() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "file",
+                    "hostId": setup.hub.id.clone(),
                     "id": 9999
                 },
                 "mode": "open"
@@ -1440,7 +1438,6 @@ async fn test_list_files_top_level() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": null,
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1530,9 +1527,9 @@ async fn test_list_files_project_directory() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "ComplexProject",
                     "file": "src"
                 },
@@ -1576,9 +1573,9 @@ async fn test_list_files_project_directory() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "ComplexProject",
                     "file": "src/modules"
                 },
@@ -1645,9 +1642,9 @@ async fn test_list_files_from_remote() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
+                    "hostId": setup.hub.id.clone(),
                     "id": "SharedProject"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1675,9 +1672,9 @@ async fn test_list_files_from_remote() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
+                    "hostId": setup.hub.id.clone(),
                     "id": "SharedProject"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1719,9 +1716,9 @@ async fn test_list_files_project_not_found() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "/non/existent/project",
                     "file": "src"
                 },
@@ -1785,9 +1782,9 @@ async fn test_list_files_not_directory() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
                 },
@@ -1849,9 +1846,9 @@ async fn test_list_files_empty_directory() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "ProjectWithEmpty",
                     "file": "empty"
                 },
@@ -1918,9 +1915,9 @@ async fn test_list_files_nested_structure() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
+                    "hostId": setup.hub.id.clone(),
                     "id": "NestedProject"
                 },
                 "signalingAddr": env.signaling_url(),
@@ -1963,9 +1960,9 @@ async fn test_list_files_nested_structure() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "NestedProject",
                     "file": "src/modules"
                 },
@@ -2123,9 +2120,9 @@ async fn test_delete_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "file1.txt"
                 },
@@ -2150,9 +2147,9 @@ async fn test_delete_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "dir1/file2.txt"
                 },
@@ -2178,9 +2175,9 @@ async fn test_delete_file() {
             req_id,
             "DeleteFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "file": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "file1.txt"
                 }
@@ -2220,9 +2217,9 @@ async fn test_delete_file() {
             req_id,
             "DeleteFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "file": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "dir1"
                 }
@@ -2280,28 +2277,24 @@ async fn test_send_ops_e2e() {
     let (hub_doc_id, _hub_site_id, _hub_content) = setup
         .hub
         .editor
-        .open_file(
-            &setup.hub.id,
-            serde_json::json!({
-                "type": "projectFile",
-                "project": "TestProject",
-                "file": "test.txt"
-            }),
-        )
+        .open_file(serde_json::json!({
+            "type": "projectFile",
+            "hostId": setup.hub.id.clone(),
+            "project": "TestProject",
+            "file": "test.txt"
+        }))
         .await
         .unwrap();
 
     // Spoke 1 requests the file
     let (spoke1_doc_id, _spoke1_site_id, spoke1_content) = setup.spokes[0]
         .editor
-        .open_file(
-            &setup.hub.id,
-            serde_json::json!({
-                "type": "projectFile",
-                "project": "TestProject",
-                "file": "test.txt"
-            }),
-        )
+        .open_file(serde_json::json!({
+            "type": "projectFile",
+            "hostId": setup.hub.id.clone(),
+            "project": "TestProject",
+            "file": "test.txt"
+        }))
         .await
         .unwrap();
     assert_eq!(spoke1_content, "Hello from test.txt");
@@ -2309,14 +2302,12 @@ async fn test_send_ops_e2e() {
     // Spoke 2 requests the file
     let (spoke2_doc_id, _spoke2_site_id, spoke2_content) = setup.spokes[1]
         .editor
-        .open_file(
-            &setup.hub.id,
-            serde_json::json!({
-                "type": "projectFile",
-                "project": "TestProject",
-                "file": "test.txt"
-            }),
-        )
+        .open_file(serde_json::json!({
+            "type": "projectFile",
+            "hostId": setup.hub.id.clone(),
+            "project": "TestProject",
+            "file": "test.txt"
+        }))
         .await
         .unwrap();
     assert_eq!(spoke2_content, "Hello from test.txt");
@@ -2544,14 +2535,12 @@ async fn test_undo_e2e() {
     // Spoke opens the file
     let (doc_id, _site_id, content) = setup.spokes[0]
         .editor
-        .open_file(
-            &setup.hub.id,
-            serde_json::json!({
-                "type": "projectFile",
-                "project": "TestProject",
-                "file": "test.txt"
-            }),
-        )
+        .open_file(serde_json::json!({
+            "type": "projectFile",
+            "hostId": setup.hub.id.clone(),
+            "project": "TestProject",
+            "file": "test.txt"
+        }))
         .await
         .unwrap();
     assert_eq!(content, "Hello from test.txt");
@@ -2863,9 +2852,9 @@ async fn test_list_files_sorted_alphanumerically() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "",
                 },
@@ -2947,9 +2936,9 @@ async fn test_open_binary_file_rejected() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.bin",
                 },
@@ -3036,9 +3025,9 @@ async fn test_doc_project_handling() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "_doc",
                     "file": "test_shared.txt",
                 },
@@ -3067,9 +3056,9 @@ async fn test_doc_project_handling() {
             req_id,
             "ListFiles",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "dir": {
                     "type": "project",
+                    "hostId": setup.hub.id.clone(),
                     "id": "_doc",
                 },
                 "signalingAddr": env.signaling_url(),
@@ -3095,9 +3084,9 @@ async fn test_doc_project_handling() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "_doc",
                     "file": "nonexistent.txt",
                 },
@@ -3231,9 +3220,9 @@ async fn test_send_ops_permission_denied() {
         .request(
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "file",
+                    "hostId": setup.hub.id.clone(),
                     "id": doc_id,
                 },
                 "mode": "open",
@@ -3316,9 +3305,9 @@ async fn test_create_file_permission_denied() {
         .request(
             "OpenFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "fileDesc": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "test-project",
                     "file": "new-file.txt",
                 },
@@ -3379,9 +3368,9 @@ async fn test_delete_file_permission_denied() {
         .request(
             "DeleteFile",
             serde_json::json!({
-                "hostId": setup.hub.id.clone(),
                 "file": {
                     "type": "projectFile",
+                    "hostId": setup.hub.id.clone(),
                     "project": "test-project",
                     "file": "test.txt",
                 },

@@ -388,19 +388,26 @@ impl Server {
             }
             "ListFiles" => {
                 let params: message::ListFilesParams = serde_json::from_value(req.params)?;
-                if !self.check_connection(next, &params.host_id).await {
+                let host_id = params
+                    .dir
+                    .as_ref()
+                    .map(|d| d.host_id().clone())
+                    .unwrap_or(self.host_id.clone());
+                if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                self.list_files_from_editor(next, params.host_id, params.dir)
-                    .await?;
+                let dir = params.dir.map(|d| d.into());
+                self.list_files_from_editor(next, host_id, dir).await?;
                 Ok(())
             }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
-                if !self.check_connection(next, &params.host_id).await {
+                let host_id = params.file_desc.host_id().clone();
+                if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                self.open_file_from_editor(next, params.host_id, params.file_desc, params.mode)
+                let file_desc = params.file_desc.into();
+                self.open_file_from_editor(next, host_id, file_desc, params.mode)
                     .await?;
                 Ok(())
             }
@@ -493,7 +500,8 @@ impl Server {
             }
             "DeleteFile" => {
                 let params: DeleteFileParams = serde_json::from_value(req.params)?;
-                if !self.check_connection(next, &params.host_id).await {
+                let host_id = params.file.host_id().clone();
+                if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
                 self.handle_delete_file_from_editor(next, params).await?;
@@ -811,18 +819,17 @@ impl Server {
             }
             Msg::FileDeleted(file_desc) => {
                 // Response from remote that file was deleted.
+                let editor_file_desc = EditorFileDesc::new(file_desc, msg.host.clone());
                 if msg.req_id.is_some() {
                     // This is a response to our request, send success to editor.
                     let resp = DeleteFileResp {
-                        host_id: msg.host,
-                        file: file_desc,
+                        file: editor_file_desc,
                     };
                     next.send_resp(resp, None).await;
                 } else {
                     // This is a notification, send to editor.
                     let msg = FileDeletedNotif {
-                        host_id: msg.host,
-                        file: file_desc,
+                        file: editor_file_desc,
                     };
                     next.send_notif(NotificationCode::FileDeleted, msg).await;
                 }
@@ -1010,7 +1017,8 @@ impl Server {
                         .to_string();
 
                     result.push(ListFileEntry {
-                        file: FileDesc::ProjectFile {
+                        file: EditorFileDesc::ProjectFile {
+                            host_id: self.host_id.clone(),
                             project: project.clone(),
                             file: file_rel,
                         },
@@ -1031,7 +1039,10 @@ impl Server {
                     for (doc_id, doc) in &self.docs {
                         if doc.abs_filename.is_none() {
                             result.push(ListFileEntry {
-                                file: FileDesc::File { id: *doc_id },
+                                file: EditorFileDesc::File {
+                                    host_id: self.host_id.clone(),
+                                    id: *doc_id,
+                                },
                                 filename: doc.name.clone(),
                                 is_directory: false,
                                 meta: doc.meta.clone(),
@@ -1065,7 +1076,8 @@ impl Server {
 
                     // For project root, relative path is just the filename
                     result.push(ListFileEntry {
-                        file: FileDesc::ProjectFile {
+                        file: EditorFileDesc::ProjectFile {
+                            host_id: self.host_id.clone(),
                             project: id.clone(),
                             file: file_name.clone(),
                         },
@@ -1088,7 +1100,8 @@ impl Server {
                 // let mut buf_result = vec![];
                 for (_, project) in &self.projects {
                     proj_result.push(ListFileEntry {
-                        file: FileDesc::Project {
+                        file: EditorFileDesc::Project {
+                            host_id: self.host_id.clone(),
                             id: project.name.clone(),
                         },
                         filename: project.name.clone(),
@@ -1097,7 +1110,8 @@ impl Server {
                     });
                 }
                 proj_result.push(ListFileEntry {
-                    file: FileDesc::Project {
+                    file: EditorFileDesc::Project {
+                        host_id: self.host_id.clone(),
                         id: "_doc".to_string(),
                     },
                     filename: "_doc".to_string(),
@@ -1107,7 +1121,10 @@ impl Server {
                 // for (doc_id, doc) in &self.docs {
                 //     if doc.abs_filename.is_none() {
                 //         buf_result.push(ListFileEntry {
-                //             file: FileDesc::File { id: *doc_id },
+                //             file: EditorFileDesc::File {
+                //                 host_id: self.host_id,
+                //                 id: *doc_id
+                //             },
                 //             filename: doc.name.clone(),
                 //             is_directory: false,
                 //             meta: doc.meta.clone(),
@@ -2162,7 +2179,9 @@ impl Server {
         next: &Next<'a>,
         params: DeleteFileParams,
     ) -> anyhow::Result<()> {
-        let DeleteFileParams { host_id, file } = params;
+        let DeleteFileParams { file: editor_file } = params;
+        let host_id = editor_file.host_id().clone();
+        let file: FileDesc = editor_file.into();
 
         // Remote.
         if host_id != self.host_id {

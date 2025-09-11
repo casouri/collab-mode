@@ -178,8 +178,7 @@ pub struct DeclareProjectsParams {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
-    pub dir: Option<FileDesc>,
-    pub host_id: ServerId,
+    pub dir: Option<EditorFileDesc>,
     pub signaling_addr: String,
     pub credential: Credential,
 }
@@ -193,9 +192,9 @@ pub struct ListFilesResp {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFileEntry {
-    pub file: FileDesc,
+    pub file: EditorFileDesc,
     // The non-directory filename (buffer/document name in editor).
-    // Must match `file` if it’s a project file.
+    // Must match `file` if it's a project file.
     pub filename: String,
     pub is_directory: bool,
     pub meta: JsonMap,
@@ -213,8 +212,7 @@ pub enum OpenMode {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenFileParams {
-    pub host_id: ServerId,
-    pub file_desc: FileDesc,
+    pub file_desc: EditorFileDesc,
     pub mode: OpenMode,
 }
 
@@ -257,8 +255,7 @@ pub type SaveFileResp = SaveFileParams;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteFileParams {
-    pub host_id: ServerId,
-    pub file: FileDesc,
+    pub file: EditorFileDesc,
 }
 
 pub type DeleteFileResp = DeleteFileParams;

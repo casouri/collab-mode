@@ -118,6 +118,58 @@ impl PartialEq for FileDesc {
 impl Eq for FileDesc {}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum EditorFileDesc {
+    /// A shared doc that isn't in a project.
+    File { host_id: ServerId, id: DocId },
+    /// A project.
+    Project { host_id: ServerId, id: ProjectId },
+    /// A file in a project.
+    ProjectFile {
+        host_id: ServerId,
+        project: ProjectId,
+        /// Relative path to the file in the project.
+        file: String,
+    },
+}
+
+impl EditorFileDesc {
+    /// Create an EditorFileDesc from a FileDesc and a host_id
+    pub fn new(file_desc: FileDesc, host_id: ServerId) -> Self {
+        match file_desc {
+            FileDesc::File { id } => EditorFileDesc::File { host_id, id },
+            FileDesc::Project { id } => EditorFileDesc::Project { host_id, id },
+            FileDesc::ProjectFile { project, file } => EditorFileDesc::ProjectFile {
+                host_id,
+                project,
+                file,
+            },
+        }
+    }
+
+    /// Get the host_id from this EditorFileDesc
+    pub fn host_id(&self) -> &ServerId {
+        match self {
+            EditorFileDesc::File { host_id, .. } => host_id,
+            EditorFileDesc::Project { host_id, .. } => host_id,
+            EditorFileDesc::ProjectFile { host_id, .. } => host_id,
+        }
+    }
+}
+
+impl From<EditorFileDesc> for FileDesc {
+    fn from(editor_file: EditorFileDesc) -> Self {
+        match editor_file {
+            EditorFileDesc::File { id, .. } => FileDesc::File { id },
+            EditorFileDesc::Project { id, .. } => FileDesc::Project { id },
+            EditorFileDesc::ProjectFile { project, file, .. } => {
+                FileDesc::ProjectFile { project, file }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileContentOrPath {
     /// File content.
     Content(String),

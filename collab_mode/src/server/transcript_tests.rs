@@ -314,13 +314,11 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     for i in 0..num_editors {
         let (doc_id, site_id, content) = setup.spokes[i]
             .editor
-            .open_file(
-                &setup.hub.id,
-                serde_json::json!({
-                    "type": "file",
-                    "id": hub_doc_id
-                }),
-            )
+            .open_file(serde_json::json!({
+                "type": "file",
+                "hostId": setup.hub.id.clone(),
+                "id": hub_doc_id
+            }))
             .await?;
 
         spoke_docs.push(MockDocument::new(&content));
