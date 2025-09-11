@@ -6,6 +6,22 @@
 
 ;;; Commentary:
 
+;;; Dev notes:
+
+;; FILE-DESC is how we address files in collab-mode. It has the following shape:
+;;
+;; FILE-DESC := (:type \"file\" :id doc-id :hostId host-id)
+;;            | (:type \"project\" :id project-id :hostId host-id)
+;;            | (:type \"projectFile\" :project project-id :file rel-path
+;;                                    :hostId host-id)"
+;;
+;; the “file” variant is for files that doesn’t belong to any project,
+;; basically shared buffers. Now, since every shared file has a doc id, a
+;; shared file in project can have two equivalent representations, either
+;; by “file” or by “projectFile”.
+;;
+;; To keep hashes
+
 ;;; Code:
 
 (require 'jsonrpc)
@@ -1758,7 +1774,7 @@ Return nil if parse failed."
     (when (>= (length segments) 2)
       (let ((host-id (pop segments))
             (project (pop segments)))
-        (if (equal project "_id")
+        (if (equal project "_buffers")
             (let ((id (pop segments)))
               (when id
                 (collab--make-file-desc host-id "file" id)))
@@ -1773,7 +1789,7 @@ Return nil if parse failed."
 Returned path doesn’t have trailing slash even if it’s a directory."
   (let ((host-id (plist-get file-desc :hostId)))
     (pcase (plist-get file-desc :type)
-      ("file" (format "/%s/_id/%s" host-id (plist-get file-desc :id)))
+      ("file" (format "/%s/_buffers/%s" host-id (plist-get file-desc :id)))
       ("project" (format "/%s/%s" host-id (plist-get file-desc :id)))
       ("projectFile"
        (let* ((project (plist-get file-desc :project))
@@ -1790,7 +1806,7 @@ Returned path doesn’t have trailing slash even if it’s a directory."
 Returned path doesn’t have trailing slash even if it’s a directory."
   (let ((host-id (plist-get file-desc :hostId)))
     (pcase (plist-get file-desc :type)
-      ("file" (format "/%s/_id" host-id))
+      ("file" (format "/%s/_buffers" host-id))
       ("project" (format "/%s" host-id))
       ("projectFile"
        (let* ((project (plist-get file-desc :project))
@@ -1993,15 +2009,8 @@ Uses ‘collab--default-directory’ as initial input."
   "In collab hub, insert a notice of the newly shared doc or project (FILE-DESC)."
   (with-current-buffer (collab--hub-buffer)
     (collab--accept-connection)
-    (let* ((id (plist-get file-desc :id))
-           (type (pcase (plist-get file-desc :type)
-                   ("project" "p")
-                   ("file" "f")))
-           (link (format "%s/%s/%s/%s"
-                         collab-default-signaling-server
-                         (or collab--my-host-id "???")
-                         type
-                         id))
+    (let* ((link (format "%s/%s" collab-default-signaling-server
+                         (collab--encode-filename file-desc)))
            (collab--current-message
             (collab--fairy "The file is shared and here’s the link
 Your friends can connect with just a click!
@@ -2111,18 +2120,13 @@ its name rather than doc id) to connect."
          (if (derived-mode-p 'collab-hub-mode)
              (get-text-property (point) 'collab-file-desc)
            `(:type "file" :id ,(collab--file-desc-id collab--file))))))
-    (if (not file-desc)
-        (message (collab--fairy "Uhmmm, I can’t find the doc id of this doc..."))
-      (let* ((type (pcase (plist-get file-desc :type)
-                     ("project" "p")
-                     ("file" "f")))
-             (link (format "%s/%s/%s/%s"
-                           collab-default-signaling-server
-                           (or collab--my-host-id "???")
-                           type
-                           (plist-get file-desc :id))))
-        (kill-new link)
-        (message (collab--fairy "Copied link to clipboard for ya (%s)" link)))))
+  (if (not file-desc)
+      (message (collab--fairy "Uhmmm, I can’t find the doc id of this doc..."))
+    (let ((link (format "%s/%s"
+                        collab-default-signaling-server
+                        (collab--encode-filename file-desc))))
+      (kill-new link)
+      (message (collab--fairy "Copied link to clipboard for ya (%s)" link)))))
 
 ;;;###autoload
 (defun collab-connect (share-link)
