@@ -217,8 +217,6 @@ pub struct FatOp<O> {
     /// None, it's a globally recognized op that has been
     /// sequentialized by the server.
     pub seq: Option<GlobalSeq>,
-    /// Document uuid.
-    pub doc: DocId,
     /// The operation.
     pub op: O,
     /// Site-local sequence number.
@@ -234,7 +232,6 @@ impl<T> FatOp<T> {
     pub fn swap<P>(self, op: P) -> FatOp<P> {
         FatOp {
             seq: self.seq,
-            doc: self.doc,
             op,
             site_seq: self.site_seq,
             kind: self.kind,

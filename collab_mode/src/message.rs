@@ -362,7 +362,10 @@ pub enum Msg {
     },
     FileList(Vec<ListFileEntry>),
     OpFromClient(ContextOps),
-    OpFromServer(Vec<FatOp>),
+    OpFromServer {
+        doc: DocId,
+        ops: Vec<FatOp>,
+    },
     RequestOps {
         doc: DocId,
         after: GlobalSeq,

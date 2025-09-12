@@ -20,6 +20,7 @@ use thiserror::Error;
 /// their position in the vector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextOps {
+    pub doc: DocId,
     pub context: GlobalSeq,
     pub ops: Vec<FatOp>,
 }
@@ -31,7 +32,7 @@ impl ContextOps {
     }
     /// Return the doc of the ops.
     pub fn doc(&self) -> DocId {
-        self.ops[0].doc.clone()
+        self.doc.clone()
     }
 }
 
@@ -1342,10 +1343,11 @@ impl ClientEngine {
     }
 
     /// Return pending local ops.
-    fn package_local_ops(&self) -> Option<ContextOps> {
+    fn package_local_ops(&self, doc: DocId) -> Option<ContextOps> {
         let ops: Vec<FatOp> = self.gh.local.clone();
         if ops.len() > 0 {
             Some(ContextOps {
+                doc,
                 context: self.current_seq,
                 ops,
             })
@@ -1359,9 +1361,9 @@ impl ClientEngine {
     /// not time. (Client can only send out new local ops when
     /// previous in-flight local ops are acked by the server.) The
     /// returned ops must be sent to server for engine to work right.
-    pub fn maybe_package_local_ops(&mut self) -> Option<ContextOps> {
+    pub fn maybe_package_local_ops(&mut self, doc: DocId) -> Option<ContextOps> {
         if self.prev_op_acked() {
-            if let Some(context_ops) = self.package_local_ops() {
+            if let Some(context_ops) = self.package_local_ops(doc) {
                 let op = context_ops.ops.last().unwrap();
                 self.last_site_seq_sent_out = op.site_seq;
                 Some(context_ops)
@@ -1479,7 +1481,6 @@ impl ClientEngine {
 
             let fat_op = crate::op::FatOp {
                 seq: None,
-                doc,
                 op,
                 site_seq,
                 kind: op_kind,
@@ -1826,8 +1827,8 @@ mod tests {
         ));
 
         // Server processing.
-        let ops_from_a = client_a.maybe_package_local_ops().unwrap();
-        let ops_from_b = client_b.maybe_package_local_ops().unwrap();
+        let ops_from_a = client_a.maybe_package_local_ops(doc_id).unwrap();
+        let ops_from_b = client_b.maybe_package_local_ops(doc_id).unwrap();
         let a_ops = server
             .process_ops(ops_from_a.ops, ops_from_a.context)
             .unwrap();
@@ -1908,9 +1909,9 @@ mod tests {
         assert_eq!(doc_c, "ac");
 
         // Server processing.
-        let ops_from_a = client_a.maybe_package_local_ops().unwrap();
-        let ops_from_b = client_b.maybe_package_local_ops().unwrap();
-        let ops_from_c = client_c.maybe_package_local_ops().unwrap();
+        let ops_from_a = client_a.maybe_package_local_ops(doc_id).unwrap();
+        let ops_from_b = client_b.maybe_package_local_ops(doc_id).unwrap();
+        let ops_from_c = client_c.maybe_package_local_ops(doc_id).unwrap();
 
         let b_ops = server
             .process_ops(ops_from_b.ops, ops_from_b.context)

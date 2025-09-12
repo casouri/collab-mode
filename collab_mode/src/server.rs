@@ -447,11 +447,13 @@ impl Server {
 
                 // Check for reserved project name.
                 for project in &params.projects {
-                    if project.name == "_doc" {
+                    if project.name == RESERVED_BUFFERS_PROJECT {
                         let error = lsp_server::ResponseError {
                             code: ErrorCode::BadRequest as i32,
-                            message: "Project name '_doc' is reserved and cannot be used"
-                                .to_string(),
+                            message: format!(
+                                "Project name '{}' is reserved and cannot be used",
+                                RESERVED_BUFFERS_PROJECT
+                            ),
                             data: None,
                         };
                         next.send_resp((), Some(error)).await;
@@ -738,8 +740,8 @@ impl Server {
                     .await?;
                 Ok(())
             }
-            Msg::OpFromServer(ops) => {
-                self.handle_op_from_server(&next, ops, msg.host.clone())
+            Msg::OpFromServer { doc, ops } => {
+                self.handle_op_from_server(&next, doc, ops, msg.host.clone())
                     .await?;
                 Ok(())
             }
@@ -985,9 +987,12 @@ impl Server {
     ) -> anyhow::Result<Vec<ListFileEntry>> {
         match dir {
             Some(FileDesc::ProjectFile { project, file }) => {
-                // Special handling for _doc project.
-                if project == "_doc" {
-                    return Err(anyhow!("_doc doesn’t have subdirectories"));
+                // Special handling for buffers project.
+                if project == RESERVED_BUFFERS_PROJECT {
+                    return Err(anyhow!(
+                        "{} doesn't have subdirectories",
+                        RESERVED_BUFFERS_PROJECT
+                    ));
                 }
 
                 // List files in a project directory.
@@ -1688,8 +1693,14 @@ impl Server {
         // Send OpFromServer to all subscribers (including the sender)
         // The sender needs to receive the globally sequenced version of their op
         for (subscriber_host_id, _) in &doc.subscribers {
-            next.send_to_remote(subscriber_host_id, Msg::OpFromServer(processed_ops.clone()))
-                .await;
+            next.send_to_remote(
+                subscriber_host_id,
+                Msg::OpFromServer {
+                    doc: doc_id,
+                    ops: processed_ops.clone(),
+                },
+            )
+            .await;
         }
 
         Ok(())
@@ -1727,7 +1738,7 @@ impl Server {
 
         // Send OpFromServer message with the ops
         if !ops.is_empty() {
-            next.send_to_remote(&remote_host_id, Msg::OpFromServer(ops))
+            next.send_to_remote(&remote_host_id, Msg::OpFromServer { doc: doc_id, ops })
                 .await;
         }
 
@@ -1780,14 +1791,13 @@ impl Server {
     async fn handle_op_from_server<'a>(
         &mut self,
         next: &Next<'a>,
+        doc_id: DocId,
         ops: Vec<FatOp>,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
         if ops.is_empty() {
             return Ok(());
         }
-
-        let doc_id = ops[0].doc;
 
         // Find doc in remote_docs with (host_id, doc_id) key
         let key = (remote_host_id.clone(), doc_id);
@@ -1946,7 +1956,7 @@ impl Server {
         }
 
         // Package local ops if any
-        if let Some(context_ops) = remote_doc.engine.maybe_package_local_ops() {
+        if let Some(context_ops) = remote_doc.engine.maybe_package_local_ops(doc_id) {
             // Send to the owner (could be ourselves or a remote)
             // Don't attach req_id since this isn’t a direct response
             // (not that it matters much).

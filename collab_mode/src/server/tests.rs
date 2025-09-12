@@ -1390,11 +1390,11 @@ async fn test_open_file_doc_id_not_found() {
 
 #[tokio::test]
 async fn test_list_files_top_level() {
-    // Test: List top-level projects and _doc virtual project
+    // Test: List top-level projects and _buffers virtual project
     // Flow:
     // 1. Hub declares multiple projects
     // 2. Spoke requests top-level listing (dir = None)
-    // Expected: Returns list of all projects and _doc virtual project
+    // Expected: Returns list of all projects and _buffers virtual project
 
     let env = TestEnvironment::new().await.unwrap();
     let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
@@ -1453,7 +1453,7 @@ async fn test_list_files_top_level() {
         .unwrap();
     let files = resp["files"].as_array().unwrap();
 
-    // Verify we have 3 items (2 projects + _doc virtual project)
+    // Verify we have 3 items (2 projects + _buffers virtual project)
     assert_eq!(files.len(), 3);
 
     // Check first project
@@ -1472,13 +1472,13 @@ async fn test_list_files_top_level() {
     });
     assert!(has_project2, "Should have Project2");
 
-    // Check _doc virtual project
-    let has_doc = files.iter().any(|f| {
-        f["filename"].as_str() == Some("_doc")
+    // Check _buffers virtual project
+    let has_buffers = files.iter().any(|f| {
+        f["filename"].as_str() == Some("_buffers")
             && f["isDirectory"].as_bool() == Some(true)
             && f["file"]["type"].as_str() == Some("project")
     });
-    assert!(has_doc, "Should have _doc virtual project");
+    assert!(has_buffers, "Should have _buffers virtual project");
 
     tracing::info!("test_list_files_top_level completed successfully");
     setup.cleanup();
@@ -2972,7 +2972,7 @@ async fn test_doc_project_handling() {
         .await
         .unwrap();
 
-    // Test 1: Attempt to declare a project named "_doc" should be rejected.
+    // Test 1: Attempt to declare a project named "_buffers" should be rejected.
     let resp = setup
         .hub
         .editor
@@ -2981,7 +2981,7 @@ async fn test_doc_project_handling() {
             serde_json::json!({
                 "projects": [
                     {
-                        "name": "_doc",
+                        "name": "_buffers",
                         "path": "/tmp/test",
                     }
                 ]
@@ -2996,7 +2996,7 @@ async fn test_doc_project_handling() {
         assert!(error_str.contains("reserved"));
     }
 
-    // Test 2: Create a shared file and access it via _doc project.
+    // Test 2: Create a shared file and access it via _buffers project.
     let share_resp = setup
         .hub
         .editor
@@ -3015,7 +3015,7 @@ async fn test_doc_project_handling() {
 
     sleep(Duration::from_millis(100)).await;
 
-    // Test 3: Open the shared file using _doc project.
+    // Test 3: Open the shared file using _buffers project.
     let req_id = 1;
     setup
         .hub
@@ -3027,7 +3027,7 @@ async fn test_doc_project_handling() {
                 "fileDesc": {
                     "type": "projectFile",
                     "hostId": setup.hub.id.clone(),
-                    "project": "_doc",
+                    "project": "_buffers",
                     "file": "test_shared.txt",
                 },
                 "mode": "open"
@@ -3046,7 +3046,7 @@ async fn test_doc_project_handling() {
     assert_eq!(open_resp["filename"].as_str().unwrap(), "test_shared.txt");
     assert_eq!(open_resp["docId"].as_u64().unwrap(), doc_id);
 
-    // Test 4: List files in _doc project.
+    // Test 4: List files in _buffers project.
     let req_id = 2;
     setup
         .hub
@@ -3058,7 +3058,7 @@ async fn test_doc_project_handling() {
                 "dir": {
                     "type": "project",
                     "hostId": setup.hub.id.clone(),
-                    "id": "_doc",
+                    "id": "_buffers",
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
