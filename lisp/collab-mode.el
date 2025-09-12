@@ -343,21 +343,22 @@ If MARK non-nil, show active region."
                 :mark ,(mark))
            `(:type "common.pos" :point ,(point))))))
 
-    (remhash collab--file
+    (remhash (collab--file-desc-normalize collab--file)
              collab--sync-cursor-timer-table)))
 
 ;; FIXME: Use a global idle time like send-ops.
 (defun collab--send-cursor-pos ()
   "Move user (SITE-ID)’s cursor overlay to POS."
   (collab--check-precondition)
-  (when (null (gethash collab--file
-                       collab--sync-cursor-timer-table))
-    ;; Run with an idle timer to we don’t interrupt scrolling, etc.
-    (let ((timer (run-with-idle-timer
-                  0.5 nil #'collab--send-cursor-pos-1
-                  (current-buffer))))
-      (puthash collab--file timer
-               collab--sync-cursor-timer-table))))
+  (let ((file-desc (collab--file-desc-normalize collab--file)))
+    (when (null (gethash file-desc
+                         collab--sync-cursor-timer-table))
+      ;; Run with an idle timer to we don’t interrupt scrolling, etc.
+      (let ((timer (run-with-idle-timer
+                    0.5 nil #'collab--send-cursor-pos-1
+                    (current-buffer))))
+        (puthash file-desc timer
+                 collab--sync-cursor-timer-table)))))
 
 ;;; Global state
 
@@ -712,14 +713,15 @@ To prevent them from being invoked."
         (setq-local collab--group-seq 1))
 
     ;; Disable.
-    (remhash collab--file collab--dispatcher-timer-table)
+    (remhash (collab--file-desc-normalize collab--file)
+             collab--dispatcher-timer-table)
 
     (remove-hook 'before-change-functions #'collab--before-change t)
     (remove-hook 'after-change-functions #'collab--after-change t)
     (remove-hook 'collab--after-change-hook #'collab--after-change-default)
     (remove-hook 'collab--after-change-hook #'collab--after-change-hasty)
 
-    (remhash collab--file collab--buffer-table)
+    (remhash (collab--file-desc-normalize collab--file) collab--buffer-table)
 
     (dolist (ov collab--cursor-ov-alist)
       (delete-overlay (cdr ov)))
@@ -738,7 +740,7 @@ MY-SITE-ID is the site id of this editor.
 
 PATH should be a string HOST/PROJECT/PATH returned by
 ‘collab--encode-filename’."
-  (setq collab--file file-desc)
+  (setq collab--file (collab--file-desc-normalize file-desc))
   (setq collab-doc-id doc-id)
   (setq collab--my-site-id my-site-id)
   (setq collab--default-directory path)
@@ -836,29 +838,18 @@ actually belongs to FILE-DESC."
     ("project" (plist-get file-desc :id))
     ("projectFile" (file-name-nondirectory (plist-get file-desc :file)))))
 
-;; FIXME: Update or remove.
-(defun collab--doc-desc-path (doc-desc)
-  "Return the relative path in DOC-DESC."
-  (pcase doc-desc
-    (`(:File [,_ ,path]) path)
-    (`(:Dir [,_ ,path]) path)
-    (_ nil)))
-
-;; FIXME: Update or remove.
-(defun collab--doc-desc-parent (doc-desc)
-  "Return parent doc-desc of DOC-DESC.
-If DOC-DESC is a doc, return nil.
-If DOC-DESC is at the top-level, return itself."
-  (pcase doc-desc
-    (`(:File [,doc-id ,path])
-     `(:File [,doc-id ,(string-trim-right
-                        (or (file-name-directory path) ".")
-                        "/")]))
-    (`(:Dir [,doc-id ,path])
-     `(:Dir [,doc-id ,(string-trim-right
-                       (or (file-name-directory path) ".")
-                       "/")]))
-    (_ nil)))
+(defun collab--file-desc-normalize (file-desc)
+  "Normalize FILE-DESC for hashing."
+  (let ((host-id (plist-get file-desc :hostId)))
+    (pcase (plist-get file-desc :type)
+      ("file" (collab--make-file-desc host-id "file" (plist-get file-desc :id)))
+      ("project" (collab--make-file-desc
+                  host-id "project" (plist-get file-desc :id)))
+      ("projectFile"
+       (collab--make-file-desc
+        host-id "projectFile" nil
+        (plist-get file-desc :project)
+        (plist-get file-desc :file))))))
 
 ;;;; Connection
 
@@ -899,7 +890,7 @@ If DOC-DESC is at the top-level, return itself."
 The purpose of this function is to cancel get ops timer when we
 know that we’re gonna send ops (which gets remotes ops too) very
 soon."
-  (when-let* ((timer (gethash collab--file
+  (when-let* ((timer (gethash (collab--file-desc-normalize collab--file)
                               collab--dispatcher-timer-table)))
     (cancel-timer timer))  )
 
@@ -935,7 +926,7 @@ If we receive a ServerError notification, just display a warning."
   (pcase method
     ('RemoteOpArrived
      ;; TODO: Idle timer?
-     (let ((file-desc (plist-get params :file))
+     (let ((file-desc (collab--file-desc-normalize (plist-get params :file)))
            (last-seq (plist-get params :lastSeq)))
        (let ((buffer (gethash file-desc collab--buffer-table))
              (timer (gethash file-desc collab--dispatcher-timer-table)))
@@ -948,20 +939,20 @@ If we receive a ServerError notification, just display a warning."
            (puthash file-desc timer collab--dispatcher-timer-table)))))
     ;; FIXME: This doesn’t exist yet, also need to use file-desc for
     ;; buffer table.
-    ('Info
-     (let* ((doc-id (plist-get params :docId))
-            (host-id (plist-get params :hostId))
-            (site-id (plist-get params :senderSiteId))
-            (value (plist-get params :value)))
-       (pcase (plist-get value :type)
-         ("common.pos"
-          (let* ((pos (plist-get value :point))
-                 (mark (plist-get value :mark))
-                 (buf (gethash (cons doc-id host-id)
-                               collab--buffer-table)))
-            (when (buffer-live-p buf)
-              (with-current-buffer buf
-                (collab--move-cursor site-id pos mark))))))))
+    ;; ('Info
+    ;;  (let* ((doc-id (plist-get params :docId))
+    ;;         (host-id (plist-get params :hostId))
+    ;;         (site-id (plist-get params :senderSiteId))
+    ;;         (value (plist-get params :value)))
+    ;;    (pcase (plist-get value :type)
+    ;;      ("common.pos"
+    ;;       (let* ((pos (plist-get value :point))
+    ;;              (mark (plist-get value :mark))
+    ;;              (buf (gethash (cons doc-id host-id)
+    ;;                            collab--buffer-table)))
+    ;;         (when (buffer-live-p buf)
+    ;;           (with-current-buffer buf
+    ;;             (collab--move-cursor site-id pos mark))))))))
     ('ServerError
      (display-warning
       'collab
@@ -1883,8 +1874,9 @@ There should be four text properties at point:
 If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
   (interactive)
   ;; See ‘collab--file-desc-id’ for the shape of FILE-DESC.
-  (let* ((file-desc (or file-desc
-                        (get-text-property (point) 'collab-file-desc)))
+  (let* ((file-desc (collab--file-desc-normalize
+                     (or file-desc
+                         (get-text-property (point) 'collab-file-desc))))
          (filename (or filename (get-text-property (point) 'collab-filename)))
          (directory-p (or directory-p (get-text-property (point) 'collab-directory-p)))
          (host-id (or host-id (get-text-property (point) 'collab-host-id)))
@@ -1936,7 +1928,8 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
   (interactive)
-  (let* ((file-desc (get-text-property (point) 'collab-file-desc))
+  (let* ((file-desc (collab--file-desc-normalize
+                     (get-text-property (point) 'collab-file-desc)))
          (host-id (get-text-property (point) 'collab-host-id))
          (doc-id (collab--file-desc-id file-desc)))
     (when doc-id
