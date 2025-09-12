@@ -19,6 +19,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+const RESERVED_BUFFERS_PROJECT: &'static str = "_buffers";
+
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
 struct Doc {
@@ -1039,7 +1041,7 @@ impl Server {
             }
             Some(FileDesc::Project { id }) => {
                 // Special handling for _doc project.
-                if id == "_doc" {
+                if id == RESERVED_BUFFERS_PROJECT {
                     // List owned docs without projects.
                     let mut result = vec![];
                     for (doc_id, doc) in &self.docs {
@@ -1118,9 +1120,9 @@ impl Server {
                 proj_result.push(ListFileEntry {
                     file: EditorFileDesc::Project {
                         host_id: self.host_id.clone(),
-                        id: "_doc".to_string(),
+                        id: RESERVED_BUFFERS_PROJECT.to_string(),
                     },
-                    filename: "_doc".to_string(),
+                    filename: RESERVED_BUFFERS_PROJECT.to_string(),
                     is_directory: true,
                     meta: JsonMap::new(),
                 });
@@ -1204,8 +1206,8 @@ impl Server {
             // Handle local file opening
             match &file_desc {
                 FileDesc::ProjectFile { project, file } => {
-                    // Special handling for _doc project.
-                    if project == "_doc" {
+                    // Special handling for _buffers project.
+                    if project == RESERVED_BUFFERS_PROJECT {
                         // Look for owned docs without projects.
                         for (doc_id, doc) in &self.docs {
                             // Check if doc doesn't belong to a project (abs_filename is None)
@@ -1418,7 +1420,10 @@ impl Server {
                         &remote_host_id,
                         Msg::ErrorResp(
                             ErrorCode::IoError,
-                            format!("Document '{}' not found in _doc", file),
+                            format!(
+                                "Document '{}' not found in {}",
+                                file, RESERVED_BUFFERS_PROJECT
+                            ),
                         ),
                     )
                     .await;
