@@ -378,7 +378,7 @@ If MARK non-nil, show active region."
 
 (defvar collab--dispatcher-timer-table
   (make-hash-table :test #'equal)
-  "Hash table mapping (doc-id . host-id) to dispatcher timers.")
+  "Hash table mapping FILE-DESC to dispatcher timers.")
 
 (defvar collab--current-message nil
   "If non-nil, collab hub will show this message in the UI.
@@ -712,8 +712,7 @@ To prevent them from being invoked."
         (setq-local collab--group-seq 1))
 
     ;; Disable.
-    (remhash collab--file
-             collab--dispatcher-timer-table)
+    (remhash collab--file collab--dispatcher-timer-table)
 
     (remove-hook 'before-change-functions #'collab--before-change t)
     (remove-hook 'after-change-functions #'collab--after-change t)
@@ -946,8 +945,7 @@ If we receive a ServerError notification, just display a warning."
                         collab-receive-ops-delay nil
                         #'collab--request-remote-ops
                         buffer last-seq))
-           (puthash (cons doc host) timer
-                    collab--dispatcher-timer-table)))))
+           (puthash file-desc timer collab--dispatcher-timer-table)))))
     ;; FIXME: This doesn’t exist yet, also need to use file-desc for
     ;; buffer table.
     ('Info
