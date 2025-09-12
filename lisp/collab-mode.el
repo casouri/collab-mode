@@ -15,12 +15,12 @@
 ;;            | (:type \"projectFile\" :project project-id :file rel-path
 ;;                                    :hostId host-id)"
 ;;
-;; the “file” variant is for files that doesn’t belong to any project,
-;; basically shared buffers. Now, since every shared file has a doc id, a
-;; shared file in project can have two equivalent representations, either
-;; by “file” or by “projectFile”.
-;;
-;; To keep hashes
+;; IOW, a “file” can be three things: a project, a file in project
+;; (identified by project and it’s path in the project), or a file that’s
+;; not in any project (identified by the doc id). Technically you can
+;; refer to a projectFile using it’s doc id, but we never do that. The
+;; “file” variant is only for files not in a project. This is to avoid
+;; issues in hash maps, etc.
 
 ;;; Code:
 
@@ -391,6 +391,9 @@ set globally.")
 (defvar-local collab--file nil
   "FILE-DESC for the current buffer.")
 
+(defvar-local collab--doc-id nil
+  "DOC-ID for the current buffer.")
+
 (defvar-local collab--accepting-connection nil
   "If non-nil, our collab process is accepting remote connections.")
 
@@ -730,14 +733,15 @@ To prevent them from being invoked."
 
     (setq-local collab--my-site-id nil)))
 
-(defun collab--enable (doc-id host-id my-site-id path)
+(defun collab--enable (file-desc doc-id my-site-id path)
   "Enable ‘collab-monitored-mode’ in the current buffer.
-DOC-ID and HOST-ID are associated with the current buffer.
+FILE-DESC and DOC-ID are associated with the current buffer.
 MY-SITE-ID is the site id of this editor.
 
 PATH should be a string HOST/PROJECT/PATH returned by
 ‘collab--encode-filename’."
-  (setq collab--file (collab--make-file-desc host-id "file" doc-id))
+  (setq collab--file file-desc)
+  (setq collab-doc-id doc-id)
   (setq collab--my-site-id my-site-id)
   (setq collab--default-directory path)
   (puthash path collab--file collab--doc-id-table)
@@ -762,18 +766,17 @@ PATH should be a string HOST/PROJECT/PATH returned by
         (plist-put collab--stashed-state-plist
                    (current-buffer)
                    `( :file ,collab--file
+                      :doc-id ,collab--doc-id
                       :site-id ,collab--my-site-id))))
 
 (defun collab--maybe-recover ()
   "Maybe reenable ‘collab’ after major mode change."
   (when-let* ((state (plist-get collab--stashed-state-plist
                                 (current-buffer)))
+              (doc-id (plist-get state :doc-id))
               (file (plist-get state :file))
               (site-id (plist-get state :site-id)))
-    (collab--enable (collab--file-desc-id file)
-                    (collab--file-desc-host-id file)
-                    site-id
-                    (collab--encode-filename file))))
+    (collab--enable file doc-id site-id (collab--encode-filename file))))
 
 ;;; JSON-RPC
 
@@ -818,6 +821,8 @@ actually belongs to FILE-DESC."
 (defun collab--file-desc-parent (file-desc)
   "Return a file desc that’s the parent directory of FILE-DESC."
   (pcase (plist-get file-desc :type)
+    ("file" (collab--make-file-desc
+             (plist-get file-desc :hostId) "project" "_buffers"))
     ("project" nil)
     ("projectFile"
      (let ((parent (file-name-directory (plist-get file-desc :file)))
@@ -1932,7 +1937,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
               (funcall (intern-soft suggested-major-mode))
             (let ((buffer-file-name filename))
               (set-auto-mode)))
-          (collab--enable doc-id host-id site-id path)))))))
+          (collab--enable file-desc doc-id site-id path)))))))
 
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
@@ -2036,10 +2041,10 @@ When called interactively, prompt for the host."
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
            (doc-id (plist-get resp :docId))
-           (site-id (plist-get resp :siteId)))
-      (collab--enable doc-id host site-id
-                      (collab--encode-filename
-                       (collab--make-file-desc host "file" doc-id)))
+           (site-id (plist-get resp :siteId))
+           (file-desc (collab--make-file-desc host "file" doc-id)))
+      (collab--enable file-desc doc-id site-id
+                      (collab--encode-filename file-desc))
       (display-buffer (collab--hub-buffer)
                       '(() . ((inhibit-same-window . t))))
       (collab--notify-newly-shared-doc `(:type "file" :id ,doc-id)))))
@@ -2067,20 +2072,18 @@ FILE can be either a file or a directory."
     (collab--notify-newly-shared-doc `(:type "project" :id ,project-name))))
 
 (defalias 'collab-reconnect 'collab-resume)
-(defun collab-resume (host doc-id)
-  "Reconnect current buffer to a remote document HOST.
+(defun collab-resume (file-desc doc-id)
+  "Reconnect current buffer to a remote document FILE-DESC.
 
 Reconnecting will override the current content of the buffer.
 
 The document to reconnect to is determined by DOC-ID. But if
 called interactively, prompt the user to select a document (by
 its name rather than doc id) to connect."
-  (interactive (list (collab--file-desc-host-id collab--file)
-                     (collab--file-desc-id collab--file)))
+  (interactive (list collab--file collab--doc-id))
   (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
     (let* ((info (collab--host-data host))
-           (orig-point (point))
-           (file-desc `(:type "file" :id ,doc-id)))
+           (orig-point (point)))
       ;; Replace buffer content with document content.
       (let* ((resp (collab--open-file-req file-desc host "open"))
              (content (plist-get resp :content))
@@ -2097,9 +2100,8 @@ its name rather than doc id) to connect."
         (insert content)
         (goto-char orig-point)
         (set-auto-mode)
-        (collab--enable doc-id host site-id
-                        (collab--encode-filename
-                         (collab--make-file-desc host "file" doc-id)))))))
+        (collab--enable file-desc doc-id site-id
+                        (collab--encode-filename file-desc))))))
 
 (defun collab-disconnect-buffer ()
   "Disconnect current buffer, returning it to a regular buffer."
