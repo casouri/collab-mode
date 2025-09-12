@@ -1,7 +1,7 @@
 //! The next iteration after webrpc. We let go of the request-response
 //! abstraction, and lump everything into a single channel. In fact, !
 //! multiple remote connections are lumped into a single channel. We !
-//! also don't do chunking anymore, instead we create a SCTP stream for
+//! also don’t do chunking anymore, instead we create a SCTP stream for
 //! every request.
 //!
 //! We could’ve defined message to take a impl Serialize +
@@ -45,7 +45,7 @@ pub enum TransportType {
     SCTP,
 }
 
-// We don't have to split into three categories, but this should make
+// We don’t have to split into three categories, but this should make
 // it easier to manage.
 #[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
 pub struct Message {
@@ -70,7 +70,7 @@ pub struct WebChannel {
     msg_tx: mpsc::Sender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
     next_stream_id: Arc<AtomicU16>,
-    /// Wether there's an accepting thread running already for a
+    /// Wether there’s an accepting thread running already for a
     /// signaling server URL.
     accepting: Arc<Mutex<HashMap<String, bool>>>,
     /// Trusted hosts with their certificate hashes for verification

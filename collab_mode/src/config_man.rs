@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct KeyCert {
-    /// The private key. I don't know if the [rcgen::KeyPair] is the
-    /// same story as [rcgen::Certificate] (see below), but let's just
+    /// The private key. I don’t know if the [rcgen::KeyPair] is the
+    /// same story as [rcgen::Certificate] (see below), but let’s just
     /// do the same thing and store the DER instead of
     /// [rcgen::KeyPair].
     pub key_der: Vec<u8>,
@@ -16,7 +16,7 @@ pub struct KeyCert {
     /// call [rcgen::Certificate::serialize_der] when you need a DER.
     /// Despite its name [rcgen::Certificate::serialize_der] actually
     /// _generates_ a new certificate every time you call it, which
-    /// means it's return value are different every time it's invoked.
+    /// means it’s return value are different every time it’s invoked.
     /// See https://github.com/rustls/rcgen/issues/62
     pub cert_der: Vec<u8>,
 }

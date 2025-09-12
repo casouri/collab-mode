@@ -52,8 +52,8 @@ pub enum SignalingError {
     /// Received an unexpected message.
     #[error("Expected: {0}, received: {1:?}")]
     UnexpectedMessage(String, SignalingMessage),
-    /// Couldn't parse the websocket message.
-    #[error("Couldn't parse the message")]
+    /// Couldn’t parse the websocket message.
+    #[error("Couldn’t parse the message")]
     ParseError(String),
     /// Cannot find the endpoint with that id.
     #[error("No endpoint is listening on this id: {0}")]
@@ -92,7 +92,7 @@ pub enum SignalingMessage {
     Candidate(EndpointId, EndpointId, ICECandidate),
     /// Cannot find the corresponding endpoint for the provided id.
     NoEndpointForId(String),
-    /// Id is already binded, or the public key doesn't match.
+    /// Id is already binded, or the public key doesn’t match.
     IdTaken(EndpointId),
     /// Allocated time of n hours is up.
     TimesUp(u16),

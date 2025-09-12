@@ -10,15 +10,15 @@ use thiserror::Error;
 pub type LocalSeq = u32;
 /// Global sequence number, globally unique, starts from 1.
 pub type GlobalSeq = u32;
-/// A DocId is a randomly generated integer. I'd really like to use
-/// u64, but JSON can't encode u64. u32 allows about 10k documents on
+/// A DocId is a randomly generated integer. I’d really like to use
+/// u64, but JSON can’t encode u64. u32 allows about 10k documents on
 /// a single server with reasonable collision. I intend collab-mode to
 /// be a small, personal tool, so 10k should be enough(TM).
 pub type DocId = u32;
 /// SiteId is a monotonically increasing integer.
 pub type SiteId = u32;
 /// Group sequence number. Consecutive ops with the same group seq
-/// number are undone together. Group seqs don't have to be
+/// number are undone together. Group seqs don’t have to be
 /// continuous.
 pub type GroupSeq = u32;
 
@@ -154,7 +154,7 @@ impl Operation for Op {
 }
 
 pub fn replace_whitespace_char(string: String) -> String {
-    // Other return symbols aren't well supported by terminals.
+    // Other return symbols aren’t well supported by terminals.
     string.replace("\n", "\\n")
 }
 

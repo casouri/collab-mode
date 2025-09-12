@@ -85,7 +85,7 @@ impl Server {
 
     /// Bind a collab server to `id`. return IdTaken if some endpoint
     /// is already connected with that id, or some endpoint has
-    /// connected with that id and the pub key doesn't match.
+    /// connected with that id and the pub key doesn’t match.
     async fn bind_endpoint(
         &self,
         id: EndpointId,
@@ -281,7 +281,7 @@ async fn send_receive_stream(
     req_tx: mpsc::Sender<Result<Message, tung::tungstenite::Error>>,
     mut resp_rx: mpsc::Receiver<Message>,
 ) {
-    // TCP sockets aren't free, close the connection after 12h.
+    // TCP sockets aren’t free, close the connection after 12h.
     let (time_tx, mut time_rx) = mpsc::channel(1);
     let timer_span = tracing::info_span!("Timer thread for auto-closing the connection");
     let allocated_hrs = 12u16;
@@ -289,7 +289,7 @@ async fn send_receive_stream(
         async move {
             let allocated_time = allocated_hrs * 3600;
             time::sleep(Duration::from_secs(allocated_time as u64)).await;
-            tracing::info!(allocated_time, "Time's up");
+            tracing::info!(allocated_time, "Time’s up");
             let _ = time_tx.send(()).await;
             return;
         }
@@ -300,10 +300,10 @@ async fn send_receive_stream(
         tokio::select! {
             _ = time_rx.recv() => {
                 stream.send(SignalingMessage::TimesUp(allocated_hrs).into()).await.unwrap();
-                tracing::debug!("Sent time's up message to client");
+                tracing::debug!("Sent time’s up message to client");
                 stream.send(Message::Close(Some(CloseFrame {
                     code: CloseCode::Policy,
-                    reason: Cow::Owned("Time's up".to_string())
+                    reason: Cow::Owned("Time’s up".to_string())
                 }))).await.unwrap();
                 return;
             }
@@ -344,7 +344,7 @@ fn resp_unsupported(msg: &str) -> Message {
     }))
 }
 
-/// If `provided_id` doesn't match `recorded_id`, return an error.
+/// If `provided_id` doesn’t match `recorded_id`, return an error.
 async fn check_id(
     provided_id: &EndpointId,
     recorded_id: &Option<EndpointId>,

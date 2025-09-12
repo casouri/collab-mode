@@ -14,11 +14,11 @@ pub use crate::op::{
 pub type ServerId = String;
 pub const SERVER_ID_SELF: &str = "self";
 pub type Credential = String;
-/// A file in a directory that's not yet a doc. The path is a relative
-/// path. We don't want to use full path since some people might
+/// A file in a directory that’s not yet a doc. The path is a relative
+/// path. We don’t want to use full path since some people might
 /// consider the full path sensitive?
 pub type FilePath = (DocId, PathBuf);
-/// Project's id is a descriptive name.
+/// Project’s id is a descriptive name.
 pub type ProjectId = String;
 
 pub type FatOp = crate::op::FatOp<Op>;
@@ -69,7 +69,7 @@ pub enum DocDesc {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum FileDesc {
-    /// A shared doc that isn't in a project.
+    /// A shared doc that isn’t in a project.
     File { id: String },
     /// A project.
     Project { id: ProjectId },

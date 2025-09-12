@@ -39,7 +39,7 @@ pub async fn ice_bind(
     Ok(listener)
 }
 
-/// Accept connections from `sock`. If `progress_tx` isn't None,
+/// Accept connections from `sock`. If `progress_tx` isn’t None,
 /// report progress to it while establishing connection.
 #[instrument(skip_all)]
 pub async fn ice_accept(
@@ -74,7 +74,7 @@ pub async fn ice_accept(
 
 /// Connect to the endpoint with `id` and `key` on the signaling
 /// server at signaling_addr`. `signaling_addr` should be a valid
-/// websocket url. If `progress_tx` isn't None, report progress to it
+/// websocket url. If `progress_tx` isn’t None, report progress to it
 /// while establishing connection.
 #[instrument(skip(my_key_cert, progress_tx))]
 pub async fn ice_connect(

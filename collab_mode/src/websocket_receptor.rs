@@ -60,7 +60,7 @@ pub async fn accept(addr: &str) -> anyhow::Result<mpsc::Receiver<Sock>> {
                         let msg = msg.unwrap();
                         let msg = serde_json::from_str::<Message>(msg);
                         if msg.is_err() {
-                            let _ = out_tx.send(err_msg(format!("Can't parse message: {:?}", msg))).await;
+                            let _ = out_tx.send(err_msg(format!("Can’t parse message: {:?}", msg))).await;
                             continue;
                         }
                         let msg = msg.unwrap();

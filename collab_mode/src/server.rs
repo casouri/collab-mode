@@ -1235,7 +1235,7 @@ impl Server {
                     if project == RESERVED_BUFFERS_PROJECT {
                         // Look for owned docs without projects.
                         for (doc_id, doc) in &self.docs {
-                            // Check if doc doesn't belong to a project (abs_filename is None)
+                            // Check if doc doesn’t belong to a project (abs_filename is None)
                             // and its name matches the requested file.
                             if doc.abs_filename.is_none() && doc.name == *file {
                                 // Found matching doc, return it.
@@ -1313,7 +1313,7 @@ impl Server {
                         Some(disk_file),
                     );
 
-                    // Add ourselves as a subscriber since we're also a client
+                    // Add ourselves as a subscriber since we’re also a client
                     doc.subscribers.insert(self.host_id.clone(), 0);
 
                     self.docs.insert(doc_id, doc);
@@ -2012,7 +2012,7 @@ impl Server {
     }
 
     fn handle_undo_from_editor(&mut self, params: UndoParams) -> anyhow::Result<UndoResp> {
-        // Check if it's a remote doc
+        // Check if it’s a remote doc
         let key = (params.host_id.clone(), params.doc_id.clone());
         let remote_doc = self
             .remote_docs
@@ -2054,7 +2054,7 @@ impl Server {
             None,
         );
 
-        // Add ourselves as a subscriber since we're also a client
+                    // Add ourselves as a subscriber since we’re also a client
         doc.subscribers.insert(self.host_id.clone(), 0);
 
         // Store the doc in our owned docs
@@ -2157,7 +2157,7 @@ impl Server {
         let old_full_path = std::path::PathBuf::from(&project.root).join(old_path);
         let new_full_path = std::path::PathBuf::from(&project.root).join(new_path);
 
-        // Create parent directory if it doesn't exist
+        // Create parent directory if it doesn’t exist
         if let Some(parent) = new_full_path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create parent directory: {}", parent.display())

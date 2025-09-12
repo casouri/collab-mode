@@ -18,8 +18,8 @@ pub enum NotificationCode {
     ConnectionBroke,     // Editor should indicate connection is broken.
     Connecting,          // Editor should set connection state of the host to "connecting".
     ConnectionProgress,  // Editor should show connection progress.
-    AcceptingConnection, // Editor should show that we're accepting connections.
-    AcceptStopped,       // Editor should show that we're not accepting connections anymore.
+    AcceptingConnection, // Editor should show that we’re accepting connections.
+    AcceptStopped,       // Editor should show that we’re not accepting connections anymore.
     Connected,           // Editor should mark the remote as connected.
     FileMoved,           // A file moved, editor should update it accordingly.
     FileDeleted,         // A file/directory was deleted.
@@ -40,7 +40,7 @@ pub enum ErrorCode {
     ServerErrorStart = -32099,
     ServerErrorEnd = -32000,
 
-    /// LSP error. Happens when editor didn't send the initialize
+    /// LSP error. Happens when editor didn’t send the initialize
     /// request before other requests.
     NotInitialized = -32002,
 

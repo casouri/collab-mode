@@ -40,7 +40,7 @@ impl ContextOps {
 
 /// A range in the internal document. Each range is either a live text
 /// (not deleted) or dead text (deleted). All the ranges should be in
-/// order, connect, and don't overlap.
+/// order, connect, and don’t overlap.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Range {
     /// Live text, (len).
@@ -81,13 +81,13 @@ impl Range {
 }
 
 /// A cursor in the internal document (which contains tombstones).
-/// This cursor also tracks the editor document's position.
+/// This cursor also tracks the editor document’s position.
 /// Translating between editor position and internal document position
 /// around a cursor is very fast.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Cursor {
-    /// The position of this cursor in the editor's document. This
-    /// position doesn't account for the tombstones.
+    /// The position of this cursor in the editor’s document. This
+    /// position doesn’t account for the tombstones.
     editor_pos: u64,
     /// The actual position in the internal document containing
     /// tombstones.
@@ -282,7 +282,7 @@ impl InternalDoc {
     }
 
     /// Return the total length of the editor document. Note that this
-    /// function don't use any optimization and goes through every
+    /// function doesn’t use any optimization and goes through every
     /// range front-to-back.
     fn editor_len(&self) -> u64 {
         let mut len = 0;
@@ -311,7 +311,7 @@ impl InternalDoc {
     /// true, and the other way around if false. This also moves the
     /// cursor to around editor pos. Unless there is no ranges in the
     /// doc, `cursor` must points to a range after this function
-    /// returns (unless there's no range).
+    /// returns (unless there’s no range).
     fn convert_pos(&self, pos: u64, cursor: &mut Cursor, editor_pos: bool) -> u64 {
         if pos == 0 {
             // `cursor` must point to a range after this function
@@ -1029,7 +1029,7 @@ struct GlobalHistory {
     /// A vector of pointer to the locally generated ops in the
     /// history. These ops are what the editor can undo. We use global
     /// seq as pointers, but these pointers can also refer to ops in
-    /// the `local` history which don't have global seq yet. Their
+    /// the `local` history which don’t have global seq yet. Their
     /// global seq are inferred to be length of global history + their
     /// index in local history. Obviously these inferred indexes need
     /// to be updated every time we receive a remote op.
@@ -1095,7 +1095,7 @@ impl GlobalHistory {
         match kind {
             EditorOpKind::Original => {
                 // If the editor undone an op and makes an original
-                // edit, the undone op is lost (can't be redone
+                // edit, the undone op is lost (can’t be redone
                 // anymore).
                 if let Some(idx) = self.undo_tip {
                     self.undo_queue.drain(idx..);
@@ -1105,7 +1105,7 @@ impl GlobalHistory {
                 Ok(OpKind::Original)
             }
             EditorOpKind::Undo => {
-                // If this op is an undo op, find the original op it's
+                // If this op is an undo op, find the original op it’s
                 // supposed to undo, and calculate the delta.
                 let idx_of_orig;
                 if let Some(idx) = self.undo_tip {
@@ -1251,16 +1251,16 @@ pub struct ClientEngine {
     internal_doc: InternalDoc,
     /// The id of this site.
     site: SiteId,
-    /// The largest global sequence number we've seen. Any remote op
+    /// The largest global sequence number we’ve seen. Any remote op
     /// we receive should have sequence equal to this number plus one.
     current_seq: GlobalSeq,
-    /// The largest local sequence number we've seen. Any local op we
+    /// The largest local sequence number we’ve seen. Any local op we
     /// receive should be have local sequence equal to this number plus
     /// one. Starts from 1.
     current_site_seq: LocalSeq,
     /// When we send local `ops` to server, record the largest site
     /// seq in `ops`. Before server acked the op with this site seq,
-    /// we can't send more local ops to server (stop-and-wait).
+    /// we can’t send more local ops to server (stop-and-wait).
     last_site_seq_sent_out: LocalSeq,
 }
 
@@ -1294,7 +1294,7 @@ impl ServerEngine {
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum EngineError {
-    #[error("An op that we expect to exist isn't there: {0:?}")]
+    #[error("An op that we expect to exist isn’t there: {0:?}")]
     OpMissing(FatOp),
     #[error("We expect to find {0:?}, but instead find {1:?}")]
     OpMismatch(FatOp, FatOp),
@@ -1302,7 +1302,7 @@ pub enum EngineError {
     SeqMismatch(GlobalSeq, FatOp),
     #[error("We expect to see site sequence number {0:?} in op {1:?}")]
     SiteSeqMismatch(LocalSeq, EditorOp),
-    #[error("Op {0:?} should have a global seq number, but doesn't")]
+    #[error("Op {0:?} should have a global seq number, but doesn’t")]
     SeqMissing(FatOp),
     #[error("Insertion cannot be empty: {0:?}")]
     EmptyInsert(EditorOp),
@@ -1356,8 +1356,8 @@ impl ClientEngine {
         }
     }
 
-    /// Return packaged local ops if it's appropriate time to send
-    /// them out, return None if there's no pending local ops or it's
+    /// Return packaged local ops if it’s appropriate time to send
+    /// them out, return None if there’s no pending local ops or it’s
     /// not time. (Client can only send out new local ops when
     /// previous in-flight local ops are acked by the server.) The
     /// returned ops must be sent to server for engine to work right.
@@ -1385,10 +1385,10 @@ impl ClientEngine {
         }
     }
 
-    /// Convert `ops` from an internal op to an editor op, but don't
+    /// Convert `ops` from an internal op to an editor op, but don’t
     /// apply `ops` to the internal doc.
     pub fn convert_internal_ops_dont_apply(&mut self, ops: Vec<FatOp>) -> Vec<EditInstruction> {
-        // We achieve "don't apply" by applying each op, and then
+        // We achieve "don’t apply" by applying each op, and then
         // applying their inverse. Because for a series of ops, we
         // have to apply the first op in order to transform the later
         // op.
@@ -1400,7 +1400,7 @@ impl ClientEngine {
             converted_ops.push(converted_op);
         }
 
-        // If the user press "undo" where there's no more ops to undo,
+        // If the user press "undo" where there’s no more ops to undo,
         // we return an empty list.
         if ops.len() > 0 {
             // Now we need to reverse the affect of applying those
