@@ -371,8 +371,7 @@ If MARK non-nil, show active region."
   "A has table that maps /HOST/PROJECT/PATH to its (doc-id . host-id), if any.")
 
 (defvar collab--buffer-table (make-hash-table :test #'equal)
-  "A has table that maps (doc-id . host-id) to its corresponding buffer.
-We also map directory path /HOST/PROJECT/PATH to dired buffers in this table.")
+  "A has table that maps FILE-DESC to its corresponding buffer.")
 
 (defvar collab--stashed-state-plist nil
   "Used for stashing local state when major mode changes.")
@@ -937,13 +936,10 @@ If we receive a ServerError notification, just display a warning."
   (pcase method
     ('RemoteOpArrived
      ;; TODO: Idle timer?
-     (let ((doc (plist-get params :docId))
-           (host (plist-get params :hostId))
+     (let ((file-desc (plist-get params :file))
            (last-seq (plist-get params :lastSeq)))
-       (let ((buffer (gethash (cons doc host)
-                              collab--buffer-table))
-             (timer (gethash (cons doc host)
-                             collab--dispatcher-timer-table)))
+       (let ((buffer (gethash file-desc collab--buffer-table))
+             (timer (gethash file-desc collab--dispatcher-timer-table)))
          (when timer (cancel-timer timer))
          (when (buffer-live-p buffer)
            (setq timer (run-with-timer
@@ -952,6 +948,8 @@ If we receive a ServerError notification, just display a warning."
                         buffer last-seq))
            (puthash (cons doc host) timer
                     collab--dispatcher-timer-table)))))
+    ;; FIXME: This doesn’t exist yet, also need to use file-desc for
+    ;; buffer table.
     ('Info
      (let* ((doc-id (plist-get params :docId))
             (host-id (plist-get params :hostId))
@@ -1892,15 +1890,13 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
          (filename (or filename (get-text-property (point) 'collab-filename)))
          (directory-p (or directory-p (get-text-property (point) 'collab-directory-p)))
          (host-id (or host-id (get-text-property (point) 'collab-host-id)))
-         (path (collab--encode-filename file-desc))
-         (buf (gethash (gethash path collab--doc-id-table) collab--buffer-table)))
+         (buf (gethash file-desc collab--buffer-table)))
     (cond
      ((not (and file-desc filename host-id))
       (user-error "Can’t find file at point"))
      ((and (buffer-live-p buf) (if (buffer-local-value 'collab-monitored-mode buf)
                                    t
-                                 (remhash (gethash path collab--doc-id-table)
-                                          collab--buffer-table)
+                                 (remhash file-desc collab--buffer-table)
                                  (kill-buffer buf)
                                  nil))
       (display-buffer buf))
@@ -1910,7 +1906,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
              (buf (get-buffer-create (format "%s<collab>" path))))
         (select-window (display-buffer buf))
         (collab-dired-mode)
-        (puthash path buf collab--buffer-table)
+        (puthash file-desc buf collab--buffer-table)
         (setq collab--file file-desc
               collab--default-directory path)
         (collab--dired-refresh)))
@@ -1950,14 +1946,12 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
           (format "can’t disconnect from Doc(%s)" doc-id)
         (collab--disconnect-from-file-req doc-id host-id)))
     (let ((buf (when doc-id
-                 (gethash (cons doc-id host-id)
-                          collab--buffer-table)))
+                 (gethash file-desc collab--buffer-table)))
           (inhibit-read-only t))
       (when buf
         (with-current-buffer buf
           (collab--disable)))
-      (puthash (cons doc-id host-id) nil
-               collab--buffer-table)
+      (puthash file-desc nil collab--buffer-table)
       (save-excursion
         (end-of-line)
         (when (looking-back " •" 2)
