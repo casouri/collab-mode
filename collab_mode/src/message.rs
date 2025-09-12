@@ -75,8 +75,11 @@ pub struct HeyParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOpsArrivedNote {
+    // Technically don’t need host_id but I don’t want to change it
+    // anymore.
     pub host_id: ServerId,
     pub doc_id: DocId,
+    pub file: EditorFileDesc,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

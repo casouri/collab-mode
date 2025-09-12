@@ -117,7 +117,7 @@ impl PartialEq for FileDesc {
 
 impl Eq for FileDesc {}
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum EditorFileDesc {
     /// A shared doc that isn't in a project.

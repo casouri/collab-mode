@@ -1504,9 +1504,9 @@ impl Server {
                     .await;
             }
             FileDesc::File { id } => {
-                // Look up existing doc
+                // Look up existing doc.
                 if let Some(doc) = self.docs.get_mut(id) {
-                    // Add remote as subscriber
+                    // Add remote as subscriber.
                     doc.subscribers.insert(remote_host_id.clone(), 0);
 
                     let snapshot = NewSnapshot {
@@ -1857,11 +1857,14 @@ impl Server {
         // Notify editor to get the new remote ops.
         let new_buffer_len = remote_doc.remote_op_buffer.len();
         if op_is_not_ours && new_buffer_len > old_buffer_len {
+            let file_desc =
+                EditorFileDesc::new(remote_doc.file_desc.clone(), remote_host_id.clone());
             next.send_notif(
                 NotificationCode::RemoteOpsArrived,
                 RemoteOpsArrivedNote {
                     host_id: remote_host_id,
                     doc_id,
+                    file: file_desc,
                 },
             )
             .await;
