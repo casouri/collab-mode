@@ -22,3 +22,7 @@ sets `next_reconnect_time` to appropriate time. The reconnect timer
 `active_remotes`, if a connection is in `Disconnect` state and
 `next_reconnect_time` is reached, it tries to reconnect. The reconnect
 time is doubled every time, from 1s all the way to 256s.
+
+## DocId and FileDesc
+
+We started out only having DocId. Later we added FileDesc for supporing sharing projects and files in projects. I tried refactoring the code to only use FileDesc but it’s quite a big undertaking and it doesn’t fully make sense—many operations can’t work with project so a FileDesc doesn’t fit perfectly. So I decide expose only FileDesc (and EditorFileDesc) to editor and use DocId internally. Also, if user initially shares a loose file (not in a project), then later shares a project that contains that file, that file should be included in the new project seamlessly.

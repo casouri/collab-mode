@@ -70,7 +70,7 @@ pub enum DocDesc {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum FileDesc {
     /// A shared doc that isn't in a project.
-    File { id: DocId },
+    File { id: String },
     /// A project.
     Project { id: ProjectId },
     /// A file in a project.
@@ -124,7 +124,7 @@ pub enum EditorFileDesc {
     File {
         #[serde(rename = "hostId")]
         host_id: ServerId,
-        id: DocId,
+        id: String,
     },
     /// A project.
     Project {

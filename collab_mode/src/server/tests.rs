@@ -1358,7 +1358,7 @@ async fn test_open_file_doc_id_not_found() {
     let env = TestEnvironment::new().await.unwrap();
     let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
-    // Request to open a non-existent doc by ID
+    // Request to open a non-existent doc by filename
     let req_id = 1;
     setup
         .hub
@@ -1370,7 +1370,7 @@ async fn test_open_file_doc_id_not_found() {
                 "fileDesc": {
                     "type": "file",
                     "hostId": setup.hub.id.clone(),
-                    "id": 9999
+                    "id": "nonexistent.txt"
                 },
                 "mode": "open"
             }),
@@ -3222,7 +3222,7 @@ async fn test_send_ops_permission_denied() {
                 "fileDesc": {
                     "type": "file",
                     "hostId": setup.hub.id.clone(),
-                    "id": doc_id,
+                    "id": "test.txt",
                 },
                 "mode": "open",
             }),

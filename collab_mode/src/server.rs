@@ -1045,16 +1045,36 @@ impl Server {
                 Ok(result)
             }
             Some(FileDesc::Project { id }) => {
-                // Special handling for _doc project.
+                // Special handling for _buffers project.
                 if id == RESERVED_BUFFERS_PROJECT {
-                    // List owned docs without projects.
+                    // Implement special handling for the virtual _buffers project.
+                    // Collect absolute project roots for containment checks.
+                    let project_roots: Vec<std::path::PathBuf> = self
+                        .projects
+                        .values()
+                        .map(|p| std::path::PathBuf::from(&p.root))
+                        .collect();
+
+                    // List docs that are not part of any declared project:
+                    // a) docs with no abs_filename
+                    // b) docs whose abs_filename is not under any project root
                     let mut result = vec![];
-                    for (doc_id, doc) in &self.docs {
-                        if doc.abs_filename.is_none() {
+                    for (_doc_id, doc) in &self.docs {
+                        let include = match &doc.abs_filename {
+                            None => true,
+                            Some(path) => {
+                                // Use the path as-is (projects are absolute already); if
+                                // canonicalization fails, fall back to the original path.
+                                let abs = path;
+                                !project_roots.iter().any(|root| abs.starts_with(root))
+                            }
+                        };
+
+                        if include {
                             result.push(ListFileEntry {
                                 file: EditorFileDesc::File {
                                     host_id: self.host_id.clone(),
-                                    id: *doc_id,
+                                    id: doc.name.clone(),
                                 },
                                 filename: doc.name.clone(),
                                 is_directory: false,
@@ -1326,19 +1346,28 @@ impl Server {
                     next.send_resp(resp, None).await;
                 }
                 FileDesc::File { id } => {
-                    // Look up existing doc
-                    if let Some(doc) = self.docs.get(id) {
+                    // Look up existing doc by filename
+                    let mut found_doc_id = None;
+                    for (doc_id, doc) in &self.docs {
+                        if doc.abs_filename.is_none() && doc.name == *id {
+                            found_doc_id = Some(*doc_id);
+                            break;
+                        }
+                    }
+
+                    if let Some(doc_id) = found_doc_id {
+                        let doc = self.docs.get(&doc_id).unwrap();
                         let resp = OpenFileResp {
                             content: doc.buffer.iter().collect(),
                             site_id: self.site_id,
                             filename: doc.name.clone(),
-                            doc_id: *id,
+                            doc_id,
                         };
                         next.send_resp(resp, None).await;
                     } else {
                         let err = lsp_server::ResponseError {
                             code: ErrorCode::IoError as i32,
-                            message: format!("Doc {} not found", id),
+                            message: format!("File '{}' not found", id),
                             data: None,
                         };
                         next.send_resp((), Some(err)).await;
@@ -1514,8 +1543,17 @@ impl Server {
                     .await;
             }
             FileDesc::File { id } => {
-                // Look up existing doc.
-                if let Some(doc) = self.docs.get_mut(id) {
+                // Look up existing doc by filename.
+                let mut found_doc_id = None;
+                for (doc_id, doc) in &self.docs {
+                    if doc.abs_filename.is_none() && doc.name == *id {
+                        found_doc_id = Some(*doc_id);
+                        break;
+                    }
+                }
+
+                if let Some(doc_id) = found_doc_id {
+                    let doc = self.docs.get_mut(&doc_id).unwrap();
                     // Add remote as subscriber.
                     doc.subscribers.insert(remote_host_id.clone(), 0);
 
@@ -1525,14 +1563,14 @@ impl Server {
                         seq: doc.engine.current_seq(),
                         site_id,
                         file_desc: file_desc.clone(),
-                        doc_id: *id,
+                        doc_id,
                     };
                     next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
                         .await;
                 } else {
                     next.send_to_remote(
                         &remote_host_id,
-                        Msg::ErrorResp(ErrorCode::IoError, format!("Doc {} not found", id)),
+                        Msg::ErrorResp(ErrorCode::IoError, format!("File '{}' not found", id)),
                     )
                     .await;
                 }
@@ -1993,6 +2031,16 @@ impl Server {
         &mut self,
         params: ShareFileParams,
     ) -> anyhow::Result<ShareFileResp> {
+        // Check if a file with this name already exists (for non-project files)
+        for doc in self.docs.values() {
+            if doc.abs_filename.is_none() && doc.name == params.filename {
+                return Err(anyhow!(
+                    "A file with name '{}' already exists",
+                    params.filename
+                ));
+            }
+        }
+
         // Generate a new doc_id
         let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
 
@@ -2017,7 +2065,9 @@ impl Server {
         buffer.insert_many(0, params.content.chars());
         let remote_doc = RemoteDoc {
             name: params.filename.clone(),
-            file_desc: FileDesc::File { id: doc_id },
+            file_desc: FileDesc::File {
+                id: params.filename.clone(),
+            },
             next_site_seq: 1,
             meta: params.meta,
             remote_op_buffer: Vec::new(),
@@ -2390,12 +2440,22 @@ impl Server {
                 Ok((docs_to_remove, Some(full_path), subscribers))
             }
             FileDesc::File { id } => {
-                if let Some(doc) = self.docs.get(id) {
+                // Look up doc by filename
+                let mut found_doc_id = None;
+                for (doc_id, doc) in &self.docs {
+                    if doc.abs_filename.is_none() && doc.name == *id {
+                        found_doc_id = Some(*doc_id);
+                        break;
+                    }
+                }
+
+                if let Some(doc_id) = found_doc_id {
+                    let doc = self.docs.get(&doc_id).unwrap();
                     let path_to_delete = doc.abs_filename.clone();
                     let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
-                    Ok((vec![*id], path_to_delete, subscribers))
+                    Ok((vec![doc_id], path_to_delete, subscribers))
                 } else {
-                    Err(anyhow!("Doc {} not found", id))
+                    Err(anyhow!("File '{}' not found", id))
                 }
             }
         }
