@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use collab_mode::{config_man, editor_receptor, jsonrpc, server::Server};
+use collab_mode::{config_man, editor_receptor, server::Server};
 use uuid::Uuid;
 
 #[derive(Parser)]
