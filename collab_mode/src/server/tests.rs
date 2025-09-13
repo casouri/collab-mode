@@ -491,6 +491,41 @@ impl MockEditor {
     }
 }
 
+#[test]
+fn test_share_file_duplicate_via_symlink() {
+    // Create a temp project dir with a file and a symlink to it.
+    let test_dir = tempfile::tempdir().unwrap();
+    let real = test_dir.path().join("file.txt");
+    std::fs::write(&real, "hello").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs as unix_fs;
+        let link = test_dir.path().join("link.txt");
+        unix_fs::symlink(&real, &link).unwrap();
+
+        // Spin up a server with config rooted in the temp dir (to avoid restricted locations).
+        let config = crate::config_man::ConfigManager::new(Some(test_dir.path().to_path_buf()), None).unwrap();
+        let mut server = super::Server::new("self".to_string(), config).unwrap();
+
+        // Share the real path first.
+        let resp1 = server.handle_share_file_from_editor(crate::message::ShareFileParams {
+            filename: real.to_string_lossy().to_string(),
+            content: "hello".into(),
+            meta: serde_json::Map::new(),
+        });
+        assert!(resp1.is_ok());
+
+        // Sharing the symlink to the same file should be rejected (duplicate).
+        let resp2 = server.handle_share_file_from_editor(crate::message::ShareFileParams {
+            filename: link.to_string_lossy().to_string(),
+            content: "hello".into(),
+            meta: serde_json::Map::new(),
+        });
+        assert!(resp2.is_err());
+    }
+}
+
 #[cfg(any(test, feature = "test-runner"))]
 pub struct ServerSetup {
     pub id: ServerId,

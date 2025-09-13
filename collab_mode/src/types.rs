@@ -69,7 +69,8 @@ pub enum DocDesc {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum FileDesc {
-    /// A shared doc that isn’t in a project.
+    /// A shared doc that isn’t in a project. `id` should be the
+    /// absolute filename for disk files, and buffer name for buffers.
     File { id: String },
     /// A project.
     Project { id: ProjectId },
@@ -195,6 +196,8 @@ pub struct Project {
     pub name: String,
     /// Absolute filename of the root of the project.
     pub root: String,
+    /// Canonicalized absolute root for stable comparisons.
+    pub root_canon: String,
     /// Metadata for the project. A serialized JSON object.
     pub meta: JsonMap,
 }

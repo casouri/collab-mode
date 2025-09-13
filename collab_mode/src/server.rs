@@ -28,10 +28,12 @@ struct Doc {
     name: String,
     /// Metadata for this doc.
     meta: JsonMap,
-    /// The absolute filename of this doc on disk, if exists. This is
-    /// used for automatically saving the file to disk. This is also
-    /// used for checking whether a file is already opened as a doc.
+    /// The absolute filename of this doc on disk, if exists (as provided/non-canonicalized).
+    /// Used for determining whether a file is within a configured project path.
     abs_filename: Option<PathBuf>,
+    /// Canonicalized absolute filename (if available).
+    /// Used for duplicate/open checks across symlinks or path variants.
+    abs_filename_canon: Option<PathBuf>,
     disk_file: Option<std::fs::File>,
     /// The server engine that transforms and stores ops for this doc.
     engine: ServerEngine,
@@ -143,6 +145,7 @@ impl Doc {
         name: String,
         meta: JsonMap,
         abs_filename: Option<PathBuf>,
+        abs_filename_canon: Option<PathBuf>,
         content: &str,
         engine: ServerEngine,
         disk_file: Option<File>,
@@ -154,6 +157,7 @@ impl Doc {
             name,
             meta,
             abs_filename,
+            abs_filename_canon,
             engine,
             buffer,
             subscribers: HashMap::new(),
@@ -271,9 +275,11 @@ impl Server {
         expand_project_paths(&mut projects)?;
 
         for project in projects {
+            let root_canon = canonicalize_if_exists(std::path::Path::new(&project.path));
             let proj = Project {
                 name: project.name.clone(),
                 root: project.path,
+                root_canon: root_canon.to_string_lossy().to_string(),
                 meta: serde_json::Map::new(),
             };
             self.projects.insert(project.name, proj);
@@ -473,9 +479,12 @@ impl Server {
                 }
 
                 for project_entry in params.projects {
+                    let root_canon =
+                        canonicalize_if_exists(std::path::Path::new(&project_entry.path));
                     let project = Project {
                         name: project_entry.name.clone(),
                         root: project_entry.path,
+                        root_canon: root_canon.to_string_lossy().to_string(),
                         meta: JsonMap::new(),
                     };
                     self.projects.insert(project.name.clone(), project);
@@ -1265,11 +1274,13 @@ impl Server {
                         .get(project)
                         .ok_or_else(|| anyhow!("Project {} not found", project))?;
 
-                    // Check if already open
+                    // Check if already open (canonicalize to avoid symlink/path variance)
                     let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
+                    let full_path_canon = canonicalize_if_exists(&full_path);
+
                     for (doc_id, doc) in &self.docs {
-                        if let Some(ref abs_filename) = doc.abs_filename {
-                            if abs_filename == &full_path {
+                        if let Some(ref abs_c) = doc.abs_filename_canon {
+                            if abs_c == &full_path_canon {
                                 // Already open, return existing doc
                                 let resp = OpenFileResp {
                                     content: doc.buffer.iter().collect(),
@@ -1308,6 +1319,7 @@ impl Server {
                         filename.clone(),
                         JsonMap::new(),
                         Some(full_path),
+                        Some(full_path_canon),
                         &content,
                         ServerEngine::new(content.len() as u64),
                         Some(disk_file),
@@ -1346,12 +1358,24 @@ impl Server {
                     next.send_resp(resp, None).await;
                 }
                 FileDesc::File { id } => {
-                    // Look up existing doc by filename
+                    // Look up existing doc by filename or absolute path
                     let mut found_doc_id = None;
-                    for (doc_id, doc) in &self.docs {
-                        if doc.abs_filename.is_none() && doc.name == *id {
-                            found_doc_id = Some(*doc_id);
-                            break;
+                    if std::path::Path::new(id).is_absolute() {
+                        let target = canonicalize_if_exists(std::path::Path::new(id));
+                        for (doc_id, doc) in &self.docs {
+                            if let Some(ref abs_c) = doc.abs_filename_canon {
+                                if abs_c == &target {
+                                    found_doc_id = Some(*doc_id);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        for (doc_id, doc) in &self.docs {
+                            if doc.abs_filename.is_none() && doc.name == *id {
+                                found_doc_id = Some(*doc_id);
+                                break;
+                            }
                         }
                     }
 
@@ -1472,11 +1496,12 @@ impl Server {
 
                 // Check if already open
                 let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
+                let full_path_canon = canonicalize_if_exists(&full_path);
 
-                // Look for existing doc with same abs_filename
+                // Look for existing doc with same abs_filename (canonical)
                 for (doc_id, doc) in &mut self.docs {
-                    if let Some(ref abs_filename) = doc.abs_filename {
-                        if abs_filename == &full_path {
+                    if let Some(ref abs_c) = doc.abs_filename_canon {
+                        if abs_c == &full_path_canon {
                             // Already open, add remote as subscriber
                             doc.subscribers.insert(remote_host_id.clone(), 0);
 
@@ -1520,6 +1545,7 @@ impl Server {
                     filename.clone(),
                     JsonMap::new(),
                     Some(full_path),
+                    Some(full_path_canon),
                     &content,
                     ServerEngine::new(content.len() as u64),
                     Some(disk_file),
@@ -1543,12 +1569,24 @@ impl Server {
                     .await;
             }
             FileDesc::File { id } => {
-                // Look up existing doc by filename.
+                // Look up existing doc by filename or absolute path.
                 let mut found_doc_id = None;
-                for (doc_id, doc) in &self.docs {
-                    if doc.abs_filename.is_none() && doc.name == *id {
-                        found_doc_id = Some(*doc_id);
-                        break;
+                if std::path::Path::new(id).is_absolute() {
+                    let target = canonicalize_if_exists(std::path::Path::new(id));
+                    for (doc_id, doc) in &self.docs {
+                        if let Some(ref abs) = doc.abs_filename {
+                            if canonicalize_if_exists(abs) == target {
+                                found_doc_id = Some(*doc_id);
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    for (doc_id, doc) in &self.docs {
+                        if doc.abs_filename.is_none() && doc.name == *id {
+                            found_doc_id = Some(*doc_id);
+                            break;
+                        }
                     }
                 }
 
@@ -2041,20 +2079,67 @@ impl Server {
             }
         }
 
+        // If an absolute path is provided and already open, reject to avoid duplicates.
+        if std::path::Path::new(&params.filename).is_absolute() {
+            let path = std::path::PathBuf::from(&params.filename);
+            if path.exists() {
+                let target = canonicalize_if_exists(&path);
+                for doc in self.docs.values() {
+                    if let Some(ref abs_c) = doc.abs_filename_canon {
+                        if abs_c == &target {
+                            return Err(anyhow!("File is already open: {}", target.display()));
+                        }
+                    }
+                }
+            }
+        }
+
         // Generate a new doc_id
         let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
 
-        // Create a new owned Doc
+        // Determine absolute filenames (non-canonicalized and canonicalized) if applicable.
+        let (abs_filename, abs_filename_canon) = {
+            let filename = std::path::Path::new(&params.filename);
+            if filename.is_absolute() && filename.exists() {
+                (
+                    Some(filename.to_path_buf()),
+                    Some(canonicalize_if_exists(filename)),
+                )
+            } else {
+                (None, None)
+            }
+        };
+
+        // If we recognized an absolute filename, open it for read/write so we can save.
+        let disk_file: Option<std::fs::File> = if let Some(ref path) = abs_filename_canon {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true);
+            match options.open(path) {
+                Ok(file) => Some(file),
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to open file for writing ({}): {}",
+                        path.display(),
+                        err
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut doc = Doc::new(
             params.filename.clone(),
             params.meta.clone(),
-            None,
+            abs_filename,
+            abs_filename_canon,
             &params.content,
             ServerEngine::new(params.content.len() as u64),
-            None,
+            disk_file,
         );
 
-                    // Add ourselves as a subscriber since we’re also a client
+        // Add ourselves as a subscriber since we’re also a client
         doc.subscribers.insert(self.host_id.clone(), 0);
 
         // Store the doc in our owned docs
@@ -2153,9 +2238,30 @@ impl Server {
             .get(project_id)
             .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
 
-        // Construct full paths
+        // Construct full paths (non-canonical, preserve original project root form).
         let old_full_path = std::path::PathBuf::from(&project.root).join(old_path);
         let new_full_path = std::path::PathBuf::from(&project.root).join(new_path);
+
+        // Pre-move checks:
+        // a) Target path already open in docs (compare canonical paths).
+        // b) Target path already exists on disk.
+        let new_full_path_canon = canonicalize_if_exists(&new_full_path);
+        for doc in self.docs.values() {
+            if let Some(ref abs_c) = doc.abs_filename_canon {
+                if abs_c == &new_full_path_canon {
+                    return Err(anyhow!(
+                        "Target path is already open as a document: {}",
+                        new_full_path.display()
+                    ));
+                }
+            }
+        }
+        if new_full_path.exists() {
+            return Err(anyhow!(
+                "Target path already exists on disk: {}",
+                new_full_path.display()
+            ));
+        }
 
         // Create parent directory if it doesn’t exist
         if let Some(parent) = new_full_path.parent() {
@@ -2173,21 +2279,33 @@ impl Server {
             )
         })?;
 
-        // Update doc's abs_filename if the file is currently open,
-        // and collect subscribers.
-        // TODO: Go through every open doc and see if its abs_filename
-        // is under the moved directory, fix the abs_filename.
+        // Update any open docs affected by the move and collect subscribers to notify.
+        let mut subscriber_set: HashSet<ServerId> = HashSet::new();
+
         for doc in self.docs.values_mut() {
             if let Some(ref mut abs_filename) = doc.abs_filename {
-                if abs_filename == &old_full_path {
+                if *abs_filename == old_full_path {
+                    // Exact file moved.
                     *abs_filename = new_full_path.clone();
-                    let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
-                    return Ok(subscribers);
+                    doc.abs_filename_canon = Some(canonicalize_if_exists(&new_full_path));
+                    for sub in doc.subscribers.keys() {
+                        subscriber_set.insert(sub.clone());
+                    }
+                } else if abs_filename.starts_with(&old_full_path) {
+                    // File under a moved directory: rebase relative path.
+                    if let Some(rel) = pathdiff::diff_paths(&*abs_filename, &old_full_path) {
+                        let rebased = new_full_path.join(rel);
+                        *abs_filename = rebased.clone();
+                        doc.abs_filename_canon = Some(canonicalize_if_exists(&rebased));
+                        for sub in doc.subscribers.keys() {
+                            subscriber_set.insert(sub.clone());
+                        }
+                    }
                 }
             }
         }
 
-        Ok(Vec::new())
+        Ok(subscriber_set.into_iter().collect())
     }
 
     async fn handle_save_file_from_editor<'a>(
@@ -2657,6 +2775,11 @@ fn unwrap_req_id(req_id: &lsp_server::RequestId) -> anyhow::Result<i32> {
         .to_string()
         .parse::<i32>()
         .map_err(|_| anyhow!("Can’t parse request id: {:?}", &req_id).into())
+}
+
+/// Canonicalize a path if it exists; otherwise return it as-is.
+fn canonicalize_if_exists(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Helper function to expand project paths to absolute paths
