@@ -2069,7 +2069,15 @@ impl Server {
         &mut self,
         params: ShareFileParams,
     ) -> anyhow::Result<ShareFileResp> {
-        // Check if a file with this name already exists (for non-project files)
+        let filename = params.filename.clone();
+        let filename = match expanduser::expanduser(filename.clone()) {
+            Ok(buf) => buf.to_string_lossy().to_string(),
+            Err(_) => filename,
+        };
+        // This can be either a legit canon path or a nonexist path.
+        let filename_canon = canonicalize_if_exists(&PathBuf::from(filename.clone()));
+
+        // Check if a file with this name/path already exists (for non-project files)
         for doc in self.docs.values() {
             if doc.abs_filename.is_none() && doc.name == params.filename {
                 return Err(anyhow!(
@@ -2077,19 +2085,10 @@ impl Server {
                     params.filename
                 ));
             }
-        }
 
-        // If an absolute path is provided and already open, reject to avoid duplicates.
-        if std::path::Path::new(&params.filename).is_absolute() {
-            let path = std::path::PathBuf::from(&params.filename);
-            if path.exists() {
-                let target = canonicalize_if_exists(&path);
-                for doc in self.docs.values() {
-                    if let Some(ref abs_c) = doc.abs_filename_canon {
-                        if abs_c == &target {
-                            return Err(anyhow!("File is already open: {}", target.display()));
-                        }
-                    }
+            if let Some(ref path_canon) = doc.abs_filename_canon {
+                if filename_canon == *path_canon {
+                    return Err(anyhow!("A file at path '{}' is already opened", &filename));
                 }
             }
         }
@@ -2097,31 +2096,16 @@ impl Server {
         // Generate a new doc_id
         let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
 
-        // Determine absolute filenames (non-canonicalized and canonicalized) if applicable.
-        let (abs_filename, abs_filename_canon) = {
-            let filename = std::path::Path::new(&params.filename);
-            if filename.is_absolute() && filename.exists() {
-                (
-                    Some(filename.to_path_buf()),
-                    Some(canonicalize_if_exists(filename)),
-                )
-            } else {
-                (None, None)
-            }
-        };
-
-        // If we recognized an absolute filename, open it for read/write so we can save.
-        let disk_file: Option<std::fs::File> = if let Some(ref path) = abs_filename_canon {
+        // If we recognized an absolute filename, open it for
+        // read/write so we can save.
+        let path_canon = PathBuf::from(&filename_canon);
+        let disk_file: Option<File> = if path_canon.exists() {
             let mut options = std::fs::OpenOptions::new();
             options.read(true).write(true);
-            match options.open(path) {
+            match options.open(&path_canon) {
                 Ok(file) => Some(file),
                 Err(err) => {
-                    tracing::warn!(
-                        "Failed to open file for writing ({}): {}",
-                        path.display(),
-                        err
-                    );
+                    tracing::warn!("Failed to open file {}: {}", filename, err);
                     None
                 }
             }
@@ -2129,11 +2113,17 @@ impl Server {
             None
         };
 
+        let (doc_filename, doc_filename_canon) = if path_canon.exists() {
+            (Some(PathBuf::from(filename)), Some(path_canon))
+        } else {
+            (None, None)
+        };
+
         let mut doc = Doc::new(
             params.filename.clone(),
             params.meta.clone(),
-            abs_filename,
-            abs_filename_canon,
+            doc_filename,
+            doc_filename_canon,
             &params.content,
             ServerEngine::new(params.content.len() as u64),
             disk_file,
