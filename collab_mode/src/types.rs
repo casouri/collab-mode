@@ -4,7 +4,6 @@
 use crate::error::CollabError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::Path;
 use std::path::PathBuf;
 
 pub use crate::config_man::{ArcKeyCert, KeyCert};
@@ -26,6 +25,12 @@ pub type ProjectId = String;
 pub type FatOp = crate::op::FatOp<Op>;
 
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;
+
+// Reserved virtual projects used to represent standalone buffers/files.
+// - `_buffers`: in-memory buffers (non-absolute identifiers)
+// - `_files`:   standalone files referenced by absolute paths
+pub const RESERVED_BUFFERS_PROJECT: &str = "_buffers";
+pub const RESERVED_FILES_PROJECT: &str = "_files";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
@@ -71,9 +76,6 @@ pub enum DocDesc {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum FileDesc {
-    /// A shared doc that isn’t in a project. `id` should be the
-    /// absolute filename for disk files, and buffer name for buffers.
-    File { id: String },
     /// A project.
     Project { id: ProjectId },
     /// A file in a project.
@@ -87,64 +89,15 @@ pub enum FileDesc {
 impl fmt::Display for FileDesc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FileDesc::File { id } => {
-                let last = Path::new(id)
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| id.into());
-                write!(f, "_buffers/{}", last)
-            }
             FileDesc::Project { id } => write!(f, "{}", id),
             FileDesc::ProjectFile { project, file } => write!(f, "{}/{}", project, file),
         }
     }
 }
 
-impl PartialEq for FileDesc {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (FileDesc::File { id: id1 }, FileDesc::File { id: id2 }) => id1 == id2,
-            (FileDesc::Project { id: id1 }, FileDesc::Project { id: id2 }) => {
-                // Normalize and compare project paths
-                std::path::Path::new(id1)
-                    .canonicalize()
-                    .unwrap_or_else(|_| std::path::PathBuf::from(id1))
-                    == std::path::Path::new(id2)
-                        .canonicalize()
-                        .unwrap_or_else(|_| std::path::PathBuf::from(id2))
-            }
-            (
-                FileDesc::ProjectFile {
-                    project: proj1,
-                    file: path1,
-                },
-                FileDesc::ProjectFile {
-                    project: proj2,
-                    file: path2,
-                },
-            ) => {
-                // Compare normalized full paths
-                let full_path1 = std::path::Path::new(proj1).join(path1);
-                let full_path2 = std::path::Path::new(proj2).join(path2);
-                full_path1.canonicalize().unwrap_or(full_path1.clone())
-                    == full_path2.canonicalize().unwrap_or(full_path2.clone())
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for FileDesc {}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum EditorFileDesc {
-    /// A shared doc that isn't in a project.
-    File {
-        #[serde(rename = "hostId")]
-        host_id: ServerId,
-        id: String,
-    },
     /// A project.
     Project {
         #[serde(rename = "hostId")]
@@ -164,25 +117,14 @@ pub enum EditorFileDesc {
 impl fmt::Display for EditorFileDesc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EditorFileDesc::File { host_id, id } => {
-                write!(f, "{}/{}", host_id, FileDesc::File { id: id.clone() })
-            }
             EditorFileDesc::Project { host_id, id } => {
-                write!(f, "{}/{}", host_id, FileDesc::Project { id: id.clone() })
+                write!(f, "{}/{}", host_id, id)
             }
             EditorFileDesc::ProjectFile {
                 host_id,
                 project,
                 file,
-            } => write!(
-                f,
-                "{}/{}",
-                host_id,
-                FileDesc::ProjectFile {
-                    project: project.clone(),
-                    file: file.clone(),
-                }
-            ),
+            } => write!(f, "{}/{}", host_id, format!("{}/{}", project, file)),
         }
     }
 }
@@ -191,7 +133,6 @@ impl EditorFileDesc {
     /// Create an EditorFileDesc from a FileDesc and a host_id
     pub fn new(file_desc: FileDesc, host_id: ServerId) -> Self {
         match file_desc {
-            FileDesc::File { id } => EditorFileDesc::File { host_id, id },
             FileDesc::Project { id } => EditorFileDesc::Project { host_id, id },
             FileDesc::ProjectFile { project, file } => EditorFileDesc::ProjectFile {
                 host_id,
@@ -204,7 +145,6 @@ impl EditorFileDesc {
     /// Get the host_id from this EditorFileDesc
     pub fn host_id(&self) -> &ServerId {
         match self {
-            EditorFileDesc::File { host_id, .. } => host_id,
             EditorFileDesc::Project { host_id, .. } => host_id,
             EditorFileDesc::ProjectFile { host_id, .. } => host_id,
         }
@@ -214,7 +154,6 @@ impl EditorFileDesc {
 impl From<EditorFileDesc> for FileDesc {
     fn from(editor_file: EditorFileDesc) -> Self {
         match editor_file {
-            EditorFileDesc::File { id, .. } => FileDesc::File { id },
             EditorFileDesc::Project { id, .. } => FileDesc::Project { id },
             EditorFileDesc::ProjectFile { project, file, .. } => {
                 FileDesc::ProjectFile { project, file }

@@ -19,8 +19,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-const RESERVED_BUFFERS_PROJECT: &'static str = "_buffers";
-
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
 struct Doc {
@@ -205,15 +203,17 @@ impl Doc {
     /// Return `true` if this doc matches `file`.
     fn matches(&self, file: &FileDesc) -> bool {
         match file {
-            FileDesc::File { id } => {
-                let file_as_path = std::path::PathBuf::from(id);
-                self.abs_filename.is_none() && self.name == *id
-                    || self.abs_filename.as_deref() == Some(&file_as_path)
-            }
             FileDesc::Project { .. } => false,
             FileDesc::ProjectFile { project, file } => {
-                let full_path = std::path::PathBuf::from(project).join(file);
-                self.abs_filename_canon == Some(canonicalize_if_exists(&full_path))
+                if project == RESERVED_BUFFERS_PROJECT {
+                    return self.abs_filename.is_none() && self.name == *file;
+                }
+                if project == RESERVED_FILES_PROJECT {
+                    let target = canonicalize_if_exists(std::path::Path::new(file));
+                    return self.abs_filename_canon == Some(target);
+                }
+                // No direct matching for real projects here.
+                false
             }
         }
     }
@@ -440,8 +440,7 @@ impl Server {
                 if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                let file_desc = params.file_desc.into();
-                self.open_file_from_editor(next, host_id, file_desc, params.mode)
+                self.open_file_from_editor(next, file_desc, params.mode)
                     .await?;
                 Ok(())
             }
@@ -1086,39 +1085,16 @@ impl Server {
                 Ok(result)
             }
             Some(FileDesc::Project { id }) => {
-                // Special handling for _buffers project.
+                // Special handling for _buffers project: list only in-memory buffers.
                 if id == RESERVED_BUFFERS_PROJECT {
-                    // Implement special handling for the virtual _buffers project.
-                    // Collect absolute project roots for containment checks.
-                    let project_roots: Vec<std::path::PathBuf> = self
-                        .projects
-                        .values()
-                        .map(|p| std::path::PathBuf::from(&p.root))
-                        .collect();
-
-                    // List docs that are not part of any declared project:
-                    // a) docs with no abs_filename
-                    // b) docs whose abs_filename is not under any project root
                     let mut result = vec![];
                     for (_doc_id, doc) in &self.docs {
-                        let include = match &doc.abs_filename {
-                            None => true,
-                            Some(path) => {
-                                // Use the path as-is (projects are absolute already); if
-                                // canonicalization fails, fall back to the original path.
-                                let abs = path;
-                                !project_roots.iter().any(|root| abs.starts_with(root))
-                            }
-                        };
-
-                        if include {
+                        if doc.abs_filename.is_none() {
                             result.push(ListFileEntry {
-                                file: EditorFileDesc::File {
+                                file: EditorFileDesc::ProjectFile {
                                     host_id: self.host_id.clone(),
-                                    id: match doc.abs_filename {
-                                        Some(ref name) => name.display().to_string(),
-                                        None => doc.name.clone(),
-                                    },
+                                    project: RESERVED_BUFFERS_PROJECT.to_string(),
+                                    file: doc.name.clone(),
                                 },
                                 filename: doc.name.clone(),
                                 is_directory: false,
@@ -1126,9 +1102,29 @@ impl Server {
                             });
                         }
                     }
-                    // Sort entries alphanumerically by filename.
                     result.sort_by(|a, b| a.filename.cmp(&b.filename));
                     return Ok(result);
+                }
+
+                // Special handling for _files project: list standalone absolute-path files not in any project.
+                if id == RESERVED_FILES_PROJECT {
+                    let mut entries = Vec::new();
+                    for (_doc_id, doc) in self.local_docs_not_in_any_project() {
+                        if let Some(path) = &doc.abs_filename {
+                            entries.push(ListFileEntry {
+                                file: EditorFileDesc::ProjectFile {
+                                    host_id: self.host_id.clone(),
+                                    project: RESERVED_FILES_PROJECT.to_string(),
+                                    file: path.display().to_string(),
+                                },
+                                filename: doc.name.clone(),
+                                is_directory: false,
+                                meta: doc.meta.clone(),
+                            });
+                        }
+                    }
+                    entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+                    return Ok(entries);
                 }
 
                 // List files in project root directory.
@@ -1167,10 +1163,6 @@ impl Server {
                 result.sort_by(|a, b| a.filename.cmp(&b.filename));
                 Ok(result)
             }
-            Some(FileDesc::File { .. }) => {
-                // Can't list a file, only directories
-                Err(anyhow!("Cannot list files in a document, only directories"))
-            }
             None => {
                 // List top-level projects and docs.
                 let mut proj_result = vec![];
@@ -1186,15 +1178,17 @@ impl Server {
                         meta: project.meta.clone(),
                     });
                 }
-                proj_result.push(ListFileEntry {
-                    file: EditorFileDesc::Project {
-                        host_id: self.host_id.clone(),
-                        id: RESERVED_BUFFERS_PROJECT.to_string(),
-                    },
-                    filename: RESERVED_BUFFERS_PROJECT.to_string(),
-                    is_directory: true,
-                    meta: JsonMap::new(),
-                });
+                for reserved in [RESERVED_BUFFERS_PROJECT, RESERVED_FILES_PROJECT] {
+                    proj_result.push(ListFileEntry {
+                        file: EditorFileDesc::Project {
+                            host_id: self.host_id.clone(),
+                            id: reserved.to_string(),
+                        },
+                        filename: reserved.to_string(),
+                        is_directory: true,
+                        meta: JsonMap::new(),
+                    });
+                }
                 // for (doc_id, doc) in &self.docs {
                 //     if doc.abs_filename.is_none() {
                 //         buf_result.push(ListFileEntry {
@@ -1217,21 +1211,47 @@ impl Server {
         }
     }
 
+    /// Return all locally hosted docs whose absolute paths are not under any declared project.
+    /// These correspond to the _files virtual project.
+    fn local_docs_not_in_any_project(&self) -> Vec<(DocId, &Doc)> {
+        let project_roots: Vec<std::path::PathBuf> = self
+            .projects
+            .values()
+            .map(|p| std::path::PathBuf::from(&p.root))
+            .collect();
+        let mut out: Vec<(DocId, &Doc)> = Vec::new();
+        for (doc_id, doc) in &self.docs {
+            if let Some(path) = &doc.abs_filename {
+                if !project_roots.iter().any(|root| path.starts_with(root)) {
+                    out.push((*doc_id, doc));
+                }
+            }
+        }
+        out
+    }
+
     /// Read file from disk and return the content as string.
+    /// Return (content, file object, abs_path).
     async fn open_file_from_disk(
         &self,
         project_id: &ProjectId,
         rel_path: &str,
         mode: OpenMode,
-    ) -> anyhow::Result<(String, File)> {
-        // Look up project
-        let project = self
-            .projects
-            .get(project_id)
-            .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+    ) -> anyhow::Result<(String, File, PathBuf)> {
+        if project_id == RESERVED_BUFFERS_PROJECT {
+            return Err(anyhow!("No existing doc {}", rel_path));
+        }
 
-        // Construct full path
-        let full_path = std::path::PathBuf::from(&project.root).join(rel_path);
+        // Construct full path.
+        let full_path = if project_id == RESERVED_FILES_PROJECT {
+            let project = self
+                .projects
+                .get(project_id)
+                .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+            std::path::PathBuf::from(&project.root).join(rel_path)
+        } else {
+            std::path::PathBuf::from(rel_path)
+        };
         let mut open_options = std::fs::OpenOptions::new();
         open_options.read(true).write(true);
         if matches!(mode, OpenMode::Create) {
@@ -1242,7 +1262,7 @@ impl Server {
             .open(&full_path)
             .with_context(|| format!("Failed to create/open file: {}", full_path.display()))?;
 
-        // Check if file is binary
+        // Check if file is binary.
         let mut buffer = vec![0; 8192]; // Read first 8KB
         let bytes_read = file
             .read(&mut buffer)
@@ -1261,83 +1281,34 @@ impl Server {
         file.read_to_string(&mut content)
             .with_context(|| format!("Failed to read file: {}", full_path.display()))?;
 
-        Ok((content, file))
+        Ok((content, file, full_path))
     }
 
     async fn open_file_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
-        host_id: ServerId,
-        file_desc: FileDesc,
+        file_desc: EditorFileDesc,
         mode: OpenMode,
     ) -> anyhow::Result<()> {
-        if self.host_id == host_id {
-            // Handle local file opening
+        if &self.host_id == file_desc.host_id() {
+            // Local file.
             match &file_desc {
-                FileDesc::ProjectFile { project, file } => {
-                    // Special handling for _buffers project.
-                    if project == RESERVED_BUFFERS_PROJECT {
-                        for (_doc_id, doc) in &self.docs {
-                            if doc.matches(&file_desc) {
-                                // Found matching doc, return it.
-                                let resp = OpenFileResp {
-                                    content: doc.buffer.iter().collect(),
-                                    site_id: self.site_id,
-                                    filename: doc.name.clone(),
-                                    file: EditorFileDesc::new(
-                                        FileDesc::File {
-                                            id: match doc.abs_filename {
-                                                Some(ref name) => name.display().to_string(),
-                                                None => doc.name.clone(),
-                                            },
-                                        },
-                                        self.host_id.clone(),
-                                    ),
-                                };
-                                next.send_resp(resp, None).await;
-                                return Ok(());
-                            }
-                        }
-                        // No matching doc found.
-                        let err = lsp_server::ResponseError {
-                            code: ErrorCode::IoError as i32,
-                            message: format!("Can’t find doc {}", file),
-                            data: None,
-                        };
-                        next.send_resp((), Some(err)).await;
-                        return Ok(());
-                    }
-
-                    // Look up project by name.
-                    let project_data = self
-                        .projects
-                        .get(project)
-                        .ok_or_else(|| anyhow!("Project {} not found", project))?;
-
-                    // Check if already open (canonicalize to avoid symlink/path variance)
-                    let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
-                    let full_path_canon = canonicalize_if_exists(&full_path);
-
+                EditorFileDesc::ProjectFile { project, file, .. } => {
+                    // Check if file is alreay opened.
                     for (_doc_id, doc) in &self.docs {
-                        if let Some(ref abs_c) = doc.abs_filename_canon {
-                            if abs_c == &full_path_canon {
-                                // Already open, return existing doc
-                                let resp = OpenFileResp {
-                                    content: doc.buffer.iter().collect(),
-                                    site_id: self.site_id,
-                                    filename: doc.name.clone(),
-                                    file: EditorFileDesc::new(
-                                        file_desc.clone(),
-                                        self.host_id.clone(),
-                                    ),
-                                };
-                                next.send_resp(resp, None).await;
-                                return Ok(());
-                            }
+                        if doc.matches(&file_desc) {
+                            let resp = OpenFileResp {
+                                content: doc.buffer.iter().collect(),
+                                site_id: self.site_id,
+                                filename: doc.name.clone(),
+                                file: EditorFileDesc::new(file_desc, self.host_id.clone()),
+                            };
+                            next.send_resp(resp, None).await;
+                            return Ok(());
                         }
                     }
 
-                    // Read from disk
+                    // Not opened, read from disk and create doc.
                     let res = self.open_file_from_disk(project, file, mode).await;
                     if let Err(err) = res {
                         let err = lsp_server::ResponseError {
@@ -1348,18 +1319,20 @@ impl Server {
                         next.send_resp((), Some(err)).await;
                         return Ok(());
                     }
-                    let (content, disk_file) = res.unwrap();
+                    let (content, disk_file, full_path) = res.unwrap();
 
                     // Create new doc
                     let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
-                    let filename = std::path::Path::new(file)
+                    let base_name = std::path::Path::new(file)
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or(file)
                         .to_string();
 
+                    let full_path_canon = canonicalize_if_exists(&full_path);
+
                     let mut doc = Doc::new(
-                        filename.clone(),
+                        base_name.clone(),
                         JsonMap::new(),
                         Some(full_path),
                         Some(full_path_canon),
@@ -1377,8 +1350,8 @@ impl Server {
                     let mut buffer = GapBuffer::new();
                     buffer.insert_many(0, content.chars());
                     let remote_doc = RemoteDoc {
-                        name: filename.clone(),
-                        file_desc: file_desc.clone(),
+                        name: base_name.clone(),
+                        file_desc: file_desc.clone().into(),
                         next_site_seq: 1,
                         meta: JsonMap::new(),
                         remote_op_buffer: Vec::new(),
@@ -1395,55 +1368,12 @@ impl Server {
                     let resp = OpenFileResp {
                         content,
                         site_id: self.site_id,
-                        filename,
-                        file: EditorFileDesc::new(file_desc.clone(), self.host_id.clone()),
+                        filename: base_name,
+                        file: file_desc.clone(),
                     };
                     next.send_resp(resp, None).await;
                 }
-                FileDesc::File { id } => {
-                    // Look up existing doc by filename or absolute path
-                    let mut found_doc_id = None;
-                    if std::path::Path::new(id).is_absolute() {
-                        let target = canonicalize_if_exists(std::path::Path::new(id));
-                        for (doc_id, doc) in &self.docs {
-                            if let Some(ref abs_c) = doc.abs_filename_canon {
-                                if abs_c == &target {
-                                    found_doc_id = Some(*doc_id);
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        for (doc_id, doc) in &self.docs {
-                            if doc.abs_filename.is_none() && doc.name == *id {
-                                found_doc_id = Some(*doc_id);
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Some(doc_id) = found_doc_id {
-                        let doc = self.docs.get(&doc_id).unwrap();
-                        let resp = OpenFileResp {
-                            content: doc.buffer.iter().collect(),
-                            site_id: self.site_id,
-                            filename: doc.name.clone(),
-                            file: EditorFileDesc::new(
-                                FileDesc::File { id: id.clone() },
-                                self.host_id.clone(),
-                            ),
-                        };
-                        next.send_resp(resp, None).await;
-                    } else {
-                        let err = lsp_server::ResponseError {
-                            code: ErrorCode::IoError as i32,
-                            message: format!("File '{}' not found", id),
-                            data: None,
-                        };
-                        next.send_resp((), Some(err)).await;
-                    }
-                }
-                FileDesc::Project { .. } => {
+                EditorFileDesc::Project { .. } => {
                     let err = lsp_server::ResponseError {
                         code: ErrorCode::BadRequest as i32,
                         message: "Cannot open a project directory".to_string(),
@@ -1457,23 +1387,22 @@ impl Server {
 
         // Open remote file.
 
-        // Check if we already have this file in remote_docs
-        for ((doc_host_id, doc_id), remote_doc) in &self.remote_docs {
-            if doc_host_id == &host_id && remote_doc.file_desc == file_desc {
-                // Return the current buffer content instead of error
-                let resp = OpenFileResp {
-                    content: remote_doc.buffer.iter().collect(),
-                    site_id: remote_doc.engine.site(),
-                    filename: remote_doc.name.clone(),
-                    file: EditorFileDesc::new(file_desc.clone(), host_id.clone()),
-                };
-                next.send_resp(resp, None).await;
-                return Ok(());
-            }
+        // Check if we already have this file in remote_docs.
+        let already_open = self.get_remote_doc(&file_desc);
+        if let Some((_doc_id, remote_doc)) = already_open {
+            let resp = OpenFileResp {
+                content: remote_doc.buffer.iter().collect(),
+                site_id: remote_doc.engine.site(),
+                filename: remote_doc.name.clone(),
+                file: file_desc,
+            };
+            next.send_resp(resp, None).await;
+            return Ok(());
         }
 
-        let msg = Msg::RequestFile(file_desc, mode);
-        next.send_to_remote(&host_id, msg).await;
+        // Don’t have it opened, send request to remote.
+        let msg = Msg::RequestFile(file_desc.into(), mode);
+        next.send_to_remote(&file_desc.host_id(), msg).await;
         Ok(())
     }
 
@@ -1497,77 +1426,27 @@ impl Server {
         let site_id = self.site_id_of(&remote_host_id);
         match &file_desc {
             FileDesc::ProjectFile { project, file } => {
-                // Special handling for _doc project.
-                if project == "_doc" {
-                    // Look for owned docs without projects.
-                    for (doc_id, doc) in &mut self.docs {
-                        if doc.abs_filename.is_none() && doc.name == *file {
-                            // Found matching doc, add remote as subscriber.
-                            doc.subscribers.insert(remote_host_id.clone(), 0);
-
-                            // Send snapshot.
-                            let snapshot = NewSnapshot {
-                                content: doc.buffer.iter().collect(),
-                                name: doc.name.clone(),
-                                seq: doc.engine.current_seq(),
-                                site_id,
-                                file_desc: file_desc.clone(),
-                                doc_id: *doc_id,
-                            };
-                            next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
-                                .await;
-                            return Ok(());
-                        }
-                    }
-                    // No matching doc found.
-                    next.send_to_remote(
-                        &remote_host_id,
-                        Msg::ErrorResp(
-                            ErrorCode::IoError,
-                            format!(
-                                "Document '{}' not found in {}",
-                                file, RESERVED_BUFFERS_PROJECT
-                            ),
-                        ),
-                    )
-                    .await;
-                    return Ok(());
-                }
-
-                // Look up project by name.
-                let project_data = self
-                    .projects
-                    .get(project)
-                    .ok_or_else(|| anyhow!("Project {} not found", project))?;
-
-                // Check if already open
-                let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
-                let full_path_canon = canonicalize_if_exists(&full_path);
-
-                // Look for existing doc with same abs_filename (canonical)
+                // Check if file is already opened.
                 for (doc_id, doc) in &mut self.docs {
-                    if let Some(ref abs_c) = doc.abs_filename_canon {
-                        if abs_c == &full_path_canon {
-                            // Already open, add remote as subscriber
-                            doc.subscribers.insert(remote_host_id.clone(), 0);
+                    if doc.matches(&file_desc) {
+                        // Don’t add remote as subscriber, wait until we
+                        // receive RequestOps message.
 
-                            // Send snapshot
-                            let snapshot = NewSnapshot {
-                                content: doc.buffer.iter().collect(),
-                                name: doc.name.clone(),
-                                seq: doc.engine.current_seq(),
-                                site_id,
-                                file_desc: file_desc.clone(),
-                                doc_id: *doc_id,
-                            };
-                            next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
-                                .await;
-                            return Ok(());
-                        }
+                        let snapshot = NewSnapshot {
+                            content: doc.buffer.iter().collect(),
+                            name: doc.name.clone(),
+                            seq: doc.engine.current_seq(),
+                            site_id,
+                            file_desc: file_desc.clone(),
+                            doc_id: *doc_id,
+                        };
+                        next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                            .await;
+                        return Ok(());
                     }
                 }
 
-                // Not open, read from disk
+                // Not already open, read from disk.
                 let res = self.open_file_from_disk(project, file, mode).await;
                 if let Err(err) = res {
                     next.send_to_remote(
@@ -1577,7 +1456,8 @@ impl Server {
                     .await;
                     return Ok(());
                 }
-                let (content, disk_file) = res.unwrap();
+                let (content, disk_file, full_path) = res.unwrap();
+                let full_path_canon = canonicalize_if_exists(&full_path);
 
                 // Create new doc
                 let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
@@ -1613,51 +1493,6 @@ impl Server {
                 };
                 next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
                     .await;
-            }
-            FileDesc::File { id } => {
-                // Look up existing doc by filename or absolute path.
-                let mut found_doc_id = None;
-                if std::path::Path::new(id).is_absolute() {
-                    let target = canonicalize_if_exists(std::path::Path::new(id));
-                    for (doc_id, doc) in &self.docs {
-                        if let Some(ref abs) = doc.abs_filename {
-                            if canonicalize_if_exists(abs) == target {
-                                found_doc_id = Some(*doc_id);
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    for (doc_id, doc) in &self.docs {
-                        if doc.abs_filename.is_none() && doc.name == *id {
-                            found_doc_id = Some(*doc_id);
-                            break;
-                        }
-                    }
-                }
-
-                if let Some(doc_id) = found_doc_id {
-                    let doc = self.docs.get_mut(&doc_id).unwrap();
-                    // Add remote as subscriber.
-                    doc.subscribers.insert(remote_host_id.clone(), 0);
-
-                    let snapshot = NewSnapshot {
-                        content: doc.buffer.iter().collect(),
-                        name: doc.name.clone(),
-                        seq: doc.engine.current_seq(),
-                        site_id,
-                        file_desc: file_desc.clone(),
-                        doc_id,
-                    };
-                    next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
-                        .await;
-                } else {
-                    next.send_to_remote(
-                        &remote_host_id,
-                        Msg::ErrorResp(ErrorCode::IoError, format!("File '{}' not found", id)),
-                    )
-                    .await;
-                }
             }
             FileDesc::Project { .. } => {
                 next.send_to_remote(
@@ -2153,10 +1988,19 @@ impl Server {
             Ok(buf) => buf.to_string_lossy().to_string(),
             Err(_) => filename,
         };
+        let file_path = std::path::Path::new(&filename);
 
         // Check if a file with this name/path already exists.
-        let file_desc = FileDesc::File {
-            id: filename.clone(),
+        let file_desc = if file_path.is_absolute() {
+            FileDesc::ProjectFile {
+                project: RESERVED_FILES_PROJECT.to_string(),
+                file: filename.clone(),
+            }
+        } else {
+            FileDesc::ProjectFile {
+                project: RESERVED_BUFFERS_PROJECT.to_string(),
+                file: params.filename.clone(),
+            }
         };
         for doc in self.docs.values() {
             if doc.matches(&file_desc) {
@@ -2185,7 +2029,7 @@ impl Server {
         };
 
         let (doc_filename, doc_filename_canon) = if filename_canon.exists() {
-            (Some(PathBuf::from(filename)), Some(filename_canon))
+            (Some(PathBuf::from(filename.clone())), Some(filename_canon))
         } else {
             (None, None)
         };
@@ -2211,9 +2055,7 @@ impl Server {
         buffer.insert_many(0, params.content.chars());
         let remote_doc = RemoteDoc {
             name: params.filename.clone(),
-            file_desc: FileDesc::File {
-                id: params.filename.clone(),
-            },
+            file_desc: file_desc.clone(),
             next_site_seq: 1,
             meta: params.meta,
             remote_op_buffer: Vec::new(),
@@ -2224,22 +2066,13 @@ impl Server {
             .insert((self.host_id.clone(), doc_id), remote_doc);
 
         // Track mapping for our own hosted remote doc as well.
-        let editor_file_desc = EditorFileDesc::new(
-            FileDesc::File {
-                id: params.filename.clone(),
-            },
-            self.host_id.clone(),
-        );
-        self.remote_doc_id_map.insert(editor_file_desc, doc_id);
+        let editor_file_desc = EditorFileDesc::new(file_desc, self.host_id.clone());
+        self.remote_doc_id_map
+            .insert(editor_file_desc.clone(), doc_id);
 
         // Return response with file and site_id
         let resp = ShareFileResp {
-            file: EditorFileDesc::new(
-                FileDesc::File {
-                    id: params.filename.clone(),
-                },
-                self.host_id.clone(),
-            ),
+            file: editor_file_desc,
             site_id: self.site_id,
         };
         Ok(resp)
@@ -2623,6 +2456,20 @@ impl Server {
                 let subscribers: Vec<ServerId> = subscriber_set.into_iter().collect();
                 Ok((docs_to_remove, Some(project_root), subscribers))
             }
+            FileDesc::ProjectFile { project, .. }
+                if project == RESERVED_BUFFERS_PROJECT || project == RESERVED_FILES_PROJECT =>
+            {
+                for (doc_id, doc) in &self.docs {
+                    if doc.matches(file) {
+                        return Ok((
+                            vec![doc_id],
+                            doc.abs_filename.clone(),
+                            doc.subscribers.keys().clone(),
+                        ));
+                    }
+                }
+                return Ok((Vec::new(), None, vec![]));
+            }
             FileDesc::ProjectFile {
                 project,
                 file: file_path,
@@ -2649,25 +2496,6 @@ impl Server {
 
                 let subscribers: Vec<ServerId> = subscriber_set.into_iter().collect();
                 Ok((docs_to_remove, Some(full_path), subscribers))
-            }
-            FileDesc::File { id } => {
-                // Look up doc by filename
-                let mut found_doc_id = None;
-                for (doc_id, doc) in &self.docs {
-                    if doc.abs_filename.is_none() && doc.name == *id {
-                        found_doc_id = Some(*doc_id);
-                        break;
-                    }
-                }
-
-                if let Some(doc_id) = found_doc_id {
-                    let doc = self.docs.get(&doc_id).unwrap();
-                    let path_to_delete = doc.abs_filename.clone();
-                    let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
-                    Ok((vec![doc_id], path_to_delete, subscribers))
-                } else {
-                    Err(anyhow!("File '{}' not found", id))
-                }
             }
         }
     }
