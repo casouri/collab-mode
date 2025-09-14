@@ -201,6 +201,22 @@ impl Doc {
         }
         Ok(())
     }
+
+    /// Return `true` if this doc matches `file`.
+    fn matches(&self, file: &FileDesc) -> bool {
+        match file {
+            FileDesc::File { id } => {
+                let file_as_path = std::path::PathBuf::from(id);
+                self.abs_filename.is_none() && self.name == *id
+                    || self.abs_filename.as_deref() == Some(&file_as_path)
+            }
+            FileDesc::Project { .. } => false,
+            FileDesc::ProjectFile { project, file } => {
+                let full_path = std::path::PathBuf::from(project).join(file);
+                self.abs_filename_canon == Some(canonicalize_if_exists(&full_path))
+            }
+        }
+    }
 }
 
 // *** Impl RemoteDoc
@@ -507,7 +523,10 @@ impl Server {
             }
             "SaveFile" => {
                 let params: SaveFileParams = serde_json::from_value(req.params)?;
-                if !self.check_connection(next, &params.host_id).await {
+                if !self
+                    .check_connection(next, &params.file.host_id().clone())
+                    .await
+                {
                     return Ok(());
                 }
                 self.handle_save_file_from_editor(next, params).await?;
@@ -515,7 +534,10 @@ impl Server {
             }
             "DisconnectFromFile" => {
                 let params: DisconnectFileParams = serde_json::from_value(req.params)?;
-                if !self.check_connection(next, &params.host_id).await {
+                if !self
+                    .check_connection(next, &params.file.host_id().clone())
+                    .await
+                {
                     return Ok(());
                 }
                 self.handle_disconnect_from_file(next, params).await?;
@@ -811,11 +833,17 @@ impl Server {
                     return Ok(());
                 }
 
-                let resp = SaveFileResp {
-                    host_id: msg.host,
-                    doc_id,
+                if let Some(remote_doc) = self.remote_docs.get(&(msg.host.clone(), doc_id)) {
+                    let file = EditorFileDesc::new(remote_doc.file_desc.clone(), msg.host.clone());
+                    let resp = SaveFileResp { file };
+                    next.send_resp(resp, None).await;
+                } else {
+                    tracing::warn!(
+                        "Doc {} not found when handling FileSaved from {}",
+                        doc_id,
+                        msg.host
+                    );
                 };
-                next.send_resp(resp, None).await;
                 Ok(())
             }
             Msg::StopSendingOps(doc_id) => {
@@ -1087,7 +1115,10 @@ impl Server {
                             result.push(ListFileEntry {
                                 file: EditorFileDesc::File {
                                     host_id: self.host_id.clone(),
-                                    id: doc.name.clone(),
+                                    id: match doc.abs_filename {
+                                        Some(ref name) => name.display().to_string(),
+                                        None => doc.name.clone(),
+                                    },
                                 },
                                 filename: doc.name.clone(),
                                 is_directory: false,
@@ -1246,17 +1277,22 @@ impl Server {
                 FileDesc::ProjectFile { project, file } => {
                     // Special handling for _buffers project.
                     if project == RESERVED_BUFFERS_PROJECT {
-                        // Look for owned docs without projects.
-                        for (doc_id, doc) in &self.docs {
-                            // Check if doc doesn’t belong to a project (abs_filename is None)
-                            // and its name matches the requested file.
-                            if doc.abs_filename.is_none() && doc.name == *file {
+                        for (_doc_id, doc) in &self.docs {
+                            if doc.matches(&file_desc) {
                                 // Found matching doc, return it.
                                 let resp = OpenFileResp {
                                     content: doc.buffer.iter().collect(),
                                     site_id: self.site_id,
                                     filename: doc.name.clone(),
-                                    doc_id: *doc_id,
+                                    file: EditorFileDesc::new(
+                                        FileDesc::File {
+                                            id: match doc.abs_filename {
+                                                Some(ref name) => name.display().to_string(),
+                                                None => doc.name.clone(),
+                                            },
+                                        },
+                                        self.host_id.clone(),
+                                    ),
                                 };
                                 next.send_resp(resp, None).await;
                                 return Ok(());
@@ -1282,7 +1318,7 @@ impl Server {
                     let full_path = std::path::PathBuf::from(&project_data.root).join(&file);
                     let full_path_canon = canonicalize_if_exists(&full_path);
 
-                    for (doc_id, doc) in &self.docs {
+                    for (_doc_id, doc) in &self.docs {
                         if let Some(ref abs_c) = doc.abs_filename_canon {
                             if abs_c == &full_path_canon {
                                 // Already open, return existing doc
@@ -1290,7 +1326,10 @@ impl Server {
                                     content: doc.buffer.iter().collect(),
                                     site_id: self.site_id,
                                     filename: doc.name.clone(),
-                                    doc_id: *doc_id,
+                                    file: EditorFileDesc::new(
+                                        file_desc.clone(),
+                                        self.host_id.clone(),
+                                    ),
                                 };
                                 next.send_resp(resp, None).await;
                                 return Ok(());
@@ -1357,7 +1396,7 @@ impl Server {
                         content,
                         site_id: self.site_id,
                         filename,
-                        doc_id,
+                        file: EditorFileDesc::new(file_desc.clone(), self.host_id.clone()),
                     };
                     next.send_resp(resp, None).await;
                 }
@@ -1389,7 +1428,10 @@ impl Server {
                             content: doc.buffer.iter().collect(),
                             site_id: self.site_id,
                             filename: doc.name.clone(),
-                            doc_id,
+                            file: EditorFileDesc::new(
+                                FileDesc::File { id: id.clone() },
+                                self.host_id.clone(),
+                            ),
                         };
                         next.send_resp(resp, None).await;
                     } else {
@@ -1423,7 +1465,7 @@ impl Server {
                     content: remote_doc.buffer.iter().collect(),
                     site_id: remote_doc.engine.site(),
                     filename: remote_doc.name.clone(),
-                    doc_id: *doc_id,
+                    file: EditorFileDesc::new(file_desc.clone(), host_id.clone()),
                 };
                 next.send_resp(resp, None).await;
                 return Ok(());
@@ -1684,7 +1726,7 @@ impl Server {
             content: snapshot.content.clone(),
             site_id: snapshot.site_id,
             filename: snapshot.name,
-            doc_id: snapshot.doc_id,
+            file: EditorFileDesc::new(snapshot.file_desc.clone(), remote_host_id.clone()),
         };
         next.send_resp(resp, None).await;
 
@@ -2007,23 +2049,20 @@ impl Server {
         next: &Next<'a>,
         params: SendOpsParams,
     ) -> anyhow::Result<()> {
-        let SendOpsParams {
-            ops,
-            doc_id,
-            host_id,
-        } = params;
-        // Look in remote_docs with (host_id, doc_id) key
-        let remote_doc = self.remote_docs.get_mut(&(host_id.clone(), doc_id));
-        if remote_doc.is_none() {
-            let err = lsp_server::ResponseError {
-                code: ErrorCode::IoError as i32,
-                message: format!("Doc {} from host {} not found", doc_id, host_id),
-                data: None,
-            };
-            next.send_resp((), Some(err)).await;
-            return Ok(());
-        }
-        let remote_doc = remote_doc.unwrap();
+        let SendOpsParams { ops, file } = params;
+        let (doc_id, remote_doc) = match self.get_remote_doc_mut(&file) {
+            Some(v) => v,
+            None => {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: format!("File not found: {}", file),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+                return Ok(());
+            }
+        };
+        let host_id = file.host_id().clone();
 
         // Drain remote ops from buffer
         let remote_ops: Vec<FatOp> = remote_doc.remote_op_buffer.drain(..).collect();
@@ -2093,12 +2132,9 @@ impl Server {
     }
 
     fn handle_undo_from_editor(&mut self, params: UndoParams) -> anyhow::Result<UndoResp> {
-        // Check if it’s a remote doc
-        let key = (params.host_id.clone(), params.doc_id.clone());
-        let remote_doc = self
-            .remote_docs
-            .get_mut(&key)
-            .ok_or_else(|| anyhow::anyhow!("Remote doc not found: {:?}", key))?;
+        let (_doc_id, remote_doc) = self
+            .get_remote_doc_mut(&params.file)
+            .ok_or_else(|| anyhow::anyhow!("Remote doc not found: {}", params.file))?;
 
         let ops = match params.kind {
             UndoKind::Undo => remote_doc.engine.generate_undo_op(),
@@ -2117,22 +2153,14 @@ impl Server {
             Ok(buf) => buf.to_string_lossy().to_string(),
             Err(_) => filename,
         };
-        // This can be either a legit canon path or a nonexist path.
-        let filename_canon = canonicalize_if_exists(&PathBuf::from(filename.clone()));
 
-        // Check if a file with this name/path already exists (for non-project files)
+        // Check if a file with this name/path already exists.
+        let file_desc = FileDesc::File {
+            id: filename.clone(),
+        };
         for doc in self.docs.values() {
-            if doc.abs_filename.is_none() && doc.name == params.filename {
-                return Err(anyhow!(
-                    "A file with name '{}' already exists",
-                    params.filename
-                ));
-            }
-
-            if let Some(ref path_canon) = doc.abs_filename_canon {
-                if filename_canon == *path_canon {
-                    return Err(anyhow!("A file at path '{}' is already opened", &filename));
-                }
+            if doc.matches(&file_desc) {
+                return Err(anyhow!("File {} already exists", params.filename));
             }
         }
 
@@ -2141,11 +2169,11 @@ impl Server {
 
         // If we recognized an absolute filename, open it for
         // read/write so we can save.
-        let path_canon = PathBuf::from(&filename_canon);
-        let disk_file: Option<File> = if path_canon.exists() {
+        let filename_canon = canonicalize_if_exists(&PathBuf::from(filename.clone()));
+        let disk_file: Option<File> = if filename_canon.exists() {
             let mut options = std::fs::OpenOptions::new();
             options.read(true).write(true);
-            match options.open(&path_canon) {
+            match options.open(&filename_canon) {
                 Ok(file) => Some(file),
                 Err(err) => {
                     tracing::warn!("Failed to open file {}: {}", filename, err);
@@ -2156,8 +2184,8 @@ impl Server {
             None
         };
 
-        let (doc_filename, doc_filename_canon) = if path_canon.exists() {
-            (Some(PathBuf::from(filename)), Some(path_canon))
+        let (doc_filename, doc_filename_canon) = if filename_canon.exists() {
+            (Some(PathBuf::from(filename)), Some(filename_canon))
         } else {
             (None, None)
         };
@@ -2204,9 +2232,14 @@ impl Server {
         );
         self.remote_doc_id_map.insert(editor_file_desc, doc_id);
 
-        // Return response with doc_id and site_id
+        // Return response with file and site_id
         let resp = ShareFileResp {
-            doc_id,
+            file: EditorFileDesc::new(
+                FileDesc::File {
+                    id: params.filename.clone(),
+                },
+                self.host_id.clone(),
+            ),
             site_id: self.site_id,
         };
         Ok(resp)
@@ -2355,25 +2388,46 @@ impl Server {
         next: &Next<'a>,
         params: SaveFileParams,
     ) -> anyhow::Result<()> {
-        let SaveFileParams { host_id, doc_id } = params.clone();
+        let SaveFileParams { file } = params.clone();
+        let host_id = file.host_id().clone();
         if host_id != self.host_id {
-            // Handle remotely.
-            next.send_to_remote(&host_id, Msg::SaveFile(doc_id)).await;
-            return Ok(());
+            // Remote: resolve doc id and forward.
+            if let Some((doc_id, _)) = self.get_remote_doc(&file) {
+                next.send_to_remote(&host_id, Msg::SaveFile(doc_id)).await;
+                return Ok(());
+            } else {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: format!("Remote file not open: {}", file),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+                return Ok(());
+            }
         }
 
-        // Handle locally.
-        let res = self.save_file_to_disk(&doc_id).await;
+        // Local: find the doc by file and save.
+        let maybe_doc_id = self.get_remote_doc(&file);
 
-        if let Err(err) = res {
+        if let Some((doc_id, _doc)) = maybe_doc_id {
+            let res = self.save_file_to_disk(&doc_id).await;
+            if let Err(err) = res {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: err.to_string(),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+            } else {
+                next.send_resp(SaveFileParams { file }, None).await;
+            }
+        } else {
             let err = lsp_server::ResponseError {
                 code: ErrorCode::IoError as i32,
-                message: err.to_string(),
+                message: "File not open".to_string(),
                 data: None,
             };
             next.send_resp((), Some(err)).await;
-        } else {
-            next.send_resp(params, None).await;
         }
         Ok(())
     }
@@ -2383,14 +2437,12 @@ impl Server {
         next: &Next<'a>,
         params: DisconnectFileParams,
     ) -> anyhow::Result<()> {
-        let DisconnectFileParams { host_id, doc_id } = params;
+        let DisconnectFileParams { file } = params;
 
-        let existing_doc = self.remote_docs.remove(&(host_id.clone(), doc_id));
-
-        if let Some(removed_doc) = existing_doc {
-            // Remove from editor mapping as well.
-            let editor_file_desc = EditorFileDesc::new(removed_doc.file_desc, host_id.clone());
-            self.remote_doc_id_map.remove(&editor_file_desc);
+        let host_id = file.host_id().clone();
+        if let Some((doc_id, _)) = self.get_remote_doc(&file) {
+            self.remote_docs.remove(&(host_id.clone(), doc_id));
+            self.remote_doc_id_map.remove(&file);
             tracing::info!(
                 "Disconnected from remote doc {} on host {}",
                 doc_id,
@@ -2399,11 +2451,7 @@ impl Server {
             next.send_to_remote(&host_id, Msg::StopSendingOps(doc_id))
                 .await;
         } else {
-            tracing::info!(
-                "Doc {} not found in remote_docs for host {}, nothing to disconnect",
-                doc_id,
-                host_id
-            );
+            tracing::info!("Doc {} not found, nothing to disconnect", file);
         }
 
         // Send empty response to indicate success

@@ -3,6 +3,8 @@
 
 use crate::error::CollabError;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::path::Path;
 use std::path::PathBuf;
 
 pub use crate::config_man::{ArcKeyCert, KeyCert};
@@ -82,6 +84,22 @@ pub enum FileDesc {
     },
 }
 
+impl fmt::Display for FileDesc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileDesc::File { id } => {
+                let last = Path::new(id)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| id.into());
+                write!(f, "_buffers/{}", last)
+            }
+            FileDesc::Project { id } => write!(f, "{}", id),
+            FileDesc::ProjectFile { project, file } => write!(f, "{}/{}", project, file),
+        }
+    }
+}
+
 impl PartialEq for FileDesc {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -141,6 +159,32 @@ pub enum EditorFileDesc {
         /// Relative path to the file in the project.
         file: String,
     },
+}
+
+impl fmt::Display for EditorFileDesc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EditorFileDesc::File { host_id, id } => {
+                write!(f, "{}/{}", host_id, FileDesc::File { id: id.clone() })
+            }
+            EditorFileDesc::Project { host_id, id } => {
+                write!(f, "{}/{}", host_id, FileDesc::Project { id: id.clone() })
+            }
+            EditorFileDesc::ProjectFile {
+                host_id,
+                project,
+                file,
+            } => write!(
+                f,
+                "{}/{}",
+                host_id,
+                FileDesc::ProjectFile {
+                    project: project.clone(),
+                    file: file.clone(),
+                }
+            ),
+        }
+    }
 }
 
 impl EditorFileDesc {

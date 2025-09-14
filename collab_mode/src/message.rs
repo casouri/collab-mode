@@ -164,7 +164,7 @@ pub struct ShareFileParams {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareFileResp {
-    pub doc_id: DocId,
+    pub file: EditorFileDesc,
     pub site_id: SiteId,
 }
 
@@ -231,7 +231,7 @@ pub struct OpenFileResp {
     pub content: String,
     pub site_id: SiteId,
     pub filename: String,
-    pub doc_id: DocId,
+    pub file: EditorFileDesc,
 }
 
 // **** MoveFile
@@ -253,8 +253,7 @@ pub type FileMovedNotif = MoveFileParams;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveFileParams {
-    pub host_id: ServerId,
-    pub doc_id: DocId,
+    pub file: EditorFileDesc,
 }
 
 pub type SaveFileResp = SaveFileParams;
@@ -275,8 +274,7 @@ pub type FileDeletedNotif = DeleteFileParams;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectFileParams {
-    pub host_id: ServerId,
-    pub doc_id: DocId,
+    pub file: EditorFileDesc,
 }
 
 // **** SendOpEditor
@@ -285,8 +283,7 @@ pub struct DisconnectFileParams {
 #[serde(rename_all = "camelCase")]
 pub struct SendOpsParams {
     pub ops: Vec<EditorFatOp>,
-    pub doc_id: DocId,
-    pub host_id: ServerId,
+    pub file: EditorFileDesc,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -302,8 +299,7 @@ pub struct SendOpsResp {
 #[serde(rename_all = "camelCase")]
 pub struct SendInfoParams {
     pub info: JsonMap,
-    pub doc_id: DocId,
-    pub host_id: ServerId,
+    pub file: EditorFileDesc,
 }
 
 // **** Undo
@@ -317,8 +313,7 @@ pub enum UndoKind {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoParams {
-    pub doc_id: DocId,
-    pub host_id: ServerId,
+    pub file: EditorFileDesc,
     pub kind: UndoKind,
 }
 
@@ -333,8 +328,7 @@ pub struct UndoResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrintHistoryParams {
-    pub doc_id: DocId,
-    pub host_id: ServerId,
+    pub file: EditorFileDesc,
     pub debug: bool,
 }
 
