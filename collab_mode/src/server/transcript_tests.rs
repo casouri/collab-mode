@@ -297,7 +297,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
     // Hub shares the initial file
     let initial_content = ""; // Start with empty document
-    let (hub_doc_id, _hub_site_id) = setup
+    let (hub_file, _hub_site_id) = setup
         .hub
         .editor
         .share_file("test.txt", initial_content, serde_json::json!({}))
@@ -307,23 +307,23 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     // We keep the MockDocument separate and just store doc_id and site_id
     let mut spoke_docs = Vec::new();
     let mut spoke_pending_ops: Vec<Vec<serde_json::Value>> = Vec::new();
-    let mut spoke_doc_ids = Vec::new();
+    let mut spoke_files = Vec::new();
     let mut spoke_site_ids = Vec::new();
     let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
 
     for i in 0..num_editors {
-        let (doc_id, site_id, content) = setup.spokes[i]
+        let (file_desc, site_id, content) = setup.spokes[i]
             .editor
             .open_file(serde_json::json!({
                 "type": "file",
                 "hostId": setup.hub.id.clone(),
-                "id": hub_doc_id
+                "id": hub_file
             }))
             .await?;
 
         spoke_docs.push(MockDocument::new(&content));
         spoke_pending_ops.push(Vec::new());
-        spoke_doc_ids.push(doc_id);
+        spoke_files.push(file_desc);
         spoke_site_ids.push(site_id);
     }
 
@@ -364,8 +364,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     let resp = setup.spokes[*editor]
                         .editor
                         .send_ops(
-                            spoke_doc_ids[*editor],
-                            &setup.hub.id,
+                            spoke_files[*editor].clone(),
                             spoke_pending_ops[*editor].clone(),
                         )
                         .await?;
@@ -383,7 +382,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 // Then send undo request
                 let ops = setup.spokes[*editor]
                     .editor
-                    .send_undo(spoke_doc_ids[*editor], &setup.hub.id, "Undo")
+                    .send_undo(spoke_files[*editor].clone(), "Undo")
                     .await?;
 
                 // Apply the undo ops locally
@@ -409,8 +408,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 let resp = setup.spokes[*editor]
                     .editor
                     .send_ops(
-                        spoke_doc_ids[*editor],
-                        &setup.hub.id,
+                        spoke_files[*editor].clone(),
                         vec![serde_json::json!({
                             "op": "Undo",
                             "groupSeq": group_seq
@@ -433,8 +431,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     let resp = setup.spokes[*editor]
                         .editor
                         .send_ops(
-                            spoke_doc_ids[*editor],
-                            &setup.hub.id,
+                            spoke_files[*editor].clone(),
                             spoke_pending_ops[*editor].clone(),
                         )
                         .await?;
@@ -452,7 +449,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 // Then send redo request
                 let ops = setup.spokes[*editor]
                     .editor
-                    .send_undo(spoke_doc_ids[*editor], &setup.hub.id, "Redo")
+                    .send_undo(spoke_files[*editor].clone(), "Redo")
                     .await?;
 
                 // Apply the redo ops locally
@@ -478,8 +475,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 let resp = setup.spokes[*editor]
                     .editor
                     .send_ops(
-                        spoke_doc_ids[*editor],
-                        &setup.hub.id,
+                        spoke_files[*editor].clone(),
                         vec![serde_json::json!({
                             "op": "Redo",
                             "groupSeq": group_seq
@@ -500,8 +496,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 let resp = setup.spokes[*editor]
                     .editor
                     .send_ops(
-                        spoke_doc_ids[*editor],
-                        &setup.hub.id,
+                        spoke_files[*editor].clone(),
                         spoke_pending_ops[*editor].clone(),
                     )
                     .await?;
@@ -523,8 +518,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         setup.spokes[i]
                             .editor
                             .send_ops(
-                                spoke_doc_ids[i],
-                                &setup.hub.id,
+                                spoke_files[i].clone(),
                                 spoke_pending_ops[i].clone(),
                             )
                             .await?
@@ -532,7 +526,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         // Send empty request to fetch remote ops
                         setup.spokes[i]
                             .editor
-                            .send_ops(spoke_doc_ids[i], &setup.hub.id, vec![])
+                            .send_ops(spoke_files[i].clone(), vec![])
                             .await?
                     };
 

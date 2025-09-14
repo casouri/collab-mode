@@ -365,12 +365,12 @@ impl MockEditor {
 
     // Test-specific helper methods
 
-    /// Helper: Open a file and return doc_id, site_id, and content
+    /// Helper: Open a file and return editor file desc, site_id, and content
     #[cfg(any(test, feature = "test-runner"))]
     pub async fn open_file(
         &mut self,
         file_desc: serde_json::Value,
-    ) -> anyhow::Result<(u32, u32, String)> {
+    ) -> anyhow::Result<(serde_json::Value, u32, String)> {
         let resp = self
             .request(
                 "OpenFile",
@@ -380,11 +380,7 @@ impl MockEditor {
                 }),
             )
             .await?;
-
-        let doc_id = resp["docId"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing docId in response"))?
-            as u32;
+        let file = resp["file"].clone();
         let site_id = resp["siteId"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing siteId in response"))?
@@ -394,22 +390,20 @@ impl MockEditor {
             .ok_or_else(|| anyhow::anyhow!("Missing content in response"))?
             .to_string();
 
-        Ok((doc_id, site_id, content))
+        Ok((file, site_id, content))
     }
 
     /// Helper: Send ops to a document
     #[cfg(any(test, feature = "test-runner"))]
     pub async fn send_ops(
         &mut self,
-        doc_id: u32,
-        host_id: &str,
+        file: serde_json::Value,
         ops: Vec<serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
         self.request(
             "SendOps",
             serde_json::json!({
-                "docId": doc_id,
-                "hostId": host_id,
+                "file": file,
                 "ops": ops,
             }),
         )
@@ -420,16 +414,14 @@ impl MockEditor {
     #[cfg(any(test, feature = "test-runner"))]
     pub async fn send_undo(
         &mut self,
-        doc_id: u32,
-        host_id: &str,
+        file: serde_json::Value,
         kind: &str,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         let resp = self
             .request(
                 "Undo",
                 serde_json::json!({
-                    "docId": doc_id,
-                    "hostId": host_id,
+                    "file": file,
                     "kind": kind,
                 }),
             )
@@ -466,7 +458,7 @@ impl MockEditor {
         filename: &str,
         content: &str,
         meta: serde_json::Value,
-    ) -> anyhow::Result<(u32, u32)> {
+    ) -> anyhow::Result<(serde_json::Value, u32)> {
         let resp = self
             .request(
                 "ShareFile",
@@ -477,17 +469,12 @@ impl MockEditor {
                 }),
             )
             .await?;
-
-        let doc_id = resp["docId"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing docId in response"))?
-            as u32;
+        let file = resp["file"].clone();
         let site_id = resp["siteId"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing siteId in response"))?
             as u32;
-
-        Ok((doc_id, site_id))
+        Ok((file, site_id))
     }
 }
 
@@ -1001,7 +988,7 @@ async fn test_open_file_basic() {
     sleep(Duration::from_millis(100)).await;
 
     // Request to open a file
-    let (doc_id, site_id, content) = setup
+    let (file_desc, site_id, content) = setup
         .hub
         .editor
         .open_file(serde_json::json!({
@@ -1015,7 +1002,7 @@ async fn test_open_file_basic() {
 
     // Verify response
     assert_eq!(content, "Hello from test.txt");
-    assert!(doc_id > 0);
+    assert!(file_desc.is_object());
     assert!(site_id >= 0); // site_id is 0 for the hub itself
 
     tracing::info!("test_open_file_basic completed successfully");
@@ -1050,7 +1037,7 @@ async fn test_open_file_from_remote() {
     sleep(Duration::from_millis(100)).await;
 
     // Spoke requests to open a file from hub
-    let (doc_id, site_id, content) = setup.spokes[0]
+    let (file_desc, site_id, content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
             "type": "projectFile",
@@ -1063,7 +1050,7 @@ async fn test_open_file_from_remote() {
 
     // Verify response
     assert_eq!(content, "fn main() {\n    println!(\"Hello\");\n}");
-    assert!(doc_id > 0);
+    assert!(file_desc.is_object());
     assert!(site_id > 0);
 
     tracing::info!("test_open_file_from_remote completed successfully");
@@ -1121,10 +1108,10 @@ async fn test_open_file_create_mode() {
 
     // Should succeed and return empty content
     let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    let doc_id = resp["docId"].as_u64().unwrap() as u32;
+    let file1 = resp["file"].clone();
     let content = resp["content"].as_str().unwrap();
     assert_eq!(content, "", "New file should have empty content");
-    assert!(doc_id > 0, "Should have valid doc_id");
+    assert!(file1.is_object(), "Should have valid file desc");
 
     // Send an insert operation to add content
     let ops = vec![serde_json::json!({
@@ -1135,7 +1122,7 @@ async fn test_open_file_create_mode() {
     let _ = setup
         .hub
         .editor
-        .send_ops(doc_id, &setup.hub.id, ops)
+        .send_ops(file1.clone(), ops)
         .await
         .unwrap();
 
@@ -1168,13 +1155,9 @@ async fn test_open_file_create_mode() {
         .wait_for_response(req_id2, 5)
         .await
         .unwrap();
-    let doc_id2 = resp2["docId"].as_u64().unwrap() as u32;
-
-    // Should return the same doc_id since it's already open
-    assert_eq!(
-        doc_id, doc_id2,
-        "Should return same doc_id for already open file"
-    );
+    let file2 = resp2["file"].clone();
+    // Should return the same file since it's already open
+    assert_eq!(file1, file2, "Should return same file for already open file");
 
     // Verify the file was actually created on disk
     let file_path = project_dir.path().join("new_file.txt");
@@ -1349,7 +1332,6 @@ async fn test_open_file_already_open() {
         .unwrap();
 
     let resp1 = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    let doc_id1 = resp1["docId"].as_u64().unwrap();
 
     // Second request to open the same file
     let req_id = 2;
@@ -1373,10 +1355,10 @@ async fn test_open_file_already_open() {
         .unwrap();
 
     let resp2 = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    let doc_id2 = resp2["docId"].as_u64().unwrap();
+    let file2 = resp2["file"].clone();
 
-    // Should return the same doc_id
-    assert_eq!(doc_id1, doc_id2);
+    // Should return the same file
+    assert_eq!(resp1["file"], file2);
     assert_eq!(resp2["content"], "Hello from test.txt");
 
     tracing::info!("test_open_file_already_open completed successfully");
@@ -2087,7 +2069,7 @@ async fn test_delete_file() {
         .unwrap();
 
     let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    let _doc_id_1 = resp["docId"].as_u64().unwrap() as DocId;
+    let _file_1 = resp["file"].clone();
 
     // Share dir1/file2.txt from hub.
     let req_id = 3;
@@ -2107,7 +2089,7 @@ async fn test_delete_file() {
         .unwrap();
 
     let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    let _doc_id_2 = resp["docId"].as_u64().unwrap() as DocId;
+    let _file_2 = resp["file"].clone();
 
     // Share dir1/file3.txt from hub.
     let req_id = 4;
@@ -2127,7 +2109,7 @@ async fn test_delete_file() {
         .unwrap();
 
     let resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    let _doc_id_3 = resp["docId"].as_u64().unwrap() as DocId;
+    let _file_3 = resp["file"].clone();
 
     // Connect spoke 0 to hub.
     setup.spokes[0]
@@ -2171,7 +2153,7 @@ async fn test_delete_file() {
         .wait_for_response(req_id, 5)
         .await
         .unwrap();
-    let _remote_doc_id_1 = resp["docId"].as_u64().unwrap() as DocId;
+    let _remote_file_1 = resp["file"].clone();
 
     // Open dir1/file2.txt from spoke 0.
     let req_id = 6;
@@ -2198,7 +2180,7 @@ async fn test_delete_file() {
         .wait_for_response(req_id, 5)
         .await
         .unwrap();
-    let _remote_doc_id_2 = resp["docId"].as_u64().unwrap() as DocId;
+    let _remote_file_2 = resp["file"].clone();
 
     // Test 1: Delete a single file (file1.txt).
     let req_id = 7;
@@ -2308,7 +2290,7 @@ async fn test_send_ops_e2e() {
     sleep(Duration::from_millis(100)).await;
 
     // Hub opens the file first (to create it in both docs and remote_docs)
-    let (hub_doc_id, _hub_site_id, _hub_content) = setup
+    let (hub_file, _hub_site_id, _hub_content) = setup
         .hub
         .editor
         .open_file(serde_json::json!({
@@ -2321,7 +2303,7 @@ async fn test_send_ops_e2e() {
         .unwrap();
 
     // Spoke 1 requests the file
-    let (spoke1_doc_id, _spoke1_site_id, spoke1_content) = setup.spokes[0]
+    let (spoke1_file, _spoke1_site_id, spoke1_content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
             "type": "projectFile",
@@ -2334,7 +2316,7 @@ async fn test_send_ops_e2e() {
     assert_eq!(spoke1_content, "Hello from test.txt");
 
     // Spoke 2 requests the file
-    let (spoke2_doc_id, _spoke2_site_id, spoke2_content) = setup.spokes[1]
+    let (spoke2_file, _spoke2_site_id, spoke2_content) = setup.spokes[1]
         .editor
         .open_file(serde_json::json!({
             "type": "projectFile",
@@ -2362,7 +2344,7 @@ async fn test_send_ops_e2e() {
     let _ = setup
         .hub
         .editor
-        .send_ops(hub_doc_id, &setup.hub.id, ops)
+        .send_ops(hub_file.clone(), ops)
         .await
         .unwrap();
 
@@ -2374,12 +2356,12 @@ async fn test_send_ops_e2e() {
         .unwrap();
 
     assert_eq!(notification["hostId"], setup.hub.id.clone());
-    assert_eq!(notification["docId"], spoke2_doc_id);
+    assert_eq!(notification["file"], spoke2_file);
 
     // Spoke 2 sends SendOps with empty ops to fetch remote ops
     let fetch_ops_resp = setup.spokes[1]
         .editor
-        .send_ops(spoke2_doc_id, &setup.hub.id, vec![])
+        .send_ops(spoke2_file.clone(), vec![])
         .await
         .unwrap();
     let remote_ops = fetch_ops_resp["ops"].as_array().unwrap();
@@ -2409,7 +2391,7 @@ async fn test_send_ops_e2e() {
     // Spoke 1 fetches remote ops
     let fetch_ops_resp_spoke1 = setup.spokes[0]
         .editor
-        .send_ops(spoke1_doc_id, &setup.hub.id, vec![])
+        .send_ops(spoke1_file.clone(), vec![])
         .await
         .unwrap();
     let remote_ops = fetch_ops_resp_spoke1["ops"].as_array().unwrap();
@@ -2439,8 +2421,7 @@ async fn test_send_ops_e2e() {
     let _send_ops_resp_spoke1 = setup.spokes[0]
         .editor
         .send_ops(
-            spoke1_doc_id,
-            &setup.hub.id,
+            spoke1_file.clone(),
             vec![serde_json::json!({
                 "op": {
                     "Ins": [10, "[Spoke1]"]  // Insert after "Modified: "
@@ -2469,8 +2450,7 @@ async fn test_send_ops_e2e() {
     let send_ops_resp = setup.spokes[1]
         .editor
         .send_ops(
-            spoke2_doc_id,
-            &setup.hub.id,
+            spoke2_file.clone(),
             vec![serde_json::json!({
                 "op": {
                     "Ins": [10, "[Spoke2]"]  // Also insert after "Modified: "
@@ -2513,7 +2493,7 @@ async fn test_send_ops_e2e() {
     // Spoke1 sends empty SendOps to fetch the new ops
     let send_ops_resp = setup.spokes[0]
         .editor
-        .send_ops(spoke1_doc_id, &setup.hub.id, vec![])
+        .send_ops(spoke1_file.clone(), vec![])
         .await
         .unwrap();
 
@@ -2567,7 +2547,7 @@ async fn test_undo_e2e() {
     sleep(Duration::from_millis(100)).await;
 
     // Spoke opens the file
-    let (doc_id, _site_id, content) = setup.spokes[0]
+    let (file_desc, _site_id, content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
             "type": "projectFile",
@@ -2585,8 +2565,7 @@ async fn test_undo_e2e() {
     let send_ops_resp = setup.spokes[0]
         .editor
         .send_ops(
-            doc_id,
-            &setup.hub.id,
+            file_desc.clone(),
             vec![serde_json::json!({
                 "op": {
                     "Ins": [0, "UNDO_TEST: "]
@@ -2603,7 +2582,7 @@ async fn test_undo_e2e() {
     // Send an undo request and get the undo operations
     let undo_ops = setup.spokes[0]
         .editor
-        .send_undo(doc_id, &setup.hub.id, "Undo")
+        .send_undo(file_desc.clone(), "Undo")
         .await
         .unwrap();
 
@@ -2632,8 +2611,7 @@ async fn test_undo_e2e() {
     let send_undo_resp = setup.spokes[0]
         .editor
         .send_ops(
-            doc_id,
-            &setup.hub.id,
+            file_desc.clone(),
             vec![serde_json::json!({
                 "op": "Undo",
                 "groupSeq": 2
@@ -2648,7 +2626,7 @@ async fn test_undo_e2e() {
     // Test redo
     let redo_ops = setup.spokes[0]
         .editor
-        .send_undo(doc_id, &setup.hub.id, "Redo")
+        .send_undo(file_desc.clone(), "Redo")
         .await
         .unwrap();
 
@@ -2681,7 +2659,7 @@ async fn test_share_file_e2e() {
     let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
     // Share a file with some content
-    let (doc_id, site_id) = setup
+    let (file_desc, site_id) = setup
         .hub
         .editor
         .share_file(
@@ -2692,8 +2670,8 @@ async fn test_share_file_e2e() {
         .await
         .unwrap();
 
-    // Verify we got a valid doc_id
-    assert!(doc_id > 0, "Should receive a valid doc_id");
+    // Verify we got a valid file desc
+    assert!(file_desc.is_object(), "Should receive a valid file desc");
     assert_eq!(site_id, 0, "Hub should have site_id 0");
 
     // Test that we can send ops to the shared doc
@@ -2706,12 +2684,12 @@ async fn test_share_file_e2e() {
     let _ = setup
         .hub
         .editor
-        .send_ops(doc_id, &setup.hub.id, ops)
+        .send_ops(file_desc.clone(), ops)
         .await
         .unwrap();
 
     // Share another file and verify it gets a different doc_id
-    let (doc_id2, site_id2) = setup
+    let (file_desc2, site_id2) = setup
         .hub
         .editor
         .share_file(
@@ -2722,7 +2700,7 @@ async fn test_share_file_e2e() {
         .await
         .unwrap();
 
-    assert_ne!(doc_id, doc_id2, "Second file should have different doc_id");
+    assert_ne!(file_desc, file_desc2, "Second file should be different");
     assert_eq!(site_id2, 0, "Hub should always have site_id 0");
 
     setup.cleanup();
@@ -3045,8 +3023,7 @@ async fn test_doc_project_handling() {
         )
         .await
         .unwrap();
-
-    let doc_id = share_resp["docId"].as_u64().unwrap();
+    let shared_file = share_resp["file"].clone();
 
     sleep(Duration::from_millis(100)).await;
 
@@ -3079,7 +3056,7 @@ async fn test_doc_project_handling() {
         "This is a shared document"
     );
     assert_eq!(open_resp["filename"].as_str().unwrap(), "test_shared.txt");
-    assert_eq!(open_resp["docId"].as_u64().unwrap(), doc_id);
+    assert_eq!(open_resp["file"], shared_file);
 
     // Test 4: List files in _buffers project.
     let req_id = 2;
@@ -3241,7 +3218,7 @@ async fn test_send_ops_permission_denied() {
     .unwrap();
 
     // Share a file on the hub
-    let (doc_id, _site_id) = setup
+    let (file_desc, _site_id) = setup
         .hub
         .editor
         .share_file("test.txt", "initial content", serde_json::json!({}))
@@ -3273,8 +3250,7 @@ async fn test_send_ops_permission_denied() {
     let result = setup.spokes[0]
         .editor
         .send_ops(
-            doc_id,
-            &setup.hub.id,
+            file_desc.clone(),
             vec![serde_json::json!({
                 "op": {"Ins": [0, "new text"]},
                 "groupSeq": 0,
