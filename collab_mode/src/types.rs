@@ -73,7 +73,7 @@ pub enum DocDesc {
     Dir(FilePath),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum FileDesc {
     /// A project.
@@ -179,8 +179,6 @@ pub struct Project {
     pub name: String,
     /// Absolute filename of the root of the project.
     pub root: String,
-    /// Canonicalized absolute root for stable comparisons.
-    pub root_canon: String,
     /// Metadata for the project. A serialized JSON object.
     pub meta: JsonMap,
 }
