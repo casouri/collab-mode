@@ -31,6 +31,12 @@ pub type JsonMap = serde_json::Map<String, serde_json::Value>;
 pub const RESERVED_BUFFERS_PROJECT: &str = "_buffers";
 pub const RESERVED_FILES_PROJECT: &str = "_files";
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Info {
+    pub sender: SiteId,
+    pub value: String,
+}
+
 #[derive(Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
     Ins(u64, String),

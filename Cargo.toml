@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["collab_mode", "test_server"]
+members = ["collab_mode"]
 
 [workspace.dependencies]
 collab_mode = { path = "./collab_mode", version = "0.1.0" }
