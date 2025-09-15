@@ -225,9 +225,13 @@ impl Doc {
         Ok(())
     }
 
-    /// Return `true` if this doc matches `file`.
-    fn matches(&self, file: &FileDesc) -> bool {
-        self.file_desc == *file
+    /// Return `true` if this doc matches `path`. Owned docs match by
+    /// PathId. Because, eg, editor could try to share a single file
+    /// which actually is inside a project, we need to be able to tell
+    /// it’s in a project and make it a project file instead. Remote
+    /// docs match by FileDesc.
+    fn matches(&self, path: &PathId) -> bool {
+        self.abs_filename == *path
     }
 }
 
@@ -1326,14 +1330,26 @@ impl Server {
         file_desc: EditorFileDesc,
         mode: OpenMode,
     ) -> anyhow::Result<()> {
-        let desc = file_desc.clone().into();
+        let desc: FileDesc = file_desc.clone().into();
+        let res = self.path_id_from_file_desc(&desc);
+        if let Err(err) = res {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::IoError as i32,
+                message: err.to_string(),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            return Ok(());
+        }
+        let path_id = res.unwrap();
+
         if &self.host_id == file_desc.host_id() {
             // Local file.
             match &file_desc {
                 EditorFileDesc::ProjectFile { project, file, .. } => {
                     // Check if file is alreay opened.
                     for (_doc_id, doc) in &self.docs {
-                        if doc.matches(&desc) {
+                        if doc.matches(&path_id) {
                             let resp = OpenFileResp {
                                 content: doc.buffer.iter().collect(),
                                 site_id: self.site_id,
@@ -1458,12 +1474,23 @@ impl Server {
             return Ok(());
         }
 
+        let res = self.path_id_from_file_desc(&file_desc);
+        if let Err(err) = res {
+            next.send_to_remote(
+                &remote_host_id,
+                Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+            )
+            .await;
+            return Ok(());
+        }
+        let path_id = res.unwrap();
+
         let site_id = self.site_id_of(&remote_host_id);
         match &file_desc {
             FileDesc::ProjectFile { project, file } => {
                 // Check if file is already opened.
                 for (doc_id, doc) in &mut self.docs {
-                    if doc.matches(&file_desc) {
+                    if doc.matches(&path_id) {
                         // Don’t add remote as subscriber, wait until we
                         // receive RequestOps message.
 
@@ -2036,8 +2063,9 @@ impl Server {
                 file: params.filename.clone(),
             }
         };
+        let path_id = self.path_id_from_file_desc(&file_desc)?;
         for doc in self.docs.values() {
-            if doc.matches(&file_desc) {
+            if doc.matches(&path_id) {
                 return Err(anyhow!("File {} already exists", params.filename));
             }
         }
@@ -2483,8 +2511,9 @@ impl Server {
             FileDesc::ProjectFile { project, .. }
                 if project == RESERVED_BUFFERS_PROJECT || project == RESERVED_FILES_PROJECT =>
             {
+                let path_id = self.path_id_from_file_desc(&file)?;
                 for (doc_id, doc) in &self.docs {
-                    if doc.matches(file) {
+                    if doc.matches(&path_id) {
                         return Ok((
                             vec![*doc_id],
                             match doc.abs_filename {
