@@ -10,17 +10,13 @@
 
 ;; FILE-DESC is how we address files in collab-mode. It has the following shape:
 ;;
-;; FILE-DESC := (:type \"file\" :id doc-id :hostId host-id)
-;;            | (:type \"project\" :id project-id :hostId host-id)
-;;            | (:type \"projectFile\" :project project-id :file rel-path
-;;                                    :hostId host-id)"
+;; FILE-DESC := (:project PROJECT-NAME :file FILE-PATH)
 ;;
-;; IOW, a “file” can be three things: a project, a file in project
-;; (identified by project and it’s path in the project), or a file that’s
-;; not in any project (identified by the doc id). Technically you can
-;; refer to a projectFile using it’s doc id, but we never do that. The
-;; “file” variant is only for files not in a project. This is to avoid
-;; issues in hash maps, etc.
+;; PROJECT-NAME is the name of the project, there’re two reserved
+;; projects, “_buffers” for buffers, and “_files” for files not in a
+;; project. For files in a project, FILE-PATH is the relative path of
+;; that file. If FILE-PATH is empty string, the FILE-DESC represents
+;; the project itself.
 
 ;;; Code:
 
@@ -334,30 +330,27 @@ If MARK non-nil, show active region."
   (when (equal buffer (current-buffer))
     (collab--check-precondition)
     (collab--catch-error "can’t send cursor position to remote"
-      (let* ((doc-id (collab--file-desc-id collab--file))
-             (host-id (collab--file-desc-host-id collab--file)))
-        (collab--send-info-req
-         doc-id host-id
-         (if (region-active-p)
-             `( :type "common.pos" :point ,(point)
-                :mark ,(mark))
-           `(:type "common.pos" :point ,(point))))))
-
-    (remhash (collab--file-desc-normalize collab--file)
+      (collab--send-info-req
+       collab--file
+       (if (region-active-p)
+           `( :type "common.pos" :point ,(point)
+              :mark ,(mark))
+         `(:type "common.pos" :point ,(point)))))
+    (remhash (collab--encode-filename collab--file)
              collab--sync-cursor-timer-table)))
 
 ;; FIXME: Use a global idle time like send-ops.
 (defun collab--send-cursor-pos ()
   "Move user (SITE-ID)’s cursor overlay to POS."
   (collab--check-precondition)
-  (let ((file-desc (collab--file-desc-normalize collab--file)))
-    (when (null (gethash file-desc
+  (let ((file-key (collab--encode-filename collab--file)))
+    (when (null (gethash file-key
                          collab--sync-cursor-timer-table))
       ;; Run with an idle timer to we don’t interrupt scrolling, etc.
       (let ((timer (run-with-idle-timer
                     0.5 nil #'collab--send-cursor-pos-1
                     (current-buffer))))
-        (puthash file-desc timer
+        (puthash file-key timer
                  collab--sync-cursor-timer-table)))))
 
 ;;; Global state
@@ -369,7 +362,7 @@ If MARK non-nil, show active region."
   "The JSONRPC connection to the collab process.")
 
 (defvar collab--doc-id-table (make-hash-table :test #'equal)
-  "A has table that maps /HOST/PROJECT/PATH to its (doc-id . host-id), if any.")
+  "A hash table that maps /HOST/PROJECT/PATH to its file-desc.")
 
 (defvar collab--buffer-table (make-hash-table :test #'equal)
   "A has table that maps FILE-DESC to its corresponding buffer.")
@@ -390,9 +383,6 @@ set globally.")
 
 (defvar-local collab--file nil
   "FILE-DESC for the current buffer.")
-
-(defvar-local collab--doc-id nil
-  "DOC-ID for the current buffer.")
 
 (defvar-local collab--accepting-connection nil
   "If non-nil, our collab process is accepting remote connections.")
@@ -566,7 +556,7 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
                      (if (string-prefix-p old current)
                          ;; If OLD is a prefix of CURRENT, this is
                          ;; actually an insert.
-                         (push (list (+ beg (length old))
+                         (push (list 'ins (+ beg (length old))
                                      (substring current (length old))
                                      group-seq)
                                ops)
@@ -574,14 +564,14 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
                        (push (list 'del beg old group-seq) ops)
                        (push (list 'ins beg current group-seq) ops)))))
 
-             (setq collab--pending-ops `(tracking-error (format "Assertion failed: (<= rbeg beg end rend): %s" (rbeg beg end rend))))))
-          (_ (setq collab--pending-ops `(tracking-error (format "Unexpected ‘collab--changing-region’ shape: %s" collab--changing-region))))))
+             (setq collab--pending-ops `(tracking-error ,(format "Assertion failed: (<= rbeg beg end rend): %s" (list rbeg beg end rend)))))))
+          (_ (setq collab--pending-ops `(tracking-error ,(format "Unexpected ‘collab--changing-region’ shape: %s" collab--changing-region))))))
 
       ;; Update state.
       (setq collab--changing-region nil)
       (collab--push-to-pending-ops ops)
 
-      (run-hooks 'collab--after-change-hook))))
+      (run-hooks 'collab--after-change-hook)))
 
 (defun collab--after-change-default ()
   "Default send-ops behavior: setup an idle timer to send ops."
@@ -713,15 +703,14 @@ To prevent them from being invoked."
         (setq-local collab--group-seq 1))
 
     ;; Disable.
-    (remhash (collab--file-desc-normalize collab--file)
-             collab--dispatcher-timer-table)
+    (remhash (collab--encode-filename collab--file) collab--dispatcher-timer-table)
 
     (remove-hook 'before-change-functions #'collab--before-change t)
     (remove-hook 'after-change-functions #'collab--after-change t)
     (remove-hook 'collab--after-change-hook #'collab--after-change-default)
     (remove-hook 'collab--after-change-hook #'collab--after-change-hasty)
 
-    (remhash (collab--file-desc-normalize collab--file) collab--buffer-table)
+    (remhash (collab--encode-filename collab--file) collab--buffer-table)
 
     (dolist (ov collab--cursor-ov-alist)
       (delete-overlay (cdr ov)))
@@ -733,19 +722,18 @@ To prevent them from being invoked."
 
     (setq-local collab--my-site-id nil)))
 
-(defun collab--enable (file-desc doc-id my-site-id path)
+(defun collab--enable (file-desc my-site-id path)
   "Enable ‘collab-monitored-mode’ in the current buffer.
-FILE-DESC and DOC-ID are associated with the current buffer.
+FILE-DESC is associated with the current buffer.
 MY-SITE-ID is the site id of this editor.
 
 PATH should be a string HOST/PROJECT/PATH returned by
 ‘collab--encode-filename’."
-  (setq collab--file (collab--file-desc-normalize file-desc))
-  (setq collab-doc-id doc-id)
+  (setq collab--file file-desc)
   (setq collab--my-site-id my-site-id)
   (setq collab--default-directory path)
   (puthash path collab--file collab--doc-id-table)
-  (puthash collab--file
+  (puthash (collab--encode-filename collab--file)
            (current-buffer)
            collab--buffer-table)
   (collab-monitored-mode)
@@ -766,90 +754,62 @@ PATH should be a string HOST/PROJECT/PATH returned by
         (plist-put collab--stashed-state-plist
                    (current-buffer)
                    `( :file ,collab--file
-                      :doc-id ,collab--doc-id
                       :site-id ,collab--my-site-id))))
 
 (defun collab--maybe-recover ()
   "Maybe reenable ‘collab’ after major mode change."
   (when-let* ((state (plist-get collab--stashed-state-plist
                                 (current-buffer)))
-              (doc-id (plist-get state :doc-id))
               (file (plist-get state :file))
               (site-id (plist-get state :site-id)))
-    (collab--enable file doc-id site-id (collab--encode-filename file))))
+    (collab--enable file site-id (collab--encode-filename file))))
 
 ;;; JSON-RPC
 
-(defun collab--make-file-desc (host-id type &optional id project file)
-  "Create a FILE-DESC using HOST-ID TYPE ID PROJECT FILE:
+(defun collab--make-file-desc (host-id project file)
+  "Create an FILE-DESC using HOST-ID PROJECT FILE.
 
-FILE-DESC := (:type \"file\" :id doc-id :hostId host-id)
-           | (:type \"project\" :id project-id :hostId host-id)
-           | (:type \"projectFile\" :project project-id :file rel-path
-                                   :hostId host-id)"
-  (pcase type
-    ("file"
-     (cl-assert (stringp id))
-     `(:type ,type :id ,id :hostId ,host-id))
-    ("project"
-     (cl-assert (stringp id))
-     `(:type ,type :id ,id :hostId ,host-id))
-    ("projectFile"
-     (cl-assert (stringp project))
-     (cl-assert (stringp file))
-     `(:type ,type :project ,project :file ,file :hostId ,host-id))
-    (_ (signal 'collab-error `("Invalid type" ,type)))))
+FILE-DESC := (:hostId HOST-ID :project PROJECT-ID :file FILE)
 
-(defun collab--file-desc-id (file-desc)
-  "Return the doc-id in FILE-DESC if it has one, else return nil.
-
-FILE-DESC := (:type \"file\" :id doc-id :hostId host-id)
-           | (:type \"project\" :id project-id :hostId host-id)
-           | (:type \"projectFile\" :project project-id :file rel-path
-                                   :hostId host-id)
-
-Return DOC-ID if FILE-DESC is a :Doc or a :File, or it's a :Dir
-but REL-PATH is \".\" Basically, return the doc id if the doc id
-actually belongs to FILE-DESC."
-  (pcase (plist-get file-desc :type)
-    ("file" (plist-get file-desc :id))))
+FILE is the relative path within the project, or empty string for project root.
+For standalone buffers, PROJECT should be \"_buffers\" and FILE is the buffer id."
+  (cl-assert (stringp host-id))
+  (cl-assert (stringp project))
+  (cl-assert (stringp file))
+  `(:hostId ,host-id :project ,project :file ,file))
 
 (defun collab--file-desc-host-id (file-desc)
   "Return the host-id from FILE-DESC."
   (plist-get file-desc :hostId))
 
 (defun collab--file-desc-parent (file-desc)
-  "Return a file desc that’s the parent directory of FILE-DESC."
-  (pcase (plist-get file-desc :type)
-    ("file" (collab--make-file-desc
-             (plist-get file-desc :hostId) "project" "_buffers"))
-    ("project" nil)
-    ("projectFile"
-     (let ((parent (file-name-directory (plist-get file-desc :file)))
-           (host-id (plist-get file-desc :hostId)))
-       (if (or (equal parent "/") (null parent))
-           (collab--make-file-desc host-id "project" (plist-get file-desc :project))
-         (collab--make-file-desc
-          host-id "projectFile" nil (plist-get file-desc :project) parent))))))
+  "Return a file desc that's the parent directory of FILE-DESC.
+
+Return nil if there’s no parent."
+  (let ((host-id (plist-get file-desc :hostId))
+        (project (plist-get file-desc :project))
+        (file (plist-get file-desc :file)))
+    (cond
+     ;; Project root -> nil (no parent).
+     ((equal file "") nil)
+     ;; Standalone buffer -> _buffers project.
+     ((equal project "_buffers")
+      (collab--make-file-desc host-id "_buffers" ""))
+     ;; File in project -> parent directory or project root.
+     (t
+      (let ((parent (file-name-directory file)))
+        (if (or (equal parent "/") (null parent))
+            (collab--make-file-desc host-id project "")
+          (collab--make-file-desc host-id project
+                                  (string-trim-right parent "/"))))))))
 
 (defun collab--file-desc-name (file-desc)
-  "Return the filename of FILE-DESC. Only works for project or projectFile."
-  (pcase (plist-get file-desc :type)
-    ("project" (plist-get file-desc :id))
-    ("projectFile" (file-name-nondirectory (plist-get file-desc :file)))))
-
-(defun collab--file-desc-normalize (file-desc)
-  "Normalize FILE-DESC for hashing."
-  (let ((host-id (plist-get file-desc :hostId)))
-    (pcase (plist-get file-desc :type)
-      ("file" (collab--make-file-desc host-id "file" (plist-get file-desc :id)))
-      ("project" (collab--make-file-desc
-                  host-id "project" (plist-get file-desc :id)))
-      ("projectFile"
-       (collab--make-file-desc
-        host-id "projectFile" nil
-        (plist-get file-desc :project)
-        (plist-get file-desc :file))))))
+  "Return the filename of FILE-DESC."
+  (let ((project (plist-get file-desc :project))
+        (file (plist-get file-desc :file)))
+    (if (equal file "")
+        project
+      (file-name-nondirectory file))))
 
 ;;;; Connection
 
@@ -890,7 +850,7 @@ actually belongs to FILE-DESC."
 The purpose of this function is to cancel get ops timer when we
 know that we’re gonna send ops (which gets remotes ops too) very
 soon."
-  (when-let* ((timer (gethash (collab--file-desc-normalize collab--file)
+  (when-let* ((timer (gethash (collab--encode-filename collab--file)
                               collab--dispatcher-timer-table)))
     (cancel-timer timer))  )
 
@@ -926,17 +886,18 @@ If we receive a ServerError notification, just display a warning."
   (pcase method
     ('RemoteOpArrived
      ;; TODO: Idle timer?
-     (let ((file-desc (collab--file-desc-normalize (plist-get params :file)))
+     (let ((file-desc (plist-get params :file))
            (last-seq (plist-get params :lastSeq)))
-       (let ((buffer (gethash file-desc collab--buffer-table))
-             (timer (gethash file-desc collab--dispatcher-timer-table)))
+       (let ((file-key (collab--encode-filename file-desc))
+             (buffer (gethash file-key collab--buffer-table))
+             (timer (gethash file-key collab--dispatcher-timer-table)))
          (when timer (cancel-timer timer))
          (when (buffer-live-p buffer)
            (setq timer (run-with-timer
                         collab-receive-ops-delay nil
                         #'collab--request-remote-ops
                         buffer last-seq))
-           (puthash file-desc timer collab--dispatcher-timer-table)))))
+           (puthash file-key timer collab--dispatcher-timer-table)))))
     ;; FIXME: This doesn’t exist yet, also need to use file-desc for
     ;; buffer table.
     ;; ('Info
@@ -1084,27 +1045,24 @@ Return (:siteId SITE-ID :content CONTENT)."
                             (* 3 collab-rpc-timeout)))
     (let ((resp (jsonrpc-request
                  conn 'OpenFile
-                 `( :hostId ,host
-                    :fileDesc ,file-desc
+                 `( :file ,file-desc
                     :mode ,mode)
                  :timeout (* 3 collab-rpc-timeout))))
       (message (collab--fairy "Here it is!"))
       resp)))
 
-(defun collab--disconnect-from-file-req (doc host)
-  "Disconnect from DOC on HOST."
+(defun collab--disconnect-from-file-req (file-desc)
+  "Disconnect from FILE-DESC."
   (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'DisconnectFromFile
-                     `( :hostId ,host
-                        :docId ,doc)
+                     `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
-(defun collab--save-file-req (doc host)
-  "Save from DOC on HOST to disk."
+(defun collab--save-file-req (file-desc)
+  "Save FILE-DESC to disk."
   (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'SaveFile
-                     `( :hostId ,host
-                        :docId ,doc)
+                     `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
 (defun collab--move-file-req (project-id old-path new-path host)
@@ -1117,12 +1075,11 @@ Return (:siteId SITE-ID :content CONTENT)."
                         :newPath ,new-path)
                      :timeout collab-rpc-timeout)))
 
-(defun collab--delete-file-req (doc host)
-  "Delete DOC on HOST."
+(defun collab--delete-file-req (file-desc)
+  "Delete FILE-DESC."
   (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'DeleteFile
-                     `( :hostId ,host
-                        :docId ,doc)
+                     `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
 (defun collab--accept-connection-notif (signaling-addr)
@@ -1142,24 +1099,22 @@ Return (:siteId SITE-ID :content CONTENT)."
                     :timeout collab-rpc-timeout)))
 
 ;; FIXME
-(defun collab--print-history-req (doc host debug)
-  "Print debugging history for DOC on HOST.
+(defun collab--print-history-req (file-desc debug)
+  "Print debugging history for FILE-DESC.
 If DEBUG non-nil, print debug version."
   (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'PrintHistory
-                     `( :docId ,doc
-                        :hostId ,host
+                     `( :file ,file-desc
                         :debug ,(if debug t :json-false))
                      :timeout collab-rpc-timeout)))
 
 ;; FIXME
-(defun collab--send-info-req (doc host info)
-  "Send INFO to DOC on HOST.
+(defun collab--send-info-req (file-desc info)
+  "Send INFO to FILE-DESC.
 INFO should be a plist JSON object. This request is async."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'SendInfo
-                    `( :hostId ,host
-                       :docId ,doc
+                    `( :file ,file-desc
                        :info ,info))))
 
 (defsubst collab--encode-op (op)
@@ -1217,8 +1172,7 @@ collab process; return nil if we didn’t get any ops."
       (setq resp
             (jsonrpc-request
              conn 'SendOps
-             `( :docId ,(collab--file-desc-id collab--file)
-                :hostId ,(collab--file-desc-host-id collab--file)
+             `( :file ,collab--file
                 :ops ,(if encoded ops
                         (if ops (vconcat (mapcar #'collab--encode-op ops))
                           [])))
@@ -1264,8 +1218,7 @@ If REDO is non-nil, redo the most recent undo instead."
     (collab--catch-error "can’t undo/redo"
       (setq resp
             (jsonrpc-request conn 'Undo
-                             `( :hostId ,(collab--file-desc-host-id collab--file)
-                                :docId ,(collab--file-desc-id collab--file)
+                             `( :file ,collab--file
                                 :kind ,(if redo "Redo" "Undo"))
                              :timeout collab-rpc-timeout))
       (if-let* ((instructions (plist-get resp :ops)))
@@ -1299,8 +1252,7 @@ Saves the buffer on the owner’s machine."
   (interactive)
   (collab--check-precondition)
   (collab--catch-error "Can’t save the buffer"
-    (collab--save-file-req (collab--file-desc-id collab--file)
-                           (collab--file-desc-host-id collab--file)))
+    (collab--save-file-req collab--file))
   (message "Saved buffer"))
 
 ;;; UI
@@ -1363,9 +1315,7 @@ If no such section is found, do nothing."
   "Insert FILE-DESC with FILENAME.
 
 SERVER is its server id. If DISPLAY-NAME non-nil, use that as the
-display name.
-
-See ‘collab--file-desc-id’ for the shape of FILE-DESC."
+display name."
   (let ((beg (point)))
     (insert (propertize (or display-name filename)
                         'face (if directoryp 'dired-directory nil)))
@@ -1484,9 +1434,9 @@ Return t if inserted a host section into the buffer."
             nil
           (collab--insert-host-1 host resp 'up)
           t))
-    ;; If not connected, connect to it and let ‘Connected’
+    ;; If not connected, connect to it and let 'Connected'
     ;; notification handler insert the files.
-    (collab--connect-notif host-id signaling-addr)
+    (collab--connect-notif host signaling-server)
     ;; Insert a placeholder host for now, full file list will be
     ;; inserted later.
     (collab--insert-host-1 host nil 'delayed)
@@ -1699,7 +1649,7 @@ immediately."
       (let* ((file-desc collab--file)
              (host-id (collab--file-desc-host-id collab--file))
              (host-data (collab--host-data host-id))
-             (projectp (equal (plist-get file-desc :type) "project"))
+             (projectp (equal (plist-get file-desc :file) ""))
              (file-list-resp (collab--list-files-req
                               file-desc host-id (nth 0 host-data) (nth 1 host-data)))
              (file-list (seq-map #'identity
@@ -1766,84 +1716,69 @@ Return nil if parse failed."
     (when (>= (length segments) 2)
       (let ((host-id (pop segments))
             (project (pop segments)))
-        (if (equal project "_buffers")
-            (let ((id (pop segments)))
-              (when id
-                (collab--make-file-desc host-id "file" id)))
-          (if segments
-              (collab--make-file-desc
-               host-id "projectFile" nil project (string-join segments "/"))
-            (collab--make-file-desc host-id "project" project)))))))
+        (if segments
+            (collab--make-file-desc host-id project (string-join segments "/"))
+          (collab--make-file-desc host-id project ""))))))
 
 (defun collab--encode-filename (file-desc)
   "Encode FILE-DESC into a path.
 
-Returned path doesn’t have trailing slash even if it’s a directory."
-  (let ((host-id (plist-get file-desc :hostId)))
-    (pcase (plist-get file-desc :type)
-      ("file" (format "/%s/_buffers/%s" host-id (plist-get file-desc :id)))
-      ("project" (format "/%s/%s" host-id (plist-get file-desc :id)))
-      ("projectFile"
-       (let* ((project (plist-get file-desc :project))
-              (file-path (plist-get file-desc :file))
-              (parent (file-name-directory file-path)))
-         (if parent
-             (format "/%s/%s/%s" host-id project
-                     (string-trim-right parent "/"))
-           (format "/%s/%s" host-id project)))))))
+Returned path doesn't have trailing slash even if it's a directory."
+  (let ((host-id (plist-get file-desc :hostId))
+        (project (plist-get file-desc :project))
+        (file (plist-get file-desc :file)))
+    (if (equal file "")
+        (format "/%s/%s" host-id project)
+      (format "/%s/%s/%s" host-id project file))))
 
 (defun collab--encode-parent (file-desc)
   "Encode FILE-DESC into a path of it's parent directory.
 
-Returned path doesn’t have trailing slash even if it’s a directory."
-  (let ((host-id (plist-get file-desc :hostId)))
-    (pcase (plist-get file-desc :type)
-      ("file" (format "/%s/_buffers" host-id))
-      ("project" (format "/%s" host-id))
-      ("projectFile"
-       (let* ((project (plist-get file-desc :project))
-              (file-path (plist-get file-desc :file))
-              (parent (file-name-directory file-path)))
-         (if parent
-             (format "/%s/%s/%s" host-id project (string-trim-right parent "/"))
-           (format "/%s/%s" host-id project)))))))
+Returned path doesn't have trailing slash even if it's a directory."
+  (when-let ((parent (collab--file-desc-parent file-desc)))
+    (collab--encode-filename parent)))
+
+(defun collab--complete-filename-1 (segments dir-p)
+  "Return the next segment completion for SEGMENTS.
+
+SEGMENTS is a list of path segments. DIR-P is t if SEGMENTS is meant to
+be a directory (the original path string ends with slash)."
+  (let ((append-slash (lambda (str) (concat str "/"))))
+    (if (eq (length segments) 0)
+        (seq-map append-slash (collab--get-available-hosts))
+      (condition-case nil
+          (let* ((host (car segments))
+                 (host-data (alist-get host (collab--host-alist)
+                                       nil nil #'equal))
+                 (signaling (nth 0 host-data))
+                 (credential (nth 1 host-data))
+                 (file-desc (pcase (length segments)
+                              (1 nil)
+                              (2 (collab--make-file-desc
+                                  host (nth 1 segments) ""))
+                              (_ (collab--make-file-desc
+                                  host
+                                  (nth 1 segments)
+                                  (string-join
+                                   (seq-subseq segments 2 (if dir-p nil -1))
+                                   "/")))))
+                 (resp (collab--list-files-req
+                        file-desc host signaling credential))
+                 (files (plist-get resp :files)))
+            (seq-map (lambda (file)
+                       (let ((name (plist-get file :filename))
+                             (dir-p (not (eq (plist-get file :isDirectory)
+                                             :json-false))))
+                         (concat name (if dir-p "/" ""))))
+                     files))
+        (error nil)))))
 
 (defun collab--complete-filename (filename _pred flag)
   "Complete FILENAME.
 PRED and FLAG see manual."
-  (let* ((append-slash (lambda (str) (concat str "/")))
-         (dir-p (string-match-p (rx "/" eos) filename))
-         (start-with-slash-p (string-match-p (rx bos "/") filename))
+  (let* ((dir-p (string-match-p (rx "/" eos) filename))
          (segments (string-split filename "/" t (rx (+ whitespace))))
-         (next (pcase (length segments)
-                 (0 (seq-map append-slash (collab--get-available-hosts)))
-                 (_ (condition-case nil
-                        (let* ((host (car segments))
-                               (host-data (alist-get host (collab--host-alist)
-                                                     nil nil #'equal))
-                               (signaling (nth 0 host-data))
-                               (credential (nth 1 host-data))
-                               (file-desc (pcase (length segments)
-                                            (1 nil)
-                                            (2 (collab--make-file-desc
-                                                host "project" (nth 1 segments)))
-                                            (_ (collab--make-file-desc
-                                                host "projectFile" nil
-                                                (nth 1 segments)
-                                                (string-join
-                                                 (seq-subseq segments 2 (if dir-p nil -1))
-                                                 "/")))))
-                               (resp (collab--list-files-req
-                                      file-desc host signaling credential))
-                               (files (plist-get resp :files)))
-                          (seq-map (lambda (file)
-                                     (let ((name (plist-get file :filename))
-                                           (dir-p (not (eq (plist-get file :isDirectory)
-                                                           :json-false))))
-                                       (concat name (if dir-p "/" ""))))
-                                   files))
-                      (error nil))))))
-
+         (next (collab--complete-filename-1 segments dir-p)))
     (pcase flag
       ('nil (if (null next)
                 t
@@ -1873,20 +1808,19 @@ There should be four text properties at point:
 
 If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
   (interactive)
-  ;; See ‘collab--file-desc-id’ for the shape of FILE-DESC.
-  (let* ((file-desc (collab--file-desc-normalize
-                     (or file-desc
-                         (get-text-property (point) 'collab-file-desc))))
+  (let* ((file-desc (or file-desc
+                        (get-text-property (point) 'collab-file-desc)))
          (filename (or filename (get-text-property (point) 'collab-filename)))
          (directory-p (or directory-p (get-text-property (point) 'collab-directory-p)))
          (host-id (or host-id (get-text-property (point) 'collab-host-id)))
-         (buf (gethash file-desc collab--buffer-table)))
+         (file-key (collab--encode-filename file-desc))
+         (buf (gethash file-key collab--buffer-table)))
     (cond
      ((not (and file-desc filename host-id))
       (user-error "Can’t find file at point"))
      ((and (buffer-live-p buf) (if (buffer-local-value 'collab-monitored-mode buf)
                                    t
-                                 (remhash file-desc collab--buffer-table)
+                                 (remhash file-key collab--buffer-table)
                                  (kill-buffer buf)
                                  nil))
       (display-buffer buf))
@@ -1896,20 +1830,21 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
              (buf (get-buffer-create (format "%s<collab>" path))))
         (select-window (display-buffer buf))
         (collab-dired-mode)
-        (puthash file-desc buf collab--buffer-table)
+        (puthash file-key buf collab--buffer-table)
         (setq collab--file file-desc
               collab--default-directory path)
         (collab--dired-refresh)))
      ;; Open a file.
      (t
-      (collab--catch-error (format "can’t connect to %s" file-desc)
+      (collab--catch-error (format "can't connect to %s" file-desc)
         (let* ((resp (collab--open-file-req file-desc host-id "open"))
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
-               (doc-id (plist-get resp :docId))
+               (resp-file-desc (plist-get resp :file))
                (filename (plist-get resp :filename))
                (meta (plist-get resp :fileMeta))
                (suggested-major-mode (plist-get meta :emacs.majorMode))
+               (path (collab--encode-filename resp-file-desc))
                (inhibit-read-only t))
           (select-window
            (display-buffer
@@ -1923,26 +1858,26 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
               (funcall (intern-soft suggested-major-mode))
             (let ((buffer-file-name filename))
               (set-auto-mode)))
-          (collab--enable file-desc doc-id site-id path)))))))
+          (collab--enable resp-file-desc site-id path)))))))
 
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
   (interactive)
-  (let* ((file-desc (collab--file-desc-normalize
-                     (get-text-property (point) 'collab-file-desc)))
-         (host-id (get-text-property (point) 'collab-host-id))
-         (doc-id (collab--file-desc-id file-desc)))
+  (let* ((file-desc (get-text-property (point) 'collab-file-desc))
+         (host-id (get-text-property (point) 'collab-host-id)))
     (when doc-id
       (collab--catch-error
-          (format "can’t disconnect from Doc(%s)" doc-id)
-        (collab--disconnect-from-file-req doc-id host-id)))
-    (let ((buf (when doc-id
-                 (gethash file-desc collab--buffer-table)))
+          (format "can't disconnect from %s"
+                  (collab--encode-filename file-desc))
+        (collab--disconnect-from-file-req file-desc)))
+    (let ((file-key (collab--encode-filename file-desc))
+          (buf (when file-desc
+                 (gethash file-key collab--buffer-table)))
           (inhibit-read-only t))
       (when buf
         (with-current-buffer buf
           (collab--disable)))
-      (puthash file-desc nil collab--buffer-table)
+      (puthash file-key nil collab--buffer-table)
       (save-excursion
         (end-of-line)
         (when (looking-back " •" 2)
@@ -1952,11 +1887,9 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
 (defun collab--delete-doc ()
   "Delete the file at point."
   (interactive)
-  (when-let* ((doc-id (collab--file-desc-id
-                       (get-text-property (point) 'collab-file-desc)))
-              (host-id (get-text-property (point) 'collab-host-id)))
-    (collab--catch-error (format "can’t delete Doc(%s)" doc-id)
-      (collab--delete-file-req doc-id host-id))
+  (when-let* ((file-desc (get-text-property (point) 'collab-file-desc)))
+    (collab--catch-error (format "can't delete %s" (collab--encode-filename file-desc))
+      (collab--delete-file-req file-desc))
     (collab--refresh)))
 
 (defun collab--accept-connection ()
@@ -2025,14 +1958,13 @@ When called interactively, prompt for the host."
                               ,(symbol-name major-mode))
                   (buffer-substring-no-properties
                    (point-min) (point-max))))
-           (doc-id (plist-get resp :docId))
-           (site-id (plist-get resp :siteId))
-           (file-desc (collab--make-file-desc host "file" doc-id)))
-      (collab--enable file-desc doc-id site-id
+           (file-desc (plist-get resp :file))
+           (site-id (plist-get resp :siteId)))
+      (collab--enable file-desc site-id
                       (collab--encode-filename file-desc))
       (display-buffer (collab--hub-buffer)
                       '(() . ((inhibit-same-window . t))))
-      (collab--notify-newly-shared-doc `(:type "file" :id ,doc-id)))))
+      (collab--notify-newly-shared-doc file-desc))))
 
 ;;;###autoload
 (defun collab-share (file filename)
@@ -2052,22 +1984,23 @@ FILE can be either a file or a directory."
 
 (defun collab--share-project (path project-name)
   "Share project at PATH to collab process under PROJECT-NAME."
-  (collab--catch-error "can’t share project"
+  (collab--catch-error "can't share project"
     (collab--declare-project-req project-name path)
-    (collab--notify-newly-shared-doc `(:type "project" :id ,project-name))))
+    (collab--notify-newly-shared-doc
+     (collab--make-file-desc collab--my-host-id project-name ""))))
 
 (defalias 'collab-reconnect 'collab-resume)
-(defun collab-resume (file-desc doc-id)
+(defun collab-resume (file-desc)
   "Reconnect current buffer to a remote document FILE-DESC.
 
 Reconnecting will override the current content of the buffer.
 
-The document to reconnect to is determined by DOC-ID. But if
-called interactively, prompt the user to select a document (by
-its name rather than doc id) to connect."
-  (interactive (list collab--file collab--doc-id))
-  (collab--catch-error (format "can’t reconnect to Doc(%s)" doc-id)
-    (let* ((info (collab--host-data host))
+If called interactively, uses the current buffer's FILE-DESC."
+  (interactive (list collab--file))
+  (collab--catch-error (format "can't reconnect to %s"
+                               (collab--encode-filename file-desc))
+    (let* ((host (collab--file-desc-host-id file-desc))
+           (info (collab--host-data host))
            (orig-point (point)))
       ;; Replace buffer content with document content.
       (let* ((resp (collab--open-file-req file-desc host "open"))
@@ -2085,18 +2018,16 @@ its name rather than doc id) to connect."
         (insert content)
         (goto-char orig-point)
         (set-auto-mode)
-        (collab--enable file-desc doc-id site-id
+        (collab--enable file-desc site-id
                         (collab--encode-filename file-desc))))))
 
 (defun collab-disconnect-buffer ()
   "Disconnect current buffer, returning it to a regular buffer."
   (interactive)
   (collab--check-precondition)
-  (let ((doc-id (collab--file-desc-id collab--file))
-        (host-id (collab--file-desc-host-id collab--file)))
-    (collab--catch-error
-        (format "can’t disconnect from Doc(%s)" doc-id)
-      (collab--disconnect-from-file-req doc-id host-id)))
+  (collab--catch-error
+      (format "can't disconnect from %s" (collab--encode-filename collab--file))
+    (collab--disconnect-from-file-req collab--file))
   (collab--disable)
   (message "Disconnected"))
 
@@ -2106,14 +2037,14 @@ its name rather than doc id) to connect."
   (let ((file-desc
          (if (derived-mode-p 'collab-hub-mode)
              (get-text-property (point) 'collab-file-desc)
-           `(:type "file" :id ,(collab--file-desc-id collab--file))))))
-  (if (not file-desc)
-      (message (collab--fairy "Uhmmm, I can’t find the doc id of this doc..."))
-    (let ((link (format "%s/%s"
-                        collab-default-signaling-server
-                        (collab--encode-filename file-desc))))
-      (kill-new link)
-      (message (collab--fairy "Copied link to clipboard for ya (%s)" link)))))
+           collab--file)))
+    (if (not file-desc)
+        (message (collab--fairy "Uhmmm, I can’t find the doc id of this doc..."))
+      (let ((link (format "%s/%s"
+                          collab-default-signaling-server
+                          (collab--encode-filename file-desc))))
+        (kill-new link)
+        (message (collab--fairy "Copied link to clipboard for ya (%s)" link))))))
 
 ;;;###autoload
 (defun collab-connect (share-link)
@@ -2145,9 +2076,7 @@ SHARE-LINK should be in the form of signaling-server/host-id/#/doc-id."
       (when project
         (setq collab--open-this-doc
               (list host-id
-                    (if path
-                        `(:type "projectFile" :project ,project :file ,path)
-                      `(:type "project" :id ,project))
+                    (collab--make-file-desc host-id project (or path ""))
                     (if path (file-name-nondirectory path) project)
                     dir-p)))
       (collab--hub-refresh))))
@@ -2158,13 +2087,12 @@ If called with an interactive argument (DEBUG), print more
 detailed history."
   (interactive "p")
   (collab--check-precondition)
-  (let ((doc-id (collab--file-desc-id collab--file))
-        (host-id (collab--file-desc-host-id collab--file))
-        (debug (eq debug 4)))
+  (let ((debug (eq debug 4)))
     (collab--catch-error
-        (format "can’t print history of Doc(%s)" doc-id)
+        (format "can't print history of %s"
+                (collab--encode-filename collab--file))
       (collab--send-ops-now)
-      (let ((text (collab--print-history-req doc-id host-id debug))
+      (let ((text (collab--print-history-req collab--file debug))
             undo-tip)
         (pop-to-buffer (format "*collab history for %s*"
                                (buffer-name)))
@@ -2210,7 +2138,7 @@ detailed history."
 
 (defun collab-initial-setup ()
   "Initial setup wizard. Set display name, download binary, etc."
-  (let ((display-name (read-string (collab--fairy "Heya! I’m dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name))
+  (let ((display-name (read-string (collab--fairy "Heya! I'm dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name))
         (default-signal-server "wss://signal.collab-mode.org"))
     (customize-set-variable 'collab-display-name display-name)
     (customize-save-customized)
@@ -2228,4 +2156,4 @@ detailed history."
 
 (provide 'collab-mode)
 
-;;; collab.el ends here
+;;; collab-mode.el ends here
