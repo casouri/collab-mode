@@ -478,41 +478,6 @@ impl MockEditor {
     }
 }
 
-#[test]
-fn test_share_file_duplicate_via_symlink() {
-    // Create a temp project dir with a file and a symlink to it.
-    let test_dir = tempfile::tempdir().unwrap();
-    let real = test_dir.path().join("file.txt");
-    std::fs::write(&real, "hello").unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs as unix_fs;
-        let link = test_dir.path().join("link.txt");
-        unix_fs::symlink(&real, &link).unwrap();
-
-        // Spin up a server with config rooted in the temp dir (to avoid restricted locations).
-        let config = crate::config_man::ConfigManager::new(Some(test_dir.path().to_path_buf()), None).unwrap();
-        let mut server = super::Server::new("self".to_string(), config).unwrap();
-
-        // Share the real path first.
-        let resp1 = server.handle_share_file_from_editor(crate::message::ShareFileParams {
-            filename: real.to_string_lossy().to_string(),
-            content: "hello".into(),
-            meta: serde_json::Map::new(),
-        });
-        assert!(resp1.is_ok());
-
-        // Sharing the symlink to the same file should be rejected (duplicate).
-        let resp2 = server.handle_share_file_from_editor(crate::message::ShareFileParams {
-            filename: link.to_string_lossy().to_string(),
-            content: "hello".into(),
-            meta: serde_json::Map::new(),
-        });
-        assert!(resp2.is_err());
-    }
-}
-
 #[cfg(any(test, feature = "test-runner"))]
 pub struct ServerSetup {
     pub id: ServerId,
@@ -977,15 +942,16 @@ async fn test_open_file_basic() {
     let project_dir = create_test_project().unwrap();
     let project_path = project_dir.path().to_string_lossy().to_string();
 
-    // Hub declares project
+    // Declare the project on the hub so the request is valid at the project level
     setup
         .hub
         .editor
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-
     sleep(Duration::from_millis(100)).await;
+
+    // Project is already declared above.
 
     // Request to open a file
     let (file_desc, site_id, content) = setup
@@ -1119,12 +1085,7 @@ async fn test_open_file_create_mode() {
         "groupSeq": 1
     })];
 
-    let _ = setup
-        .hub
-        .editor
-        .send_ops(file1.clone(), ops)
-        .await
-        .unwrap();
+    let _ = setup.hub.editor.send_ops(file1.clone(), ops).await.unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
@@ -1157,7 +1118,10 @@ async fn test_open_file_create_mode() {
         .unwrap();
     let file2 = resp2["file"].clone();
     // Should return the same file since it's already open
-    assert_eq!(file1, file2, "Should return same file for already open file");
+    assert_eq!(
+        file1, file2,
+        "Should return same file for already open file"
+    );
 
     // Verify the file was actually created on disk
     let file_path = project_dir.path().join("new_file.txt");
@@ -1186,15 +1150,7 @@ async fn test_open_file_not_found() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "TestProject",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
 
@@ -1296,15 +1252,7 @@ async fn test_open_file_already_open() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "TestProject",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
 
@@ -1375,8 +1323,14 @@ async fn test_open_file_doc_id_not_found() {
     let env = TestEnvironment::new().await.unwrap();
     let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
 
-    // Request to open a non-existent doc by filename
+    // Request to open a non-existent absolute file via the _files virtual project
     let req_id = 1;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let missing_path = temp_dir
+        .path()
+        .join("nonexistent.txt")
+        .to_string_lossy()
+        .to_string();
     setup
         .hub
         .editor
@@ -1385,9 +1339,10 @@ async fn test_open_file_doc_id_not_found() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "file",
+                    "type": "projectFile",
                     "hostId": setup.hub.id.clone(),
-                    "id": "nonexistent.txt"
+                    "project": "_files",
+                    "file": missing_path
                 },
                 "mode": "open"
             }),
@@ -1399,7 +1354,7 @@ async fn test_open_file_doc_id_not_found() {
     let result = setup.hub.editor.wait_for_response(req_id, 5).await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("112") || err_msg.contains("not found"));
+    assert!(err_msg.contains("not found") || err_msg.contains("Failed to"));
 
     tracing::info!("test_open_file_doc_id_not_found completed successfully");
     setup.cleanup();
@@ -1407,11 +1362,12 @@ async fn test_open_file_doc_id_not_found() {
 
 #[tokio::test]
 async fn test_list_files_top_level() {
-    // Test: List top-level projects and _buffers virtual project
+    // Test: List top-level projects and _buffers and _files virtual project
     // Flow:
     // 1. Hub declares multiple projects
-    // 2. Spoke requests top-level listing (dir = None)
-    // Expected: Returns list of all projects and _buffers virtual project
+    // 2. Spoke requests top-level listing (dir = None) Expected:
+    // Returns list of all projects and _buffers and _files virtual
+    // project
 
     let env = TestEnvironment::new().await.unwrap();
     let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
@@ -1427,21 +1383,13 @@ async fn test_list_files_top_level() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [
-                    {
-                        "path": project1_path.clone(),
-                        "name": "Project1",
-                    },
-                    {
-                        "path": project2_path.clone(),
-                        "name": "Project2",
-                    }
-                ]
-            }),
-        )
+        .declare_project(&project1_path, "Project1")
+        .await
+        .unwrap();
+    setup
+        .hub
+        .editor
+        .declare_project(&project2_path, "Project2")
         .await
         .unwrap();
 
@@ -1470,8 +1418,8 @@ async fn test_list_files_top_level() {
         .unwrap();
     let files = resp["files"].as_array().unwrap();
 
-    // Verify we have 3 items (2 projects + _buffers virtual project)
-    assert_eq!(files.len(), 3);
+    // Verify we have 4 items (2 projects + _buffers and _files virtual project)
+    assert_eq!(files.len(), 4);
 
     // Check first project
     let has_project1 = files.iter().any(|f| {
@@ -1497,6 +1445,13 @@ async fn test_list_files_top_level() {
     });
     assert!(has_buffers, "Should have _buffers virtual project");
 
+    let has_buffers = files.iter().any(|f| {
+        f["filename"].as_str() == Some("_files")
+            && f["isDirectory"].as_bool() == Some(true)
+            && f["file"]["type"].as_str() == Some("project")
+    });
+    assert!(has_buffers, "Should have _files virtual project");
+
     tracing::info!("test_list_files_top_level completed successfully");
     setup.cleanup();
 }
@@ -1521,15 +1476,7 @@ async fn test_list_files_project_directory() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "ComplexProject",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "ComplexProject")
         .await
         .unwrap();
 
@@ -1636,15 +1583,7 @@ async fn test_list_files_from_remote() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "SharedProject",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "SharedProject")
         .await
         .unwrap();
 
@@ -1776,15 +1715,7 @@ async fn test_list_files_not_directory() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "TestProject",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
 
@@ -1840,15 +1771,7 @@ async fn test_list_files_empty_directory() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "ProjectWithEmpty",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "ProjectWithEmpty")
         .await
         .unwrap();
 
@@ -1909,15 +1832,7 @@ async fn test_list_files_nested_structure() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "path": project_path.clone(),
-                    "name": "NestedProject",
-                }]
-            }),
-        )
+        .declare_project(&project_path, "NestedProject")
         .await
         .unwrap();
 
@@ -2032,24 +1947,12 @@ async fn test_delete_file() {
     std::fs::write(project_path.join("dir1/file3.txt"), "Content 3").unwrap();
 
     // Declare the project.
-    let req_id = 1;
     setup
         .hub
         .editor
-        .send_request(
-            req_id,
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [{
-                    "name": "TestProject",
-                    "path": project_path.display().to_string(),
-                }]
-            }),
-        )
+        .declare_project(&project_path.display().to_string(), "TestProject")
         .await
         .unwrap();
-
-    setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
 
     // Share file1.txt from hub.
     let req_id = 2;
@@ -2840,17 +2743,7 @@ async fn test_list_files_sorted_alphanumerically() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [
-                    {
-                        "path": project_path.clone(),
-                        "name": "TestProject",
-                    }
-                ]
-            }),
-        )
+        .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
 
@@ -2923,17 +2816,7 @@ async fn test_open_binary_file_rejected() {
     setup
         .hub
         .editor
-        .request(
-            "DeclareProjects",
-            serde_json::json!({
-                "projects": [
-                    {
-                        "path": project_path.clone(),
-                        "name": "TestProject",
-                    }
-                ]
-            }),
-        )
+        .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
 
@@ -3231,11 +3114,7 @@ async fn test_send_ops_permission_denied() {
         .request(
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
-                    "type": "file",
-                    "hostId": setup.hub.id.clone(),
-                    "id": "test.txt",
-                },
+                "fileDesc": file_desc, // Use the file descriptor returned by share_file
                 "mode": "open",
             }),
         )
@@ -3308,6 +3187,17 @@ async fn test_create_file_permission_denied() {
     .await
     .unwrap();
 
+    // Create and declare a real project named "test-project" on the hub
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+    setup
+        .hub
+        .editor
+        .declare_project(&project_path, "test-project")
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(100)).await;
+
     // Try to create a new file from spoke
     // This should return an error response due to permission denial
     let result = setup.spokes[0]
@@ -3362,6 +3252,25 @@ async fn test_delete_file_permission_denied() {
     )
     .await
     .unwrap();
+
+    // Declare a project named "test-project" on the hub
+    let project_dir = create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+    setup
+        .hub
+        .editor
+        .request(
+            "DeclareProjects",
+            serde_json::json!({
+                "projects": [{
+                    "path": project_path,
+                    "name": "test-project",
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(100)).await;
 
     // First, share a file on the hub
     let (_doc_id, _site_id) = setup

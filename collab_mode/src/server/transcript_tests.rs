@@ -517,10 +517,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     let resp = if !spoke_pending_ops[i].is_empty() {
                         setup.spokes[i]
                             .editor
-                            .send_ops(
-                                spoke_files[i].clone(),
-                                spoke_pending_ops[i].clone(),
-                            )
+                            .send_ops(spoke_files[i].clone(), spoke_pending_ops[i].clone())
                             .await?
                     } else {
                         // Send empty request to fetch remote ops

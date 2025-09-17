@@ -533,12 +533,14 @@ impl Server {
 
                 // Check for reserved project name.
                 for project in &params.projects {
-                    if project.name == RESERVED_BUFFERS_PROJECT {
+                    if project.name == RESERVED_BUFFERS_PROJECT
+                        || project.name == RESERVED_FILES_PROJECT
+                    {
                         let error = lsp_server::ResponseError {
                             code: ErrorCode::BadRequest as i32,
                             message: format!(
-                                "Project name '{}' is reserved and cannot be used",
-                                RESERVED_BUFFERS_PROJECT
+                                "Project name {} is reserved and cannot be used",
+                                project.name
                             ),
                             data: None,
                         };
@@ -1284,13 +1286,15 @@ impl Server {
 
         // Construct full path.
         let full_path = if project_id == RESERVED_FILES_PROJECT {
+            // For _files file, `rel_path` is an absolute path.
+            std::path::PathBuf::from(rel_path)
+        } else {
+            // Normal project: join project root with the relative path.
             let project = self
                 .projects
                 .get(project_id)
                 .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
             std::path::PathBuf::from(&project.root).join(rel_path)
-        } else {
-            std::path::PathBuf::from(rel_path)
         };
         let mut open_options = std::fs::OpenOptions::new();
         open_options.read(true).write(true);
@@ -1331,22 +1335,33 @@ impl Server {
         mode: OpenMode,
     ) -> anyhow::Result<()> {
         let desc: FileDesc = file_desc.clone().into();
-        let res = self.path_id_from_file_desc(&desc);
-        if let Err(err) = res {
-            let err = lsp_server::ResponseError {
-                code: ErrorCode::IoError as i32,
-                message: err.to_string(),
-                data: None,
-            };
-            next.send_resp((), Some(err)).await;
-            return Ok(());
-        }
-        let path_id = res.unwrap();
 
         if &self.host_id == file_desc.host_id() {
             // Local file.
+
+            // Check if trying to open a project directory first.
             match &file_desc {
+                EditorFileDesc::Project { .. } => {
+                    let err = lsp_server::ResponseError {
+                        code: ErrorCode::BadRequest as i32,
+                        message: "Cannot open a project directory".to_string(),
+                        data: None,
+                    };
+                    next.send_resp((), Some(err)).await;
+                    return Ok(());
+                }
                 EditorFileDesc::ProjectFile { project, file, .. } => {
+                    let res = self.path_id_from_file_desc(&desc);
+                    if let Err(err) = res {
+                        let err = lsp_server::ResponseError {
+                            code: ErrorCode::IoError as i32,
+                            message: err.to_string(),
+                            data: None,
+                        };
+                        next.send_resp((), Some(err)).await;
+                        return Ok(());
+                    }
+                    let path_id = res.unwrap();
                     // Check if file is alreay opened.
                     for (_doc_id, doc) in &self.docs {
                         if doc.matches(&path_id) {
@@ -1414,6 +1429,8 @@ impl Server {
                     };
                     self.remote_docs
                         .insert((self.host_id.clone(), doc_id), remote_doc);
+                    // Add mapping from EditorFileDesc to doc_id for lookup.
+                    self.remote_doc_id_map.insert(file_desc.clone(), doc_id);
 
                     // Send response
                     let resp = OpenFileResp {
@@ -1423,14 +1440,6 @@ impl Server {
                         file: file_desc.clone(),
                     };
                     next.send_resp(resp, None).await;
-                }
-                EditorFileDesc::Project { .. } => {
-                    let err = lsp_server::ResponseError {
-                        code: ErrorCode::BadRequest as i32,
-                        message: "Cannot open a project directory".to_string(),
-                        data: None,
-                    };
-                    next.send_resp((), Some(err)).await;
                 }
             }
             return Ok(());
