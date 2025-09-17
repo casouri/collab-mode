@@ -85,35 +85,21 @@ impl fmt::Display for FileDesc {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase", tag = "type")]
-pub enum EditorFileDesc {
-    /// A project.
-    Project {
-        #[serde(rename = "hostId")]
-        host_id: ServerId,
-        id: ProjectId,
-    },
-    /// A file in a project.
-    ProjectFile {
-        #[serde(rename = "hostId")]
-        host_id: ServerId,
-        project: ProjectId,
-        /// Relative path to the file in the project.
-        file: String,
-    },
+#[serde(rename_all = "camelCase")]
+pub struct EditorFileDesc {
+    #[serde(rename = "hostId")]
+    pub host_id: ServerId,
+    pub project: ProjectId,
+    /// Relative path to the file in the project. Empty string means it's a project directory.
+    pub file: String,
 }
 
 impl fmt::Display for EditorFileDesc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EditorFileDesc::Project { host_id, id } => {
-                write!(f, "{}/{}", host_id, id)
-            }
-            EditorFileDesc::ProjectFile {
-                host_id,
-                project,
-                file,
-            } => write!(f, "{}/{}", host_id, format!("{}/{}", project, file)),
+        if self.file.is_empty() {
+            write!(f, "{}/{}", self.host_id, self.project)
+        } else {
+            write!(f, "{}/{}/{}", self.host_id, self.project, self.file)
         }
     }
 }
@@ -122,8 +108,12 @@ impl EditorFileDesc {
     /// Create an EditorFileDesc from a FileDesc and a host_id
     pub fn new(file_desc: FileDesc, host_id: ServerId) -> Self {
         match file_desc {
-            FileDesc::Project { id } => EditorFileDesc::Project { host_id, id },
-            FileDesc::ProjectFile { project, file } => EditorFileDesc::ProjectFile {
+            FileDesc::Project { id } => EditorFileDesc {
+                host_id,
+                project: id,
+                file: String::new(),
+            },
+            FileDesc::ProjectFile { project, file } => EditorFileDesc {
                 host_id,
                 project,
                 file,
@@ -133,19 +123,30 @@ impl EditorFileDesc {
 
     /// Get the host_id from this EditorFileDesc
     pub fn host_id(&self) -> &ServerId {
-        match self {
-            EditorFileDesc::Project { host_id, .. } => host_id,
-            EditorFileDesc::ProjectFile { host_id, .. } => host_id,
-        }
+        &self.host_id
+    }
+
+    /// Check if this descriptor represents a project (directory)
+    pub fn is_project(&self) -> bool {
+        self.file.is_empty()
+    }
+
+    /// Check if this descriptor represents a file
+    pub fn is_file(&self) -> bool {
+        !self.file.is_empty()
     }
 }
 
 impl From<EditorFileDesc> for FileDesc {
     fn from(editor_file: EditorFileDesc) -> Self {
-        match editor_file {
-            EditorFileDesc::Project { id, .. } => FileDesc::Project { id },
-            EditorFileDesc::ProjectFile { project, file, .. } => {
-                FileDesc::ProjectFile { project, file }
+        if editor_file.file.is_empty() {
+            FileDesc::Project {
+                id: editor_file.project,
+            }
+        } else {
+            FileDesc::ProjectFile {
+                project: editor_file.project,
+                file: editor_file.file,
             }
         }
     }

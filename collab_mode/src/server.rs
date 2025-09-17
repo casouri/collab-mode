@@ -1130,7 +1130,7 @@ impl Server {
                         .to_string();
 
                     result.push(ListFileEntry {
-                        file: EditorFileDesc::ProjectFile {
+                        file: EditorFileDesc {
                             host_id: self.host_id.clone(),
                             project: project.clone(),
                             file: file_rel,
@@ -1151,7 +1151,7 @@ impl Server {
                     for (_doc_id, doc) in &self.docs {
                         if doc.abs_filename.is_buffer() {
                             result.push(ListFileEntry {
-                                file: EditorFileDesc::ProjectFile {
+                                file: EditorFileDesc {
                                     host_id: self.host_id.clone(),
                                     project: RESERVED_BUFFERS_PROJECT.to_string(),
                                     file: doc.name.clone(),
@@ -1173,7 +1173,7 @@ impl Server {
                     for (_doc_id, doc) in self.local_docs_not_in_any_project() {
                         if let PathId::Path(path) = &doc.abs_filename {
                             entries.push(ListFileEntry {
-                                file: EditorFileDesc::ProjectFile {
+                                file: EditorFileDesc {
                                     host_id: self.host_id.clone(),
                                     project: RESERVED_FILES_PROJECT.to_string(),
                                     file: path.display().to_string(),
@@ -1210,7 +1210,7 @@ impl Server {
 
                     // For project root, relative path is just the filename
                     result.push(ListFileEntry {
-                        file: EditorFileDesc::ProjectFile {
+                        file: EditorFileDesc {
                             host_id: self.host_id.clone(),
                             project: id.clone(),
                             file: file_name.clone(),
@@ -1230,9 +1230,10 @@ impl Server {
                 // let mut buf_result = vec![];
                 for (_, project) in &self.projects {
                     proj_result.push(ListFileEntry {
-                        file: EditorFileDesc::Project {
+                        file: EditorFileDesc {
                             host_id: self.host_id.clone(),
-                            id: project.name.clone(),
+                            project: project.name.clone(),
+                            file: String::new(),
                         },
                         filename: project.name.clone(),
                         is_directory: true,
@@ -1241,9 +1242,10 @@ impl Server {
                 }
                 for reserved in [RESERVED_BUFFERS_PROJECT, RESERVED_FILES_PROJECT] {
                     proj_result.push(ListFileEntry {
-                        file: EditorFileDesc::Project {
+                        file: EditorFileDesc {
                             host_id: self.host_id.clone(),
-                            id: reserved.to_string(),
+                            project: reserved.to_string(),
+                            file: String::new(),
                         },
                         filename: reserved.to_string(),
                         is_directory: true,
@@ -1340,108 +1342,107 @@ impl Server {
             // Local file.
 
             // Check if trying to open a project directory first.
-            match &file_desc {
-                EditorFileDesc::Project { .. } => {
-                    let err = lsp_server::ResponseError {
-                        code: ErrorCode::BadRequest as i32,
-                        message: "Cannot open a project directory".to_string(),
-                        data: None,
-                    };
-                    next.send_resp((), Some(err)).await;
-                    return Ok(());
-                }
-                EditorFileDesc::ProjectFile { project, file, .. } => {
-                    let res = self.path_id_from_file_desc(&desc);
-                    if let Err(err) = res {
-                        let err = lsp_server::ResponseError {
-                            code: ErrorCode::IoError as i32,
-                            message: err.to_string(),
-                            data: None,
-                        };
-                        next.send_resp((), Some(err)).await;
-                        return Ok(());
-                    }
-                    let path_id = res.unwrap();
-                    // Check if file is alreay opened.
-                    for (_doc_id, doc) in &self.docs {
-                        if doc.matches(&path_id) {
-                            let resp = OpenFileResp {
-                                content: doc.buffer.iter().collect(),
-                                site_id: self.site_id,
-                                filename: doc.name.clone(),
-                                file: file_desc,
-                            };
-                            next.send_resp(resp, None).await;
-                            return Ok(());
-                        }
-                    }
+            if file_desc.is_project() {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::BadRequest as i32,
+                    message: "Cannot open a project directory".to_string(),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+                return Ok(());
+            }
 
-                    // Not opened, read from disk and create doc.
-                    let res = self.open_file_from_disk(project, file, mode).await;
-                    if let Err(err) = res {
-                        let err = lsp_server::ResponseError {
-                            code: ErrorCode::IoError as i32,
-                            message: err.to_string(),
-                            data: None,
-                        };
-                        next.send_resp((), Some(err)).await;
-                        return Ok(());
-                    }
-                    let (content, disk_file, full_path) = res.unwrap();
-
-                    // Create new doc
-                    let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
-                    let base_name = std::path::Path::new(file)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(file)
-                        .to_string();
-
-                    let mut doc = Doc::new(
-                        base_name.clone(),
-                        JsonMap::new(),
-                        PathId::Path(full_path),
-                        desc.clone(),
-                        &content,
-                        ServerEngine::new(content.len() as u64),
-                        Some(disk_file),
-                    );
-
-                    // Add ourselves as a subscriber since we’re also a client
-                    doc.subscribers.insert(self.host_id.clone(), 0);
-
-                    self.docs.insert(doc_id, doc);
-
-                    // Also create a RemoteDoc for ourselves (we act as both server and client)
-                    let mut buffer = GapBuffer::new();
-                    buffer.insert_many(0, content.chars());
-                    let remote_doc = RemoteDoc {
-                        name: base_name.clone(),
-                        file_desc: desc.clone(),
-                        next_site_seq: 1,
-                        meta: JsonMap::new(),
-                        remote_op_buffer: Vec::new(),
-                        // Global seq starts from 1. So use 0 for the
-                        // base_seq, meaning we expect next global seq
-                        // to be 1.
-                        engine: ClientEngine::new(self.site_id, 0, content.chars().count() as u64),
-                        buffer,
-                    };
-                    self.remote_docs
-                        .insert((self.host_id.clone(), doc_id), remote_doc);
-                    // Add mapping from EditorFileDesc to doc_id for lookup.
-                    self.remote_doc_id_map.insert(file_desc.clone(), doc_id);
-
-                    // Send response
+            let res = self.path_id_from_file_desc(&desc);
+            if let Err(err) = res {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: err.to_string(),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+                return Ok(());
+            }
+            let path_id = res.unwrap();
+            // Check if file is alreay opened.
+            for (_doc_id, doc) in &self.docs {
+                if doc.matches(&path_id) {
                     let resp = OpenFileResp {
-                        content,
+                        content: doc.buffer.iter().collect(),
                         site_id: self.site_id,
-                        filename: base_name,
-                        file: file_desc.clone(),
+                        filename: doc.name.clone(),
+                        file: file_desc,
                     };
                     next.send_resp(resp, None).await;
+                    return Ok(());
                 }
             }
+
+            // Not opened, read from disk and create doc.
+            let res = self
+                .open_file_from_disk(&file_desc.project, &file_desc.file, mode)
+                .await;
+            if let Err(err) = res {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: err.to_string(),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+                return Ok(());
+            }
+            let (content, disk_file, full_path) = res.unwrap();
+
+            // Create new doc
+            let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+            let base_name = std::path::Path::new(&file_desc.file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file_desc.file)
+                .to_string();
+
+            let mut doc = Doc::new(
+                base_name.clone(),
+                JsonMap::new(),
+                PathId::Path(full_path),
+                desc.clone(),
+                &content,
+                ServerEngine::new(content.len() as u64),
+                Some(disk_file),
+            );
+
+            // Add ourselves as a subscriber since we're also a client
+            doc.subscribers.insert(self.host_id.clone(), 0);
+
+            self.docs.insert(doc_id, doc);
+
+            // Also create a RemoteDoc for ourselves (we act as both server and client)
+            let mut buffer = GapBuffer::new();
+            buffer.insert_many(0, content.chars());
+            let remote_doc = RemoteDoc {
+                name: base_name.clone(),
+                file_desc: desc.clone(),
+                next_site_seq: 1,
+                meta: JsonMap::new(),
+                remote_op_buffer: Vec::new(),
+                // Global seq starts from 1. So use 0 for the
+                // base_seq, meaning we expect next global seq
+                // to be 1.
+                engine: ClientEngine::new(self.site_id, 0, content.chars().count() as u64),
+                buffer,
+            };
+            self.remote_docs
+                .insert((self.host_id.clone(), doc_id), remote_doc);
+            // Add mapping from EditorFileDesc to doc_id for lookup.
+            self.remote_doc_id_map.insert(file_desc.clone(), doc_id);
+
+            // Send response
+            let resp = OpenFileResp {
+                content,
+                site_id: self.site_id,
+                filename: base_name,
+                file: file_desc.clone(),
+            };
+            next.send_resp(resp, None).await;
             return Ok(());
         }
 

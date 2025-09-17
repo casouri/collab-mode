@@ -958,7 +958,7 @@ async fn test_open_file_basic() {
         .hub
         .editor
         .open_file(serde_json::json!({
-            "type": "projectFile",
+
             "hostId": setup.hub.id.clone(),
             "project": "TestProject",
             "file": "test.txt"
@@ -1006,7 +1006,7 @@ async fn test_open_file_from_remote() {
     let (file_desc, site_id, content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
-            "type": "projectFile",
+
             "hostId": setup.hub.id.clone(),
             "project": "TestProject",
             "file": "src/main.rs"
@@ -1061,7 +1061,7 @@ async fn test_open_file_create_mode() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "new_file.txt"
@@ -1099,7 +1099,7 @@ async fn test_open_file_create_mode() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "new_file.txt"
@@ -1166,7 +1166,7 @@ async fn test_open_file_not_found() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "non_existent.txt"
@@ -1213,9 +1213,9 @@ async fn test_open_file_bad_request() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "project",
                     "hostId": setup.hub.id.clone(),
-                    "id": "TestProject"
+                    "project": "TestProject",
+                    "file": ""
                 },
                 "mode": "open"
             }),
@@ -1268,7 +1268,7 @@ async fn test_open_file_already_open() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
@@ -1291,7 +1291,7 @@ async fn test_open_file_already_open() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
@@ -1339,7 +1339,7 @@ async fn test_open_file_doc_id_not_found() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "_files",
                     "file": missing_path
@@ -1425,7 +1425,7 @@ async fn test_list_files_top_level() {
     let has_project1 = files.iter().any(|f| {
         f["filename"].as_str() == Some("Project1")
             && f["isDirectory"].as_bool() == Some(true)
-            && f["file"]["type"].as_str() == Some("project")
+            && f["file"]["file"].as_str() == Some("")
     });
     assert!(has_project1, "Should have Project1");
 
@@ -1433,7 +1433,7 @@ async fn test_list_files_top_level() {
     let has_project2 = files.iter().any(|f| {
         f["filename"].as_str() == Some("Project2")
             && f["isDirectory"].as_bool() == Some(true)
-            && f["file"]["type"].as_str() == Some("project")
+            && f["file"]["file"].as_str() == Some("")
     });
     assert!(has_project2, "Should have Project2");
 
@@ -1441,14 +1441,14 @@ async fn test_list_files_top_level() {
     let has_buffers = files.iter().any(|f| {
         f["filename"].as_str() == Some("_buffers")
             && f["isDirectory"].as_bool() == Some(true)
-            && f["file"]["type"].as_str() == Some("project")
+            && f["file"]["file"].as_str() == Some("")
     });
     assert!(has_buffers, "Should have _buffers virtual project");
 
     let has_buffers = files.iter().any(|f| {
         f["filename"].as_str() == Some("_files")
             && f["isDirectory"].as_bool() == Some(true)
-            && f["file"]["type"].as_str() == Some("project")
+            && f["file"]["file"].as_str() == Some("")
     });
     assert!(has_buffers, "Should have _files virtual project");
 
@@ -1491,7 +1491,7 @@ async fn test_list_files_project_directory() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "ComplexProject",
                     "file": "src"
@@ -1537,7 +1537,7 @@ async fn test_list_files_project_directory() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "ComplexProject",
                     "file": "src/modules"
@@ -1598,9 +1598,9 @@ async fn test_list_files_from_remote() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "project",
                     "hostId": setup.hub.id.clone(),
-                    "id": "SharedProject"
+                    "project": "SharedProject",
+                    "file": ""
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1628,9 +1628,9 @@ async fn test_list_files_from_remote() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "project",
                     "hostId": setup.hub.id.clone(),
-                    "id": "SharedProject"
+                    "project": "SharedProject",
+                    "file": ""
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1672,7 +1672,7 @@ async fn test_list_files_project_not_found() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "/non/existent/project",
                     "file": "src"
@@ -1730,7 +1730,7 @@ async fn test_list_files_not_directory() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
@@ -1786,7 +1786,7 @@ async fn test_list_files_empty_directory() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "ProjectWithEmpty",
                     "file": "empty"
@@ -1847,9 +1847,9 @@ async fn test_list_files_nested_structure() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "project",
                     "hostId": setup.hub.id.clone(),
-                    "id": "NestedProject"
+                    "project": "NestedProject",
+                    "file": ""
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -1892,7 +1892,7 @@ async fn test_list_files_nested_structure() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "NestedProject",
                     "file": "src/modules"
@@ -1920,7 +1920,8 @@ async fn test_list_files_nested_structure() {
         .find(|f| f["filename"].as_str() == Some("mod1.rs"))
         .unwrap();
     assert_eq!(mod1["file"]["file"].as_str(), Some("src/modules/mod1.rs"));
-    assert_eq!(mod1["file"]["type"].as_str(), Some("projectFile"));
+    // Verify it's a file (not a project) by checking file field is non-empty
+    assert!(!mod1["file"]["file"].as_str().unwrap().is_empty());
 
     tracing::info!("test_list_files_nested_structure completed successfully");
     setup.cleanup();
@@ -2040,7 +2041,7 @@ async fn test_delete_file() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "file1.txt"
@@ -2067,7 +2068,7 @@ async fn test_delete_file() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "dir1/file2.txt"
@@ -2095,7 +2096,7 @@ async fn test_delete_file() {
             "DeleteFile",
             serde_json::json!({
                 "file": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "file1.txt"
@@ -2114,10 +2115,8 @@ async fn test_delete_file() {
         .await
         .unwrap();
     // Check that we got the correct file descriptor.
-    assert_eq!(
-        notification["file"]["type"].as_str().unwrap(),
-        "projectFile"
-    );
+    // Verify it's a file by checking file field is non-empty
+    assert!(!notification["file"]["file"].as_str().unwrap().is_empty());
     assert_eq!(
         notification["file"]["project"].as_str().unwrap(),
         "TestProject"
@@ -2137,7 +2136,7 @@ async fn test_delete_file() {
             "DeleteFile",
             serde_json::json!({
                 "file": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "dir1"
@@ -2156,10 +2155,8 @@ async fn test_delete_file() {
         .await
         .unwrap();
     // Check that we got the correct file descriptor for the directory.
-    assert_eq!(
-        notification["file"]["type"].as_str().unwrap(),
-        "projectFile"
-    );
+    // Verify it's a file/dir by checking file field is non-empty
+    assert!(!notification["file"]["file"].as_str().unwrap().is_empty());
     assert_eq!(
         notification["file"]["project"].as_str().unwrap(),
         "TestProject"
@@ -2197,7 +2194,7 @@ async fn test_send_ops_e2e() {
         .hub
         .editor
         .open_file(serde_json::json!({
-            "type": "projectFile",
+
             "hostId": setup.hub.id.clone(),
             "project": "TestProject",
             "file": "test.txt"
@@ -2209,7 +2206,7 @@ async fn test_send_ops_e2e() {
     let (spoke1_file, _spoke1_site_id, spoke1_content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
-            "type": "projectFile",
+
             "hostId": setup.hub.id.clone(),
             "project": "TestProject",
             "file": "test.txt"
@@ -2222,7 +2219,7 @@ async fn test_send_ops_e2e() {
     let (spoke2_file, _spoke2_site_id, spoke2_content) = setup.spokes[1]
         .editor
         .open_file(serde_json::json!({
-            "type": "projectFile",
+
             "hostId": setup.hub.id.clone(),
             "project": "TestProject",
             "file": "test.txt"
@@ -2453,7 +2450,7 @@ async fn test_undo_e2e() {
     let (file_desc, _site_id, content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
-            "type": "projectFile",
+
             "hostId": setup.hub.id.clone(),
             "project": "TestProject",
             "file": "test.txt"
@@ -2758,7 +2755,7 @@ async fn test_list_files_sorted_alphanumerically() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "",
@@ -2832,7 +2829,7 @@ async fn test_open_binary_file_rejected() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.bin",
@@ -2920,7 +2917,7 @@ async fn test_doc_project_handling() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "_buffers",
                     "file": "test_shared.txt",
@@ -2951,9 +2948,9 @@ async fn test_doc_project_handling() {
             "ListFiles",
             serde_json::json!({
                 "dir": {
-                    "type": "project",
                     "hostId": setup.hub.id.clone(),
-                    "id": "_buffers",
+                    "project": "_buffers",
+                    "file": ""
                 },
                 "signalingAddr": env.signaling_url(),
                 "credential": "test"
@@ -2979,7 +2976,7 @@ async fn test_doc_project_handling() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "_doc",
                     "file": "nonexistent.txt",
@@ -3206,7 +3203,7 @@ async fn test_create_file_permission_denied() {
             "OpenFile",
             serde_json::json!({
                 "fileDesc": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "test-project",
                     "file": "new-file.txt",
@@ -3288,7 +3285,7 @@ async fn test_delete_file_permission_denied() {
             "DeleteFile",
             serde_json::json!({
                 "file": {
-                    "type": "projectFile",
+
                     "hostId": setup.hub.id.clone(),
                     "project": "test-project",
                     "file": "test.txt",
