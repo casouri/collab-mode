@@ -24,7 +24,7 @@ All editor requests follow a similar pattern:
 - `meta`: Metadata as JSON map
 - `abs_filename`: PathId (either Buffer or Path)
 - `file_desc`: FileDesc for identification
-- `engine`: ServerEngine for CRDT operations
+- `engine`: ServerEngine for operations
 - `buffer`: GapBuffer containing the actual text
 - `subscribers`: Remote peers subscribing to this doc
 - `disk_file`: Optional file handle for saving
@@ -32,7 +32,7 @@ All editor requests follow a similar pattern:
 **RemoteDoc** - A document hosted by a remote server:
 - `name`: Human-readable name
 - `file_desc`: FileDesc for identification
-- `engine`: ClientEngine for CRDT operations
+- `engine`: ClientEngine for operations
 - `buffer`: GapBuffer containing the synced text
 - `remote_op_buffer`: Buffer for incoming remote operations
 - `next_site_seq`: Local sequence number for operations
@@ -137,15 +137,22 @@ Lists all available projects from a server (local or remote).
 **Flow**
 1. Editor sends ListProjects request with target host_id
 2. Server checks if host_id is local or remote
-3. If remote:
+3. **If remote**:
    - Check connection status
-   - Forward `Msg::ListFiles { dir: None }` to remote
-   - Wait for `Msg::FileList` response
-4. If local:
-   - List all projects from `self.projects`
-   - List docs from `self.docs` not in any project (virtual _files project)
+   - Send `Msg::ListFiles { dir: None }` to remote via WebChannel
+   - **Remote server processing**:
+     - Lists all available projects
+     - Lists standalone documents not in any project
+     - Formats each as ListFileEntry with metadata
+     - Sends back `Msg::FileList(files)` with req_id
+   - **Local server receives response**:
+     - Validates req_id matches pending request
+     - Forwards files list to editor
+4. **If local**:
+   - List all projects from project registry
+   - List docs not in any project (virtual _files project)
    - List docs in virtual _buffers project
-5. Return ListFilesResp to editor
+   - Return ListFilesResp to editor
 
 **Errors**
 - `NotConnected`: If remote host is not connected
@@ -172,15 +179,22 @@ Same as ListProjects response format.
 **Flow**
 1. Editor sends ListFiles request with directory descriptor
 2. Server checks if target is local or remote
-3. If remote:
+3. **If remote**:
    - Convert EditorFileDesc to FileDesc
-   - Forward `Msg::ListFiles { dir: Some(file_desc) }` to remote
-   - Wait for response
-4. If local:
+   - Send `Msg::ListFiles { dir: Some(file_desc) }` to remote
+   - **Remote server processing**:
+     - Converts FileDesc to filesystem path
+     - Reads directory contents from disk
+     - Formats entries as ListFileEntry items
+     - Sends back `Msg::FileList(files)` or `Msg::ErrorResp` if error
+   - **Local server receives response**:
+     - If FileList: forwards to editor
+     - If ErrorResp: converts to ResponseError and sends to editor
+4. **If local**:
    - Convert FileDesc to filesystem path
    - Read directory contents from disk
    - Filter and format entries
-5. Return ListFilesResp to editor
+   - Return ListFilesResp to editor
 
 **Errors**
 - `NotConnected`: If remote host is not connected
@@ -221,17 +235,30 @@ Opens a file for editing, creating it if necessary.
    - If not opened:
      - Read file from disk (or create if mode=Create)
      - Create new Doc with ServerEngine
-     - Add to `self.docs`
+     - Add to `self.docs` with new doc_id
+     - Add ourselves as subscriber
      - Create corresponding RemoteDoc for local editing
-     - Add to `self.remote_docs`
-   - Return content and site_id
+     - Add to `self.remote_docs` and `remote_doc_id_map`
+   - Return OpenFileResp with content and site_id
 4. **If remote**:
    - Check if already opened in `self.remote_docs`
+   - If already opened: return existing content
    - If not opened:
      - Send `Msg::RequestFile(file_desc, mode)` to remote
-     - Receive `Msg::Snapshot` with content and site_id
-     - Create RemoteDoc with ClientEngine
-     - Add to `self.remote_docs`
+     - **Remote server processing**:
+       - Checks if document already exists
+       - If not exists and mode=Open: returns error
+       - If not exists and mode=Create: creates new file
+       - Creates document with engine if needed
+       - Assigns new site_id to requester
+       - Adds requester as subscriber
+       - Creates snapshot with content, sequence number, and site_id
+       - Sends back `Msg::Snapshot(snapshot)`
+     - **Local server receives Snapshot**:
+       - Creates RemoteDoc with assigned site_id
+       - Initializes buffer with snapshot content
+       - Stores in remote document registry
+       - Sends OpenFileResp to editor
    - Return content and site_id
 
 **Errors**
@@ -320,19 +347,28 @@ Sends editing operations from the editor to apply to a document.
 3. Drain any buffered remote operations
 4. **Process local operations**:
    - For each EditorOp:
-     - Assign site_seq (increment next_site_seq)
-     - Convert to CRDT operations using ClientEngine
+     - Assign sequence number
+     - Convert to operation
      - Apply to local buffer
-     - Generate FatOp for remote
+     - Collect operations for remote
 5. **Send to remote** (if file is remote):
-   - Package as ContextOps with context
+   - Package as ContextOps with context vector
    - Send `Msg::OpFromClient(context_ops)` to remote
+   - **Remote server processing**:
+     - Finds document by doc_id
+     - Updates sender's sequence tracking
+     - Transforms each operation for consistency
+     - Applies operations to document buffer
+     - Broadcasts transformed ops to all other subscribers
+     - Each subscriber gets ops after their last received sequence
+   - **Note**: No immediate response; ops arrive async via OpFromServer
 6. **Process buffered remote operations**:
-   - Transform and apply each buffered op
-   - Update buffer
+   - Transform each buffered operation
+   - Apply to local buffer
+   - Add to response list
 7. **Prepare response**:
-   - Collect all EditInstructions
-   - Include last global sequence number
+   - Collect all edit instructions transformed from remote ops
+   - Include last sequence number
 8. Return SendOpsResp to editor
 
 **Errors**
@@ -364,9 +400,18 @@ Sends metadata/information about a document to remote subscribers.
    - Get doc_id and site_id from RemoteDoc
    - Create Info message with doc_id, sender site_id, and serialized value
    - Send `Msg::InfoFromClient(info)` to remote host
+   - **Remote server processing**:
+     - Receives info containing doc_id, sender site_id, and value
+     - Broadcasts info to all subscribers of the document
+     - Sends `Msg::InfoFromServer(info)` to each subscriber
+     - Skips sending back to original sender
+   - **Other clients receive**:
+     - Receive `Msg::InfoFromServer` notification
+     - Match doc_id to their remote documents
+     - Send InfoReceived notification to their editor
 3. **If file is local**:
-   - Find Doc by PathId
-   - Create Info message with doc_id and our site_id
+   - Find document by PathId
+   - Create Info message with doc_id and site_id
    - Broadcast `Msg::InfoFromServer(info)` to all subscribers
    - Skip sending to ourselves
 4. Return empty response
@@ -443,15 +488,22 @@ Moves or renames a file within a project.
 **Flow**
 1. Editor sends MoveFile request
 2. **If remote**:
-   - Forward `Msg::MoveFile(project, old_path, new_path)` to remote
-   - Wait for `Msg::FileMoved` response
-3. **If local**:
-   - Call `move_file_on_disk()` which:
+   - Send `Msg::MoveFile(project, old_path, new_path)` to remote
+   - **Remote server processing**:
      - Validates project exists
-     - Performs filesystem rename
-     - Updates affected Doc's abs_filename and file_desc
-     - Returns list of subscribers
-   - Send response to editor
+     - Builds full filesystem paths
+     - Performs filesystem rename operation
+     - Scan through opened docs and find affected ones by their absolute path
+     - Updates affected document's path and descriptor
+     - Gets list of subscribers
+     - Sends `Msg::FileMoved` response with req_id
+     - Sends `Msg::FileMoved` notification to all subscribers
+   - **Local server receives response**:
+     - Receives `Msg::FileMoved` with req_id
+     - Sends MoveFileResp to editor
+3. **If local**:
+   - Perform same operations as remote (validate, rename, update)
+   - Send MoveFileResp to editor
    - Send `Msg::FileMoved` notification to all subscribers
 
 **Errors**
@@ -482,16 +534,22 @@ Saves a document to disk.
 **Flow**
 1. Editor sends SaveFile request
 2. **If remote**:
-   - Find doc_id from remote_docs
+   - Find doc_id from remote documents
    - Send `Msg::SaveFile(doc_id)` to remote
-   - Wait for `Msg::FileSaved` response
+   - **Remote server processing**:
+     - Finds document by doc_id
+     - Collects buffer content as string
+     - Writes to disk
+     - Sends `Msg::FileSaved(doc_id)` response
+     - Or `Msg::ErrorResp(IoError)` if save fails
+   - **Local server receives response**:
+     - Receives `Msg::FileSaved` with req_id
+     - Finds RemoteDoc to get file descriptor
+     - Sends SaveFileResp to editor
 3. **If local**:
-   - Find Doc by file descriptor
-   - Call `save_to_disk()` which:
-     - Writes buffer content to disk_file
-     - Truncates file first
-     - Syncs to ensure durability
-   - Return success response
+   - Find document by PathId
+   - Perform save operation directly
+   - Return SaveFileResp or error to editor
 
 **Errors**
 - `NotConnected`: If remote host not connected
@@ -521,17 +579,26 @@ Deletes a file or directory.
 **Flow**
 1. Editor sends DeleteFile request
 2. **If remote**:
-   - Convert to FileDesc
+   - Convert EditorFileDesc to FileDesc
    - Send `Msg::DeleteFile(file_desc)` to remote
-   - Wait for `Msg::FileDeleted` response
+   - **Remote server processing**:
+     - Converts FileDesc to filesystem path
+     - Checks if path is file or directory
+     - For directory, find all the opened docs under it, collect all the subscribers of contained doc; for file, collect its subscribers too
+     - Deletes from filesystem
+     - If doc exists for this file/directory:
+       - Removes itself and contained docs (if directory) from registry
+       - Sends `Msg::FileDeleted` notification to each subscriber we collected earlier
+     - Sends `Msg::FileDeleted` response to the original caller
+     - Or `Msg::ErrorResp(IoError)` if delete fails
+   - **Local server receives response**:
+     - Receives `Msg::FileDeleted` with req_id
+     - Sends DeleteFileResp to editor
 3. **If local**:
    - Convert to filesystem path
-   - Check if path is file or directory
-   - Delete from filesystem
-   - If Doc exists for this file:
-     - Remove from `self.docs`
-     - Notify all subscribers with `Msg::FileDeleted`
-   - Return success response
+   - Perform same delete operations as remote
+   - Send DeleteFileResp to editor
+   - Send `Msg::FileDeleted` notifications to subscribers
 
 **Errors**
 - `NotConnected`: If remote host not connected
@@ -560,10 +627,15 @@ Closes a remote document and stops receiving updates.
 **Flow**
 1. Editor sends DisconnectFromFile request
 2. Find RemoteDoc for the file
-3. Remove from `self.remote_docs`
-4. Remove from `self.remote_doc_id_map`
+3. Remove from remote documents registry
+4. Remove from file descriptor mapping
 5. Send `Msg::StopSendingOps(doc_id)` to remote host
-6. Return empty response
+   - **Remote server processing**:
+     - Finds document by doc_id
+     - Removes sender from subscribers list
+     - No response sent back
+   - **Note**: This is fire-and-forget notification
+6. Return empty response to editor
 
 **Note**: This only applies to remote documents. Local documents remain open until explicitly deleted.
 
@@ -598,7 +670,6 @@ Declares new projects to be managed by the server.
 3. Expand project paths:
    - Handle `~` expansion
    - Convert to absolute paths
-   - Canonicalize paths
 4. For each project:
    - Create Project struct with name, root path, and empty metadata
    - Add to `self.projects` HashMap
@@ -649,6 +720,26 @@ Updates server configuration for accept mode and trusted hosts.
 
 **Errors**
 - None (configuration updates are best-effort)
+
+## Asynchronous Message Flows
+
+### Remote Operation Delivery
+
+When a remote server sends operations for a document, they arrive asynchronously:
+
+**Flow**:
+1. Remote server has new ops for a document (from another client)
+2. Remote sends `Msg::OpFromServer { doc, ops }` to all subscribers
+3. **Local server receives**:
+   - Finds RemoteDoc by host_id and doc_id
+   - Adds ops to remote operation buffer
+   - Sends `RemoteOpsArrived` notification to editor
+4. **Editor processes**:
+   - Editor receives notification
+   - Editor sends `SendOps` request (possibly with empty ops)
+   - Server processes buffered ops and returns them
+
+This buffering mechanism ensures ops arrive in order and are processed atomically with local edits.
 
 ## Notification Flows
 
@@ -730,7 +821,7 @@ The server uses the following error codes in responses:
    - Returns PermissionDenied error
 
 4. **Document corruption**:
-   - CRDT engine detects inconsistent state
+   - Engine detects inconsistent state
    - Operation sequence violation
    - Returns DocFatal, requires reopening document
 
@@ -746,7 +837,3 @@ The server uses the following error codes in responses:
 - **Document errors**: Editor should close and reopen the document
 - **File errors**: Editor should refresh file list and retry
 - **Permission errors**: User must update credentials or trusted hosts
-
-<function_calls>
-<invoke name="TodoWrite">
-<parameter name="todos">[{"content": "Write summary section of the design document", "status": "completed", "activeForm": "Writing summary section"}, {"content": "Write concepts section explaining key architecture components", "status": "completed", "activeForm": "Writing concepts section"}, {"content": "Document Initialize request flow", "status": "completed", "activeForm": "Documenting Initialize request"}, {"content": "Document ListProjects and ListFiles request flows", "status": "in_progress", "activeForm": "Documenting ListProjects/ListFiles"}, {"content": "Document OpenFile request flow", "status": "pending", "activeForm": "Documenting OpenFile request"}, {"content": "Document ShareFile request flow", "status": "pending", "activeForm": "Documenting ShareFile request"}, {"content": "Document SendOps request flow", "status": "pending", "activeForm": "Documenting SendOps request"}, {"content": "Document SendInfo, Undo, and other miscellaneous requests", "status": "pending", "activeForm": "Documenting miscellaneous requests"}, {"content": "Document file management requests (Move, Save, Delete, Disconnect)", "status": "pending", "activeForm": "Documenting file management"}, {"content": "Document DeclareProjects and UpdateConfig requests", "status": "pending", "activeForm": "Documenting project/config requests"}, {"content": "Write error handling section", "status": "pending", "activeForm": "Writing error handling section"}]
