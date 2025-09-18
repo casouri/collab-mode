@@ -23,6 +23,7 @@ pub enum NotificationCode {
     Connected,           // Editor should mark the remote as connected.
     FileMoved,           // A file moved, editor should update it accordingly.
     FileDeleted,         // A file/directory was deleted.
+    InfoReceived,        // Info received from remote for a file.
 
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
@@ -302,6 +303,13 @@ pub struct SendInfoParams {
     pub file: EditorFileDesc,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendInfoNote {
+    pub file: EditorFileDesc,
+    pub info: serde_json::Value,
+}
+
 // **** Undo
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -375,7 +383,9 @@ pub enum Msg {
     ResetFile(DocId),
     Login(Credential),
     LoggedYouIn(SiteId),
-    Info(DocId, Info),
+    Info(Info),
+    InfoFromClient(Info),
+    InfoFromServer(Info),
 
     // Misc
     IceProgress(String),

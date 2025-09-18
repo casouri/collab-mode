@@ -683,6 +683,11 @@ impl Server {
                     .await;
                 }
             }
+            "SendInfo" => {
+                let params: SendInfoParams = serde_json::from_value(notif.params)?;
+                self.handle_send_info_from_editor(next, params).await?;
+            }
+
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
                 // TODO: send back an error response.
@@ -942,6 +947,32 @@ impl Server {
                         file: editor_file_desc,
                     };
                     next.send_notif(NotificationCode::FileDeleted, msg).await;
+                }
+                Ok(())
+            }
+            Msg::InfoFromClient(info) => {
+                // Received from a client, broadcast to all subscribers
+                let res = self.broadcast_info(&next, info, None).await;
+                if let Err(err) = res {
+                    tracing::warn!("{} when handling InfoFromClient from {}", err, msg.host);
+                }
+                Ok(())
+            }
+            Msg::InfoFromServer(info) => {
+                let remote_doc = self.remote_docs.get(&(msg.host.clone(), info.doc_id));
+                if let Some(remote_doc) = remote_doc {
+                    let editor_file =
+                        EditorFileDesc::new(remote_doc.file_desc.clone(), msg.host.clone());
+
+                    let info_json = serde_json::to_value(&info.value)?;
+                    let note = SendInfoNote {
+                        file: editor_file,
+                        info: info_json,
+                    };
+                    next.send_notif(NotificationCode::InfoReceived, note).await;
+                } else {
+                    next.send_to_remote(&msg.host, Msg::StopSendingOps(info.doc_id))
+                        .await;
                 }
                 Ok(())
             }
@@ -1950,6 +1981,57 @@ impl Server {
         Ok(())
     }
 
+    async fn handle_send_info_from_editor<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: SendInfoParams,
+    ) -> anyhow::Result<()> {
+        let SendInfoParams { info, file } = params;
+
+        // Remote doc.
+        if let Some((doc_id, remote_doc)) = self.get_remote_doc_mut(&file) {
+            let sender_site_id = remote_doc.engine.site();
+            let info_value = serde_json::to_string(&info)?;
+            let info = Info {
+                doc_id,
+                sender: sender_site_id,
+                value: info_value,
+            };
+
+            let remote_host_id = file.host_id().clone();
+            next.send_to_remote(&remote_host_id, Msg::InfoFromClient(info))
+                .await;
+            return Ok(());
+        }
+
+        // Local doc. Check that we have a opened doc.
+        let res = self.get_remote_doc(&file).map_or_else(
+            || None,
+            |(doc_id, _doc)| self.docs.get(&doc_id).map(|doc| (doc_id, doc)),
+        );
+        if res.is_none() {
+            tracing::warn!("Received a info for non-exist file {}", file);
+            return Ok(());
+        }
+
+        let (doc_id, _doc) = res.unwrap();
+
+        let info_value = serde_json::to_string(&info)?;
+        let info = Info {
+            doc_id,
+            sender: self.site_id,
+            value: info_value,
+        };
+
+        let host_id = self.host_id.clone();
+        // This call shouldn’t return any error since we already
+        // verified that the doc exists.
+        self.broadcast_info(next, info, Some(&host_id))
+            .await
+            .unwrap();
+        Ok(())
+    }
+
     async fn handle_send_ops_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
@@ -2217,7 +2299,7 @@ impl Server {
             .get(project_id)
             .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
 
-        // Construct full paths (non-canonical, preserve original project root form).
+        // Construct full paths.
         let old_full_path = std::path::PathBuf::from(&project.root).join(old_path);
         let new_full_path = std::path::PathBuf::from(&project.root).join(new_path);
 
@@ -2564,6 +2646,29 @@ impl Server {
                 Ok((docs_to_remove, Some(full_path), subscribers))
             }
         }
+    }
+
+    async fn broadcast_info<'a>(
+        &mut self,
+        next: &Next<'a>,
+        info: Info,
+        exclude_host: Option<&ServerId>,
+    ) -> anyhow::Result<()> {
+        let doc_id = info.doc_id;
+        let doc = self.docs.get(&doc_id);
+        if doc.is_none() {
+            return Err(anyhow!("Doc {} not found", doc_id));
+        }
+        let doc = doc.unwrap();
+
+        // Send InfoFromServer to all subscribers except the excluded host.
+        for (subscriber_host_id, _) in &doc.subscribers {
+            if Some(subscriber_host_id) != exclude_host {
+                next.send_to_remote(subscriber_host_id, Msg::InfoFromServer(info.clone()))
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     async fn save_file_to_disk(&mut self, doc_id: &DocId) -> anyhow::Result<()> {

@@ -423,13 +423,11 @@ mod e2e_tests {
 
         // Each client sends a unique message
         for (i, (_client_id, channel)) in client_channels.iter().enumerate() {
-            let msg = Msg::Info(
-                i as u32, // DocId is u32
-                Info {
-                    sender: i as u32,
-                    value: format!("Hello from client {}", i),
-                },
-            );
+            let msg = Msg::Info(Info {
+                doc_id: i as u32,
+                sender: i as u32,
+                value: format!("Hello from client {}", i),
+            });
             channel.send(&hub_id, None, msg).await.unwrap();
         }
 
@@ -441,9 +439,9 @@ mod e2e_tests {
         while received_count < num_clients && start_time.elapsed() < timeout_duration {
             if let Ok(Some(msg)) = timeout(Duration::from_millis(100), hub_rx.recv()).await {
                 match msg.body {
-                    Msg::Info(doc_id, info) => {
+                    Msg::Info(info) => {
                         let client_num = info.sender as usize;
-                        assert_eq!(doc_id, client_num as u32);
+                        assert_eq!(info.doc_id, client_num as u32);
                         assert_eq!(info.value, format!("Hello from client {}", client_num));
                         received_count += 1;
                     }
@@ -729,13 +727,11 @@ mod e2e_tests {
                         }
                     } else {
                         // Others are small
-                        Msg::Info(
-                            i as u32, // DocId is u32
-                            Info {
-                                sender: i as u32,
-                                value: format!("Message {}", i),
-                            },
-                        )
+                        Msg::Info(Info {
+                            doc_id: i as u32,
+                            sender: i as u32,
+                            value: format!("Message {}", i),
+                        })
                     };
                     channel2.send(&id1, None, msg).await.unwrap();
                 }
