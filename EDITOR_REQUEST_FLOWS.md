@@ -96,7 +96,7 @@ Establishes the connection between editor and server.
 
 **Flow**
 1. Editor sends Initialize request
-2. Server returns its host_id
+2. Server returns its `host_id`
 3. No errors possible for this request
 
 ### ListProjects
@@ -135,8 +135,8 @@ Lists all available projects from a server (local or remote).
 ```
 
 **Flow**
-1. Editor sends ListProjects request with target host_id
-2. Server checks if host_id is local or remote
+1. Editor sends ListProjects request with target `host_id`
+2. Server checks if `host_id` is local or remote
 3. **If remote**:
    - Check connection status
    - Send `Msg::ListFiles { dir: None }` to remote via WebChannel
@@ -144,14 +144,14 @@ Lists all available projects from a server (local or remote).
      - Lists all available projects
      - Lists standalone documents not in any project
      - Formats each as ListFileEntry with metadata
-     - Sends back `Msg::FileList(files)` with req_id
+     - Sends back `Msg::FileList(files)` with `req_id`
    - **Local server receives response**:
-     - Validates req_id matches pending request
+     - Validates `req_id` matches pending request
      - Forwards files list to editor
 4. **If local**:
    - List all projects from project registry
-   - List docs not in any project (virtual _files project)
-   - List docs in virtual _buffers project
+   - List docs not in any project (virtual `_files` project)
+   - List docs in virtual `_buffers` project
    - Return ListFilesResp to editor
 
 **Errors**
@@ -181,7 +181,7 @@ Same as ListProjects response format.
 2. Server checks if target is local or remote
 3. **If remote**:
    - Convert EditorFileDesc to FileDesc
-   - Send `Msg::ListFiles { dir: Some(file_desc) }` to remote
+   - Send `Msg::ListFiles { dir: Some(`file_desc`) }` to remote
    - **Remote server processing**:
      - Converts FileDesc to filesystem path
      - Reads directory contents from disk
@@ -235,31 +235,31 @@ Opens a file for editing, creating it if necessary.
    - If not opened:
      - Read file from disk (or create if mode=Create)
      - Create new Doc with ServerEngine
-     - Add to `self.docs` with new doc_id
+     - Add to `self.docs` with new `doc_id`
      - Add ourselves as subscriber
      - Create corresponding RemoteDoc for local editing
      - Add to `self.remote_docs` and `remote_doc_id_map`
-   - Return OpenFileResp with content and site_id
+   - Return OpenFileResp with content and `site_id`
 4. **If remote**:
    - Check if already opened in `self.remote_docs`
    - If already opened: return existing content
    - If not opened:
-     - Send `Msg::RequestFile(file_desc, mode)` to remote
+     - Send `Msg::RequestFile(`file_desc`, `mode`)` to remote
      - **Remote server processing**:
        - Checks if document already exists
        - If not exists and mode=Open: returns error
        - If not exists and mode=Create: creates new file
        - Creates document with engine if needed
-       - Assigns new site_id to requester
+       - Assigns new `site_id` to requester
        - Adds requester as subscriber
-       - Creates snapshot with content, sequence number, and site_id
+       - Creates snapshot with content, sequence number, and `site_id`
        - Sends back `Msg::Snapshot(snapshot)`
      - **Local server receives Snapshot**:
-       - Creates RemoteDoc with assigned site_id
+       - Creates RemoteDoc with assigned `site_id`
        - Initializes buffer with snapshot content
        - Stores in remote document registry
        - Sends OpenFileResp to editor
-   - Return content and site_id
+   - Return content and `site_id`
 
 **Errors**
 - `BadRequest`: If trying to open a project directory
@@ -298,7 +298,7 @@ Creates a new shared document from content provided by the editor.
    - Absolute path → `_files` project with PathId::Path
    - Relative path → `_buffers` project with PathId::Buffer
 4. Check if file already exists in `self.docs`
-5. Generate new doc_id
+5. Generate new `doc_id`
 6. If absolute path exists, open file for read/write
 7. Create new Doc with:
    - ServerEngine initialized with content length
@@ -307,7 +307,7 @@ Creates a new shared document from content provided by the editor.
 8. Add Doc to `self.docs`
 9. Create corresponding RemoteDoc for local editing
 10. Add RemoteDoc to `self.remote_docs`
-11. Return EditorFileDesc and site_id
+11. Return EditorFileDesc and `site_id`
 
 **Errors**
 - `BadRequest`: If file with same name already exists
@@ -353,9 +353,9 @@ Sends editing operations from the editor to apply to a document.
      - Collect operations for remote
 5. **Send to remote** (if file is remote):
    - Package as ContextOps with context vector
-   - Send `Msg::OpFromClient(context_ops)` to remote
+   - Send `Msg::OpFromClient(`context_ops`)` to remote
    - **Remote server processing**:
-     - Finds document by doc_id
+     - Finds document by `doc_id`
      - Updates sender's sequence tracking
      - Transforms each operation for consistency
      - Applies operations to document buffer
@@ -372,52 +372,7 @@ Sends editing operations from the editor to apply to a document.
 8. Return SendOpsResp to editor
 
 **Errors**
-- `IoError`: If file not found in remote_docs
-
-### SendInfo
-
-Sends metadata/information about a document to remote subscribers.
-
-**Request**
-```json
-{
-  "method": "SendInfo",
-  "params": {
-    "info": {"cursor": 42, "selection": [10, 20]},
-    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
-  }
-}
-```
-
-**Response**
-```json
-{}
-```
-
-**Flow**
-1. Editor sends SendInfo request with metadata and file
-2. **If file is remote**:
-   - Get doc_id and site_id from RemoteDoc
-   - Create Info message with doc_id, sender site_id, and serialized value
-   - Send `Msg::InfoFromClient(info)` to remote host
-   - **Remote server processing**:
-     - Receives info containing doc_id, sender site_id, and value
-     - Broadcasts info to all subscribers of the document
-     - Sends `Msg::InfoFromServer(info)` to each subscriber
-     - Skips sending back to original sender
-   - **Other clients receive**:
-     - Receive `Msg::InfoFromServer` notification
-     - Match doc_id to their remote documents
-     - Send InfoReceived notification to their editor
-3. **If file is local**:
-   - Find document by PathId
-   - Create Info message with doc_id and site_id
-   - Broadcast `Msg::InfoFromServer(info)` to all subscribers
-   - Skip sending to ourselves
-4. Return empty response
-
-**Errors**
-- `IoError`: If file not found
+- `IoError`: If file not found in `remote_docs`
 
 ### Undo
 
@@ -496,10 +451,10 @@ Moves or renames a file within a project.
      - Scan through opened docs and find affected ones by their absolute path
      - Updates affected document's path and descriptor
      - Gets list of subscribers
-     - Sends `Msg::FileMoved` response with req_id
+     - Sends `Msg::FileMoved` response with `req_id`
      - Sends `Msg::FileMoved` notification to all subscribers
    - **Local server receives response**:
-     - Receives `Msg::FileMoved` with req_id
+     - Receives `Msg::FileMoved` with `req_id`
      - Sends MoveFileResp to editor
 3. **If local**:
    - Perform same operations as remote (validate, rename, update)
@@ -534,16 +489,16 @@ Saves a document to disk.
 **Flow**
 1. Editor sends SaveFile request
 2. **If remote**:
-   - Find doc_id from remote documents
-   - Send `Msg::SaveFile(doc_id)` to remote
+   - Find `doc_id` from remote documents
+   - Send `Msg::SaveFile(`doc_id`)` to remote
    - **Remote server processing**:
-     - Finds document by doc_id
+     - Finds document by `doc_id`
      - Collects buffer content as string
      - Writes to disk
-     - Sends `Msg::FileSaved(doc_id)` response
+     - Sends `Msg::FileSaved(`doc_id`)` response
      - Or `Msg::ErrorResp(IoError)` if save fails
    - **Local server receives response**:
-     - Receives `Msg::FileSaved` with req_id
+     - Receives `Msg::FileSaved` with `req_id`
      - Finds RemoteDoc to get file descriptor
      - Sends SaveFileResp to editor
 3. **If local**:
@@ -553,7 +508,7 @@ Saves a document to disk.
 
 **Errors**
 - `NotConnected`: If remote host not connected
-- `IoError`: If file not open, write fails, or no disk_file handle
+- `IoError`: If file not open, write fails, or no `disk_file` handle
 
 ### DeleteFile
 
@@ -580,7 +535,7 @@ Deletes a file or directory.
 1. Editor sends DeleteFile request
 2. **If remote**:
    - Convert EditorFileDesc to FileDesc
-   - Send `Msg::DeleteFile(file_desc)` to remote
+   - Send `Msg::DeleteFile(`file_desc`)` to remote
    - **Remote server processing**:
      - Converts FileDesc to filesystem path
      - Checks if path is file or directory
@@ -592,7 +547,7 @@ Deletes a file or directory.
      - Sends `Msg::FileDeleted` response to the original caller
      - Or `Msg::ErrorResp(IoError)` if delete fails
    - **Local server receives response**:
-     - Receives `Msg::FileDeleted` with req_id
+     - Receives `Msg::FileDeleted` with `req_id`
      - Sends DeleteFileResp to editor
 3. **If local**:
    - Convert to filesystem path
@@ -629,9 +584,9 @@ Closes a remote document and stops receiving updates.
 2. Find RemoteDoc for the file
 3. Remove from remote documents registry
 4. Remove from file descriptor mapping
-5. Send `Msg::StopSendingOps(doc_id)` to remote host
+5. Send `Msg::StopSendingOps(`doc_id`)` to remote host
    - **Remote server processing**:
-     - Finds document by doc_id
+     - Finds document by `doc_id`
      - Removes sender from subscribers list
      - No response sent back
    - **Note**: This is fire-and-forget notification
@@ -707,7 +662,7 @@ Updates server configuration for accept mode and trusted hosts.
 1. Editor sends UpdateConfig request
 2. Get current configuration
 3. If `acceptMode` provided:
-   - Update config.accept_mode
+   - Update `config.accept_mode`
    - Update shared Arc<Mutex<AcceptMode>>
 4. If `addTrustedHosts` provided:
    - Add each host/cert pair to config.trusted_hosts
@@ -731,7 +686,7 @@ When a remote server sends operations for a document, they arrive asynchronously
 1. Remote server has new ops for a document (from another client)
 2. Remote sends `Msg::OpFromServer { doc, ops }` to all subscribers
 3. **Local server receives**:
-   - Finds RemoteDoc by host_id and doc_id
+   - Finds RemoteDoc by `host_id` and `doc_id`
    - Adds ops to remote operation buffer
    - Sends `RemoteOpsArrived` notification to editor
 4. **Editor processes**:
@@ -769,6 +724,44 @@ Starts accepting connections on the specified signaling server.
 }
 ```
 Initiates connection to a remote server.
+
+### SendInfo
+
+Sends metadata/information about a document to remote subscribers.
+
+**Notification**
+```json
+{
+  "method": "SendInfo",
+  "params": {
+    "info": {"cursor": 42, "selection": [10, 20]},
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
+  }
+}
+```
+
+**Flow**
+1. Editor sends SendInfo notification with metadata and file
+2. **If file is remote**:
+   - Get `doc_id` and `site_id` from RemoteDoc
+   - Create Info message with `doc_id`, sender `site_id`, and serialized value
+   - Send `Msg::InfoFromClient(info)` to remote host
+   - **Remote server processing**:
+     - Receives info containing `doc_id`, sender `site_id`, and value
+     - Broadcasts info to all subscribers of the document
+     - Sends `Msg::InfoFromServer(info)` to each subscriber
+     - Skips sending back to original sender
+   - **Other clients receive**:
+     - Receive `Msg::InfoFromServer` notification
+     - Match `doc_id` to their remote documents
+     - Send InfoReceived notification to their editor
+3. **If file is local**:
+   - Find document by PathId
+   - Create Info message with `doc_id` and `site_id`
+   - Broadcast `Msg::InfoFromServer(info)` to all subscribers
+   - Skip sending to ourselves
+
+**Note**: SendInfo is a notification, not a request. No response is sent back to the editor.
 
 ## Error Handling
 
@@ -812,7 +805,7 @@ The server uses the following error codes in responses:
 
 2. **File not found**:
    - Local: File doesn't exist on disk
-   - Remote: File not in remote_docs map
+   - Remote: File not in `remote_docs` map
    - Returns IoError with descriptive message
 
 3. **Permission denied**:
