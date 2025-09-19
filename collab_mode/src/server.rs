@@ -1989,12 +1989,11 @@ impl Server {
         let SendInfoParams { info, file } = params;
 
         // Remote doc.
-        if let Some((doc_id, remote_doc)) = self.get_remote_doc_mut(&file) {
-            let sender_site_id = remote_doc.engine.site();
+        if let Some((doc_id, _remote_doc)) = self.get_remote_doc_mut(&file) {
             let info_value = serde_json::to_string(&info)?;
             let info = Info {
                 doc_id,
-                sender: sender_site_id,
+                sender: file.host_id().clone(),
                 value: info_value,
             };
 
@@ -2019,7 +2018,7 @@ impl Server {
         let info_value = serde_json::to_string(&info)?;
         let info = Info {
             doc_id,
-            sender: self.site_id,
+            sender: self.host_id.clone(),
             value: info_value,
         };
 

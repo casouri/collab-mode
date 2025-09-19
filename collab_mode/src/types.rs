@@ -34,7 +34,7 @@ pub const RESERVED_FILES_PROJECT: &str = "_files";
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Info {
     pub doc_id: DocId,
-    pub sender: SiteId,
+    pub sender: ServerId,
     pub value: String,
 }
 
