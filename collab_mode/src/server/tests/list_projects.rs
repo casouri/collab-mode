@@ -81,4 +81,3 @@ async fn test_list_files_top_level() {
 
     setup.cleanup();
 }
-

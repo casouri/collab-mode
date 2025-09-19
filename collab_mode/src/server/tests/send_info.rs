@@ -10,7 +10,11 @@ async fn test_send_info_local_file() {
     let (hub_file, _site_id) = setup
         .hub
         .editor
-        .share_file("test_info.txt", "Content for info test", serde_json::json!({}))
+        .share_file(
+            "test_info.txt",
+            "Content for info test",
+            serde_json::json!({}),
+        )
         .await
         .unwrap();
 
@@ -34,7 +38,11 @@ async fn test_send_info_local_file() {
         )
         .await
         .unwrap();
-    let _ = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let _ = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
 
     // Wait for subscription to be established.
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -103,7 +111,11 @@ async fn test_send_info_remote_file() {
         )
         .await
         .unwrap();
-    let _ = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let _ = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
 
     // Spoke 2 also opens the same file.
     let spoke2_file_desc = spoke1_file_desc.clone();
@@ -120,7 +132,11 @@ async fn test_send_info_remote_file() {
         )
         .await
         .unwrap();
-    let _ = setup.spokes[1].editor.wait_for_response(req_id, 5).await.unwrap();
+    let _ = setup.spokes[1]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
@@ -227,4 +243,3 @@ async fn test_send_info_multiple_subscribers() {
 
     setup.cleanup();
 }
-

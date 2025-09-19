@@ -55,7 +55,10 @@ async fn test_accept_connect() {
     let accepting_params = mock_editor1
         .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
         .await;
-    assert!(accepting_params.is_ok(), "Should receive AcceptingConnection notification");
+    assert!(
+        accepting_params.is_ok(),
+        "Should receive AcceptingConnection notification"
+    );
 
     tracing::info!("Server2 connecting to Server1");
     mock_editor2
@@ -73,7 +76,10 @@ async fn test_accept_connect() {
     let connecting_params = mock_editor2
         .wait_for_notification(&NotificationCode::Connecting.to_string(), 5)
         .await;
-    assert!(connecting_params.is_ok(), "Should receive Connecting notification");
+    assert!(
+        connecting_params.is_ok(),
+        "Should receive Connecting notification"
+    );
 
     tracing::info!("Waiting for connection to be established");
 
@@ -149,11 +155,13 @@ async fn test_accept_connect() {
         }
     }
 
-    assert_eq!(connected_received_count, 2, "Both sides should be connected");
+    assert_eq!(
+        connected_received_count, 2,
+        "Both sides should be connected"
+    );
 
     tracing::info!("Test completed successfully");
 
     server1_handle.abort();
     server2_handle.abort();
 }
-

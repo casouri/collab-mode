@@ -48,10 +48,9 @@ async fn test_expand_project_paths_relative_error() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.to_string().contains("is not absolute"));
-    assert!(
-        err.to_string()
-            .contains("All project paths must be absolute")
-    );
+    assert!(err
+        .to_string()
+        .contains("All project paths must be absolute"));
 }
 
 #[tokio::test]
@@ -155,4 +154,3 @@ async fn test_server_run_config_projects_expansion() {
 
     server_task.abort();
 }
-

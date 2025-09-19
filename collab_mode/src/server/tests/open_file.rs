@@ -158,7 +158,12 @@ async fn test_open_file_create_mode() {
         .await
         .unwrap();
 
-    let resp2 = setup.hub.editor.wait_for_response(req_id2, 5).await.unwrap();
+    let resp2 = setup
+        .hub
+        .editor
+        .wait_for_response(req_id2, 5)
+        .await
+        .unwrap();
     let file2 = resp2["file"].clone();
     assert_eq!(file1, file2);
 
@@ -418,4 +423,3 @@ async fn test_open_binary_file_rejected() {
 
     setup.cleanup();
 }
-

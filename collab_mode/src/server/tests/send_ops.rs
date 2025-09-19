@@ -56,7 +56,12 @@ async fn test_send_ops_e2e() {
         "op": { "Ins": [0, "Modified: "] },
         "groupSeq": 1
     })];
-    let _ = setup.hub.editor.send_ops(hub_file.clone(), ops).await.unwrap();
+    let _ = setup
+        .hub
+        .editor
+        .send_ops(hub_file.clone(), ops)
+        .await
+        .unwrap();
 
     // Spoke 2 should receive RemoteOpsArrived and then fetch remote ops.
     let _notification = setup.spokes[1]
@@ -223,4 +228,3 @@ async fn test_send_ops_permission_denied() {
         assert!(message.contains("denied"));
     }
 }
-

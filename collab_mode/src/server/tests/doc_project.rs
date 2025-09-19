@@ -65,7 +65,10 @@ async fn test_doc_project_handling() {
         .await
         .unwrap();
     let open_resp = setup.hub.editor.wait_for_response(req_id, 5).await.unwrap();
-    assert_eq!(open_resp["content"].as_str().unwrap(), "This is a shared document");
+    assert_eq!(
+        open_resp["content"].as_str().unwrap(),
+        "This is a shared document"
+    );
     assert_eq!(open_resp["filename"].as_str().unwrap(), "test_shared.txt");
     assert_eq!(open_resp["file"], shared_file);
 
@@ -119,4 +122,3 @@ async fn test_doc_project_handling() {
 
     setup.cleanup();
 }
-

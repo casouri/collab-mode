@@ -66,7 +66,10 @@ async fn wait_for_signaling_server(url: &str, timeout: Duration) -> anyhow::Resu
         }
     }
 
-    Err(anyhow::anyhow!("Signaling server failed to start within {:?}", timeout))
+    Err(anyhow::anyhow!(
+        "Signaling server failed to start within {:?}",
+        timeout
+    ))
 }
 
 impl TestEnvironment {
@@ -792,14 +795,14 @@ fn create_complex_project() -> anyhow::Result<tempfile::TempDir> {
 }
 
 // Submodules per request/feature under test.
-mod connection;
-mod open_file;
-mod list_projects;
-mod list_files;
-mod delete_file;
-mod send_ops;
-mod undo;
-mod share_file;
-mod send_info;
 mod config;
+mod connection;
+mod delete_file;
 mod doc_project;
+mod list_files;
+mod list_projects;
+mod open_file;
+mod send_info;
+mod send_ops;
+mod share_file;
+mod undo;

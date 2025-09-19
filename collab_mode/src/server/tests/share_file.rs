@@ -25,13 +25,22 @@ async fn test_share_file_e2e() {
         "op": {"Ins": [30, " More text."]},
         "groupSeq": 1
     })];
-    let _ = setup.hub.editor.send_ops(file_desc.clone(), ops).await.unwrap();
+    let _ = setup
+        .hub
+        .editor
+        .send_ops(file_desc.clone(), ops)
+        .await
+        .unwrap();
 
     // Share another file and verify doc id differs.
     let (file_desc2, site_id2) = setup
         .hub
         .editor
-        .share_file("another_file.txt", "Different content", serde_json::json!({}))
+        .share_file(
+            "another_file.txt",
+            "Different content",
+            serde_json::json!({}),
+        )
         .await
         .unwrap();
     assert_ne!(file_desc, file_desc2);
@@ -39,4 +48,3 @@ async fn test_share_file_e2e() {
 
     setup.cleanup();
 }
-

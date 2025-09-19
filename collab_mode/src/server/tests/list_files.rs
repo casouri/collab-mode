@@ -37,7 +37,11 @@ async fn test_list_files_project_directory() {
         .await
         .unwrap();
 
-    let resp = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
     let files = resp["files"].as_array().unwrap();
 
     // Should have main.rs, lib.rs, modules.
@@ -63,7 +67,11 @@ async fn test_list_files_project_directory() {
         .await
         .unwrap();
 
-    let resp = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
     let files = resp["files"].as_array().unwrap();
     assert_eq!(files.len(), 3);
 
@@ -111,7 +119,11 @@ async fn test_list_files_from_remote() {
         )
         .await
         .unwrap();
-    let resp = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
     let files = resp["files"].as_array().unwrap();
 
     // Spoke 2 lists files.
@@ -133,7 +145,11 @@ async fn test_list_files_from_remote() {
         )
         .await
         .unwrap();
-    let resp2 = setup.spokes[1].editor.wait_for_response(req_id2, 5).await.unwrap();
+    let resp2 = setup.spokes[1]
+        .editor
+        .wait_for_response(req_id2, 5)
+        .await
+        .unwrap();
     let files2 = resp2["files"].as_array().unwrap();
 
     assert_eq!(files.len(), files2.len());
@@ -375,4 +391,3 @@ async fn test_list_files_sorted_alphanumerically() {
     assert_eq!(filenames[4], "banana.txt");
     assert_eq!(filenames[5], "zebra.txt");
 }
-

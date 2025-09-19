@@ -43,7 +43,11 @@ async fn test_delete_file() {
         )
         .await
         .unwrap();
-    let _resp = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let _resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
 
     // Also open a file from dir1 to get subscribed to directory changes
     let req_id = 42;
@@ -63,7 +67,11 @@ async fn test_delete_file() {
         )
         .await
         .unwrap();
-    let _resp = setup.spokes[0].editor.wait_for_response(req_id, 5).await.unwrap();
+    let _resp = setup.spokes[0]
+        .editor
+        .wait_for_response(req_id, 5)
+        .await
+        .unwrap();
 
     // Wait a bit for subscriptions to be established
     sleep(Duration::from_millis(200)).await;
@@ -207,4 +215,3 @@ async fn test_delete_file_permission_denied() {
         );
     }
 }
-
