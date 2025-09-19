@@ -585,8 +585,6 @@ pub async fn setup_hub_and_spoke_servers(
         }
     });
 
-    sleep(Duration::from_millis(100)).await;
-
     // Hub starts accepting connections.
     tracing::info!("Hub server {} starting to accept connections", hub_id);
     hub_editor
@@ -603,8 +601,6 @@ pub async fn setup_hub_and_spoke_servers(
     let _ = hub_editor
         .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
         .await?;
-
-    sleep(Duration::from_millis(1000)).await;
 
     // Create and connect spoke servers.
     let mut spokes = Vec::new();

@@ -29,7 +29,6 @@ async fn test_open_file_basic() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Request to open a file.
     let (file_desc, site_id, content) = setup
@@ -69,8 +68,6 @@ async fn test_open_file_from_remote() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(100)).await;
-
     // Spoke requests to open a file from hub.
     let (_file_desc, site_id, content) = setup.spokes[0]
         .editor
@@ -107,8 +104,6 @@ async fn test_open_file_create_mode() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(100)).await;
-
     // Request to create a new file.
     let req_id = 1;
     setup
@@ -142,8 +137,6 @@ async fn test_open_file_create_mode() {
         "groupSeq": 1
     })];
     let _ = setup.hub.editor.send_ops(file1.clone(), ops).await.unwrap();
-
-    sleep(Duration::from_millis(100)).await;
 
     // Open the file again with "open" mode to verify it exists and has content.
     let req_id2 = 2;
@@ -193,7 +186,6 @@ async fn test_open_file_not_found() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Request to open a non-existent file.
     let req_id = 1;
@@ -278,7 +270,6 @@ async fn test_open_file_already_open() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // First request to open a file.
     let req_id = 1;
@@ -391,7 +382,6 @@ async fn test_open_binary_file_rejected() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Try to open the binary file.
     let req_id = 1;

@@ -173,7 +173,6 @@ async fn test_delete_file_permission_denied() {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // First, share a file on the hub.
     let (_doc_id, _site_id) = setup

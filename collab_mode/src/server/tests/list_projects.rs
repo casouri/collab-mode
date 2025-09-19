@@ -26,8 +26,6 @@ async fn test_list_files_top_level() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(100)).await;
-
     // Spoke requests top-level listing.
     let req_id = 1;
     setup.spokes[0]

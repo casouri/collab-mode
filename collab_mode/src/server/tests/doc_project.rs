@@ -45,8 +45,6 @@ async fn test_doc_project_handling() {
         .unwrap();
     let shared_file = share_resp["file"].clone();
 
-    sleep(Duration::from_millis(100)).await;
-
     // Test 3: Open the shared file using _buffers project.
     let req_id = 1;
     setup

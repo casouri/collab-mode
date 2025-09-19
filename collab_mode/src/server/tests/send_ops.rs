@@ -14,7 +14,6 @@ async fn test_send_ops_e2e() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Hub opens the file first (to create it in both docs and remote_docs).
     let (hub_file, _hub_site_id, _hub_content) = setup
@@ -193,8 +192,6 @@ async fn test_send_ops_permission_denied() {
         )
         .await
         .unwrap();
-
-    sleep(Duration::from_millis(100)).await;
 
     // Try to send ops from spoke (should be denied on hub side; local request still OK).
     let result = setup.spokes[0]

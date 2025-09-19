@@ -17,7 +17,6 @@ async fn test_undo_e2e() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Spoke opens the file.
     let (file_desc, _site_id, content) = setup.spokes[0]
@@ -30,8 +29,6 @@ async fn test_undo_e2e() {
         .await
         .unwrap();
     assert_eq!(content, "Hello from test.txt");
-
-    sleep(Duration::from_millis(200)).await;
 
     // Send an insert operation.
     let send_ops_resp = setup.spokes[0]
@@ -46,8 +43,6 @@ async fn test_undo_e2e() {
         .await
         .unwrap();
     tracing::info!("SendOps response: {:?}", send_ops_resp);
-
-    sleep(Duration::from_millis(100)).await;
 
     // Send an undo request and get the undo operations.
     let undo_ops = setup.spokes[0]
@@ -73,8 +68,6 @@ async fn test_undo_e2e() {
         )
         .await
         .unwrap();
-
-    sleep(Duration::from_millis(100)).await;
 
     // Test redo.
     let redo_ops = setup.spokes[0]

@@ -128,9 +128,6 @@ async fn test_server_run_config_projects_expansion() {
     let server_task =
         tokio::spawn(async move { server.run(server_to_editor_tx, editor_to_server_rx).await });
 
-    // Give server time to initialize.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // Send Initialize request to verify server is running.
     let init_request = lsp_server::Request {
         id: lsp_server::RequestId::from(1),

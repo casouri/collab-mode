@@ -39,8 +39,6 @@ async fn test_accept_connect() {
         })
     };
 
-    sleep(Duration::from_millis(100)).await;
-
     tracing::info!("Server1 starting to accept connections");
     mock_editor1
         .send_notification(
@@ -58,8 +56,6 @@ async fn test_accept_connect() {
         .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
         .await;
     assert!(accepting_params.is_ok(), "Should receive AcceptingConnection notification");
-
-    sleep(Duration::from_millis(500)).await;
 
     tracing::info!("Server2 connecting to Server1");
     mock_editor2

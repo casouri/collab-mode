@@ -17,8 +17,6 @@ async fn test_list_files_project_directory() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(100)).await;
-
     // Spoke requests listing of src directory.
     let req_id = 1;
     setup.spokes[0]
@@ -93,7 +91,6 @@ async fn test_list_files_from_remote() {
         .declare_project(&project_path, "Project2")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Spoke 1 lists files.
     let req_id = 1;
@@ -191,7 +188,6 @@ async fn test_list_files_not_directory() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Request listing of a file (not directory).
     let req_id = 1;
@@ -235,7 +231,6 @@ async fn test_list_files_empty_directory() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // Request listing of empty directory.
     let req_id = 1;
@@ -281,7 +276,6 @@ async fn test_list_files_nested_structure() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     let req_id = 1;
     setup.spokes[0]
@@ -342,7 +336,6 @@ async fn test_list_files_sorted_alphanumerically() {
         .declare_project(&project_path, "TestProject")
         .await
         .unwrap();
-    sleep(Duration::from_millis(100)).await;
 
     // List files in the project directory.
     let req_id = 1;
