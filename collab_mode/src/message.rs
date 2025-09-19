@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 #[derive(Clone, Copy, fmt_derive::Debug, fmt_derive::Display)]
 #[non_exhaustive]
+#[allow(dead_code)]
 pub enum NotificationCode {
     RemoteOpsArrived,    // Editor should fetch remote ops.
     FileListUpdated,     // Editor should update the file list.

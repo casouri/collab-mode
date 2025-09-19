@@ -44,7 +44,6 @@ fn main_loop(
     // `connection`.
     let connection_1 = connection.clone();
     let err_tx_1 = err_tx.clone();
-    let msg_tx_1 = msg_tx.clone();
 
     // Read from editor and send to msg_tx.
     std::thread::spawn(move || loop {

@@ -12,11 +12,13 @@ pub use crate::op::{
 };
 
 pub type ServerId = String;
+#[allow(dead_code)]
 pub const SERVER_ID_SELF: &str = "self";
 pub type Credential = String;
 /// A file in a directory that’s not yet a doc. The path is a relative
 /// path. We don’t want to use full path since some people might
 /// consider the full path sensitive?
+#[allow(dead_code)]
 pub type FilePath = (DocId, PathBuf);
 /// Project’s id is a descriptive name.
 pub type ProjectId = String;
@@ -133,6 +135,7 @@ impl EditorFileDesc {
     }
 
     /// Check if this descriptor represents a file
+    #[allow(dead_code)]
     pub fn is_file(&self) -> bool {
         !self.file.is_empty()
     }
@@ -229,6 +232,7 @@ pub struct NewSnapshot {
     /// Doc id on the remote server.
     pub doc_id: DocId,
 }
+#[allow(dead_code)]
 pub fn empty_json_map() -> JsonMap {
     serde_json::Map::new()
 }

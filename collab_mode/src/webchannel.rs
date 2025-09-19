@@ -101,6 +101,7 @@ impl WebChannel {
         self.my_hostid.clone()
     }
 
+    #[allow(dead_code)]
     pub fn active_remotes(&self) -> Vec<ServerId> {
         self.assoc_tx.lock().unwrap().keys().cloned().collect()
     }
@@ -365,7 +366,8 @@ impl WebChannel {
         Ok(())
     }
 
-    /// Broadcasts a message to all connected peers. Doesn’t block.
+    /// Broadcasts a message to all connected peers. Doesn't block.
+    #[allow(dead_code)]
     pub async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
         let message = Message {
             host: self.my_hostid.clone(),

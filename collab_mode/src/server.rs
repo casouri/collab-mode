@@ -55,6 +55,7 @@ struct Doc {
     /// The absolute filename of this doc on disk, if exists.
     abs_filename: PathId,
     /// File desc of this doc.
+    #[allow(dead_code)]
     file_desc: FileDesc,
     /// File object for saving file.
     disk_file: Option<std::fs::File>,
@@ -2061,9 +2062,7 @@ impl Server {
             let site_seq = remote_doc.next_site_seq;
             remote_doc.next_site_seq += 1;
 
-            let instructions = remote_doc
-                .engine
-                .process_local_op(editor_op, doc_id, site_seq);
+            let instructions = remote_doc.engine.process_local_op(editor_op, site_seq);
 
             match instructions {
                 Ok(instrs) => {

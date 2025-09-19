@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Convert remote `err` into a local error.
+#[allow(dead_code)]
 pub fn convert_remote_err(err: CollabError) -> CollabError {
     match &err {
         CollabError::Fatal(_) => CollabError::DocFatal(format!("Remote fatal error: {:#?}", err)),

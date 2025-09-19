@@ -27,6 +27,7 @@ pub struct ContextOps {
 
 impl ContextOps {
     /// Return the site of the ops.
+    #[allow(dead_code)]
     pub fn site(&self) -> SiteId {
         self.ops[0].site()
     }
@@ -1146,6 +1147,7 @@ impl GlobalHistory {
     }
 
     /// Print debugging history.
+    #[allow(dead_code)]
     pub fn print_history(&self) -> String {
         fn print_kind(kind: OpKind) -> &'static str {
             match kind {
@@ -1191,6 +1193,7 @@ impl GlobalHistory {
         output
     }
 
+    #[allow(dead_code)]
     pub fn print_history_debug(&self) -> String {
         fn print_kind(kind: OpKind, seq: GlobalSeq) -> String {
             match kind {
@@ -1428,7 +1431,6 @@ impl ClientEngine {
     pub fn process_local_op(
         &mut self,
         editor_op: EditorFatOp,
-        doc: DocId,
         site_seq: LocalSeq,
     ) -> EngineResult<Vec<EditInstruction>> {
         tracing::debug!(?editor_op, ?self.current_site_seq, "process_local_op");
@@ -1650,6 +1652,7 @@ impl ClientEngine {
     }
 
     /// Print debugging history.
+    #[allow(dead_code)]
     pub fn print_history(&self, debug: bool) -> String {
         if debug {
             self.gh.print_history_debug()
@@ -1803,7 +1806,7 @@ mod tests {
 
         // Local edits.
         apply_editor_op(&mut doc_a, &editor_op_a1);
-        client_a.process_local_op(op_a1.clone(), doc_id, 1).unwrap();
+        client_a.process_local_op(op_a1.clone(), 1).unwrap();
         assert_eq!(doc_a, "bcd");
         assert!(vec_eq(
             &client_a.internal_doc.ranges,
@@ -1811,7 +1814,7 @@ mod tests {
         ));
 
         apply_editor_op(&mut doc_a, &editor_op_a2);
-        client_a.process_local_op(op_a2.clone(), doc_id, 2).unwrap();
+        client_a.process_local_op(op_a2.clone(), 2).unwrap();
         assert_eq!(doc_a, "bcxd");
         assert!(vec_eq(
             &client_a.internal_doc.ranges,
@@ -1819,7 +1822,7 @@ mod tests {
         ));
 
         apply_editor_op(&mut doc_b, &editor_op_b1);
-        client_b.process_local_op(op_b1.clone(), doc_id, 1).unwrap();
+        client_b.process_local_op(op_b1.clone(), 1).unwrap();
         assert_eq!(doc_b, "abd");
         assert!(vec_eq(
             &client_b.internal_doc.ranges,
@@ -1897,15 +1900,15 @@ mod tests {
 
         // Local edits.
         apply_editor_op(&mut doc_a, &editor_op_a1);
-        client_a.process_local_op(op_a1.clone(), doc_id, 1).unwrap();
+        client_a.process_local_op(op_a1.clone(), 1).unwrap();
         assert_eq!(doc_a, "ab1c");
 
         apply_editor_op(&mut doc_b, &editor_op_b1);
-        client_b.process_local_op(op_b1.clone(), doc_id, 1).unwrap();
+        client_b.process_local_op(op_b1.clone(), 1).unwrap();
         assert_eq!(doc_b, "a2bc");
 
         apply_editor_op(&mut doc_c, &editor_op_c1);
-        client_c.process_local_op(op_c1.clone(), doc_id, 1).unwrap();
+        client_c.process_local_op(op_c1.clone(), 1).unwrap();
         assert_eq!(doc_c, "ac");
 
         // Server processing.
@@ -1990,10 +1993,10 @@ mod tests {
         let op4 = make_editor_fatop(EditorOp::Ins(1, "}".to_string()), 1);
         // All four ops have the same group, which is what we want.
 
-        client_engine.process_local_op(op1, doc_id, 1).unwrap();
-        client_engine.process_local_op(op2, doc_id, 2).unwrap();
-        client_engine.process_local_op(op3, doc_id, 3).unwrap();
-        client_engine.process_local_op(op4, doc_id, 4).unwrap();
+        client_engine.process_local_op(op1, 1).unwrap();
+        client_engine.process_local_op(op2, 2).unwrap();
+        client_engine.process_local_op(op3, 3).unwrap();
+        client_engine.process_local_op(op4, 4).unwrap();
 
         let undo_ops = client_engine.generate_undo_op();
 
