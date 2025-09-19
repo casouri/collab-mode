@@ -42,6 +42,33 @@ fn get_random_port() -> u16 {
     rng.gen_range(49152..=65535)
 }
 
+/// Wait for the signaling server to be ready by attempting to connect to it.
+/// Returns Ok(()) when connection succeeds, Err if timeout is reached.
+async fn wait_for_signaling_server(url: &str, timeout: Duration) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+    let retry_interval = Duration::from_millis(10);
+
+    while start.elapsed() < timeout {
+        // Try to connect to the WebSocket server
+        match tokio_tungstenite::connect_async(url).await {
+            Ok((ws_stream, _response)) => {
+                // Connection succeeded, close it and return
+                drop(ws_stream);
+                tracing::debug!("Signaling server is ready at {}", url);
+                return Ok(());
+            }
+            Err(_) => {
+                // Server not ready yet, wait a bit and retry
+                if start.elapsed() + retry_interval < timeout {
+                    sleep(retry_interval).await;
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("Signaling server failed to start within {:?}", timeout))
+}
+
 impl TestEnvironment {
     #[cfg(any(test, feature = "test-runner"))]
     pub async fn new() -> anyhow::Result<Self> {
@@ -69,10 +96,13 @@ impl TestEnvironment {
             tracing::debug!("Signaling server task ended");
         });
 
-        sleep(Duration::from_millis(100)).await;
+        let signaling_url = format!("ws://{}", addr);
+
+        // Wait for signaling server to be ready
+        wait_for_signaling_server(&signaling_url, Duration::from_secs(5)).await?;
 
         Ok(Self {
-            signaling_addr: format!("ws://{}", addr),
+            signaling_addr: signaling_url,
             signaling_task: Some(signaling_task),
             temp_dir,
         })
