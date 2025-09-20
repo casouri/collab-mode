@@ -191,7 +191,6 @@ pub struct ListProjectsParams {
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesParams {
     pub dir: EditorFileDesc,
-    pub signaling_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -223,7 +222,7 @@ pub enum OpenMode {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenFileParams {
-    pub file_desc: EditorFileDesc,
+    pub file: EditorFileDesc,
     pub mode: OpenMode,
 }
 

@@ -578,11 +578,11 @@ impl Server {
             }
             "OpenFile" => {
                 let params: OpenFileParams = serde_json::from_value(req.params)?;
-                let host_id = params.file_desc.host_id().clone();
+                let host_id = params.file.host_id().clone();
                 if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                self.open_file_from_editor(next, params.file_desc, params.mode)
+                self.open_file_from_editor(next, params.file, params.mode)
                     .await?;
                 Ok(())
             }
