@@ -137,12 +137,8 @@ pub struct Server {
     next_doc_id: AtomicU32,
     /// Docs hosted by this server.
     docs: HashMap<DocId, Doc>,
-    /// Docs hosted by remote peers.
-    /// Key is (host_id, doc_id) where doc_id is the remote server's doc_id.
-    remote_docs: HashMap<(ServerId, DocId), RemoteDoc>,
-    /// Map from an editor-visible file descriptor to its remote doc id.
-    /// Helps resolve remote doc ids directly from `EditorFileDesc`.
-    remote_doc_id_map: HashMap<EditorFileDesc, DocId>,
+    /// Remote docs.
+    remote_docs: RemoteDocs,
     /// Projects.
     projects: HashMap<ProjectId, Project>,
     /// Map of recognized users.
@@ -257,6 +253,91 @@ impl RemoteDoc {
     }
 }
 
+// *** RemoteDocs
+
+/// Container for remote documents that maintains consistency between
+/// the docs map and editor file descriptor mapping.
+#[derive(Debug)]
+struct RemoteDocs {
+    /// Remote docs keyed by (host_id, doc_id).
+    docs: HashMap<(ServerId, DocId), RemoteDoc>,
+    /// Map from editor file descriptor to remote doc id.
+    editor_map: HashMap<EditorFileDesc, DocId>,
+}
+
+impl RemoteDocs {
+    fn new() -> Self {
+        Self {
+            docs: HashMap::new(),
+            editor_map: HashMap::new(),
+        }
+    }
+
+    /// Insert a remote doc.
+    fn insert(
+        &mut self,
+        host_id: ServerId,
+        doc_id: DocId,
+        remote_doc: RemoteDoc,
+        editor_file_desc: EditorFileDesc,
+    ) {
+        self.docs.insert((host_id, doc_id), remote_doc);
+        self.editor_map.insert(editor_file_desc, doc_id);
+    }
+
+    /// Get a remote doc by (ServerId, DocId).
+    fn get(&self, host_id: &ServerId, doc_id: DocId) -> Option<&RemoteDoc> {
+        self.docs.get(&(host_id.clone(), doc_id))
+    }
+
+    /// Get a mutable remote doc by (ServerId, DocId).
+    fn get_mut(&mut self, host_id: &ServerId, doc_id: DocId) -> Option<&mut RemoteDoc> {
+        self.docs.get_mut(&(host_id.clone(), doc_id))
+    }
+
+    /// Get a remote doc by EditorFileDesc.
+    fn get_by_editor_desc(&self, editor_file: &EditorFileDesc) -> Option<(DocId, &RemoteDoc)> {
+        let host_id = editor_file.host_id();
+        let doc_id = *self.editor_map.get(editor_file)?;
+        self.docs
+            .get(&(host_id.clone(), doc_id))
+            .map(|doc| (doc_id, doc))
+    }
+
+    /// Get a mutable remote doc by EditorFileDesc.
+    fn get_mut_by_editor_desc(
+        &mut self,
+        editor_file: &EditorFileDesc,
+    ) -> Option<(DocId, &mut RemoteDoc)> {
+        let host_id = editor_file.host_id().clone();
+        let doc_id = *self.editor_map.get(editor_file)?;
+        self.docs
+            .get_mut(&(host_id, doc_id))
+            .map(|doc| (doc_id, doc))
+    }
+
+    /// Remove a remote doc by (ServerId, DocId).
+    fn remove(&mut self, host_id: &ServerId, doc_id: DocId) -> Option<RemoteDoc> {
+        let removed_doc = self.docs.remove(&(host_id.clone(), doc_id))?;
+        // Clean up editor mapping
+        let editor_file_desc = EditorFileDesc::new(removed_doc.file_desc.clone(), host_id.clone());
+        self.editor_map.remove(&editor_file_desc);
+        Some(removed_doc)
+    }
+
+    /// Remove a remote doc by EditorFileDesc.
+    fn remove_by_editor_desc(&mut self, editor_file: &EditorFileDesc) -> Option<RemoteDoc> {
+        let host_id = editor_file.host_id().clone();
+        let doc_id = self.editor_map.remove(editor_file)?;
+        self.docs.remove(&(host_id, doc_id))
+    }
+
+    /// Iterate over all remote docs.
+    fn iter(&self) -> impl Iterator<Item = (&(ServerId, DocId), &RemoteDoc)> {
+        self.docs.iter()
+    }
+}
+
 // *** Impl Server
 
 impl Server {
@@ -274,8 +355,7 @@ impl Server {
             next_site_id: AtomicU32::new(1),
             next_doc_id: AtomicU32::new(1),
             docs: HashMap::new(),
-            remote_docs: HashMap::new(),
-            remote_doc_id_map: HashMap::new(),
+            remote_docs: RemoteDocs::new(),
             projects: HashMap::new(),
             users: HashMap::new(),
             active_remotes: HashMap::new(),
@@ -898,7 +978,7 @@ impl Server {
                     return Ok(());
                 }
 
-                if let Some(remote_doc) = self.remote_docs.get(&(msg.host.clone(), doc_id)) {
+                if let Some(remote_doc) = self.remote_docs.get(&msg.host, doc_id) {
                     let file = EditorFileDesc::new(remote_doc.file_desc.clone(), msg.host.clone());
                     let resp = SaveFileResp { file };
                     next.send_resp(resp, None).await;
@@ -960,7 +1040,7 @@ impl Server {
                 Ok(())
             }
             Msg::InfoFromServer(info) => {
-                let remote_doc = self.remote_docs.get(&(msg.host.clone(), info.doc_id));
+                let remote_doc = self.remote_docs.get(&msg.host, info.doc_id);
                 if let Some(remote_doc) = remote_doc {
                     let editor_file =
                         EditorFileDesc::new(remote_doc.file_desc.clone(), msg.host.clone());
@@ -1463,9 +1543,7 @@ impl Server {
                 buffer,
             };
             self.remote_docs
-                .insert((self.host_id.clone(), doc_id), remote_doc);
-            // Add mapping from EditorFileDesc to doc_id for lookup.
-            self.remote_doc_id_map.insert(file_desc.clone(), doc_id);
+                .insert(self.host_id.clone(), doc_id, remote_doc, file_desc.clone());
 
             // Send response
             let resp = OpenFileResp {
@@ -1616,7 +1694,7 @@ impl Server {
     ) -> anyhow::Result<()> {
         // First check if there's existing doc with the same file_desc
         // from the same host.
-        for ((host, _), remote_doc) in &self.remote_docs {
+        for ((host, _), remote_doc) in self.remote_docs.iter() {
             if host == &remote_host_id && remote_doc.file_desc == snapshot.file_desc {
                 let err = lsp_server::ResponseError {
                     code: ErrorCode::BadRequest as i32,
@@ -1649,15 +1727,15 @@ impl Server {
             buffer,
         };
 
-        // Store with (host_id, remote_doc_id) as key
-        self.remote_docs
-            .insert((remote_host_id.clone(), snapshot.doc_id), remote_doc);
-
-        // Track mapping from editor file descriptor to remote doc id.
+        // Store with (host_id, remote_doc_id) as key.
         let editor_file_desc =
             EditorFileDesc::new(snapshot.file_desc.clone(), remote_host_id.clone());
-        self.remote_doc_id_map
-            .insert(editor_file_desc, snapshot.doc_id);
+        self.remote_docs.insert(
+            remote_host_id.clone(),
+            snapshot.doc_id,
+            remote_doc,
+            editor_file_desc,
+        );
 
         // Send response to editor with the remote doc_id
         let resp = OpenFileResp {
@@ -1694,21 +1772,13 @@ impl Server {
         &mut self,
         editor_file: &EditorFileDesc,
     ) -> Option<(DocId, &mut RemoteDoc)> {
-        let host_id = editor_file.host_id().clone();
-        let doc_id = *self.remote_doc_id_map.get(editor_file)?;
-        self.remote_docs
-            .get_mut(&(host_id, doc_id))
-            .map(|doc| (doc_id, doc))
+        self.remote_docs.get_mut_by_editor_desc(editor_file)
     }
 
     /// Get a remote doc by `EditorFileDesc`.
     /// Returns the remote doc id and an immutable reference to the doc if found.
     fn get_remote_doc(&self, editor_file: &EditorFileDesc) -> Option<(DocId, &RemoteDoc)> {
-        let host_id = editor_file.host_id().clone();
-        let doc_id = *self.remote_doc_id_map.get(editor_file)?;
-        self.remote_docs
-            .get(&(host_id, doc_id))
-            .map(|doc| (doc_id, doc))
+        self.remote_docs.get_by_editor_desc(editor_file)
     }
 
     async fn handle_op_from_client<'a>(
@@ -1889,8 +1959,7 @@ impl Server {
         }
 
         // Find doc in remote_docs with (host_id, doc_id) key
-        let key = (remote_host_id.clone(), doc_id);
-        let remote_doc = self.remote_docs.get_mut(&key);
+        let remote_doc = self.remote_docs.get_mut(&remote_host_id, doc_id);
         if remote_doc.is_none() {
             tracing::warn!(
                 "Received OpFromServer for unknown doc {} from {}",
@@ -1928,12 +1997,7 @@ impl Server {
                     },
                 )
                 .await;
-                if let Some(removed_doc) = self.remote_docs.remove(&key) {
-                    // Remove editor mapping for this remote doc.
-                    let editor_file_desc =
-                        EditorFileDesc::new(removed_doc.file_desc, remote_host_id.clone());
-                    self.remote_doc_id_map.remove(&editor_file_desc);
-                }
+                self.remote_docs.remove(&remote_host_id, doc_id);
                 return Ok(());
             }
             let gseq = gseq.unwrap();
@@ -2080,11 +2144,7 @@ impl Server {
                     };
                     next.send_resp((), Some(err)).await;
                     // Remove from remote_docs and mapping.
-                    if let Some(removed_doc) = self.remote_docs.remove(&(host_id.clone(), doc_id)) {
-                        let editor_file_desc =
-                            EditorFileDesc::new(removed_doc.file_desc, host_id.clone());
-                        self.remote_doc_id_map.remove(&editor_file_desc);
-                    }
+                    self.remote_docs.remove(&host_id, doc_id);
                     return Ok(());
                 }
             }
@@ -2213,13 +2273,13 @@ impl Server {
             engine: ClientEngine::new(self.site_id, 0, params.content.chars().count() as u64),
             buffer,
         };
-        self.remote_docs
-            .insert((self.host_id.clone(), doc_id), remote_doc);
-
-        // Track mapping for our own hosted remote doc as well.
         let editor_file_desc = EditorFileDesc::new(file_desc, self.host_id.clone());
-        self.remote_doc_id_map
-            .insert(editor_file_desc.clone(), doc_id);
+        self.remote_docs.insert(
+            self.host_id.clone(),
+            doc_id,
+            remote_doc,
+            editor_file_desc.clone(),
+        );
 
         // Return response with file and site_id
         let resp = ShareFileResp {
@@ -2414,10 +2474,9 @@ impl Server {
     ) -> anyhow::Result<()> {
         let DisconnectFileParams { file } = params;
 
-        let host_id = file.host_id().clone();
         if let Some((doc_id, _)) = self.get_remote_doc(&file) {
-            self.remote_docs.remove(&(host_id.clone(), doc_id));
-            self.remote_doc_id_map.remove(&file);
+            let host_id = file.host_id().clone();
+            self.remote_docs.remove_by_editor_desc(&file);
             tracing::info!(
                 "Disconnected from remote doc {} on host {}",
                 doc_id,
