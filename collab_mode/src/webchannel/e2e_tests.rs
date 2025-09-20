@@ -425,7 +425,7 @@ mod e2e_tests {
         for (i, (_client_id, channel)) in client_channels.iter().enumerate() {
             let msg = Msg::Info(Info {
                 doc_id: i as u32,
-                sender: i as u32,
+                sender: format!("client-{}", i),
                 value: format!("Hello from client {}", i),
             });
             channel.send(&hub_id, None, msg).await.unwrap();
@@ -440,7 +440,12 @@ mod e2e_tests {
             if let Ok(Some(msg)) = timeout(Duration::from_millis(100), hub_rx.recv()).await {
                 match msg.body {
                     Msg::Info(info) => {
-                        let client_num = info.sender as usize;
+                        // Parse client number from sender string "client-N"
+                        let client_num: usize = info
+                            .sender
+                            .strip_prefix("client-")
+                            .and_then(|s| s.parse().ok())
+                            .expect("Invalid sender format");
                         assert_eq!(info.doc_id, client_num as u32);
                         assert_eq!(info.value, format!("Hello from client {}", client_num));
                         received_count += 1;
@@ -729,7 +734,7 @@ mod e2e_tests {
                         // Others are small
                         Msg::Info(Info {
                             doc_id: i as u32,
-                            sender: i as u32,
+                            sender: format!("sender-{}", i),
                             value: format!("Message {}", i),
                         })
                     };
