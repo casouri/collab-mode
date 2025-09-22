@@ -165,6 +165,32 @@ substitutes command keys like docstring, see
                            format-string)
           args)))
 
+(defmacro collab--push-with-limit (elm seq max)
+  "Push ELM to SEQ, if SEQ is longer than MAX, truncate it."
+  `(progn
+     (push ,elm ,seq)
+     (when (> (length ,seq) ,max)
+       (setcdr (nthcdr (max (1- ,max) 0) ,seq) nil))))
+
+(defun collab--msg-event (face message &optional no-message)
+  "Print MESSAGE in FACE and add it to ‘collab--events’.
+If NO-MESSAGE is non-nil, don’t message, only and to events."
+  (unless no-message
+    (message (propertize message 'face face)))
+  (collab--push-with-limit
+   (format "%s %s"
+           (propertize (format-time-string "%I:%M:%S") 'face 'collab-host)
+           (propertize message 'face face))
+   collab--events 30))
+
+(defun collab--host-idx (host-id)
+  "Get HOST-ID’s index in ‘collab--known-hosts’.
+Add the host to the list if it doesn’t exists in it."
+  (or (seq-position collab--known-hosts host-id)
+      (setq collab--known-hosts
+            (append collab--known-hosts (list host-id)))
+      (1- (length collab--known-hosts))))
+
 ;;; Host data
 
 (defun collab--host-alist ()
@@ -260,7 +286,7 @@ MSG should be something like “can’t do xxx”."
 (defvar collab--jsonrpc-connection)
 (defvar collab--file)
 (defun collab--check-precondition ()
-  "Check 'collab--jsonrpc-connection' and 'collab--file'.
+  "Check ‘collab--jsonrpc-connection’ and ‘collab--file’.
 
 If they are invalid, turn off ‘collab-monitored-mode’ and raise
 an error. This function should be called before any interactive
@@ -277,7 +303,7 @@ command that acts on a collab-monitored buffer."
 ;;; Cursor tracking
 
 (defvar-local collab--cursor-ov-alist nil
-  "An alist mapping user’s site id to cursor overlays.")
+  "An alist mapping user’s host id to cursor overlays.")
 
 (defvar-local collab--my-site-id nil
   "My site-id.")
@@ -286,14 +312,14 @@ command that acts on a collab-monitored buffer."
   (make-hash-table :test #'equal)
   "Hash table mapping (doc-id . host-id) to sync cursor timers.")
 
-(defun collab--move-cursor (site-id pos &optional mark)
-  "Move user (SITE-ID)’s cursor overlay to POS.
+(defun collab--move-cursor (host-id pos &optional mark)
+  "Move user (HOST-ID)’s cursor overlay to POS.
 If MARK non-nil, show active region."
-  (when (and (not (eq site-id collab--my-site-id))
+  (when (and (not (eq host-id collab--my-host-id))
              (<= (point-min) pos (point-max)))
     (save-restriction
       (widen)
-      (let* ((idx (mod site-id
+      (let* ((idx (mod (collab--host-idx host-id)
                        (length collab-cursor-colors)))
              (color (nth idx collab-cursor-colors))
              (region-color (collab--blend-color
@@ -301,12 +327,12 @@ If MARK non-nil, show active region."
                             color 0.2))
              (face `(:background ,color))
              (region-face `(:background ,region-color))
-             (ov (or (alist-get site-id collab--cursor-ov-alist)
+             (ov (or (alist-get host-id collab--cursor-ov-alist nil nil #'equal)
                      (let ((ov (make-overlay (min (1+ pos) (point-max))
                                              (min (+ pos 2) (point-max))
                                              nil t nil)))
                        (overlay-put ov 'face face)
-                       (push (cons site-id ov) collab--cursor-ov-alist)
+                       (push (cons host-id ov) collab--cursor-ov-alist)
                        ov))))
 
         (if (not mark)
@@ -378,6 +404,13 @@ If MARK non-nil, show active region."
   "If non-nil, collab hub will show this message in the UI.
 This should be let-bound when calling ‘collab-hub’, rather than
 set globally.")
+
+(defvar collab--events nil
+  "A list of events for display.
+Each event is cons (FACE . MESSAGE). MESSAGE is a string.")
+
+(defvar collab--known-hosts nil
+  "A list hosts connected to us or we connected to in this session.")
 
 ;;; Local state
 
@@ -564,14 +597,20 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
                        (push (list 'del beg old group-seq) ops)
                        (push (list 'ins beg current group-seq) ops)))))
 
-             (setq collab--pending-ops `(tracking-error ,(format "Assertion failed: (<= rbeg beg end rend): %s" (list rbeg beg end rend)))))))
-          (_ (setq collab--pending-ops `(tracking-error ,(format "Unexpected ‘collab--changing-region’ shape: %s" collab--changing-region))))))
+             (setq collab--pending-ops
+                   `(tracking-error
+                     ,(format "Assertion failed: (<= rbeg beg end rend): %s"
+                              (list rbeg beg end rend))))))
+          (_ (setq collab--pending-ops
+                   `(tracking-error
+                     ,(format "Unexpected ‘collab--changing-region’ shape: %s"
+                              collab--changing-region)))))))
 
-      ;; Update state.
-      (setq collab--changing-region nil)
-      (collab--push-to-pending-ops ops)
+    ;; Update state.
+    (setq collab--changing-region nil)
+    (collab--push-to-pending-ops ops)
 
-      (run-hooks 'collab--after-change-hook)))
+    (run-hooks 'collab--after-change-hook)))
 
 (defun collab--after-change-default ()
   "Default send-ops behavior: setup an idle timer to send ops."
@@ -888,9 +927,9 @@ If we receive a ServerError notification, just display a warning."
      ;; TODO: Idle timer?
      (let ((file-desc (plist-get params :file))
            (last-seq (plist-get params :lastSeq)))
-       (let ((file-key (collab--encode-filename file-desc))
-             (buffer (gethash file-key collab--buffer-table))
-             (timer (gethash file-key collab--dispatcher-timer-table)))
+       (let* ((file-key (collab--encode-filename file-desc))
+              (buffer (gethash file-key collab--buffer-table))
+              (timer (gethash file-key collab--dispatcher-timer-table)))
          (when timer (cancel-timer timer))
          (when (buffer-live-p buffer)
            (setq timer (run-with-timer
@@ -898,78 +937,74 @@ If we receive a ServerError notification, just display a warning."
                         #'collab--request-remote-ops
                         buffer last-seq))
            (puthash file-key timer collab--dispatcher-timer-table)))))
-    ;; FIXME: This doesn’t exist yet, also need to use file-desc for
-    ;; buffer table.
-    ;; ('Info
-    ;;  (let* ((doc-id (plist-get params :docId))
-    ;;         (host-id (plist-get params :hostId))
-    ;;         (site-id (plist-get params :senderSiteId))
-    ;;         (value (plist-get params :value)))
-    ;;    (pcase (plist-get value :type)
-    ;;      ("common.pos"
-    ;;       (let* ((pos (plist-get value :point))
-    ;;              (mark (plist-get value :mark))
-    ;;              (buf (gethash (cons doc-id host-id)
-    ;;                            collab--buffer-table)))
-    ;;         (when (buffer-live-p buf)
-    ;;           (with-current-buffer buf
-    ;;             (collab--move-cursor site-id pos mark))))))))
-    ('ServerError
-     (display-warning
-      'collab
-      (format "Local host errored, you might want to restart collab process. Cause: %s"
-              params)))
+    ('InfoReceived
+     (let ((file (plist-get params :file))
+           (host-id (plist-get params :sender))
+           (value (plist-get params :value)))
+       (pcase (plist-get value :type)
+         ("common.pos"
+          (let* ((pos (plist-get value :point))
+                 (mark (plist-get value :mark))
+                 (buf (gethash (collab--encode-filename file)
+                               collab--buffer-table)))
+            (when (buffer-live-p buf)
+              (with-current-buffer buf
+                (collab--move-cursor host-id pos mark))))))))
+    ;; ('ServerError
+    ;;  (display-warning
+    ;;   'collab
+    ;;   (format "Local host errored, you might want to restart collab process. Cause: %s"
+    ;;           params)))
     ('AcceptStopped
      (with-current-buffer (collab--hub-buffer)
        (setq collab--accepting-connection nil)
        (collab--refresh)
-       (message (collab--fairy "We stopped accepting remote connections"))))
+       (collab--msg-event
+        'warn
+        (format "Stopped accepting remote connections, because %s"
+                (plist-get params :reason)))))
     ('AcceptingConnection
-     (message (collab--fairy "We’re accepting remote connections now")))
-    ;; REMOVE
-    ('AcceptConnectionErr
-     ;; If we use ‘run-with-timer’, this handler might interfer with
-     ;; the condition-case handler in ‘collab--render’.
-     (run-with-timer
-      0.0001 nil
-      (lambda ()
-        (with-current-buffer (collab--hub-buffer)
-          (setq collab--accepting-connection nil)
-          (collab--hub-refresh)
-          (display-warning
-           'collab
-           (format "Error accepting remote peer connections: %s" params))))))
-
+     (collab--msg-event 'success "Accepting remote connections"))
+    ('ConnectionProgress
+     (collab--msg-event 'default
+                        (format "Connecting to %s...%s"
+                                (plist-get params :hostId)
+                                (plist-get params :message))))
     ('Connected
-     (let ((host-id (plist-get params :hostId))
-           (hub-buffer (collab--hub-buffer))
-           (host-data (collab--host-data host-id)))
+     (let* ((host-id (plist-get params :hostId))
+            (hub-buffer (collab--hub-buffer))
+            (host-data (collab--host-data host-id)))
        (when (not (collab--host-connected host-id))
          (collab--set-host-connected host-id t)
          (when (buffer-live-p hub-buffer)
            (collab--list-files-req
             nil host-id (car host-data) (cadr host-data)
             (lambda (status resp)
-              (collab--list-files-callback host status resp)))))))
+              (collab--list-files-callback host-id status resp)))))))
     ('ConnectionBroke
      (let ((host-id (plist-get params :hostId))
            (reason (plist-get params :reason))
-           (hub-buffer (collab--hub-buffer))
-           (host-data (collab--host-data host-id)))
+           (hub-buffer (collab--hub-buffer)))
        (collab--set-host-connected host-id nil)
        (when (buffer-live-p hub-buffer)
-         (collab--list-files-callback host :error `(:message ,reason)))))
+         (collab--list-files-callback host-id :error `(:message ,reason)))))
     ('Connecting
      (let ((host-id (plist-get params :hostId))
-           (hub-buffer (collab--hub-buffer))
-           (host-data (collab--host-data host-id)))
+           (hub-buffer (collab--hub-buffer)))
        (when (buffer-live-p hub-buffer)
          (collab--replace-section
           'collab-host-id host-id
           (lambda () (collab--insert-host-1 host-id nil 'delayed))))))
-
-
-    ))
+    ('FileListUpdated
+     ;; TODO
+     )
+    ('FileDeleted
+     ;; TODO
+     )
+    ('UnimportantError
+     (collab--msg-event 'warn (plist-get params :message) 'no-message))
+    ('InternalError
+     (collab--msg-event 'error (plist-get params :message)))))
 
 ;;;; Requests
 
@@ -989,25 +1024,25 @@ the response object (not a list of files, but the full plist
 response)."
   (let ((conn (collab--connect-process))
         (request-object
-         (append `( :hostId ,host
-                    :signalingAddr ,signaling-server
-                    :credential ,credential)
-                 (and dir `(:dir ,dir)))))
+         (if dir
+             `(:dir ,dir)
+           `( :hostId ,host
+              :signalingAddr ,signaling-server))))
     (if callback
         ;; Async request.
         (jsonrpc-async-request
-         conn 'ListFiles
+         conn (if dir 'ListFiles 'ListProjects)
          request-object
          :success-fn (lambda (resp)
                        (funcall callback :success resp))
          :error-fn (lambda (resp)
                      (funcall callback :error resp))
          :timeout-fn (lambda ()
-                       (funcall callback :timeout resp))
+                       (funcall callback :timeout nil))
          :timeout collab-connection-timeout)
       ;; Sync request.
       (jsonrpc-request
-       conn 'ListFiles
+       conn (if dir 'ListFiles 'ListProjects)
        request-object
        :timeout collab-rpc-timeout))))
 
@@ -1036,7 +1071,7 @@ PATH must be an absolute path."
                 :timeout collab-rpc-timeout)))
     resp))
 
-(defun collab--open-file-req (file-desc host mode)
+(defun collab--open-file-req (file-desc mode)
   "Connect to FILE-DESC on HOST.
 MODE can be \"Create\" or \"Open\".
 Return (:siteId SITE-ID :content CONTENT)."
@@ -1095,8 +1130,7 @@ Return (:siteId SITE-ID :content CONTENT)."
     (jsonrpc-notify conn 'Connect
                     `( :hostId ,host-id
                        :signalingAddr ,signaling-addr
-                       :transportType "SCTP")
-                    :timeout collab-rpc-timeout)))
+                       :transportType "SCTP"))))
 
 ;; FIXME
 (defun collab--print-history-req (file-desc debug)
@@ -1311,11 +1345,11 @@ If no such section is found, do nothing."
               (throw 'done nil))))))))
 
 (defun collab--insert-file
-    (server file-desc filename directoryp &optional display-name)
+    (file-desc filename directoryp &optional display-name)
   "Insert FILE-DESC with FILENAME.
 
-SERVER is its server id. If DISPLAY-NAME non-nil, use that as the
-display name."
+Insert as a directory if DIRECTORYP non-nil. If DISPLAY-NAME non-nil,
+use that as the display name."
   (let ((beg (point)))
     (insert (propertize (or display-name filename)
                         'face (if directoryp 'dired-directory nil)))
@@ -1357,7 +1391,7 @@ shouldn’t end with a newline."
                       (name (plist-get entry :filename))
                       (directoryp (not (eq (plist-get entry :isDirectory)
                                            :json-false))))
-                 (collab--insert-file host file-desc name directoryp)
+                 (collab--insert-file file-desc name directoryp)
                  (insert "\n")))))
       ;; Delayed. Getting files async.
       (_ (insert (propertize "...\n" 'face 'shadow))))
@@ -1379,6 +1413,7 @@ STATUS should be one of ‘:success’, ‘:error’, or ‘:timeout’. For
 This function finds the section for the host in the CURRENT
 BUFFER (make sure it’s the hub buffer), and populates the file
 list."
+  (message "%s %s %s" host status resp)
   (pcase status
     (:success
      (puthash host resp collab--list-files-cache)
@@ -1655,14 +1690,14 @@ immediately."
              (file-list (seq-map #'identity
                                  (plist-get file-list-resp :files)))
              (parent-file-desc (collab--file-desc-parent file-desc)))
-        (insert (propertize (collab--encode-parent file-desc)
+        (insert (propertize (or (collab--encode-parent file-desc) host-id)
                             'face 'dired-header)
                 ":\n")
         (insert ".\n")
         (if projectp
             (insert "..")
           (collab--insert-file
-           host-id parent-file-desc (collab--file-desc-name parent-file-desc) t ".."))
+           parent-file-desc (collab--file-desc-name parent-file-desc) t ".."))
         (insert "\n")
         (if (null file-list)
             (insert (collab--fairy "There’s no files here!\n"))
@@ -1670,7 +1705,7 @@ immediately."
             (let* ((file-desc (plist-get entry :file))
                    (filename (plist-get entry :filename))
                    (directoryp (not (eq (plist-get entry :isDirectory) :json-false))))
-              (collab--insert-file host-id file-desc filename directoryp)
+              (collab--insert-file file-desc filename directoryp)
               (insert "\n"))))
         (put-text-property (point-min) (point-max)
                            'collab-host-id host-id)))))
@@ -1735,7 +1770,7 @@ Returned path doesn't have trailing slash even if it's a directory."
   "Encode FILE-DESC into a path of it's parent directory.
 
 Returned path doesn't have trailing slash even if it's a directory."
-  (when-let ((parent (collab--file-desc-parent file-desc)))
+  (when-let* ((parent (collab--file-desc-parent file-desc)))
     (collab--encode-filename parent)))
 
 (defun collab--complete-filename-1 (segments dir-p)
@@ -1812,11 +1847,10 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
                         (get-text-property (point) 'collab-file-desc)))
          (filename (or filename (get-text-property (point) 'collab-filename)))
          (directory-p (or directory-p (get-text-property (point) 'collab-directory-p)))
-         (host-id (or host-id (get-text-property (point) 'collab-host-id)))
          (file-key (collab--encode-filename file-desc))
          (buf (gethash file-key collab--buffer-table)))
     (cond
-     ((not (and file-desc filename host-id))
+     ((not (and file-desc filename))
       (user-error "Can’t find file at point"))
      ((and (buffer-live-p buf) (if (buffer-local-value 'collab-monitored-mode buf)
                                    t
@@ -1837,7 +1871,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
      ;; Open a file.
      (t
       (collab--catch-error (format "can't connect to %s" file-desc)
-        (let* ((resp (collab--open-file-req file-desc host-id "open"))
+        (let* ((resp (collab--open-file-req file-desc "open"))
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
                (resp-file-desc (plist-get resp :file))
@@ -1863,17 +1897,16 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
   (interactive)
-  (let* ((file-desc (get-text-property (point) 'collab-file-desc))
-         (host-id (get-text-property (point) 'collab-host-id)))
-    (when doc-id
+  (let ((file-desc (get-text-property (point) 'collab-file-desc)))
+    (when file-desc
       (collab--catch-error
           (format "can't disconnect from %s"
                   (collab--encode-filename file-desc))
         (collab--disconnect-from-file-req file-desc)))
-    (let ((file-key (collab--encode-filename file-desc))
-          (buf (when file-desc
-                 (gethash file-key collab--buffer-table)))
-          (inhibit-read-only t))
+    (let* ((file-key (collab--encode-filename file-desc))
+           (buf (when file-desc
+                  (gethash file-key collab--buffer-table)))
+           (inhibit-read-only t))
       (when buf
         (with-current-buffer buf
           (collab--disable)))
@@ -1895,8 +1928,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
 (defun collab--accept-connection ()
   "Start accepting connections."
   (interactive)
-  (let ((host-id (nth 0 collab-local-host-config))
-        (signaling-addr (nth 1 collab-local-host-config)))
+  (let ((signaling-addr (nth 1 collab-local-host-config)))
     (collab--catch-error "can’t accept connection "
       (collab--accept-connection-notif signaling-addr))
     (setq-local collab--accepting-connection t)
@@ -1951,8 +1983,7 @@ When called interactively, prompt for the host."
                           (buffer-name)))))
   (collab--catch-error "can’t share the current buffer"
     ;; For the moment, always share to local host.
-    (let* ((host collab--my-host-id)
-           (resp (collab--share-file-req
+    (let* ((resp (collab--share-file-req
                   filename `( :common.hostEditor "emacs"
                               :emacs.majorMode
                               ,(symbol-name major-mode))
@@ -1999,11 +2030,9 @@ If called interactively, uses the current buffer's FILE-DESC."
   (interactive (list collab--file))
   (collab--catch-error (format "can't reconnect to %s"
                                (collab--encode-filename file-desc))
-    (let* ((host (collab--file-desc-host-id file-desc))
-           (info (collab--host-data host))
-           (orig-point (point)))
+    (let ((orig-point (point)))
       ;; Replace buffer content with document content.
-      (let* ((resp (collab--open-file-req file-desc host "open"))
+      (let* ((resp (collab--open-file-req file-desc "open"))
              (content (plist-get resp :content))
              (site-id (plist-get resp :siteId))
              (inhibit-read-only t))
