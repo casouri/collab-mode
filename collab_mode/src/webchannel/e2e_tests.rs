@@ -450,7 +450,7 @@ mod e2e_tests {
                         assert_eq!(info.value, format!("Hello from client {}", client_num));
                         received_count += 1;
                     }
-                    Msg::IceProgress(_) => {
+                    Msg::IceProgress(_, _) => {
                         // Skip ICE progress messages
                         continue;
                     }
@@ -833,7 +833,7 @@ mod e2e_tests {
 
         while start_time.elapsed() < Duration::from_secs(5) {
             if let Ok(Some(msg)) = timeout(Duration::from_millis(100), rx2.recv()).await {
-                if let Msg::IceProgress(status) = msg.body {
+                if let Msg::IceProgress(_host_id, status) = msg.body {
                     ice_messages.push(status);
                 }
             }

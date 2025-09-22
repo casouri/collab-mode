@@ -787,11 +787,11 @@ impl Server {
         tracing::info!("From remote: {}", &msg);
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
-            Msg::IceProgress(progress) => {
+            Msg::IceProgress(remote_hostid, progress) => {
                 next.send_notif(
                     NotificationCode::ConnectionProgress,
                     HostAndMessageNote {
-                        host_id: msg.host,
+                        host_id: remote_hostid,
                         message: progress,
                     },
                 )

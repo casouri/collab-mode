@@ -388,7 +388,7 @@ pub enum Msg {
     InfoFromServer(Info),
 
     // Misc
-    IceProgress(String),
+    IceProgress(ServerId, String),
     Hey(HeyMessage),
 
     // Errors

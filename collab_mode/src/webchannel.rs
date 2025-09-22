@@ -286,6 +286,7 @@ impl WebChannel {
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
         let msg_tx = self.msg_tx.clone();
         let hostid = self.hostid();
+        let remote_hostid_1 = remote_hostid.clone();
 
         // Spawn a thread that sends ICE progress to editor.
         tokio::spawn(async move {
@@ -294,7 +295,7 @@ impl WebChannel {
                 let _ = msg_tx
                     .send(Message {
                         host: hostid.clone(),
-                        body: Msg::IceProgress(progress.to_string()),
+                        body: Msg::IceProgress(remote_hostid_1.clone(), progress.to_string()),
                         req_id: None,
                     })
                     .await;
