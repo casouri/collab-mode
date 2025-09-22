@@ -82,7 +82,7 @@ impl fmt::Display for FileDesc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FileDesc::Project { id } => write!(f, "{}", id),
-            FileDesc::ProjectFile { project, file } => write!(f, "{}/{}", project, file),
+            FileDesc::ProjectFile { project, file } => write!(f, "/{}/{}", project, file),
         }
     }
 }
