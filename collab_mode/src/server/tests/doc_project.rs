@@ -54,7 +54,7 @@ async fn test_doc_project_handling() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "_buffers",
                     "file": "test_shared.txt",
@@ -107,7 +107,7 @@ async fn test_doc_project_handling() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "_doc",
                     "file": "nonexistent.txt",

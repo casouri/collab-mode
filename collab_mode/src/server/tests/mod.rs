@@ -410,7 +410,7 @@ impl MockEditor {
             .request(
                 "OpenFile",
                 serde_json::json!({
-                    "fileDesc": file_desc,
+                    "file": file_desc,
                     "mode": "open",
                 }),
             )

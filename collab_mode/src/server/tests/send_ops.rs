@@ -191,7 +191,7 @@ async fn test_send_ops_permission_denied() {
         .request(
             "OpenFile",
             serde_json::json!({
-                "fileDesc": file_desc,
+                "file": file_desc,
                 "mode": "open",
             }),
         )

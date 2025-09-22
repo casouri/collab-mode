@@ -33,7 +33,7 @@ async fn test_delete_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "file1.txt"
@@ -57,7 +57,7 @@ async fn test_delete_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "dir1/file2.txt"

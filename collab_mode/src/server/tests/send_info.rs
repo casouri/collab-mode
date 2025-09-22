@@ -32,7 +32,7 @@ async fn test_send_info_local_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": spoke_file_desc.clone(),
+                "file": spoke_file_desc.clone(),
                 "mode": "open"
             }),
         )
@@ -105,7 +105,7 @@ async fn test_send_info_remote_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": spoke1_file_desc.clone(),
+                "file": spoke1_file_desc.clone(),
                 "mode": "open"
             }),
         )
@@ -126,7 +126,7 @@ async fn test_send_info_remote_file() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": spoke2_file_desc.clone(),
+                "file": spoke2_file_desc.clone(),
                 "mode": "open"
             }),
         )
@@ -201,7 +201,7 @@ async fn test_send_info_multiple_subscribers() {
                 req_id,
                 "OpenFile",
                 serde_json::json!({
-                    "fileDesc": spoke_file_desc.clone(),
+                    "file": spoke_file_desc.clone(),
                     "mode": "open"
                 }),
             )

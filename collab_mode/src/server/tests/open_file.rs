@@ -113,7 +113,7 @@ async fn test_open_file_create_mode() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "new_file.txt"
@@ -147,7 +147,7 @@ async fn test_open_file_create_mode() {
             req_id2,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "new_file.txt"
@@ -201,7 +201,7 @@ async fn test_open_file_not_found() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "non_existent.txt"
@@ -238,7 +238,7 @@ async fn test_open_file_bad_request() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": ""
@@ -285,7 +285,7 @@ async fn test_open_file_already_open() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
@@ -306,7 +306,7 @@ async fn test_open_file_already_open() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.txt"
@@ -345,7 +345,7 @@ async fn test_open_file_doc_id_not_found() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "_files",
                     "file": missing_path
@@ -397,7 +397,7 @@ async fn test_open_binary_file_rejected() {
             req_id,
             "OpenFile",
             serde_json::json!({
-                "fileDesc": {
+                "file": {
                     "hostId": setup.hub.id.clone(),
                     "project": "TestProject",
                     "file": "test.bin",
