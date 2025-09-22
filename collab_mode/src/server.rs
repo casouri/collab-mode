@@ -762,6 +762,15 @@ impl Server {
                         params.transport_type,
                     )
                     .await;
+                } else {
+                    next.send_notif(
+                        NotificationCode::Connected,
+                        HostAndMessageNote {
+                            host_id: params.host_id,
+                            message: "Already connected".to_string(),
+                        },
+                    )
+                    .await;
                 }
             }
             "SendInfo" => {
@@ -1132,7 +1141,13 @@ impl Server {
             {
                 let msg = format!("Failed to connect to {}: {}", host_id, err);
                 tracing::error!(msg);
-                send_to_remote(&webchannel_1, &my_host_id, None, Msg::ConnectionBroke(msg)).await;
+                send_to_remote(
+                    &webchannel_1,
+                    &my_host_id,
+                    None,
+                    Msg::ConnectionBroke(host_id),
+                )
+                .await;
             }
         });
     }
@@ -1476,80 +1491,86 @@ impl Server {
             }
             let path_id = res.unwrap();
             // Check if file is alreay opened.
-            for (_doc_id, doc) in &self.docs {
+            let mut opened_doc = None;
+            for (doc_id, doc) in &mut self.docs {
                 if doc.matches(&path_id) {
-                    let resp = OpenFileResp {
-                        content: doc.buffer.iter().collect(),
-                        site_id: self.site_id,
-                        filename: doc.name.clone(),
-                        file: file_desc,
-                    };
-                    next.send_resp(resp, None).await;
-                    return Ok(());
+                    opened_doc = Some((doc_id.clone(), doc));
                 }
             }
 
-            // Not opened, read from disk and create doc.
-            let res = self
-                .open_file_from_disk(&file_desc.project, &file_desc.file, mode)
-                .await;
-            if let Err(err) = res {
-                let err = lsp_server::ResponseError {
-                    code: ErrorCode::IoError as i32,
-                    message: err.to_string(),
-                    data: None,
-                };
-                next.send_resp((), Some(err)).await;
-                return Ok(());
-            }
-            let (content, disk_file, full_path) = res.unwrap();
+            let (doc_id, doc) = if let Some(doc) = opened_doc {
+                doc
+            } else {
+                // Not opened, read from disk and create doc.
+                let res = self
+                    .open_file_from_disk(&file_desc.project, &file_desc.file, mode)
+                    .await;
+                if let Err(err) = res {
+                    let err = lsp_server::ResponseError {
+                        code: ErrorCode::IoError as i32,
+                        message: err.to_string(),
+                        data: None,
+                    };
+                    next.send_resp((), Some(err)).await;
+                    return Ok(());
+                }
+                let (content, disk_file, full_path) = res.unwrap();
+                // Create new doc
+                let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+                let base_name = std::path::Path::new(&file_desc.file)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&file_desc.file)
+                    .to_string();
 
-            // Create new doc
-            let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
-            let base_name = std::path::Path::new(&file_desc.file)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&file_desc.file)
-                .to_string();
+                let doc = Doc::new(
+                    base_name.clone(),
+                    JsonMap::new(),
+                    PathId::Path(full_path),
+                    desc.clone(),
+                    &content,
+                    ServerEngine::new(content.len() as u64),
+                    Some(disk_file),
+                );
+                self.docs.insert(doc_id, doc);
+                (doc_id, self.docs.get_mut(&doc_id).unwrap())
+            };
 
-            let mut doc = Doc::new(
-                base_name.clone(),
-                JsonMap::new(),
-                PathId::Path(full_path),
-                desc.clone(),
-                &content,
-                ServerEngine::new(content.len() as u64),
-                Some(disk_file),
-            );
-
-            // Add ourselves as a subscriber since we're also a client
+            // Add ourselves as a subscriber.
             doc.subscribers.insert(self.host_id.clone(), 0);
 
-            self.docs.insert(doc_id, doc);
-
-            // Also create a RemoteDoc for ourselves (we act as both server and client)
-            let mut buffer = GapBuffer::new();
-            buffer.insert_many(0, content.chars());
-            let remote_doc = RemoteDoc {
-                name: base_name.clone(),
-                file_desc: desc.clone(),
-                next_site_seq: 1,
-                meta: JsonMap::new(),
-                remote_op_buffer: Vec::new(),
-                // Global seq starts from 1. So use 0 for the
-                // base_seq, meaning we expect next global seq
-                // to be 1.
-                engine: ClientEngine::new(self.site_id, 0, content.chars().count() as u64),
-                buffer,
+            // If the remote_doc doesn’t exists already, add it.
+            let content: String = doc.buffer.iter().collect();
+            if self.remote_docs.get_by_editor_desc(&file_desc).is_none() {
+                let mut buffer = GapBuffer::new();
+                buffer.insert_many(0, content.chars());
+                let remote_doc = RemoteDoc {
+                    name: doc.name.clone(),
+                    file_desc: desc.clone(),
+                    next_site_seq: 1,
+                    meta: JsonMap::new(),
+                    remote_op_buffer: Vec::new(),
+                    // Use the current gseq from the doc’s engine.
+                    engine: ClientEngine::new(
+                        self.site_id,
+                        doc.engine.current_seq(),
+                        content.chars().count() as u64,
+                    ),
+                    buffer,
+                };
+                self.remote_docs.insert(
+                    self.host_id.clone(),
+                    doc_id,
+                    remote_doc,
+                    file_desc.clone(),
+                );
             };
-            self.remote_docs
-                .insert(self.host_id.clone(), doc_id, remote_doc, file_desc.clone());
 
             // Send response
             let resp = OpenFileResp {
                 content,
                 site_id: self.site_id,
-                filename: base_name,
+                filename: doc.name.clone(),
                 file: file_desc.clone(),
             };
             next.send_resp(resp, None).await;
@@ -2788,6 +2809,7 @@ impl Server {
     }
 
     fn remote_connected(&self, host_id: &ServerId) -> bool {
+        dbg!(&self.active_remotes);
         if let Some(remote) = self.active_remotes.get(host_id) {
             remote.state == ConnectionState::Connected
         } else {
