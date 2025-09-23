@@ -712,6 +712,16 @@ This buffering mechanism ensures ops arrive in order and are processed atomicall
 ```
 Starts accepting connections on the specified signaling server.
 
+When the server actually starts accepting connections on the signaling server, it sends an **AcceptingConnection** notification:
+
+**AcceptingConnection Notification**
+```json
+{
+  "method": "AcceptingConnection",
+  "params": {}
+}
+```
+
 **Connect**
 ```json
 {
@@ -724,6 +734,21 @@ Starts accepting connections on the specified signaling server.
 }
 ```
 Initiates connection to a remote server.
+
+After receiving a Connect notification, the server will always send a **Connected** notification to indicate the connection status:
+- If the remote is already connected, the Connected notification is sent immediately
+- If the remote is not yet connected, the Connected notification is sent after the connection is established
+
+**Connected Notification**
+```json
+{
+  "method": "Connected",
+  "params": {
+    "hostId": "remote-server",
+    "message": "Welcome message from remote server"
+  }
+}
+```
 
 ### SendInfo
 
