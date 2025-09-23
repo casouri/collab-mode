@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::instrument;
 use webrtc_ice::agent::agent_config::AgentConfig;
 use webrtc_ice::agent::Agent;
@@ -55,9 +56,9 @@ pub async fn ice_accept(
     send_ice_credential(&mut sock, &agent).await?;
 
     ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone());
-    ice_exchange_candidates(agent.clone(), sock, error_tx, connected_rx)?;
+    let candidate_task = ice_exchange_candidates(agent.clone(), sock, error_tx, connected_rx)?;
 
-    tokio::select! {
+    let result = tokio::select! {
         err = error_rx.recv() => {
             drop(connected_tx);
             drop(cancel_tx);
@@ -69,7 +70,18 @@ pub async fn ice_accept(
             let conn = conn?;
             Ok(conn)
         }
+    };
+
+    // Terminate candidate_task.
+    candidate_task.abort();
+    let _ = candidate_task.await;
+
+    // Clean up the agent.
+    if let Err(err) = agent.close().await {
+        tracing::warn!("Failed to close ICE agent: {}", err);
     }
+
+    result
 }
 
 /// Connect to the endpoint with `id` and `key` on the signaling
@@ -99,9 +111,10 @@ pub async fn ice_connect(
     let their_cert = sock.cert_hash();
 
     ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone());
-    ice_exchange_candidates(agent.clone(), sock, error_tx.clone(), connected_rx)?;
+    let candidate_task =
+        ice_exchange_candidates(agent.clone(), sock, error_tx.clone(), connected_rx)?;
 
-    tokio::select! {
+    let result = tokio::select! {
         err = error_rx.recv() => {
             drop(connected_tx);
             drop(cancel_tx);
@@ -113,7 +126,18 @@ pub async fn ice_connect(
             let conn = conn?;
             Ok((conn, their_cert))
         }
+    };
+
+    // Terminate candidate_task.
+    candidate_task.abort();
+    let _ = candidate_task.await;
+
+    // Clean up the agent.
+    if let Err(err) = agent.close().await {
+        tracing::warn!("Failed to close ICE agent: {}", err);
     }
+
+    result
 }
 
 /// Monitor the handshake progress. If connection failed, send an error
@@ -191,14 +215,15 @@ async fn ice_credential(agent: &Agent) -> ICECredential {
 
 /// Start gathering candidates and exchange candidates with remote
 /// endpoint. If `connected_rx` is closed, don't send any candidates
-/// out. Errors are sent to `err_tx`.
+/// out. Errors are sent to `err_tx`. Returns a JoinHandle for the
+/// candidate receiver task that should be aborted after connection.
 #[instrument(skip_all)]
 fn ice_exchange_candidates(
     agent: Arc<Agent>,
     mut sock: SignalSocket,
     error_tx: mpsc::Sender<WebrpcError>,
     connected_rx: watch::Receiver<()>,
-) -> WebrpcResult<()> {
+) -> WebrpcResult<JoinHandle<()>> {
     // Send candidate.
     let candidate_sender = sock.candidate_sender();
     agent.on_candidate(Box::new(move |candidate| {
@@ -221,9 +246,9 @@ fn ice_exchange_candidates(
         Box::pin(async {})
     }));
 
-    // Receive candidate.
+    // Receive candidate - store the JoinHandle so we can abort it later.
     let agent_1 = agent.clone();
-    tokio::spawn(async move {
+    let candidate_task = tokio::spawn(async move {
         while let Some(candidate) = sock.recv_candidate().await {
             let func = || {
                 tracing::info!(?candidate, "Received ICE candidate");
@@ -234,14 +259,17 @@ fn ice_exchange_candidates(
                 Ok::<(), WebrpcError>(())
             };
             if let Err(err) = func() {
-                error_tx.send(err).await.unwrap();
+                // If we can't send error, the connection is likely established
+                let _ = error_tx.send(err).await;
+                break;
             }
         }
+        tracing::info!("Candidate receiver task ending");
     });
 
     // Gather candidate.
     agent.gather_candidates()?;
-    Ok(())
+    Ok(candidate_task)
 }
 
 #[cfg(test)]
