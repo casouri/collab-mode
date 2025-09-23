@@ -76,11 +76,6 @@ pub async fn ice_accept(
     candidate_task.abort();
     let _ = candidate_task.await;
 
-    // Clean up the agent.
-    if let Err(err) = agent.close().await {
-        tracing::warn!("Failed to close ICE agent: {}", err);
-    }
-
     result
 }
 
@@ -131,11 +126,6 @@ pub async fn ice_connect(
     // Terminate candidate_task.
     candidate_task.abort();
     let _ = candidate_task.await;
-
-    // Clean up the agent.
-    if let Err(err) = agent.close().await {
-        tracing::warn!("Failed to close ICE agent: {}", err);
-    }
 
     result
 }
