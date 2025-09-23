@@ -1,0 +1,12 @@
+{
+  "projects": [
+    {
+      "name": "shared1",
+      "path": "~/p/collab-mode/fixture/Bob/shared1"
+    }
+  ],
+  "trusted_hosts": {},
+  "accept_mode": "All",
+  "host_id": "bob",
+  "permission": {}
+}

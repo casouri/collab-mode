@@ -1,0 +1,18 @@
+{
+  "projects": [
+    {
+      "name": "shared1",
+      "path": "~/p/collab-mode/fixture/Alice/shared1"
+    },
+    {
+      "name": "emacs-doom-themes",
+      "path": "~/p/emacs-doom-themes"
+    }
+  ],
+  "trusted_hosts": {
+    "bob": "FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13"
+  },
+  "accept_mode": "All",
+  "host_id": "alice",
+  "permission": {}
+}
