@@ -32,6 +32,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_tungstenite as tung;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -60,6 +61,10 @@ pub struct Listener {
     /// When the listener receives a `BindResponse(their_id,
     /// their_sdp)`, it sends `(their_id, their_sdp)` to this channel.
     sock_rx: mpsc::UnboundedReceiver<SignalingResult<Socket>>,
+    /// Handle to the send/receive stream task
+    send_receive_task: JoinHandle<()>,
+    /// Handle to the message processing task
+    process_message_task: JoinHandle<()>,
 }
 
 /// A socket that can be used to exchange ICE candidates.
@@ -100,22 +105,18 @@ impl Listener {
             endpoint = id,
             signaling_addr = addr
         );
-        let _ = tokio::spawn(send_receive_stream(stream, in_tx, out_rx).instrument(span));
+        let send_receive_task =
+            tokio::spawn(send_receive_stream(stream, in_tx, out_rx).instrument(span));
 
         let der_hash = my_key_cert.cert_der_hash();
-        let listener = Listener {
-            my_id: id.clone(),
-            my_key_cert,
-            sock_rx,
-            out_tx: out_tx.clone(),
-        };
 
         let span = tracing::info_span!(
             "listener_process_message",
             endpoint = id,
             signaling_addr = addr
         );
-        let _ = tokio::spawn(
+        let out_tx_clone = out_tx.clone();
+        let process_message_task = tokio::spawn(
             async move {
                 let mut endpoint_map = HashMap::new();
                 while let Some(msg) = in_rx.recv().await {
@@ -126,7 +127,7 @@ impl Listener {
                     let res = listener_process_message(
                         der_hash.clone(),
                         msg,
-                        out_tx.clone(),
+                        out_tx_clone.clone(),
                         sock_tx.clone(),
                         &mut endpoint_map,
                     )
@@ -139,6 +140,16 @@ impl Listener {
             }
             .instrument(span),
         );
+
+        let listener = Listener {
+            my_id: id.clone(),
+            my_key_cert,
+            sock_rx,
+            out_tx,
+            send_receive_task,
+            process_message_task,
+        };
+
         Ok(listener)
     }
 
@@ -174,6 +185,15 @@ impl Listener {
         } else {
             Err(SignalingError::Closed)
         }
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        // Abort background tasks to close WebSocket connection
+        tracing::info!("Closing signaling connection for endpoint {}", self.my_id);
+        self.send_receive_task.abort();
+        self.process_message_task.abort();
     }
 }
 
@@ -333,24 +353,28 @@ async fn send_receive_stream(
                 if let Some(msg) = msg {
                     if req_tx.send(msg).await.is_err() {
                         tracing::info!("Req channel closed, ending bg thread");
-                        return;
+                        break;
                     }
                 } else {
                     tracing::info!("Req stream closed, ending bg thread");
-                    return;
+                    break;
                 }
             }
             resp = resp_rx.recv() => {
                 if let Some(msg) = resp {
                     if stream.send(msg).await.is_err() {
                         tracing::info!("Resp stream closed, ending bg thread");
-                        return;
+                        break;
                     }
                 } else {
                     tracing::info!("Resp channel closed, ending bg thread");
-                    return;
+                    break;
                 }
             }
         }
+    }
+    let res = stream.close(Option::None).await;
+    if let Err(err) = res {
+        tracing::warn!("Error closing ws stream: {}", err);
     }
 }
