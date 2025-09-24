@@ -801,6 +801,7 @@ mod delete_file;
 mod doc_project;
 mod list_files;
 mod list_projects;
+mod local_remote_ops;
 mod open_file;
 mod reconnection;
 mod send_info;

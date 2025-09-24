@@ -24,8 +24,7 @@ signaling:
 doc:
 	cargo doc --document-private-items --open
 
-run-2:
-	$(RUST_ENV) cargo run --bin collab_mode -- run --socket --socket-port 7702 --config ../fixture/Bob/config &
+emacs-2:
 	~/emacs-head/src/emacs -f collab--setup-2
 
 upload:
