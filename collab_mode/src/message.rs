@@ -17,6 +17,7 @@ pub enum NotificationCode {
     FileListUpdated,     // Editor should update the file list.
     SuggestOpenFile,     // Editor should suggest to open a file.
     ConnectionBroke,     // Editor should indicate connection is broken.
+    FailedToConnect,     // Editor should show reason for failed connection attempt.
     Connecting,          // Editor should set connection state of the host to "connecting".
     ConnectionProgress,  // Editor should show connection progress.
     AcceptingConnection, // Editor should show that we’re accepting connections.
@@ -331,6 +332,15 @@ pub struct UndoResp {
     pub ops: Vec<EditInstruction>,
 }
 
+// **** ConnectionState
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStateResp {
+    /// Map from host_id to connection state
+    pub connections: HashMap<ServerId, crate::server::ConnectionState>,
+}
+
 // **** Etc
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -392,6 +402,7 @@ pub enum Msg {
     Hey(HeyMessage),
 
     // Errors
+    FailedToConnect(ServerId, String),
     ConnectionBroke(ServerId),
     StopSendingOps(DocId),
     SerializationErr(String),

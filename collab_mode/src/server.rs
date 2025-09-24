@@ -90,11 +90,17 @@ struct RemoteDoc {
     buffer: GapBuffer<char>,
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone)]
-enum ConnectionState {
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionState {
+    // Connected and well.
     Connected,
+    // Trying to (re)connect.
     Connecting,
+    // Connection was established but then broke. We try to reconnect in this case.
     Disconnected,
+    // Connection was never established. We don't try to reconnect in this case.
+    FailedToConnect,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -556,6 +562,16 @@ impl Server {
                 next.send_resp(resp, None).await;
                 Ok(())
             }
+            "ConnectionState" => {
+                // Return connection states for all active remotes
+                let mut connections = HashMap::new();
+                for (host_id, remote) in &self.active_remotes {
+                    connections.insert(host_id.clone(), remote.state);
+                }
+                let resp = message::ConnectionStateResp { connections };
+                next.send_resp(resp, None).await;
+                Ok(())
+            }
             "ListProjects" => {
                 let params: message::ListProjectsParams = serde_json::from_value(req.params)?;
                 let host_id = params.host_id;
@@ -803,6 +819,19 @@ impl Server {
                         host_id: remote_hostid,
                         message: progress,
                     },
+                )
+                .await;
+                Ok(())
+            }
+            Msg::FailedToConnect(host_id, reason) => {
+                if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+                    remote.state = ConnectionState::FailedToConnect;
+                    remote.next_reconnect_stride = 1;
+                    remote.next_reconnect_time = Instant::now();
+                }
+                next.send_notif(
+                    NotificationCode::ConnectionBroke,
+                    ConnectionBrokeNote { host_id, reason },
                 )
                 .await;
                 Ok(())
@@ -1145,7 +1174,7 @@ impl Server {
                     &webchannel_1,
                     &my_host_id,
                     None,
-                    Msg::ConnectionBroke(host_id),
+                    Msg::FailedToConnect(host_id, err.to_string()),
                 )
                 .await;
             }
