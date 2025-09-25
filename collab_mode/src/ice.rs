@@ -139,15 +139,37 @@ fn ice_monitor_progress(
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     error_tx: mpsc::Sender<WebrpcError>,
 ) {
+    let agent_clone = agent.clone();
     agent.on_connection_state_change(Box::new(move |state| {
         tracing::debug!(?state, "ICE state changed");
         if let Some(tx) = &progress_tx {
             let _ = tx.try_send(state);
         }
-        if state == ConnectionState::Failed {
-            let _ = error_tx.try_send(WebrpcError::ICEError(format!("Connection failed")));
+
+        // Check for terminal states and close the agent
+        if state == ConnectionState::Failed
+            || state == ConnectionState::Disconnected
+            || state == ConnectionState::Closed
+        {
+            let agent_to_close = agent_clone.clone();
+            let description = match state {
+                ConnectionState::Failed => "failed",
+                ConnectionState::Disconnected => "broke",
+                ConnectionState::Closed => "closed",
+                _ => "...",
+            };
+
+            let _ = error_tx.try_send(WebrpcError::ICEError(format!("Connection {}", description)));
+
+            Box::pin(async move {
+                tracing::debug!("Closing ICE agent due to terminal state: {:?}", state);
+                if let Err(err) = agent_to_close.close().await {
+                    tracing::error!("Error closing ICE agent: {:?}", err);
+                }
+            })
+        } else {
+            Box::pin(async move {})
         }
-        Box::pin(async move {})
     }));
 }
 
