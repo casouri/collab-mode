@@ -106,8 +106,12 @@ should be the port number.")
 
 (defvar collab-host-alist nil
   "An alist of host configurations.
+
 Each key is HOST-ID, each value is (SIGNALING-SERVER-ADDR
-CREDENTIAL).")
+CREDENTIAL).
+
+Only contains the host that we connect to, not hosts that connects to
+us.")
 
 (defvar collab-hasty-p nil
   "If t, buffer changes are sent to collab process immediately.
@@ -211,7 +215,7 @@ Point is not restored in the face of non-local exit."
 ;;; Host data
 
 (defun collab--host-alist ()
-  "Return ‘collab--host-alist’ plus outselves.
+  "Return ‘collab-host-alist’ plus outselves.
 
 Don’t use this function before a connection is established, because it
 uses ‘collab--my-host-id’."
@@ -224,20 +228,21 @@ uses ‘collab--my-host-id’."
 Gets data from ‘collab--host-alist’."
   (alist-get host-id (collab--host-alist) nil nil #'equal))
 
-(defvar collab--host-connected-map (make-hash-table)
-  "Maps host-id to connectivity state.")
+(defun collab--host-state (host-id connection-state)
+  "Return connection state of HOST-ID in CONNECTION-STATE.
 
-(defsubst collab--host-connected (host-id)
-  "Return non-nil if HOST-ID is connected.
+Our own HOST-ID is always “Connected”.
+For all possible states, see ‘collab--connection-state-req’.
 
-Our own HOST-ID is always connected."
+Return nil if no info for HOST-ID is found."
   (if (equal host-id collab--my-host-id)
-      t
-    (gethash host-id collab--host-connected-map)))
-
-(defsubst collab--set-host-connected (host-id connected)
-  "Set connection state of HOST-ID to CONNECTED."
-  (puthash host-id connected collab--host-connected-map))
+      "Connected"
+    (let ((entry (cl-find (lambda (entry)
+                            (equal (plist-get entry :hostId) host-id))
+                          connection-state)))
+      (if entry
+          (plist-get entry :state)
+        nil))))
 
 ;;; Icons
 
@@ -989,10 +994,11 @@ If we receive a ServerError notification, just display a warning."
      (let* ((host-id (plist-get params :hostId))
             (hub-buffer (collab--hub-buffer))
             (host-data (collab--host-data host-id)))
-       ;; If previously not connected, send an async list files
-       ;; request and update collab hub.
-       (when (not (collab--host-connected host-id))
-         (collab--set-host-connected host-id t)
+       ;; Send an async list files request and update collab hub. This
+       ;; might be unnecessary but it doesn’t hurt. But don’t send
+       ;; files list request if it’s just from a remote that connected
+       ;; to US.
+       (when (alist-get host-id (collab--host-alist) nil nil #'equal)
          (when (buffer-live-p hub-buffer)
            (collab--list-files-req
             nil host-id (car host-data) (cadr host-data)
@@ -1009,7 +1015,6 @@ If we receive a ServerError notification, just display a warning."
      (let ((host-id (plist-get params :hostId))
            (reason (plist-get params :reason))
            (hub-buffer (collab--hub-buffer)))
-       (collab--set-host-connected host-id nil)
        (when (buffer-live-p hub-buffer)
          (collab--list-files-callback host-id :error `(:message ,reason))))
      (collab--hub-rerender))
@@ -1067,6 +1072,25 @@ the full plist response). STATUS can be ‘:success’, ‘:error’, and
        conn (if dir 'ListFiles 'ListProjects)
        request-object
        :timeout collab-rpc-timeout))))
+
+(defun collab--connection-state-req ()
+  "Get the connection state of each host.
+
+Returns a list of (:hostId HOST-ID :state CONNECTION-STATE).
+
+CONNECTION-STATE can be:
+
+  - “Connected”: Connected and well.
+  - “Connecting”: Trying to (re)connect.
+  - “Disconnected”: Connection was established but then broke.
+                    Server will try to reconnect.
+  - “FailedToConnect”: Connection was never established.
+                       Server doesn’t try to reconnect."
+  (let* ((conn (collab--connect-process))
+         (resp (jsonrpc-request
+                conn 'ConnectionState nil
+                :timeout collab-rpc-timeout)))
+    (plist-get resp :connections)))
 
 (defun collab--share-file-req (filename file-meta content)
   "Share the file with HOST.
@@ -1374,7 +1398,8 @@ use that as the display name."
 (defun collab--insert-host-1 (host resp status &optional error)
   "Insert HOST, its STATUS, and its files in RESP.
 
-STATUS can be ‘up’, ‘down’, ‘delayed’, or nil.
+STATUS can be “Connected”, “Disconnected”, “Connecting”,
+“FailedToConnect”, or nil (meaning don’t show status).
 
 RESP can be the response object of ListFiles request or nil.
 Insert (empty) if RESP is nil; insert ... if STATUS is not ‘up’.
@@ -1384,30 +1409,30 @@ shouldn’t end with a newline."
   (let* ((beg (point))
          (files (seq-map #'identity (plist-get resp :files))))
     ;; 1. Insert host line.
-    (insert (propertize (if (equal host collab--my-host-id) "local host" host)
+    (insert (propertize (if (equal host collab--my-host-id) "Your files" host)
                         'face 'collab-host
                         'collab-host-line t))
     ;; 1.1 Insert status.
     (unless (equal host collab--my-host-id)
       (insert (pcase status
-                ('delayed (propertize " CONNECTING" 'face 'shadow))
-                ('up (propertize " UP" 'face 'success))
-                ('down (propertize " DOWN" 'face 'error))
-                ;; Matches nil and everything else.
+                ("Connecting" (propertize " CONNECTING" 'face 'shadow))
+                ("Connected" (propertize " UP" 'face 'success))
+                ("Disconnected" (propertize " DOWN" 'face 'error))
+                ("FailedToConnect" (propertize " FAILED" 'face 'error))
                 (_ ""))))
     (insert (propertize "\n" 'line-spacing 0.4))
     ;; 2. Insert files.
     (pcase status
-      ('up (if (null files)
-               (insert (propertize "(empty)\n" 'face 'shadow))
-             (dolist (entry files)
-               (let* ((file-desc (plist-get entry :file))
-                      (name (plist-get entry :filename))
-                      (directoryp (not (eq (plist-get entry :isDirectory)
-                                           :json-false))))
-                 (collab--insert-file file-desc name directoryp)
-                 (insert "\n")))))
-      ;; Delayed. Getting files async.
+      ("Connected" (if (null files)
+                       (insert (propertize "(empty)\n" 'face 'shadow))
+                     (dolist (entry files)
+                       (let* ((file-desc (plist-get entry :file))
+                              (name (plist-get entry :filename))
+                              (directoryp (not (eq (plist-get entry :isDirectory)
+                                                   :json-false))))
+                         (collab--insert-file file-desc name directoryp)
+                         (insert "\n")))))
+      ;; Not connected. Getting files async or can’t get files.
       (_ (insert (propertize "...\n" 'face 'shadow))))
     ;; 3. Insert error.
     (when error
@@ -1443,7 +1468,7 @@ list."
      (puthash host resp collab--list-files-cache)
      (collab--override-host-data
       host
-      `(:host ,host :files ,resp :status up))
+      `(:host ,host :files ,resp :status up :state "Connected"))
      (collab--hub-rerender))
     (:error
      (puthash host nil collab--list-files-cache)
@@ -1451,7 +1476,7 @@ list."
                         host (or (plist-get resp :message) ""))))
        (collab--override-host-data
         host
-        `(:host ,host :files ,resp :status down :error ,err))
+        `(:host ,host :files ,resp :status down :error ,err :state "Disconnected"))
        (collab--msg-event 'error err))
      (collab--hub-rerender))
     (:timeout
@@ -1459,34 +1484,9 @@ list."
      (let ((err (format "Timed out listing files of %s" host)))
        (collab--override-host-data
         host
-        `(:host ,host :files ,resp :status down :error ,err))
+        `(:host ,host :files ,resp :status down :error ,err :state "Disconnected"))
        (collab--msg-event 'error err))
      (collab--hub-rerender))))
-
-(defun collab--insert-host (host signaling-server credential)
-  "Insert HOST on SIGNALING-SERVER and its files.
-
-Server has CREDENTIAL. SIGNALING-SERVER is the address of the
-signaling server. Return t if the server has some file to list.
-
-Return t if inserted a host section into the buffer."
-  (if (or (equal host collab--my-host-id)
-          (collab--host-connected host))
-      ;; If connected, get file list and insert files.
-      (let* ((resp (collab--list-files-req
-                    nil host signaling-server credential)))
-        ;; Don’t insert local host if there’s no files on it.
-        (if (eq (length (plist-get resp :files)) 0)
-            nil
-          (collab--insert-host-1 host resp 'up)
-          t))
-    ;; If not connected, connect to it and let 'Connected'
-    ;; notification handler insert the files.
-    (collab--connect-notif host signaling-server)
-    ;; Insert a placeholder host for now, full file list will be
-    ;; inserted later.
-    (collab--insert-host-1 host nil 'delayed)
-    t))
 
 (defun collab--prop-section (prop)
   "Return the (BEG . END) of the range that has PROP."
@@ -1559,7 +1559,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (dolist (host hosts)
       (collab--insert-host-1 (plist-get host :host)
                              (plist-get host :files)
-                             (plist-get host :status))
+                             (plist-get host :state))
       (insert "\n"))
     (insert "\n")
 
@@ -1595,7 +1595,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
   "Recompute data for collab hub."
   (let ((data nil)
         (hosts nil)
-        connection-up accepting)
+        connection-up accepting connection-state)
     ;; Header.
     (setq data
           (plist-put data :connection-up
@@ -1606,18 +1606,21 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
                                  t)
                              (error nil)))))
     ;; Hosts.
+    (setq connection-state (when connection-up
+                             (collab--connection-state-req)))
     (dolist (entry (collab--host-alist))
       (let* ((host-id (car entry))
              (signaling-server (nth 0 (cdr entry)))
              (credential (nth 1 (cdr entry)))
              ;; (cached-resp (gethash host-id collab--list-files-cache))
-             (inserted-host nil))
+             (inserted-host nil)
+             (state (collab--host-state host-id connection-state)))
         (cond
          ((not connection-up)
-          (push `(:host ,host-id :files nil :status nil) hosts))
+          (push `(:host ,host-id :files nil :status nil :state nil) hosts))
          (connection-up
-          (push `(:host ,host-id :files nil :status 'delayed) hosts)
-          (if (collab--host-connected host-id)
+          (push `(:host ,host-id :files nil :status 'delayed :state ,state) hosts)
+          (if (equal state "Connected")
               ;; Connected, get files async.
               (collab--list-files-req
                nil host-id signaling-server credential
@@ -1632,7 +1635,6 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (setq data (plist-put data :current-message nil))
     ;; Update data.
     (setq collab--hub-data data)))
-
 
 ;;;; Dynamic highlight
 
