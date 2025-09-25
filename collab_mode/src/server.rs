@@ -91,7 +91,6 @@ struct RemoteDoc {
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum ConnectionState {
     // Connected and well.
     Connected,
