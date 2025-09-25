@@ -940,7 +940,7 @@ run once in each command loop.
 
 If we receive a ServerError notification, just display a warning."
   (pcase method
-    ('RemoteOpArrived
+    ('RemoteOpsArrived
      ;; TODO: Idle timer?
      (let ((file-desc (plist-get params :file))
            (last-seq (plist-get params :lastSeq)))
@@ -1586,10 +1586,11 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (insert "\n\n")
 
     ;; 6. Events.
-    (insert "Recent events:\n\n")
-    (dolist (event collab--events)
-      (insert event "\n\n"))
-    (insert "\n")))
+    (when collab--events
+      (insert "Recent events:\n\n")
+      (dolist (event collab--events)
+        (insert event "\n\n"))
+      (insert "\n"))))
 
 (defun collab--hub-recompute ()
   "Recompute data for collab hub."

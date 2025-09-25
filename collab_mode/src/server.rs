@@ -813,7 +813,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
-        tracing::info!("From remote: {}", &msg);
+        tracing::info!("From remote: {:?}", &msg);
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
             Msg::IceProgress(remote_hostid, progress) => {
@@ -1843,7 +1843,7 @@ impl Server {
     ) -> anyhow::Result<()> {
         let doc_id = context_ops.doc();
 
-        // Check write permission
+        // Check permission.
         if !self.config.write_allowed(&remote_host_id) {
             next.send_to_remote(
                 &remote_host_id,
@@ -1853,7 +1853,7 @@ impl Server {
             return Ok(());
         }
 
-        // Find doc in docs (as the server/owner of the doc)
+        // Get the doc.
         let doc = self.docs.get_mut(&doc_id);
         if doc.is_none() {
             next.send_to_remote(
@@ -1865,6 +1865,7 @@ impl Server {
         }
         let doc = doc.unwrap();
 
+        // Check site seq.
         let subscriber_data = doc.subscribers.get(&remote_host_id).copied();
         if subscriber_data.is_none() {
             let msg = Msg::BadRequest(format!("Doc {} ({}) not open", doc.name, doc_id));
@@ -1873,10 +1874,11 @@ impl Server {
         }
         let expected_seq = subscriber_data.unwrap() + 1;
 
-        // Check if first op's local site seq matches subscriber's saved seq
+        // Check if first op's local site seq matches what we expect.
+        // Even with disconnect, we shouldn’t receive bogus ops from
+        // client.
         if let Some(first_op) = context_ops.ops.first() {
             if first_op.site_seq != expected_seq {
-                // Send DocFatal message back
                 let err = format!(
                     "Site seq mismatch: expected {}, got {}",
                     expected_seq, first_op.site_seq
@@ -1887,12 +1889,12 @@ impl Server {
             }
         }
 
-        // Process ops using server engine
+        // Process ops.
         let processed_ops = doc
             .engine
             .process_ops(context_ops.ops.clone(), context_ops.context)?;
 
-        // Update subscriber's local seq to latest
+        // Record subscriber's latest received site seq.
         if let Some(last_op) = context_ops.ops.last() {
             doc.subscribers
                 .insert(remote_host_id.clone(), last_op.site_seq);
@@ -2083,15 +2085,15 @@ impl Server {
 
         // Notify editor to get the new remote ops.
         let new_buffer_len = remote_doc.remote_op_buffer.len();
-        if op_is_not_ours && new_buffer_len > old_buffer_len {
+        let last_seq = remote_doc.remote_op_buffer.last().and_then(|op| op.seq);
+        if op_is_not_ours && new_buffer_len > old_buffer_len && new_buffer_len > 0 {
             let file_desc =
                 EditorFileDesc::new(remote_doc.file_desc.clone(), remote_host_id.clone());
             next.send_notif(
                 NotificationCode::RemoteOpsArrived,
                 RemoteOpsArrivedNote {
-                    host_id: remote_host_id,
-                    doc_id,
                     file: file_desc,
+                    last_seq: last_seq.unwrap(),
                 },
             )
             .await;
@@ -2959,16 +2961,16 @@ async fn send_to_remote(
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,
 ) {
-    tracing::info!("Send to {}: {}", host_id, &msg);
+    tracing::info!("Send to {}: {:?}", host_id, &msg);
     // We don’t let caller handle disconnect errors. Because
     // disconnect error is caught by the receiving end of each
     // connection, and it’ll send a ConnectionBroke message.
     if let Err(err) = webchannel.send(host_id, req_id, msg.clone()).await {
         tracing::error!(
-            "Failed to send {:?} to remote host {}: {}",
-            msg,
+            "Failed to send to remote host {}: {}, msg={:?}",
             host_id,
-            err
+            err,
+            msg,
         );
     }
 }
