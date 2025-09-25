@@ -1,5 +1,6 @@
 use crate::{
     config_man::{AcceptMode, ConfigProject},
+    server,
     types::*,
     webchannel::TransportType,
 };
@@ -336,9 +337,15 @@ pub struct UndoResp {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectionStateEntry {
+    pub host_id: ServerId,
+    pub state: server::ConnectionState,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionStateResp {
-    /// Map from host_id to connection state
-    pub connections: HashMap<ServerId, crate::server::ConnectionState>,
+    pub connections: Vec<ConnectionStateEntry>,
 }
 
 // **** Etc

@@ -97,9 +97,11 @@ pub enum ConnectionState {
     Connected,
     // Trying to (re)connect.
     Connecting,
-    // Connection was established but then broke. We try to reconnect in this case.
+    // Connection was established but then broke. We try to reconnect
+    // in this case.
     Disconnected,
-    // Connection was never established. We don't try to reconnect in this case.
+    // Connection was never established. We don't try to reconnect in
+    // this case.
     FailedToConnect,
 }
 
@@ -564,9 +566,12 @@ impl Server {
             }
             "ConnectionState" => {
                 // Return connection states for all active remotes
-                let mut connections = HashMap::new();
+                let mut connections = Vec::new();
                 for (host_id, remote) in &self.active_remotes {
-                    connections.insert(host_id.clone(), remote.state);
+                    connections.push(message::ConnectionStateEntry {
+                        host_id: host_id.clone(),
+                        state: remote.state,
+                    });
                 }
                 let resp = message::ConnectionStateResp { connections };
                 next.send_resp(resp, None).await;

@@ -750,6 +750,45 @@ After receiving a Connect notification, the server will always send a **Connecte
 }
 ```
 
+**ConnectionState**
+```json
+{
+  "method": "ConnectionState",
+  "params": {}
+}
+```
+Returns the current connection states for all active remote servers.
+
+**Response**
+```json
+{
+  "connections": [
+    {
+      "hostId": "remote-server-1",
+      "state": "Connected"
+    },
+    {
+      "hostId": "remote-server-2",
+      "state": "Connecting"
+    }
+  ]
+}
+```
+
+**Flow**
+1. Editor sends ConnectionState request
+2. Server iterates through all active_remotes
+3. For each active remote, creates a ConnectionStateEntry with:
+   - `hostId`: The remote server's ID
+   - `state`: Current connection state (Connected/Connecting/Disconnected/Fatal)
+4. Returns ConnectionStateResp with array of connection entries
+
+**State Values**
+- `Connected`: Connection established and active
+- `Connecting`: Currently attempting to connect or reconnect
+- `Disconnected`: Connection lost, attempting to reconnect
+- `Fatal`: Connection permanently failed, not attempting reconnect
+
 ### SendInfo
 
 Sends metadata/information about a document to remote subscribers.
