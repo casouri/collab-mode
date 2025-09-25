@@ -1418,7 +1418,7 @@ shouldn’t end with a newline."
                 ("Connecting" (propertize " CONNECTING" 'face 'shadow))
                 ("Connected" (propertize " UP" 'face 'success))
                 ("Disconnected" (propertize " DOWN" 'face 'error))
-                ("FailedToConnect" (propertize " FAILED" 'face 'error))
+                ("FailedToConnect" (propertize " DOWN" 'face 'error))
                 (_ ""))))
     (insert (propertize "\n" 'line-spacing 0.4))
     ;; 2. Insert files.
@@ -1468,7 +1468,7 @@ list."
      (puthash host resp collab--list-files-cache)
      (collab--override-host-data
       host
-      `(:host ,host :files ,resp :status up :state "Connected"))
+      `(:host ,host :files ,resp :state "Connected"))
      (collab--hub-rerender))
     (:error
      (puthash host nil collab--list-files-cache)
@@ -1476,7 +1476,7 @@ list."
                         host (or (plist-get resp :message) ""))))
        (collab--override-host-data
         host
-        `(:host ,host :files ,resp :status down :error ,err :state "Disconnected"))
+        `(:host ,host :files ,resp :error ,err :state "Disconnected"))
        (collab--msg-event 'error err))
      (collab--hub-rerender))
     (:timeout
@@ -1484,7 +1484,7 @@ list."
      (let ((err (format "Timed out listing files of %s" host)))
        (collab--override-host-data
         host
-        `(:host ,host :files ,resp :status down :error ,err :state "Disconnected"))
+        `(:host ,host :files ,resp :error ,err :state "Disconnected"))
        (collab--msg-event 'error err))
      (collab--hub-rerender))))
 
@@ -1617,9 +1617,9 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
              (state (collab--host-state host-id connection-state)))
         (cond
          ((not connection-up)
-          (push `(:host ,host-id :files nil :status nil :state nil) hosts))
+          (push `(:host ,host-id :files nil :state nil) hosts))
          (connection-up
-          (push `(:host ,host-id :files nil :status 'delayed :state ,state) hosts)
+          (push `(:host ,host-id :files nil :state ,state) hosts)
           (if (equal state "Connected")
               ;; Connected, get files async.
               (collab--list-files-req
