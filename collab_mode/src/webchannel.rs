@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_ice::state::ConnectionState;
 use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
@@ -195,9 +195,12 @@ impl WebChannel {
             let remote_hostid_clone = remote_hostid.to_string();
 
             tokio::spawn(async move {
-                let conn = ice_accept(sock, None).await;
-                if conn.is_err() {
-                    tracing::error!("Failed to accept ICE connection: {}", conn.err().unwrap());
+                let conn_result = ice_accept(sock, None).await;
+                if conn_result.is_err() {
+                    tracing::error!(
+                        "Failed to accept ICE connection: {}",
+                        conn_result.err().unwrap()
+                    );
                     let _ = msg_tx
                         .send(Message {
                             host: remote_hostid_clone.clone(),
@@ -207,7 +210,7 @@ impl WebChannel {
                         .await;
                     return;
                 }
-                let conn = conn.unwrap();
+                let (conn, conn_broke_rx) = conn_result.unwrap();
 
                 let dtls_connection = create_dtls_server(conn, my_key_cert, their_cert).await;
                 if dtls_connection.is_err() {
@@ -244,7 +247,12 @@ impl WebChannel {
                 let sctp_assoc = sctp_assoc.unwrap();
 
                 let res = self_clone
-                    .setup_message_handling(&remote_hostid, sctp_assoc, STREAM_ID_HALF)
+                    .setup_message_handling(
+                        &remote_hostid,
+                        sctp_assoc,
+                        STREAM_ID_HALF,
+                        conn_broke_rx,
+                    )
                     .await;
                 if let Err(e) = res {
                     tracing::error!("Failed to setup message handling: {}", e);
@@ -302,7 +310,7 @@ impl WebChannel {
             }
         });
 
-        let (conn, their_cert) = ice_connect(
+        let ((conn, their_cert), conn_broke_rx) = ice_connect(
             remote_hostid.clone(),
             my_key_cert.clone(),
             signaling_addr,
@@ -313,7 +321,7 @@ impl WebChannel {
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
         let sctp_assoc = create_sctp_client(dtls_connection).await?;
 
-        self.setup_message_handling(&remote_hostid, sctp_assoc, 0)
+        self.setup_message_handling(&remote_hostid, sctp_assoc, 0, conn_broke_rx)
             .await?;
 
         self.send(
@@ -398,6 +406,7 @@ impl WebChannel {
         remote_hostid: &ServerId,
         sctp_assoc: Arc<association::Association>,
         stream_id_base: u16,
+        conn_broke_rx: oneshot::Receiver<()>,
     ) -> anyhow::Result<()> {
         // Create channel for outgoing messages
         let (tx, rx) = mpsc::channel(16);
@@ -441,6 +450,7 @@ impl WebChannel {
                     msg_tx_clone.clone(),
                     remote_hostid_clone.clone(),
                     stream_id_base,
+                    conn_broke_rx,
                 ) => (),
                 _ = err_rx.recv() => (),
             }
@@ -638,43 +648,53 @@ async fn handle_incoming_messages(
     msg_tx: mpsc::Sender<Message>,
     remote_hostid: ServerId,
     stream_id_base: u16,
+    mut conn_broke_rx: oneshot::Receiver<()>,
 ) {
     loop {
-        match sctp_assoc.accept_stream().await {
-            Some(stream) => {
-                let stream_id = stream.stream_identifier();
-                // If `stream_id_base` is 2^15, that means we’re the
-                // accept side of the overall connection, which means
-                // all the streams created by us for sending out
-                // messages will have stream id greater than that.
-                // Then, if we get a stream with id greater than 2^15,
-                // it’s from ourself, so don’t read from it.
-                let stream_is_from_us = stream_id_base == 0
-                    && stream_id < STREAM_ID_HALF + STREAM_ID_INIT
-                    || stream_id_base == STREAM_ID_HALF
-                        && stream_id >= STREAM_ID_HALF + STREAM_ID_INIT;
+        tokio::select! {
+            stream_result = sctp_assoc.accept_stream() => {
+                match stream_result {
+                    Some(stream) => {
+                        let stream_id = stream.stream_identifier();
+                        // If `stream_id_base` is 2^15, that means we're the
+                        // accept side of the overall connection, which means
+                        // all the streams created by us for sending out
+                        // messages will have stream id greater than that.
+                        // Then, if we get a stream with id greater than 2^15,
+                        // it's from ourself, so don't read from it.
+                        let stream_is_from_us = stream_id_base == 0
+                            && stream_id < STREAM_ID_HALF + STREAM_ID_INIT
+                            || stream_id_base == STREAM_ID_HALF
+                                && stream_id >= STREAM_ID_HALF + STREAM_ID_INIT;
 
-                if stream_is_from_us {
-                    let _ = stream.shutdown(std::net::Shutdown::Read).await;
-                    continue;
+                        if stream_is_from_us {
+                            let _ = stream.shutdown(std::net::Shutdown::Read).await;
+                            continue;
+                        }
+
+                        let msg_tx = msg_tx.clone();
+                        let remote_hostid = remote_hostid.clone();
+
+                        tracing::info!(
+                            "New stream (#{}) from {}",
+                            stream.stream_identifier(),
+                            remote_hostid
+                        );
+                        tokio::spawn(async move {
+                            read_from_stream(stream, msg_tx, remote_hostid).await;
+                        });
+                    }
+                    None => {
+                        // When this function returns, the caller cleans up
+                        // assoc_tx map and sends connection closed message.
+                        tracing::info!("No more streams from {}", remote_hostid);
+                        break;
+                    }
                 }
-
-                let msg_tx = msg_tx.clone();
-                let remote_hostid = remote_hostid.clone();
-
-                tracing::info!(
-                    "New stream (#{}) from {}",
-                    stream.stream_identifier(),
-                    remote_hostid
-                );
-                tokio::spawn(async move {
-                    read_from_stream(stream, msg_tx, remote_hostid).await;
-                });
             }
-            None => {
-                // When this function returns, the caller cleans up
-                // assoc_tx map and sends connection closed message.
-                tracing::info!("No more streams from {}", remote_hostid);
+            _ = &mut conn_broke_rx => {
+                // ICE connection broke, exit
+                tracing::info!("Connection broke for {}", remote_hostid);
                 break;
             }
         }

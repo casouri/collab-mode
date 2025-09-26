@@ -8,6 +8,7 @@ use crate::types::ArcKeyCert;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::instrument;
@@ -46,16 +47,17 @@ pub async fn ice_bind(
 pub async fn ice_accept(
     mut sock: SignalSocket,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
-) -> WebrpcResult<Arc<impl Conn + Send + Sync>> {
+) -> WebrpcResult<(Arc<impl Conn + Send + Sync>, oneshot::Receiver<()>)> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
     let (connected_tx, connected_rx) = watch::channel(());
+    let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
 
     let (ufrag, pwd) = get_ice_credential(&sock)?;
     let agent = Arc::new(make_ice_agent(false).await?);
     send_ice_credential(&mut sock, &agent).await?;
 
-    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone());
+    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone(), conn_broke_tx);
     let candidate_task = ice_exchange_candidates(agent.clone(), sock, error_tx, connected_rx)?;
 
     let result = tokio::select! {
@@ -68,7 +70,7 @@ pub async fn ice_accept(
         conn = agent.accept(cancel_rx, ufrag, pwd) => {
             drop(connected_tx);
             let conn = conn?;
-            Ok(conn)
+            Ok((conn, conn_broke_rx))
         }
     };
 
@@ -90,10 +92,14 @@ pub async fn ice_connect(
     signaling_addr: &str,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     my_id: Option<String>,
-) -> WebrpcResult<(Arc<impl Conn + Send + Sync>, CertDerHash)> {
+) -> WebrpcResult<(
+    (Arc<impl Conn + Send + Sync>, CertDerHash),
+    oneshot::Receiver<()>,
+)> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
     let (connected_tx, connected_rx) = watch::channel(());
+    let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
 
     let my_id = my_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut listener = Listener::new(signaling_addr, my_id, my_key_cert).await?;
@@ -105,7 +111,7 @@ pub async fn ice_connect(
     let (ufrag, pwd) = get_ice_credential(&sock)?;
     let their_cert = sock.cert_hash();
 
-    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone());
+    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone(), conn_broke_tx);
     let candidate_task =
         ice_exchange_candidates(agent.clone(), sock, error_tx.clone(), connected_rx)?;
 
@@ -119,7 +125,7 @@ pub async fn ice_connect(
         conn = agent.dial(cancel_rx, ufrag, pwd) => {
             drop(connected_tx);
             let conn = conn?;
-            Ok((conn, their_cert))
+            Ok(((conn, their_cert), conn_broke_rx))
         }
     };
 
@@ -138,8 +144,10 @@ fn ice_monitor_progress(
     agent: Arc<Agent>,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     error_tx: mpsc::Sender<WebrpcError>,
+    conn_broke_tx: oneshot::Sender<()>,
 ) {
     let agent_clone = agent.clone();
+    let mut conn_broke_tx = Some(conn_broke_tx);
     agent.on_connection_state_change(Box::new(move |state| {
         tracing::debug!(?state, "ICE state changed");
         if let Some(tx) = &progress_tx {
@@ -160,6 +168,9 @@ fn ice_monitor_progress(
             };
 
             let _ = error_tx.try_send(WebrpcError::ICEError(format!("Connection {}", description)));
+
+            // Drop conn_broke_tx to signal connection termination
+            // drop(conn_broke_tx.take());
 
             Box::pin(async move {
                 tracing::debug!("Closing ICE agent due to terminal state: {:?}", state);
@@ -301,7 +312,7 @@ mod tests {
         listener.bind().await?;
         let sock = listener.accept().await?;
 
-        let conn = ice_accept(sock, None).await?;
+        let (conn, _conn_broke_rx) = ice_accept(sock, None).await?;
         let conn_tx = Arc::clone(&conn);
 
         // Send and receive message.
@@ -330,7 +341,7 @@ mod tests {
     async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
         // We don't verify server_cert until DTLS connection is
         // established. So no use for the server_cert at this layer.
-        let (conn, _server_cert) = ice_connect(
+        let ((conn, _server_cert), _conn_broke_rx) = ice_connect(
             server_id,
             client_key_cert,
             "ws://127.0.0.1:9000",
