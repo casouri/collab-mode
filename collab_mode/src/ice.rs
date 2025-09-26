@@ -169,8 +169,8 @@ fn ice_monitor_progress(
 
             let _ = error_tx.try_send(WebrpcError::ICEError(format!("Connection {}", description)));
 
-            // Drop conn_broke_tx to signal connection termination
-            // drop(conn_broke_tx.take());
+            // Signal connection breakage.
+            drop(conn_broke_tx.take());
 
             Box::pin(async move {
                 tracing::debug!("Closing ICE agent due to terminal state: {:?}", state);

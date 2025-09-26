@@ -692,8 +692,14 @@ async fn handle_incoming_messages(
                     }
                 }
             }
+            // Why do we need a channel to know that connection broke?
+            // SCTP SHOULD have implemented heartbeat and return None
+            // with connection breaks, but doesn’t. Which means when
+            // connection breaks, accept_stream just hangs
+            // indefinitely. To take the matter into our own hands, I
+            // added this channel.
             _ = &mut conn_broke_rx => {
-                // ICE connection broke, exit
+                // ICE connection broke, exit.
                 tracing::info!("Connection broke for {}", remote_hostid);
                 break;
             }

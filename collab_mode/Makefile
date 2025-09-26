@@ -25,7 +25,7 @@ doc:
 	cargo doc --document-private-items --open
 
 emacs-2:
-	~/emacs-head/src/emacs -f collab--setup-2
+	~/emacs-head/src/emacs --eval "(setq collab-connection-type '(socket 7702))"
 
 upload:
 	rsync -rP ~/p/collab-mode yuan@collab-mode: --exclude "target" --exclude ".git" --exclude "release"
