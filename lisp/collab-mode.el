@@ -433,6 +433,10 @@ Each event is a string.")
 (defvar collab--known-hosts nil
   "A list hosts connected to us or we connected to in this session.")
 
+;; Used for debugging.
+(defvar collab--pause-auto-update nil
+  "If non-nil, Emacs don’t apply changes from remote automatically.")
+
 ;;; Local state
 
 (defvar-local collab--file nil
@@ -942,18 +946,19 @@ If we receive a ServerError notification, just display a warning."
   (pcase method
     ('RemoteOpsArrived
      ;; TODO: Idle timer?
-     (let ((file-desc (plist-get params :file))
-           (last-seq (plist-get params :lastSeq)))
-       (let* ((file-key (collab--encode-filename file-desc))
-              (buffer (gethash file-key collab--buffer-table))
-              (timer (gethash file-key collab--dispatcher-timer-table)))
-         (when timer (cancel-timer timer))
-         (when (buffer-live-p buffer)
-           (setq timer (run-with-timer
-                        collab-receive-ops-delay nil
-                        #'collab--request-remote-ops
-                        buffer last-seq))
-           (puthash file-key timer collab--dispatcher-timer-table)))))
+     (when (not collab--pause-auto-update)
+       (let ((file-desc (plist-get params :file))
+             (last-seq (plist-get params :lastSeq)))
+         (let* ((file-key (collab--encode-filename file-desc))
+                (buffer (gethash file-key collab--buffer-table))
+                (timer (gethash file-key collab--dispatcher-timer-table)))
+           (when timer (cancel-timer timer))
+           (when (buffer-live-p buffer)
+             (setq timer (run-with-timer
+                          collab-receive-ops-delay nil
+                          #'collab--request-remote-ops
+                          buffer last-seq))
+             (puthash file-key timer collab--dispatcher-timer-table))))))
     ('InfoReceived
      (let ((file (plist-get params :file))
            (host-id (plist-get params :sender))
@@ -986,7 +991,7 @@ If we receive a ServerError notification, just display a warning."
      )
     ('ConnectionProgress
      (collab--msg-event 'default
-                        (format "Connecting to %s...%s"
+                        (format "Connection to %s: %s"
                                 (plist-get params :hostId)
                                 (plist-get params :message)))
      (collab--hub-rerender))

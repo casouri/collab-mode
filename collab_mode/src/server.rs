@@ -572,7 +572,12 @@ impl Server {
                         state: remote.state,
                     });
                 }
-                let resp = message::ConnectionStateResp { connections };
+                // Collect accepting signaling addresses
+                let accepting: Vec<String> = self.accepting.keys().cloned().collect();
+                let resp = message::ConnectionStateResp {
+                    connections,
+                    accepting,
+                };
                 next.send_resp(resp, None).await;
                 Ok(())
             }
@@ -728,6 +733,7 @@ impl Server {
         match notif.method.as_str() {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
+
                 if self.accepting.get(&params.signaling_addr).is_some() {
                     return Ok(());
                 }
@@ -741,7 +747,8 @@ impl Server {
                 .await;
                 let key_cert = self.key_cert.clone();
                 let mut webchannel_1 = next.webchannel.clone();
-                let editor_tx_1 = next.editor_tx.clone();
+                let signaling_addr_1 = params.signaling_addr.clone();
+                let my_host_id = self.host_id.clone();
 
                 tokio::spawn(async move {
                     let res = webchannel_1
@@ -761,12 +768,19 @@ impl Server {
                             }
                             _ => err.to_string(),
                         };
-                        send_notification(
-                            &editor_tx_1,
-                            NotificationCode::AcceptStopped,
-                            serde_json::json!({
-                                "reason": msg,
-                            }),
+                        // We have to send a message to ourselves to
+                        // continue next step because this is a
+                        // background task which doesn’t have access
+                        // to self so we can’t update the accepting
+                        // state.
+                        send_to_remote(
+                            &webchannel_1,
+                            &my_host_id,
+                            None,
+                            Msg::AcceptStopped {
+                                signaling_addr: signaling_addr_1,
+                                reason: msg,
+                            },
                         )
                         .await;
                     }
@@ -816,6 +830,21 @@ impl Server {
         tracing::info!("From remote: {:?}", &msg);
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
+            Msg::AcceptStopped {
+                signaling_addr,
+                reason,
+            } => {
+                self.accepting.remove(&signaling_addr);
+                next.send_notif(
+                    NotificationCode::AcceptStopped,
+                    serde_json::json!({
+                        "signalingAddr": signaling_addr,
+                        "reason": reason,
+                    }),
+                )
+                .await;
+                Ok(())
+            }
             Msg::IceProgress(remote_hostid, progress) => {
                 next.send_notif(
                     NotificationCode::ConnectionProgress,
@@ -2045,9 +2074,9 @@ impl Server {
             if gseq.is_none() {
                 tracing::error!("Received remote op without global seq: {:?}", &remote_op);
                 next.send_notif(
-                    NotificationCode::InternalError,
-                    HostAndMessageNote {
-                        host_id: remote_host_id.clone(),
+                    NotificationCode::DocFatal,
+                    FileAndMessageNote {
+                        file: remote_doc.file_desc.clone(),
                         message: "Received remote op without global seq, terminating doc"
                             .to_string(),
                     },

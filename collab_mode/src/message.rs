@@ -28,6 +28,7 @@ pub enum NotificationCode {
     FileDeleted,         // A file/directory was deleted.
     InfoReceived,        // Info received from remote for a file.
 
+    DocFatal,         // This doc needs to be restarted.
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
 }
@@ -88,6 +89,13 @@ pub struct RemoteOpsArrivedNote {
 pub struct ConnectionBrokeNote {
     pub host_id: ServerId,
     pub reason: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAndMessageNote {
+    pub file: FileDesc,
+    pub message: String,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -343,6 +351,7 @@ pub struct ConnectionStateEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionStateResp {
     pub connections: Vec<ConnectionStateEntry>,
+    pub accepting: Vec<String>,
 }
 
 // **** Etc
@@ -400,6 +409,11 @@ pub enum Msg {
     Info(Info),
     InfoFromClient(Info),
     InfoFromServer(Info),
+    // Signaling addr, reason
+    AcceptStopped {
+        signaling_addr: String,
+        reason: String,
+    },
 
     // Misc
     IceProgress(ServerId, String),
