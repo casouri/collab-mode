@@ -28,9 +28,9 @@ pub enum NotificationCode {
     FileDeleted,         // A file/directory was deleted.
     InfoReceived,        // Info received from remote for a file.
 
-    DocFatal,         // This doc needs to be restarted.
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
+    ErrorResponse,    // Async request error, comes with error code.
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -93,8 +93,9 @@ pub struct ConnectionBrokeNote {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileAndMessageNote {
-    pub file: FileDesc,
+pub struct ErrorResponseNote {
+    pub code: ErrorCode,
+    pub file: Option<FileDesc>,
     pub message: String,
 }
 
@@ -431,7 +432,11 @@ pub enum Msg {
     DocFatal(DocId, String),
     // If we need to respond to a request from a remote’s editor with
     // an error, use this message.
-    ErrorResp(ErrorCode, String),
+    ErrorResp {
+        code: ErrorCode,
+        file: Option<FileDesc>,
+        message: String,
+    },
 }
 
 // *** Functions

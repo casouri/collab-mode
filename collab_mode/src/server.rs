@@ -941,29 +941,20 @@ impl Server {
                 next.send_resp(ListFilesResp { files }, None).await;
                 Ok(())
             }
-            Msg::ErrorResp(_, error_msg) => {
-                if msg.req_id.is_none() {
-                    tracing::warn!("Received ErrorResp without req_id, ignoring");
-                    let msg = HostAndMessageNote {
-                        host_id: msg.host.clone(),
-                        message: format!(
-                            "Received error response from remote {}, but without response id: {}",
-                            msg.host, error_msg
-                        ),
-                    };
-                    next.send_notif(NotificationCode::UnimportantError, msg)
-                        .await;
-                    return Ok(());
-                }
-
-                // Send error response back to the editor
-                let err = lsp_server::ResponseError {
-                    code: 500,
-                    message: error_msg,
-                    data: None,
-                };
-                next.send_resp((), Some(err)).await;
-
+            Msg::ErrorResp {
+                code,
+                file,
+                message,
+            } => {
+                next.send_notif(
+                    NotificationCode::ErrorResponse,
+                    ErrorResponseNote {
+                        code,
+                        file,
+                        message,
+                    },
+                )
+                .await;
                 Ok(())
             }
             Msg::RequestFile(file_desc, mode) => {
@@ -1034,7 +1025,11 @@ impl Server {
             Msg::SaveFile(doc_id) => {
                 let res = self.save_file_to_disk(&doc_id).await;
                 let resp = if let Err(err) = res {
-                    Msg::ErrorResp(ErrorCode::IoError, err.to_string())
+                    Msg::ErrorResp {
+                        code: ErrorCode::IoError,
+                        file: self.docs.get(&doc_id).map(|doc| doc.file_desc.clone()),
+                        message: err.to_string(),
+                    }
                 } else {
                     Msg::FileSaved(doc_id)
                 };
@@ -1145,12 +1140,27 @@ impl Server {
                 }
                 Ok(())
             }
+            Msg::DocFatal(doc_id, reason) => {
+                let remote_doc = self.remote_docs.remove(&msg.host, doc_id);
+                let msg = ErrorResponseNote {
+                    code: ErrorCode::DocFatal,
+                    file: remote_doc.map(|doc| doc.file_desc),
+                    message: reason,
+                };
+                next.send_notif(NotificationCode::ErrorResponse, msg).await;
+                Ok(())
+            }
             _ => {
-                tracing::error!(
+                let message = format!(
                     "Unrecognized message type from {}: {:?}",
-                    msg.host,
-                    msg.body
+                    msg.host, msg.body
                 );
+                tracing::error!(message);
+                let msg = HostAndMessageNote {
+                    host_id: msg.host,
+                    message,
+                };
+                next.send_notif(NotificationCode::InternalError, msg);
                 Ok(())
             }
         }
@@ -1249,21 +1259,23 @@ impl Server {
         Ok(())
     }
 
-    // In attached mode, delegate to editor, otherwise read from disk
-    // and response immediately.
     async fn list_files_from_remote<'a>(
         &mut self,
         next: &Next<'a>,
         dir: Option<FileDesc>,
         remote_host_id: ServerId,
     ) -> anyhow::Result<()> {
-        match self.list_files_from_disk(dir).await {
+        match self.list_files_from_disk(dir.clone()).await {
             Ok(files) => {
                 let msg = Msg::FileList(files);
                 next.send_to_remote(&remote_host_id, msg).await;
             }
             Err(err) => {
-                let msg = Msg::ErrorResp(ErrorCode::IoError, err.to_string());
+                let msg = Msg::ErrorResp {
+                    code: ErrorCode::IoError,
+                    file: dir,
+                    message: err.to_string(),
+                };
                 next.send_to_remote(&remote_host_id, msg).await;
             }
         }
@@ -1681,7 +1693,11 @@ impl Server {
         if let Err(err) = res {
             next.send_to_remote(
                 &remote_host_id,
-                Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+                Msg::ErrorResp {
+                    code: ErrorCode::IoError,
+                    file: Some(file_desc.clone()),
+                    message: err.to_string(),
+                },
             )
             .await;
             return Ok(());
@@ -1716,7 +1732,11 @@ impl Server {
                 if let Err(err) = res {
                     next.send_to_remote(
                         &remote_host_id,
-                        Msg::ErrorResp(ErrorCode::IoError, format!("File not found: {}", err)),
+                        Msg::ErrorResp {
+                            code: ErrorCode::IoError,
+                            file: Some(file_desc.clone()),
+                            message: format!("File not found: {}", err),
+                        },
                     )
                     .await;
                     return Ok(());
@@ -2024,7 +2044,11 @@ impl Server {
             Err(err) => {
                 next.send_to_remote(
                     &remote_host_id,
-                    Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+                    Msg::ErrorResp {
+                        code: ErrorCode::IoError,
+                        file: None,
+                        message: err.to_string(),
+                    },
                 )
                 .await;
             }
@@ -2074,9 +2098,10 @@ impl Server {
             if gseq.is_none() {
                 tracing::error!("Received remote op without global seq: {:?}", &remote_op);
                 next.send_notif(
-                    NotificationCode::DocFatal,
-                    FileAndMessageNote {
-                        file: remote_doc.file_desc.clone(),
+                    NotificationCode::ErrorResponse,
+                    ErrorResponseNote {
+                        code: ErrorCode::DocFatal,
+                        file: Some(remote_doc.file_desc.clone()),
                         message: "Received remote op without global seq, terminating doc"
                             .to_string(),
                     },
@@ -2664,7 +2689,11 @@ impl Server {
             Err(err) => {
                 next.send_to_remote(
                     &requester,
-                    Msg::ErrorResp(ErrorCode::IoError, err.to_string()),
+                    Msg::ErrorResp {
+                        code: ErrorCode::IoError,
+                        file: Some(file_desc.clone()),
+                        message: err.to_string(),
+                    },
                 )
                 .await;
             }
