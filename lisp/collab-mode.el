@@ -286,7 +286,8 @@ Return nil if no info for HOST-ID is found."
     (103 . DocFatal)
     (104 . PermissionDenied)
     (105 . IoError)
-    (113 . BadRequest))
+    (113 . BadRequest)
+    (114 . NotConnected))
   "An alist of JSONRPC error codes.")
 
 (defun collab--error-code-jsonrpc-error-p (code)
@@ -1033,9 +1034,30 @@ If we receive a ServerError notification, just display a warning."
      ;; TODO
      )
     ('UnimportantError
-     (collab--msg-event 'warn (plist-get params :message) 'no-message))
+     (collab--msg-event 'info (plist-get params :message) 'no-message))
     ('InternalError
-     (collab--msg-event 'error (plist-get params :message)))))
+     (collab--msg-event 'error (plist-get params :message)))
+    ('ErrorResponse
+     (let* ((file (plist-get params :file))
+            (filename (and file (collab--encode-filename file)))
+            (code (plist-get params :code))
+            (code-desc (or (alist-get code collab--error-code-alist)
+                           (format "(Unrecognized code %s)" code)))
+            (additional-message ""))
+       (if (and (eq code-desc 'DocFatal) filename)
+           (let ((buf (gethash filename collab--buffer-table)))
+             (if buf
+                 (with-current-buffer buf
+                   (collab--disable))
+               (setq additional-message
+                     "...and we don’t even have the file open"))))
+       (collab--msg-event
+        'error
+        (format "%s %s%s%s"
+                code-desc
+                (if filename (format "(%s) " filename) "")
+                (plist-get params :message)
+                additional-message))))))
 
 ;;;; Requests
 

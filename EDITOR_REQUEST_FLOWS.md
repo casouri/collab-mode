@@ -885,6 +885,30 @@ The server uses the following error codes in responses:
 | 113 | BadRequest | Invalid request parameters |
 | 114 | NotConnected | Remote host not connected |
 
+### ErrorResponse notification
+
+The `ErrorResponse` notification is sent to the editor when errors occur during document operations.
+
+**Notification format**
+```json
+{
+  "method": "ErrorResponse",
+  "params": {
+    "code": 103,  // Error code (e.g., 103 for DocFatal)
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"},  // Optional
+    "message": "Document fatal error: sequence mismatch"
+  }
+}
+```
+
+**When it's sent**
+- **DocFatal errors** (code 103): When the document state becomes corrupted
+  - OT engine errors during operation transformation.
+  - Sequence number mismatches between client and server.
+  - Operations out of range for document length
+- **Remote operation failures**: When request to remote server fails
+- **IO errors**: When file operations fail on remote servers.
+
 ### Error Response Format
 
 ```json
@@ -897,38 +921,3 @@ The server uses the following error codes in responses:
   }
 }
 ```
-
-### Common Error Scenarios
-
-1. **Remote host not connected**:
-   - Occurs when trying to access files on disconnected remote
-   - Server checks connection status before forwarding
-   - Returns NotConnected error
-
-2. **File not found**:
-   - Local: File doesn't exist on disk
-   - Remote: File not in `remote_docs` map
-   - Returns IoError with descriptive message
-
-3. **Permission denied**:
-   - Remote server rejects access based on credentials
-   - File system denies read/write access
-   - Returns PermissionDenied error
-
-4. **Document corruption**:
-   - Engine detects inconsistent state
-   - Operation sequence violation
-   - Returns DocFatal, requires reopening document
-
-5. **Invalid parameters**:
-   - Missing required fields
-   - Invalid file descriptors
-   - Reserved project names
-   - Returns BadRequest or InvalidParams
-
-### Error Recovery
-
-- **Connection errors**: Server implements exponential backoff for reconnection
-- **Document errors**: Editor should close and reopen the document
-- **File errors**: Editor should refresh file list and retry
-- **Permission errors**: User must update credentials or trusted hosts
