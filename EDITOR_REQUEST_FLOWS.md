@@ -712,13 +712,44 @@ This buffering mechanism ensures ops arrive in order and are processed atomicall
 ```
 Starts accepting connections on the specified signaling server.
 
-When the server actually starts accepting connections on the signaling server, it sends an **AcceptingConnection** notification:
+**AcceptConnection Flow**
+1. Editor sends AcceptConnection notification with signaling address and transport type
+2. Server checks if already accepting on this signaling address:
+   - If yes: Ignores the request and returns
+   - If no: Continues with accept process
+3. Server adds signaling address to `self.accepting` HashMap to track accepting state
+4. Server sends `AcceptingConnection` notification to editor immediately
+5. Server spawns background task to handle the accept loop:
+   - Calls `webchannel.accept()` to bind to signaling server
+   - Accepts incoming connections in a loop
+6. In the background task, if connection breaks for various reasons, send `Msg::AcceptStopped(signaling_addr, reason)` message to the server itself
+   - Connection to signaling server breaks
+   - Allocated signaling time expires
+   - Host ID is already taken on that server
+8. Server receives the AcceptStopped message and:
+   - Removes the signaling address from `self.accepting` HashMap
+   - Sends AcceptStopped notification to editor with failure reason
 
 **AcceptingConnection Notification**
+
 ```json
 {
   "method": "AcceptingConnection",
-  "params": {}
+  "params": {
+    "signaling_addr": "wss://signaling.server/path"
+  }
+}
+```
+
+**AcceptStopped Notification**
+
+```json
+{
+  "method": "AcceptStopped",
+  "params": {
+    "signalingAddr": "wss://signaling.server/path",
+    "reason": "Signaling server closed the connection"
+  }
 }
 ```
 
@@ -771,6 +802,10 @@ Returns the current connection states for all active remote servers.
       "hostId": "remote-server-2",
       "state": "Connecting"
     }
+  ],
+  "accepting": [
+    "wss://signaling.server/path1",
+    "wss://signaling.server/path2"
   ]
 }
 ```
@@ -781,7 +816,10 @@ Returns the current connection states for all active remote servers.
 3. For each active remote, creates a ConnectionStateEntry with:
    - `hostId`: The remote server's ID
    - `state`: Current connection state (Connected/Connecting/Disconnected/Fatal)
-4. Returns ConnectionStateResp with array of connection entries
+4. Server collects all signaling addresses where it's currently accepting connections from `self.accepting` HashMap
+5. Returns ConnectionStateResp with:
+   - `connections`: Array of connection entries for active remote connections
+   - `accepting`: Array of signaling addresses where the server is accepting incoming connections
 
 **State Values**
 - `Connected`: Connection established and active
