@@ -1,4 +1,4 @@
-# Collab Mode Server - Editor Request Flows Design Document
+# Collab mode server - editor request flows design document
 
 ## Summary
 
@@ -15,9 +15,9 @@ All editor requests follow a similar pattern:
 4. For remote targets, the server forwards the request via WebChannel
 5. Server sends response back to editor
 
-## Key Concepts
+## Key concepts
 
-### Document Types
+### Document types
 
 **Doc** - A locally hosted document containing:
 - `name`: Human-readable name
@@ -61,19 +61,19 @@ All editor requests follow a similar pattern:
 {"type": "ProjectFile", "project": "project-name", "file": "relative/path.txt"}
 ```
 
-### Reserved Projects
+### Reserved projects
 
 - `_buffers`: Virtual project for in-memory buffers
 - `_files`: Virtual project for standalone files with absolute paths
 
-### Next Struct
+### Next struct
 
 The `Next` struct encapsulates response handling:
 - `send_resp()`: Send response to editor
 - `send_notif()`: Send notification to editor
 - `send_to_remote()`: Forward message to remote server
 
-## Editor Request Flows
+## Editor request flows
 
 ### Initialize
 
@@ -99,7 +99,7 @@ Establishes the connection between editor and server.
 2. Server returns its `host_id`
 3. No errors possible for this request
 
-### ListProjects
+### List projects
 
 Lists all available projects from a server (local or remote).
 
@@ -158,7 +158,7 @@ Lists all available projects from a server (local or remote).
 - `NotConnected`: If remote host is not connected
 - `IoError`: If unable to read local filesystem
 
-### ListFiles
+### List files
 
 Lists files within a specific directory/project.
 
@@ -200,7 +200,7 @@ Same as ListProjects response format.
 - `NotConnected`: If remote host is not connected
 - `IoError`: If directory doesn't exist or permission denied
 
-### OpenFile
+### Open file
 
 Opens a file for editing, creating it if necessary.
 
@@ -267,7 +267,7 @@ Opens a file for editing, creating it if necessary.
 - `NotConnected`: If remote host is not connected
 - `PermissionDenied`: If remote server denies access
 
-### ShareFile
+### Share file
 
 Creates a new shared document from content provided by the editor.
 
@@ -312,7 +312,7 @@ Creates a new shared document from content provided by the editor.
 **Errors**
 - `BadRequest`: If file with same name already exists
 
-### SendOps
+### Send ops
 
 Sends editing operations from the editor to apply to a document.
 
@@ -413,7 +413,7 @@ Generates undo/redo operations for a document.
 **Errors**
 - `InternalError`: If RemoteDoc not found
 
-### MoveFile
+### Move file
 
 Moves or renames a file within a project.
 
@@ -465,7 +465,7 @@ Moves or renames a file within a project.
 - `NotConnected`: If remote host not connected
 - `IoError`: If move operation fails (permission, file not found, etc.)
 
-### SaveFile
+### Save file
 
 Saves a document to disk.
 
@@ -510,7 +510,7 @@ Saves a document to disk.
 - `NotConnected`: If remote host not connected
 - `IoError`: If file not open, write fails, or no `disk_file` handle
 
-### DeleteFile
+### Delete file
 
 Deletes a file or directory.
 
@@ -560,7 +560,7 @@ Deletes a file or directory.
 - `IoError`: If delete operation fails
 - `PermissionDenied`: If insufficient permissions
 
-### DisconnectFromFile
+### Disconnect from file
 
 Closes a remote document and stops receiving updates.
 
@@ -597,7 +597,7 @@ Closes a remote document and stops receiving updates.
 **Errors**
 - `NotConnected`: If remote host not connected
 
-### DeclareProjects
+### Declare projects
 
 Declares new projects to be managed by the server.
 
@@ -634,7 +634,7 @@ Declares new projects to be managed by the server.
 - `BadRequest`: If using reserved project names
 - `IoError`: If path expansion or canonicalization fails
 
-### UpdateConfig
+### Update config
 
 Updates server configuration for accept mode and trusted hosts.
 
@@ -676,9 +676,9 @@ Updates server configuration for accept mode and trusted hosts.
 **Errors**
 - None (configuration updates are best-effort)
 
-## Asynchronous Message Flows
+## Asynchronous message flows
 
-### Remote Operation Delivery
+### Remote operation delivery
 
 When a remote server sends operations for a document, they arrive asynchronously:
 
@@ -696,11 +696,11 @@ When a remote server sends operations for a document, they arrive asynchronously
 
 This buffering mechanism ensures ops arrive in order and are processed atomically with local edits.
 
-## Notification Flows
+## Notification flows
 
-### Connection Management
+### Connection management
 
-**AcceptConnection**
+**Accept connection**
 ```json
 {
   "method": "AcceptConnection",
@@ -712,7 +712,7 @@ This buffering mechanism ensures ops arrive in order and are processed atomicall
 ```
 Starts accepting connections on the specified signaling server.
 
-**AcceptConnection Flow**
+**Accept connection flow**
 1. Editor sends AcceptConnection notification with signaling address and transport type
 2. Server checks if already accepting on this signaling address:
    - If yes: Ignores the request and returns
@@ -730,7 +730,7 @@ Starts accepting connections on the specified signaling server.
    - Removes the signaling address from `self.accepting` HashMap
    - Sends AcceptStopped notification to editor with failure reason
 
-**AcceptingConnection Notification**
+**Accepting connection notification**
 
 ```json
 {
@@ -741,7 +741,7 @@ Starts accepting connections on the specified signaling server.
 }
 ```
 
-**AcceptStopped Notification**
+**Accept stopped notification**
 
 ```json
 {
@@ -767,10 +767,10 @@ Starts accepting connections on the specified signaling server.
 Initiates connection to a remote server.
 
 After receiving a Connect notification, the server will always send a **Connected** notification to indicate the connection status:
-- If the remote is already connected, the Connected notification is sent immediately
-- If the remote is not yet connected, the Connected notification is sent after the connection is established
+- If the remote is already connected, the Connected notification is sent immediately.
+- If the remote is not yet connected, the Connected notification is sent after the connection is established.
 
-**Connected Notification**
+**Connected notification**
 ```json
 {
   "method": "Connected",
@@ -781,7 +781,7 @@ After receiving a Connect notification, the server will always send a **Connecte
 }
 ```
 
-**ConnectionState**
+**Connection state**
 ```json
 {
   "method": "ConnectionState",
@@ -821,13 +821,13 @@ Returns the current connection states for all active remote servers.
    - `connections`: Array of connection entries for active remote connections
    - `accepting`: Array of signaling addresses where the server is accepting incoming connections
 
-**State Values**
+**State values**
 - `Connected`: Connection established and active
 - `Connecting`: Currently attempting to connect or reconnect
 - `Disconnected`: Connection lost, attempting to reconnect
 - `Fatal`: Connection permanently failed, not attempting reconnect
 
-### SendInfo
+### Send info
 
 Sends metadata/information about a document to remote subscribers.
 
@@ -865,9 +865,9 @@ Sends metadata/information about a document to remote subscribers.
 
 **Note**: SendInfo is a notification, not a request. No response is sent back to the editor.
 
-## Error Handling
+## Error handling
 
-### Error Codes
+### Error codes
 
 The server uses the following error codes in responses:
 
@@ -885,7 +885,7 @@ The server uses the following error codes in responses:
 | 113 | BadRequest | Invalid request parameters |
 | 114 | NotConnected | Remote host not connected |
 
-### ErrorResponse notification
+### Error response notification
 
 The `ErrorResponse` notification is sent to the editor when errors occur during document operations.
 
@@ -902,14 +902,14 @@ The `ErrorResponse` notification is sent to the editor when errors occur during 
 ```
 
 **When it's sent**
-- **DocFatal errors** (code 103): When the document state becomes corrupted
+- **DocFatal errors** (code 103): When the document state becomes corrupted.
   - OT engine errors during operation transformation.
   - Sequence number mismatches between client and server.
-  - Operations out of range for document length
-- **Remote operation failures**: When request to remote server fails
+  - Operations out of range for document length.
+- **Remote operation failures**: When request to remote server fails.
 - **IO errors**: When file operations fail on remote servers.
 
-### Error Response Format
+### Error response format
 
 ```json
 {
