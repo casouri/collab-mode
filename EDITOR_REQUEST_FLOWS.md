@@ -806,6 +806,22 @@ Returns the current connection states for all active remote servers.
   "accepting": [
     "wss://signaling.server/path1",
     "wss://signaling.server/path2"
+  ],
+  "live": [
+    {
+      "file": {"hostId": "my-server", "project": "project1", "file": "doc.txt"},
+      "subscribers": ["remote-server-1", "remote-server-2"],
+      "filename": "document.txt",
+      "meta": {"author": "user1", "created": "2024-01-01"},
+      "seq": 42
+    }
+  ],
+  "connected": [
+    {
+      "file": {"hostId": "remote-server-1", "project": "project2", "file": "file.md"},
+      "filename": "readme.md",
+      "meta": {"version": "1.0"}
+    }
   ]
 }
 ```
@@ -817,9 +833,23 @@ Returns the current connection states for all active remote servers.
    - `hostId`: The remote server's ID
    - `state`: Current connection state (Connected/Connecting/Disconnected/Fatal)
 4. Server collects all signaling addresses where it's currently accepting connections from `self.accepting` HashMap
-5. Returns ConnectionStateResp with:
+5. Server iterates through all local documents in `self.docs`:
+   - Creates LiveDocEntry for each document with:
+     - `file`: EditorFileDesc for the document
+     - `subscribers`: List of remote servers subscribed to this document
+     - `filename`: Human-readable name of the document
+     - `meta`: Document metadata
+     - `seq`: Current sequence number from the engine
+6. Server iterates through all remote documents in `self.remote_docs`:
+   - Creates ConnectedDocEntry for each remote document with:
+     - `file`: EditorFileDesc for the document
+     - `filename`: Human-readable name of the document
+     - `meta`: Document metadata
+7. Returns ConnectionStateResp with:
    - `connections`: Array of connection entries for active remote connections
    - `accepting`: Array of signaling addresses where the server is accepting incoming connections
+   - `live`: Array of locally hosted documents that may have subscribers
+   - `connected`: Array of remote documents this server has opened
 
 **State values**
 - `Connected`: Connection established and active

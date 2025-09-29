@@ -350,9 +350,34 @@ pub struct ConnectionStateEntry {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LiveDocEntry {
+    pub file: EditorFileDesc,
+    pub subscribers: Vec<ServerId>,
+    pub filename: String,
+    pub meta: JsonMap,
+    pub seq: GlobalSeq,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedDocEntry {
+    pub file: EditorFileDesc,
+    pub filename: String,
+    pub meta: JsonMap,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionStateResp {
+    /// Connected remotes.
     pub connections: Vec<ConnectionStateEntry>,
+    /// Signal addresses that we're accepting connection on. Usually
+    /// just one.
     pub accepting: Vec<String>,
+    /// Live documents hosted by this server.
+    pub live: Vec<LiveDocEntry>,
+    /// Connected documents from remote servers.
+    pub connected: Vec<ConnectedDocEntry>,
 }
 
 // **** Etc

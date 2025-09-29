@@ -564,21 +564,7 @@ impl Server {
                 Ok(())
             }
             "ConnectionState" => {
-                // Return connection states for all active remotes
-                let mut connections = Vec::new();
-                for (host_id, remote) in &self.active_remotes {
-                    connections.push(message::ConnectionStateEntry {
-                        host_id: host_id.clone(),
-                        state: remote.state,
-                    });
-                }
-                // Collect accepting signaling addresses
-                let accepting: Vec<String> = self.accepting.keys().cloned().collect();
-                let resp = message::ConnectionStateResp {
-                    connections,
-                    accepting,
-                };
-                next.send_resp(resp, None).await;
+                self.handle_connection_state_from_editor(next);
                 Ok(())
             }
             "ListProjects" => {
@@ -2298,6 +2284,53 @@ impl Server {
         };
         let resp = UndoResp { ops };
         Ok(resp)
+    }
+
+    fn handle_connection_state_from_editor<'a>(&self, next: &Next<'a>) -> () {
+        // Collect active remotes.
+        let mut connections = Vec::new();
+        for (host_id, remote) in &self.active_remotes {
+            connections.push(message::ConnectionStateEntry {
+                host_id: host_id.clone(),
+                state: remote.state,
+            });
+        }
+
+        // Collect accepting signaling addresses.
+        let accepting: Vec<String> = self.accepting.keys().cloned().collect();
+
+        // Collect owned docs from self.docs.
+        let mut live = Vec::new();
+        for (_doc_id, doc) in &self.docs {
+            let file = EditorFileDesc::new(doc.file_desc.clone(), self.host_id.clone());
+            let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
+            live.push(message::LiveDocEntry {
+                file,
+                subscribers,
+                filename: doc.name.clone(),
+                meta: doc.meta.clone(),
+                seq: doc.engine.current_seq(),
+            });
+        }
+
+        // Collect docs from self.remote_docs.
+        let mut connected = Vec::new();
+        for ((host_id, _doc_id), remote_doc) in &self.remote_docs.docs {
+            let file = EditorFileDesc::new(remote_doc.file_desc.clone(), host_id.clone());
+            connected.push(message::ConnectedDocEntry {
+                file,
+                filename: remote_doc.name.clone(),
+                meta: remote_doc.meta.clone(),
+            });
+        }
+
+        let msg = message::ConnectionStateResp {
+            connections,
+            accepting,
+            live,
+            connected,
+        };
+        next.send_resp(msg, None).await;
     }
 
     fn handle_share_file_from_editor(
