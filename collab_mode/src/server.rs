@@ -564,7 +564,7 @@ impl Server {
                 Ok(())
             }
             "ConnectionState" => {
-                self.handle_connection_state_from_editor(next);
+                self.handle_connection_state_from_editor(next).await;
                 Ok(())
             }
             "ListProjects" => {
@@ -2286,7 +2286,7 @@ impl Server {
         Ok(resp)
     }
 
-    fn handle_connection_state_from_editor<'a>(&self, next: &Next<'a>) -> () {
+    async fn handle_connection_state_from_editor<'a>(&self, next: &Next<'a>) -> () {
         // Collect active remotes.
         let mut connections = Vec::new();
         for (host_id, remote) in &self.active_remotes {

@@ -472,11 +472,6 @@ delay (‘collab-send-ops-delay’).")
 (defvar-local collab--send-ops-idle-timer nil
   "Idle timer for sending out ops.")
 
-(defvar-local collab--list-files-cache (make-hash-table :test #'equal)
-  "A cache of response of ListFiles.
-A hash table; keys are host ids and values are ListFiles reply
-objects.")
-
 (defvar-local collab--open-this-doc nil
   "When non-nil, open this doc when we finish refresh.
 It should be a list (HOST-ID FILE-DESC FILENAME DIRECTORY-P).
@@ -980,12 +975,13 @@ If we receive a ServerError notification, just display a warning."
     ;;           params)))
     ('AcceptStopped
      (with-current-buffer (collab--hub-buffer)
-       (setq collab--hub-data
-             (plist-put collab--hub-data :accepting nil))
        (collab--msg-event
-        'warn
+        'warning
         (format "Stopped accepting remote connections, because %s"
                 (plist-get params :reason)))
+       (collab--refetch 'ConnectionState
+                        (lambda ()
+                          (collab--connection-state-req)))
        (collab--hub-rerender)))
     ('AcceptingConnection
      ;; Don’t need to do anything.
@@ -1009,10 +1005,10 @@ If we receive a ServerError notification, just display a warning."
            (collab--list-files-req
             nil host-id (car host-data) (cadr host-data)
             (lambda (status resp)
-              (collab--list-files-callback host-id status resp)))))
+              (collab--list-files-callback host-id nil status resp)))))
        ;; Open the doc we were trying to open before connecting.
        (when (and collab--open-this-doc
-                  (equal host (car collab--open-this-doc)))
+                  (equal host-id (car collab--open-this-doc)))
          (pcase-let ((`(,_ ,file-desc ,filename ,directory-p)
                       collab--open-this-doc))
            (setq collab--open-this-doc nil)
@@ -1022,7 +1018,7 @@ If we receive a ServerError notification, just display a warning."
            (reason (plist-get params :reason))
            (hub-buffer (collab--hub-buffer)))
        (when (buffer-live-p hub-buffer)
-         (collab--list-files-callback host-id :error `(:message ,reason))))
+         (collab--list-files-callback host-id nil :error `(:message ,reason))))
      (collab--hub-rerender))
     ('Connecting
      ;; Don’t need to do anything, we’ll get a connection progress very soon.
@@ -1103,8 +1099,14 @@ the full plist response). STATUS can be ‘:success’, ‘:error’, and
 (defun collab--connection-state-req ()
   "Get the connection state of each host.
 
-Returns a list of (:hostId HOST-ID :state CONNECTION-STATE).
+Returns a plist
 
+    (:connections CONNECTION
+     :accepting ADDRS
+     :live LIVE-FILES
+     :connected CONNECTED-FILES)
+
+CONNECTIONS is a vector of (:hostId HOST-ID :state CONNECTION-STATE),
 CONNECTION-STATE can be:
 
   - “Connected”: Connected and well.
@@ -1112,12 +1114,17 @@ CONNECTION-STATE can be:
   - “Disconnected”: Connection was established but then broke.
                     Server will try to reconnect.
   - “FailedToConnect”: Connection was never established.
-                       Server doesn’t try to reconnect."
-  (let* ((conn (collab--connect-process))
-         (resp (jsonrpc-request
-                conn 'ConnectionState nil
-                :timeout collab-rpc-timeout)))
-    (plist-get resp :connections)))
+                       Server doesn’t try to reconnect.
+
+ADDRS is a vector of signaling addresses on which the collab server is
+accepting connections.
+
+LIVE-FILES is a vector of (:file :subscribers filename :meta :seq),
+CONNECTED-FILES is a vector of (:file :filename :meta)."
+  (let* ((conn (collab--connect-process)))
+    (jsonrpc-request
+     conn 'ConnectionState nil
+     :timeout collab-rpc-timeout)))
 
 (defun collab--share-file-req (filename file-meta content)
   "Share the file with HOST.
@@ -1364,20 +1371,23 @@ Saves the buffer on the owner’s machine."
 
 ;;; UI
 
+;;;; Data
+
+(defvar collab--cached-responses (make-hash-table :test #'equal)
+  "A hash table of QUERY-KEY to QUERY-DATA.
+QUERY-KEY is an arbitrary list that contains, eg, type of query, query
+params. QUERY-DATA is the data returned by collab server or error, so
+it’s a plist (:data DATA :error ERROR).")
+
 ;;;; Drawing the hub UI
-
-(defvar collab--hub-data nil
-  "A plist of data that will be rendered in to the hub buffer.
-
-See ‘collab--hub-recompute’ for structure.")
 
 (defun collab--hub-buffer ()
   "Return the hub buffer."
   (get-buffer-create "*collab hub*"))
 
 ;; This function becomes unused after we changed to use
-;; ‘collab--hub-data’ + ‘collab--hub-render’. But we might use it
-;; again in the future.
+;; ‘collab--cached-responses’ + ‘collab--hub-render’. But we might use
+;; it again in the future.
 (defun collab--replace-section (prop value content-fn)
   "Replace a section of the buffer with new content.
 
@@ -1468,19 +1478,22 @@ shouldn’t end with a newline."
     (add-text-properties beg (point)
                          `(collab-host-id ,host))))
 
-(defun collab--override-host-data (host-id data)
-  "Override host data for HOST-ID in ‘collab--hub-data’ with DATA."
-  (let* ((hosts (plist-get collab--hub-data :hosts))
-         (new-hosts
-          (mapcar (lambda (old-host)
-                    (if (equal (plist-get old-host :host) host-id)
-                        data
-                      old-host))
-                  hosts)))
-    (plist-put collab--hub-data :hosts new-hosts)))
+;; (defun collab--override-host-data (host-id data)
+;;   "Override host data for HOST-ID in ‘collab--hub-data’ with DATA."
+;;   (let* ((hosts (plist-get collab--hub-data :hosts))
+;;          (new-hosts
+;;           (mapcar (lambda (old-host)
+;;                     (if (equal (plist-get old-host :host) host-id)
+;;                         data
+;;                       old-host))
+;;                   hosts)))
+;;     (plist-put collab--hub-data :hosts new-hosts)))
 
-(defun collab--list-files-callback (host status resp)
+(defun collab--list-files-callback (host dir status resp)
   "The callback function for inserting HOST and its files.
+
+DIR is the directory FILE-DESC in which we’re listing files, or nil for
+top-level projects.
 
 STATUS should be one of ‘:success’, ‘:error’, or ‘:timeout’. For
 ‘:success’, RESP is the plist response object of ListFiles. For
@@ -1492,28 +1505,17 @@ BUFFER (make sure it’s the hub buffer), and populates the file
 list."
   (pcase status
     (:success
-     (puthash host resp collab--list-files-cache)
-     (collab--override-host-data
-      host
-      `(:host ,host :files ,resp :state "Connected"))
-     (collab--hub-rerender))
+     (puthash (list 'ListFiles host dir) (list :data resp) collab--cached-responses))
     (:error
-     (puthash host nil collab--list-files-cache)
      (let ((err (format "Failed to list files of %s. %s"
                         host (or (plist-get resp :message) ""))))
-       (collab--override-host-data
-        host
-        `(:host ,host :files ,resp :error ,err :state "Disconnected"))
-       (collab--msg-event 'error err))
-     (collab--hub-rerender))
+       (puthash (list 'ListFiles host dir) (list :error err) collab--cached-responses)
+       (collab--msg-event 'error err)))
     (:timeout
-     (puthash host nil collab--list-files-cache)
      (let ((err (format "Timed out listing files of %s" host)))
-       (collab--override-host-data
-        host
-        `(:host ,host :files ,resp :error ,err :state "Disconnected"))
-       (collab--msg-event 'error err))
-     (collab--hub-rerender))))
+       (puthash (list 'ListFiles host dir) (list :error err) collab--cached-responses)
+       (collab--msg-event 'error err))))
+  (collab--hub-rerender))
 
 (defun collab--prop-section (prop)
   "Return the (BEG . END) of the range that has PROP."
@@ -1551,14 +1553,22 @@ list."
 (defun collab--hub-render ()
   "Render collab mode buffer.
 Also insert ‘collab--current-message’ if it’s non-nil."
-  (let ((connection-up (plist-get collab--hub-data :connection-up))
-        (accepting (plist-get collab--hub-data :accepting))
-        (hosts (plist-get collab--hub-data :hosts))
-        (current-message (plist-get collab--hub-data :current-message))
-        (fairy-chatter (plist-get collab--hub-data :fairy-chatter)))
+  ;; If ConnectionState can fail, we’re probably not connected at all,
+  ;; so just get the data.
+  (let* ((conn-state-data (plist-get
+                           (gethash 'ConnectionState collab--cached-responses)
+                           :data))
+         (connected (plist-get
+                     (gethash 'Connected collab--cached-responses)
+                     :data))
+         (accepting (seq-find (lambda (addr)
+                                (equal addr collab-default-signaling-server))
+                              (plist-get conn-state-data :accepting)))
+         (hosts (mapcar #'car (collab--host-alist)))
+         (current-message (gethash 'CurrentMessage collab--cached-responses)))
     ;; 1. Insert headers.
     (insert "Connection: ")
-    (insert (if connection-up
+    (insert (if connected
                 (propertize "UP" 'face 'success)
               (propertize "DOWN" 'face 'error))
             "\n")
@@ -1584,9 +1594,13 @@ Also insert ‘collab--current-message’ if it’s non-nil."
 
     ;; 3. Insert each host and files.
     (dolist (host hosts)
-      (collab--insert-host-1 (plist-get host :host)
-                             (plist-get host :files)
-                             (plist-get host :state))
+      (if (not connected)
+          (collab--insert-host-1 host nil nil)
+        (let ((list-files-resp (gethash (list 'ListFiles host nil)
+                                        collab--cached-responses))
+              (state (collab--host-state
+                      host (plist-get conn-state-data :connections))))
+          (collab--insert-host-1 host (plist-get list-files-resp :data) state)))
       (insert "\n"))
     (insert "\n")
 
@@ -1619,50 +1633,47 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
         (insert event "\n\n"))
       (insert "\n"))))
 
-(defun collab--hub-recompute ()
+(defun collab--refetch (key query-fn)
+  "Run QUERY-FN and save the result under KEY in ‘collab--cached-responses’.
+Key can be any object."
+  (condition-case err
+      (progn
+        (let ((resp (funcall query-fn)))
+          (puthash key (list :data resp) collab--cached-responses)))
+    (error (puthash key
+                    (list :error ,(format "%s" err))
+                    collab--cached-responses))))
+
+(defun collab--hub-refetch ()
   "Recompute data for collab hub."
-  (let ((data nil)
-        (hosts nil)
-        connection-up accepting connection-state)
-    ;; Header.
-    (setq data
-          (plist-put data :connection-up
-                     (setq connection-up
-                           (condition-case err
-                               (progn
-                                 (collab--connect-process)
-                                 t)
-                             (error nil)))))
-    ;; Hosts.
-    (setq connection-state (when connection-up
-                             (collab--connection-state-req)))
+  (let (connected connection-state)
+
+    (setq connected (condition-case nil
+                        (progn
+                          (collab--connect-process)
+                          t)
+                      (error nil)))
+    (puthash 'Connected `(:data ,connected) collab--cached-responses)
+
+    (collab--refetch 'ConnectionState
+                     (lambda ()
+                       (collab--connection-state-req)))
+
     (dolist (entry (collab--host-alist))
       (let* ((host-id (car entry))
              (signaling-server (nth 0 (cdr entry)))
              (credential (nth 1 (cdr entry)))
-             ;; (cached-resp (gethash host-id collab--list-files-cache))
-             (inserted-host nil)
              (state (collab--host-state host-id connection-state)))
-        (cond
-         ((not connection-up)
-          (push `(:host ,host-id :files nil :state nil) hosts))
-         (connection-up
-          (push `(:host ,host-id :files nil :state ,state) hosts)
+        (when connected
           (if (equal state "Connected")
               ;; Connected, get files async.
               (collab--list-files-req
                nil host-id signaling-server credential
                (lambda (status resp)
-                 (collab--list-files-callback host-id status resp)))
+                 (collab--list-files-callback host-id nil status resp)))
             ;; Not connected, connect first.
             (unless (equal host-id collab--my-host-id)
-              (collab--connect-notif host-id signaling-server)))))))
-    (setq data
-          (plist-put data :hosts (nreverse hosts)))
-    ;; Misc
-    (setq data (plist-put data :current-message nil))
-    ;; Update data.
-    (setq collab--hub-data data)))
+              (collab--connect-notif host-id signaling-server))))))))
 
 ;;;; Dynamic highlight
 
@@ -1783,7 +1794,7 @@ immediately."
 (defun collab--hub-refresh ()
   "Refresh collab hub buffer."
   (interactive)
-  (collab--hub-recompute)
+  (collab--hub-refetch)
   (collab--hub-rerender))
 
 (defun collab--hub-rerender ()
@@ -1995,9 +2006,10 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
   (let ((signaling-addr (nth 1 collab-local-host-config)))
     (collab--catch-error "can’t accept connection "
       (collab--accept-connection-notif signaling-addr))
-    (setq collab--hub-data
-          (plist-put collab--hub-data :accepting t))
     (collab--msg-event 'success "Accepting remote connections")
+    (collab--refetch 'ConnectionState
+                     (lambda ()
+                       (collab--connection-state-req)))
     (collab--hub-rerender)))
 
 ;;;###autoload
@@ -2031,11 +2043,12 @@ Uses ‘collab--default-directory’ as initial input."
   (with-current-buffer (collab--hub-buffer)
     (collab--accept-connection)
     (let* ((link (format "%s/%s" collab-default-signaling-server
-                         (collab--encode-filename file-desc)))
-           (plist-put collab--hub-data :current-message
-                      (collab--fairy "The file is shared and here’s the link
+                         (collab--encode-filename file-desc))))
+      (puthash 'CurrentMessage
+               (collab--fairy "The file is shared and here’s the link
 Your friends can connect with just a click!
-LINK: %s" (propertize link 'face 'link))))
+LINK: %s" (propertize link 'face 'link))
+               collab--cached-responses)
       (collab--hub-rerender))))
 
 ;;;###autoload
@@ -2233,8 +2246,7 @@ detailed history."
 
 (defun collab-initial-setup ()
   "Initial setup wizard. Set display name, download binary, etc."
-  (let ((display-name (read-string (collab--fairy "Heya! I'm dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name))
-        (default-signal-server "wss://signal.collab-mode.org"))
+  (let ((display-name (read-string (collab--fairy "Heya! I'm dolly dolly dolly, the collab-mode fairy. Sweet human, tell me, what name do you carry? -- ") user-full-name)))
     (customize-set-variable 'collab-display-name display-name)
     (customize-save-customized)
 
