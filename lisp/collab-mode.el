@@ -1379,6 +1379,17 @@ QUERY-KEY is an arbitrary list that contains, eg, type of query, query
 params. QUERY-DATA is the data returned by collab server or error, so
 it’s a plist (:data DATA :error ERROR).")
 
+(defun collab--refetch (key query-fn)
+  "Run QUERY-FN and save the result under KEY in ‘collab--cached-responses’.
+Key can be any object."
+  (condition-case err
+      (progn
+        (let ((resp (funcall query-fn)))
+          (puthash key (list :data resp) collab--cached-responses)))
+    (error (puthash key
+                    (list :error ,(format "%s" err))
+                    collab--cached-responses))))
+
 ;;;; Drawing the hub UI
 
 (defun collab--hub-buffer ()
@@ -1536,6 +1547,7 @@ list."
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
+    (define-key map (kbd "L") #'collab-list-docs)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1621,6 +1633,7 @@ Let’s create one, here’s how!\n\n\n"))
     ;; 5. Footer.
     (insert (substitute-command-keys
              "PRESS \\[collab--refresh] TO REFRESH
+PRESS \\[collab-list-docs] TO SHOW ALL DOCS
 PRESS \\[collab-share] TO SHARE A FILE/DIR
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
@@ -1632,17 +1645,6 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
       (dolist (event collab--events)
         (insert event "\n\n"))
       (insert "\n"))))
-
-(defun collab--refetch (key query-fn)
-  "Run QUERY-FN and save the result under KEY in ‘collab--cached-responses’.
-Key can be any object."
-  (condition-case err
-      (progn
-        (let ((resp (funcall query-fn)))
-          (puthash key (list :data resp) collab--cached-responses)))
-    (error (puthash key
-                    (list :error ,(format "%s" err))
-                    collab--cached-responses))))
 
 (defun collab--hub-refetch ()
   "Recompute data for collab hub."
@@ -1675,6 +1677,76 @@ Key can be any object."
             (unless (equal host-id collab--my-host-id)
               (collab--connect-notif host-id signaling-server))))))))
 
+;;;; Docs listing
+
+(defun collab--docs-buffer ()
+  "Return the docs buffer."
+  (get-buffer-create "*collab docs*"))
+
+(defvar collab-docs-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'collab--open-thing)
+    (define-key map (kbd "x") #'collab--delete-doc)
+    (define-key map (kbd "k") #'collab--disconnect-from-doc)
+    (define-key map (kbd "g") #'collab--refresh)
+    (define-key map (kbd "f") #'collab-find-file)
+    (define-key map (kbd "C") #'collab-connect)
+    (define-key map (kbd "+") #'collab-share)
+    (define-key map (kbd "H") #'collab-hub)
+
+    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "p") #'previous-line)
+    map)
+  "Keymap for ‘collab-hub-mode’.")
+
+(define-derived-mode collab-docs-mode special-mode "Collab docs"
+  "Collaboration doc listing mode."
+  (setq-local line-spacing 0.2
+              eldoc-idle-delay 0.8)
+  (add-hook 'eldoc-documentation-functions #'collab--eldoc 0 t)
+  (add-hook 'post-command-hook #'collab--dynamic-highlight)
+  (eldoc-mode))
+
+(defun collab--docs-render ()
+  "Render collab docs buffer."
+  ;; If ConnectionState can fail, we’re probably not connected at all,
+  ;; so just get the data.
+  (let* ((conn-state-data (plist-get
+                           (gethash 'ConnectionState collab--cached-responses)
+                           :data))
+         (connected (plist-get
+                     (gethash 'Connected collab--cached-responses)
+                     :data)))
+    (if (not connected)
+        (insert (collab--fairy "Alas, no connection to the server,\nto found out what happend, let’s go to the hub buffer!\n\n")
+                (substitute-command-keys
+                 "PRESS \\[collab--hub] TO GO TO HUB BUFFER\n"))
+      (insert (propertize "Files hosted by our server:\n"
+                          'face 'dired-header))
+      (if (eq 0 (seq-length (plist-get conn-state-data :live)))
+          (insert (propertize "(no files yet)\n" 'face 'shadow))
+        (seq-doseq (entry (plist-get conn-state-data :live))
+          (let ((file (plist-get entry :file))
+                (subscribers (plist-get entry :subscribers))
+                (filename (plist-get entry :filename))
+                (seq (plist-get entry :seq)))
+            (collab--insert-file file filename nil)
+            (insert (propertize (format " (%s connection%s)"
+                                        (seq-length subscribers)
+                                        (if (eq 1 (seq-length subscribers))
+                                            "" "s"))
+                                'face 'shadow))
+            (insert "\n"))))
+      (insert "\n")
+      (insert (propertize "Files opened:\n" 'face 'dired-header))
+      (if (eq 0 (seq-length (plist-get conn-state-data :connected)))
+          (insert (propertize "(no files yet)\n" 'face 'shadow))
+        (seq-doseq (entry (plist-get conn-state-data :connected))
+          (let ((file (plist-get entry :file))
+                (filename (plist-get entry :filename)))
+            (collab--insert-file file filename nil)
+            (insert "\n")))))))
+
 ;;;; Dynamic highlight
 
 (defun collab--dynamic-highlight ()
@@ -1684,8 +1756,8 @@ Key can be any object."
                   (overlay-put ov 'face 'collab-dynamic-highlight)
                   (setq collab--hl-ov-1 ov)))))
     (cond
-     ((get-text-property (point) 'collab-doc-desc)
-      (let ((range (collab--prop-section 'collab-doc-desc)))
+     ((get-text-property (point) 'collab-file-desc)
+      (let ((range (collab--prop-section 'collab-file-desc)))
         (move-overlay ov (car range) (cdr range)))
       ;; (setq-local cursor-type nil)
       )
@@ -1700,28 +1772,34 @@ Key can be any object."
       ;; (kill-local-variable 'cursor-type)
       ))))
 
-;;;; Eldoc
-
-;;; Dired
+;;; Eldoc
 
 (defun collab--eldoc (callback)
   "Displays help information at point.
 Used for ‘eldoc-documentation-functions’, calls CALLBACK
 immediately."
-  (let ((doc-desc (get-text-property (point) 'collab-doc-desc))
+  (let ((file-desc (get-text-property (point) 'collab-file-desc))
         (host-id (get-text-property (point) 'collab-host-id)))
     (cond
-     (doc-desc
+     (file-desc
       (funcall
        callback
        (substitute-command-keys
-        "\\[collab--open-thing] → Open Doc/Project  \\[collab--delete-doc] → Delete  \\[collab--disconnect-from-doc] → Disconnect  \\[collab-share-link] → Copy share link")))
+        (concat
+         "\\[collab--open-thing] → Open  "
+         "\\[collab--delete-doc] → Delete  "
+         "\\[collab--disconnect-from-doc] → Disconnect  "
+         (if (derived-mode-p 'collab-hub-mode)
+             "\\[collab-share-link] → Copy share link"
+           "")))))
      (host-id
       (funcall callback (substitute-command-keys
                          "\\[collab-share] → Share File/directory")))
      (t
       (funcall callback (substitute-command-keys
                          "\\[collab--refresh] → Refresh"))))))
+
+;;; Dired
 
 (defvar collab-dired-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1781,7 +1859,6 @@ immediately."
         (put-text-property (point-min) (point-max)
                            'collab-host-id host-id)))))
 
-
 ;;; Interactive commands
 
 (defun collab-shutdown ()
@@ -1796,6 +1873,25 @@ immediately."
   (interactive)
   (collab--hub-refetch)
   (collab--hub-rerender))
+
+(defun collab--docs-refresh ()
+  "Refresh collab docs buffer."
+  (interactive)
+  (collab--refetch 'ConnectionState
+                   (lambda ()
+                     (collab--connection-state-req)))
+  (collab--docs-rerender))
+
+(defun collab--docs-rerender ()
+  "Refresh collab docs buffer."
+  (interactive)
+  (with-current-buffer (collab--docs-buffer)
+    (let ((inhibit-read-only t)
+          (line (line-number-at-pos)))
+      (erase-buffer)
+      (collab--docs-render)
+      (goto-char (point-min))
+      (forward-line (1- line)))))
 
 (defun collab--hub-rerender ()
   "Re-render hub buffer but don’t refetch files list."
@@ -1813,9 +1909,17 @@ immediately."
   (cond ((derived-mode-p 'collab-hub-mode)
          (collab--hub-refresh))
         ((derived-mode-p 'collab-dired-mode)
-         (collab--dired-refresh)))
+         (collab--dired-refresh))
+        ((derived-mode-p 'collab-docs-mode)
+         (collab--docs-refresh)))
   (message "Refreshed"))
 
+(defun collab-list-docs ()
+  "Show all connected and hosted files."
+  (interactive)
+  (switch-to-buffer (collab--docs-buffer))
+  (collab-docs-mode)
+  (collab--docs-refresh))
 ;;; Find-file
 
 (defun collab--parse-filename (filename)
@@ -1980,16 +2084,12 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
         (collab--disconnect-from-file-req file-desc)))
     (let* ((file-key (collab--encode-filename file-desc))
            (buf (when file-desc
-                  (gethash file-key collab--buffer-table)))
-           (inhibit-read-only t))
+                  (gethash file-key collab--buffer-table))))
       (when buf
         (with-current-buffer buf
           (collab--disable)))
-      (puthash file-key nil collab--buffer-table)
-      (save-excursion
-        (end-of-line)
-        (when (looking-back " •" 2)
-          (delete-char -2))))))
+      (puthash file-key nil collab--buffer-table)))
+  (collab--refresh))
 
 ;; FIXME
 (defun collab--delete-doc ()
