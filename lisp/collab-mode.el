@@ -254,7 +254,7 @@ Return nil if no info for HOST-ID is found."
   `((image ,(concat collab--load-directory "/dot_medium_16.svg")
            :face success
            :height (0.9 . em)
-           :ascent 83)
+           :ascent 92)
     (symbol "•")
     (text "*"))
   "Icon for collab on status indicator."
@@ -265,7 +265,7 @@ Return nil if no info for HOST-ID is found."
   `((image ,(concat collab--load-directory "/dot_medium_16.svg")
            :face error
            :height (0.9 . em)
-           :ascent 83)
+           :ascent 92)
     (symbol "•")
     (text "*"))
   "Icon for collab off status indicator."
@@ -1027,8 +1027,28 @@ If we receive a ServerError notification, just display a warning."
      ;; TODO
      )
     ('FileDeleted
-     ;; TODO
-     )
+     (collab--msg-event 'info (plist-get params :message) 'no-message)
+     (let* ((file-desc (plist-get params :file))
+            (file-key (when file-desc
+                        (collab--encode-filename file-desc)))
+            (buf (when file-key
+                   (gethash file-key collab--buffer-table))))
+       (collab--msg-event 'info (format "%s deleted" file-key))
+       (when buf
+         (with-current-buffer buf
+           (collab--disable)))
+       (puthash file-key nil collab--buffer-table)))
+    ('FileClosed
+     (let* ((file-desc (plist-get params :file))
+            (file-key (when file-desc
+                        (collab--encode-filename file-desc)))
+            (buf (when file-key
+                   (gethash file-key collab--buffer-table))))
+       (collab--msg-event 'info (format "%s closed" file-key))
+       (when buf
+         (with-current-buffer buf
+           (collab--disable)))
+       (puthash file-key nil collab--buffer-table)))
     ('UnimportantError
      (collab--msg-event 'info (plist-get params :message) 'no-message))
     ('InternalError
@@ -1170,6 +1190,13 @@ Return (:siteId SITE-ID :content CONTENT)."
   "Disconnect from FILE-DESC."
   (let ((conn (collab--connect-process)))
     (jsonrpc-request conn 'DisconnectFromFile
+                     `( :file ,file-desc)
+                     :timeout collab-rpc-timeout)))
+
+(defun collab--close-file-req (file-desc)
+  "Close FILE-DESC."
+  (let ((conn (collab--connect-process)))
+    (jsonrpc-request conn 'CloseFile
                      `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
@@ -1387,7 +1414,7 @@ Key can be any object."
         (let ((resp (funcall query-fn)))
           (puthash key (list :data resp) collab--cached-responses)))
     (error (puthash key
-                    (list :error ,(format "%s" err))
+                    (list :error (format "%s" err))
                     collab--cached-responses))))
 
 ;;;; Drawing the hub UI
@@ -1540,7 +1567,7 @@ list."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'collab--open-thing)
     (define-key map (kbd "x") #'collab--delete-doc)
-    (define-key map (kbd "k") #'collab--disconnect-from-doc)
+    (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "l") #'collab-share-link)
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "f") #'collab-find-file)
@@ -1687,7 +1714,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'collab--open-thing)
     (define-key map (kbd "x") #'collab--delete-doc)
-    (define-key map (kbd "k") #'collab--disconnect-from-doc)
+    (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "g") #'collab--refresh)
     (define-key map (kbd "f") #'collab-find-file)
     (define-key map (kbd "C") #'collab-connect)
@@ -1720,7 +1747,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (if (not connected)
         (insert (collab--fairy "Alas, no connection to the server,\nto found out what happend, let’s go to the hub buffer!\n\n")
                 (substitute-command-keys
-                 "PRESS \\[collab--hub] TO GO TO HUB BUFFER\n"))
+                 "PRESS \\[collab-hub] TO GO TO HUB BUFFER\n"))
       (insert (propertize "Files hosted by our server:\n"
                           'face 'dired-header))
       (if (eq 0 (seq-length (plist-get conn-state-data :live)))
@@ -1731,6 +1758,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
                 (filename (plist-get entry :filename))
                 (seq (plist-get entry :seq)))
             (collab--insert-file file filename nil)
+            (put-text-property (pos-bol) (pos-eol) 'collab-hosted-file-p t)
             (insert (propertize (format " (%s connection%s)"
                                         (seq-length subscribers)
                                         (if (eq 1 (seq-length subscribers))
@@ -1788,7 +1816,7 @@ immediately."
         (concat
          "\\[collab--open-thing] → Open  "
          "\\[collab--delete-doc] → Delete  "
-         "\\[collab--disconnect-from-doc] → Disconnect  "
+         "\\[collab--disconnect-or-close] → Disconnect  "
          (if (derived-mode-p 'collab-hub-mode)
              "\\[collab-share-link] → Copy share link"
            "")))))
@@ -1814,7 +1842,8 @@ immediately."
   "Keymap for ‘collab-dired-mode’.")
 
 (define-derived-mode collab-dired-mode special-mode "Collab Dired"
-  "Mode showing a shared directory.")
+  "Mode showing a shared directory."
+  (font-lock-mode -1))
 
 (defun collab--dired-refresh ()
   "Refresh the current ‘collab-dired-mode’ buffer."
@@ -2039,7 +2068,7 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
       (display-buffer buf))
      ;; Open a directory or project.
      (directory-p
-      (let* ((path (collab--encode-parent file-desc))
+      (let* ((path (collab--encode-filename file-desc))
              (buf (get-buffer-create (format "%s<collab>" path))))
         (select-window (display-buffer buf))
         (collab-dired-mode)
@@ -2090,6 +2119,25 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
           (collab--disable)))
       (puthash file-key nil collab--buffer-table)))
   (collab--refresh))
+
+(defun collab--close-doc ()
+  "Close the file at point."
+  (interactive)
+  (let ((file-desc (get-text-property (point) 'collab-file-desc)))
+    (when file-desc
+      (collab--catch-error
+          (format "can't close %s"
+                  (collab--encode-filename file-desc))
+        (collab--close-file-req file-desc))))
+  (collab--refresh))
+
+(defun collab--disconnect-or-close ()
+  "Disconnect or close the file at point.
+Disconnect for remote doc, close for owned doc."
+  (interactive)
+  (if (get-text-property (point) 'collab-hosted-file-p)
+      (collab--close-doc)
+    (collab--disconnect-from-doc)))
 
 ;; FIXME
 (defun collab--delete-doc ()
