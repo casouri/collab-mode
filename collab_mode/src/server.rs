@@ -694,6 +694,11 @@ impl Server {
                 self.handle_disconnect_from_file(next, params).await?;
                 Ok(())
             }
+            "CloseFile" => {
+                let params: CloseFileParams = serde_json::from_value(req.params)?;
+                self.handle_close_file_from_editor(next, params).await?;
+                Ok(())
+            }
             "DeleteFile" => {
                 let params: DeleteFileParams = serde_json::from_value(req.params)?;
                 let host_id = params.file.host_id().clone();
@@ -1081,6 +1086,15 @@ impl Server {
                     };
                     next.send_notif(NotificationCode::FileDeleted, msg).await;
                 }
+                Ok(())
+            }
+            Msg::FileClosed(file_desc) => {
+                // Notification from remote that file was closed.
+                let editor_file_desc = EditorFileDesc::new(file_desc, msg.host.clone());
+                let note = FileClosedNote {
+                    file: editor_file_desc,
+                };
+                next.send_notif(NotificationCode::FileClosed, note).await;
                 Ok(())
             }
             Msg::InfoFromClient(info) => {
@@ -2633,6 +2647,80 @@ impl Server {
 
         // Send empty response to indicate success
         next.send_resp((), None).await;
+        Ok(())
+    }
+
+    async fn handle_close_file_from_editor<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: CloseFileParams,
+    ) -> anyhow::Result<()> {
+        let CloseFileParams { file: editor_file } = params.clone();
+        let host_id = editor_file.host_id().clone();
+
+        // CloseFile can only be used on local files.
+        if host_id != self.host_id {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::BadRequest as i32,
+                message: "CloseFile can only be used on local files".to_string(),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            return Ok(());
+        }
+
+        let file_desc: FileDesc = editor_file.clone().into();
+
+        // Find the file in .docs.
+        let path_id = self.path_id_from_file_desc(&file_desc)?;
+        let doc_entry = self.docs.iter().find(|(_, doc)| doc.matches(&path_id));
+
+        if doc_entry.is_none() {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::IoError as i32,
+                message: format!("File not open: {}", editor_file),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            return Ok(());
+        }
+
+        let (doc_id, doc) = doc_entry.unwrap();
+        let doc_id = *doc_id;
+
+        // Collect subscribers (including ourself).
+        let mut subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
+        subscribers.push(self.host_id.clone());
+
+        // Remove the doc from self.docs.
+        let mut doc = self.docs.remove(&doc_id).unwrap();
+
+        // Save to disk (send error message if failed, but continue).
+        if let Err(err) = doc.save_to_disk() {
+            let err_msg = format!("Failed to save file before closing: {}", err);
+            tracing::warn!("{}", err_msg);
+            let err_note = ErrorResponseNote {
+                code: ErrorCode::IoError,
+                file: Some(file_desc.clone()),
+                message: err_msg,
+            };
+            next.send_notif(NotificationCode::ErrorResponse, err_note)
+                .await;
+        }
+
+        // Send FileClosed message to all subscribers.
+        for subscriber_id in subscribers {
+            next.send_to_remote_no_req_id(&subscriber_id, Msg::FileClosed(file_desc.clone()))
+                .await;
+        }
+
+        // Return CloseFileResp to editor.
+        let resp = CloseFileResp {
+            file: editor_file.clone(),
+        };
+        next.send_resp(resp, None).await;
+
+        tracing::info!("Closed file: {}", editor_file);
         Ok(())
     }
 

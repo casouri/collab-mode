@@ -803,7 +803,6 @@ mod list_files;
 mod list_projects;
 mod local_remote_ops;
 mod open_file;
-mod reconnection;
 mod send_info;
 mod send_ops;
 mod share_file;

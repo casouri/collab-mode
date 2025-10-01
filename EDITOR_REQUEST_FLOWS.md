@@ -510,6 +510,63 @@ Saves a document to disk.
 - `NotConnected`: If remote host not connected
 - `IoError`: If file not open, write fails, or no `disk_file` handle
 
+### Close file
+
+Closes a local document, saving it to disk and notifying subscribers.
+
+**Request**
+```json
+{
+  "method": "CloseFile",
+  "params": {
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
+  }
+}
+```
+
+**Response**
+```json
+{
+  "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
+}
+```
+
+**Flow**
+1. Editor sends CloseFile request
+2. **Local files only**:
+   - Server checks if `host_id` matches local server
+   - If remote: returns `BadRequest` error
+   - If local:
+     - Converts EditorFileDesc to FileDesc to PathId
+     - Finds document in `self.docs` by matching PathId
+     - If not found: returns `IoError`
+     - If found:
+       - Saves document to disk (logs error if fails, but continues)
+       - Collects list of subscribers (including local server)
+       - Removes document from `self.docs`
+       - Sends `Msg::FileClosed` to each remote subscriber
+       - Sends FileClosed notification to local editor
+       - Returns CloseFileResp to editor
+
+**Errors**
+- `BadRequest`: If trying to close a remote file (CloseFile only works on local files)
+- `IoError`: If file not open or save fails
+
+**FileClosed notification**
+
+When a file is closed on a remote server, subscribers receive a FileClosed notification:
+
+```json
+{
+  "method": "FileClosed",
+  "params": {
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
+  }
+}
+```
+
+**Note**: CloseFile only applies to local documents. To disconnect from a remote document, use DisconnectFromFile instead.
+
 ### Delete file
 
 Deletes a file or directory.

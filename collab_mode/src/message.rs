@@ -26,6 +26,7 @@ pub enum NotificationCode {
     Connected,           // Editor should mark the remote as connected.
     FileMoved,           // A file moved, editor should update it accordingly.
     FileDeleted,         // A file/directory was deleted.
+    FileClosed,          // A file is closed.
     InfoReceived,        // Info received from remote for a file.
 
     UnimportantError, // Editor should log it but not display it.
@@ -110,6 +111,12 @@ pub struct HostAndMessageNote {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectingNote {
     pub host_id: ServerId,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileClosedNote {
+    pub file: EditorFileDesc,
 }
 
 // *** Requests and responses
@@ -286,6 +293,18 @@ pub struct DisconnectFileParams {
     pub file: EditorFileDesc,
 }
 
+pub type DisconnectFileResp = DisconnectFileParams;
+
+// **** CloseFile
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseFileParams {
+    pub file: EditorFileDesc,
+}
+
+pub type CloseFileResp = CloseFileParams;
+
 // **** SendOpEditor
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -428,6 +447,7 @@ pub enum Msg {
     FileSaved(DocId),
     DeleteFile(FileDesc),
     FileDeleted(FileDesc),
+    FileClosed(FileDesc),
     Snapshot(NewSnapshot),
     ResetFile(DocId),
     Login(Credential),
