@@ -1451,7 +1451,14 @@ Saves the buffer on the owner’s machine."
   "A hash table of QUERY-KEY to QUERY-DATA.
 QUERY-KEY is an arbitrary list that contains, eg, type of query, query
 params. QUERY-DATA is the data returned by collab server or error, so
-it’s a plist (:data DATA :error ERROR).")
+it’s a plist (:data DATA :error ERROR).
+
+Currently used keys:
+
+- CurrentMessage
+- ConnectionState
+- Connected
+- (ListFiles host-id dir)")
 
 (defun collab--refetch (key query-fn)
   "Run QUERY-FN and save the result under KEY in ‘collab--cached-responses’.
@@ -1724,6 +1731,8 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
 (defun collab--hub-refetch ()
   "Recompute data for collab hub."
   (let (connected connection-state)
+
+    (puthash 'CurrentMessage nil collab--cached-responses)
 
     (setq connected (condition-case nil
                         (progn
@@ -2245,7 +2254,7 @@ Uses ‘collab--default-directory’ as initial input."
   "In collab hub, insert a notice of the newly shared doc or project (FILE-DESC)."
   (with-current-buffer (collab--hub-buffer)
     (collab--accept-connection)
-    (let* ((link (format "%s/%s" collab-default-signaling-server
+    (let* ((link (format "%s%s" collab-default-signaling-server
                          (collab--encode-filename file-desc))))
       (puthash 'CurrentMessage
                (collab--fairy "The file is shared and here’s the link
