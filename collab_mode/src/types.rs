@@ -150,7 +150,7 @@ impl From<EditorFileDesc> for FileDesc {
         } else {
             FileDesc::ProjectFile {
                 project: editor_file.project,
-                file: editor_file.file,
+                file: editor_file.file.trim_matches('/').to_string(),
             }
         }
     }
