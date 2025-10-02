@@ -1285,7 +1285,7 @@ impl Server {
     async fn list_files_from_disk(
         &self,
         dir: Option<FileDesc>,
-    ) -> anyhow::Result<Vec<ListFileEntry>> {
+    ) -> anyhow::Result<Vec<ListFilesEntry>> {
         match dir {
             Some(FileDesc::ProjectFile { project, file }) => {
                 // Special handling for buffers project.
@@ -1330,7 +1330,7 @@ impl Server {
                         .to_string_lossy()
                         .to_string();
 
-                    result.push(ListFileEntry {
+                    result.push(ListFilesEntry {
                         file: EditorFileDesc {
                             host_id: self.host_id.clone(),
                             project: project.clone(),
@@ -1351,7 +1351,7 @@ impl Server {
                     let mut result = vec![];
                     for (_doc_id, doc) in &self.docs {
                         if doc.abs_filename.is_buffer() {
-                            result.push(ListFileEntry {
+                            result.push(ListFilesEntry {
                                 file: EditorFileDesc {
                                     host_id: self.host_id.clone(),
                                     project: RESERVED_BUFFERS_PROJECT.to_string(),
@@ -1373,7 +1373,7 @@ impl Server {
                     let mut entries = Vec::new();
                     for (_doc_id, doc) in self.local_docs_not_in_any_project() {
                         if let PathId::Path(path) = &doc.abs_filename {
-                            entries.push(ListFileEntry {
+                            entries.push(ListFilesEntry {
                                 file: EditorFileDesc {
                                     host_id: self.host_id.clone(),
                                     project: RESERVED_FILES_PROJECT.to_string(),
@@ -1410,7 +1410,7 @@ impl Server {
                         .with_context(|| format!("Can't access file {}", &file_name))?;
 
                     // For project root, relative path is just the filename
-                    result.push(ListFileEntry {
+                    result.push(ListFilesEntry {
                         file: EditorFileDesc {
                             host_id: self.host_id.clone(),
                             project: id.clone(),
@@ -1430,7 +1430,7 @@ impl Server {
                 let mut proj_result = vec![];
                 // let mut buf_result = vec![];
                 for (_, project) in &self.projects {
-                    proj_result.push(ListFileEntry {
+                    proj_result.push(ListFilesEntry {
                         file: EditorFileDesc {
                             host_id: self.host_id.clone(),
                             project: project.name.clone(),
@@ -1442,7 +1442,7 @@ impl Server {
                     });
                 }
                 for reserved in [RESERVED_BUFFERS_PROJECT, RESERVED_FILES_PROJECT] {
-                    proj_result.push(ListFileEntry {
+                    proj_result.push(ListFilesEntry {
                         file: EditorFileDesc {
                             host_id: self.host_id.clone(),
                             project: reserved.to_string(),

@@ -193,7 +193,7 @@ pub struct DeclareProjectsParams {
     pub projects: Vec<ConfigProject>,
 }
 
-// **** ListFiles
+// **** ListProjects and ListFiles
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,12 +211,12 @@ pub struct ListFilesParams {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFilesResp {
-    pub files: Vec<ListFileEntry>,
+    pub files: Vec<ListFilesEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListFileEntry {
+pub struct ListFilesEntry {
     pub file: EditorFileDesc,
     // The non-directory filename (buffer/document name in editor).
     // Must match `file` if it's a project file.
@@ -430,7 +430,7 @@ pub enum Msg {
     ListFiles {
         dir: Option<FileDesc>,
     },
-    FileList(Vec<ListFileEntry>),
+    FileList(Vec<ListFilesEntry>),
     OpFromClient(ContextOps),
     OpFromServer {
         doc: DocId,
