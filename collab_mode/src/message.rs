@@ -397,6 +397,8 @@ pub struct ConnectionStateResp {
     pub live: Vec<LiveDocEntry>,
     /// Connected documents from remote servers.
     pub connected: Vec<ConnectedDocEntry>,
+    /// Local projects.
+    pub projects: Vec<ConfigProject>,
 }
 
 // **** Etc

@@ -2338,11 +2338,21 @@ impl Server {
             });
         }
 
+        let projects: Vec<ConfigProject> = self
+            .projects
+            .iter()
+            .map(|(_, proj)| ConfigProject {
+                name: proj.name.clone(),
+                path: proj.root.clone(),
+            })
+            .collect();
+
         let msg = message::ConnectionStateResp {
             connections,
             accepting,
             live,
             connected,
+            projects,
         };
         next.send_resp(msg, None).await;
     }
