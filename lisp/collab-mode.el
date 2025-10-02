@@ -726,7 +726,6 @@ To prevent them from being invoked."
     (define-key map [remap undo-tree-visualize]
                 #'collab--warn-for-unsupported-undo)
     ;; Other commands
-    ;; FIXME: add collab-save-buffer.
     (define-key map [remap save-buffer] #'collab-save-buffer)
     map)
   "Keymap for ‘collab-monitored-mode’.")
@@ -738,6 +737,7 @@ To prevent them from being invoked."
   :keymap collab-monitored-mode-map
   (if collab-monitored-mode
       (progn
+        (collab--global-monitoring-mode)
         (add-hook 'change-major-mode-hook #'collab--rescue-state 0 t)
         (add-hook 'after-change-major-mode-hook
                   #'collab--maybe-recover 0)
@@ -819,6 +819,53 @@ PATH should be a string HOST/PROJECT/PATH returned by
               (file (plist-get state :file))
               (site-id (plist-get state :site-id)))
     (collab--enable file site-id (collab--encode-filename file))))
+
+;;; Global monioring
+
+(defun collab--find-file-hook ()
+  "Enable collab mode if this file is in a shared project."
+  (let ((this-file-path (buffer-file-name))
+        conn-state)
+    (when (and this-file-path (string-prefix-p "/" this-file-path))
+      (unless (plist-get
+               (gethash 'ConnectionState collab--cached-responses) :data)
+        (collab--refetch 'ConnectionState
+                         (lambda ()
+                           (collab--connection-state-req))))
+      (setq conn-state
+            (plist-get (gethash 'ConnectionState collab--cached-responses) :data))
+      (when conn-state
+        (catch 'done
+          (seq-doseq (proj (plist-get conn-state :projects))
+            (let ((proj-path (plist-get proj :path))
+                  (proj-name (plist-get proj :name))
+                  (filename (file-name-nondirectory this-file-path)))
+              (when (string-prefix-p proj-path this-file-path)
+                (let ((file-desc (collab--make-file-desc
+                                  collab--my-host-id
+                                  proj-name
+                                  (string-trim
+                                   (substring this-file-path (length proj-path))
+                                   "/"))))
+                  (collab--open-thing file-desc
+                                      filename
+                                      nil
+                                      (current-buffer))
+                  (collab--msg-event
+                   'info (format "Opening %s in shared project (%s), taking over"
+                                 filename proj-name))
+                  (throw 'done nil))))))))))
+
+(define-minor-mode collab--global-monitoring-mode
+  "Collaborative global monitoring mode.
+
+DO NOT close this mode while collab-mode is enabled. This is for
+automatically delegating to collab mode when you open a file that falls
+under a shared project."
+  :global t
+  (if collab--global-monitoring-mode
+      (add-hook 'find-file-hook #'collab--find-file-hook 0)
+    (remove-hook 'find-file-hook #'collab--find-file-hook)))
 
 ;;; JSON-RPC
 
@@ -1394,7 +1441,7 @@ Saves the buffer on the owner’s machine."
   (collab--check-precondition)
   (collab--catch-error "Can’t save the buffer"
     (collab--save-file-req collab--file))
-  (message "Saved buffer"))
+  (message "Buffer saved"))
 
 ;;; UI
 
@@ -1574,7 +1621,7 @@ list."
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
-    (define-key map (kbd "L") #'collab-list-docs)
+    (define-key map (kbd "H") #'collab-list-docs)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1583,6 +1630,7 @@ list."
 
 (define-derived-mode collab-hub-mode special-mode "Collab"
   "Collaboration mode."
+  (collab--global-monitoring-mode)
   (setq-local line-spacing 0.2
               eldoc-idle-delay 0.8)
   (add-hook 'eldoc-documentation-functions #'collab--eldoc 0 t)
@@ -1661,7 +1709,7 @@ Let’s create one, here’s how!\n\n\n"))
     (insert (substitute-command-keys
              "PRESS \\[collab--refresh] TO REFRESH
 PRESS \\[collab-list-docs] TO SHOW ALL DOCS
-PRESS \\[collab-share] TO SHARE A FILE/DIR
+PRESS \\[collab-share] TO SHARE A FILE/PROJECT
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
     (insert "\n\n")
@@ -1728,6 +1776,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
 
 (define-derived-mode collab-docs-mode special-mode "Collab docs"
   "Collaboration doc listing mode."
+  (collab--global-monitoring-mode)
   (setq-local line-spacing 0.2
               eldoc-idle-delay 0.8)
   (add-hook 'eldoc-documentation-functions #'collab--eldoc 0 t)
@@ -2040,16 +2089,18 @@ PRED and FLAG see manual."
   "Return a list of available host IDs."
   (mapcar #'car (collab--host-alist)))
 
-(defun collab--open-thing (&optional file-desc filename directory-p)
+(defun collab--open-thing (&optional file-desc filename directory-p buffer)
   "Open the file at point.
-There should be four text properties at point:
+There should be three text properties at point:
 
 - ‘collab-file-desc’
 - ‘collab-filename’
 - ‘collab-directory-p’
-- ‘collab-host-id’
 
-If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
+If FILE-DESC, FILENAME, DIRECTORY-P are non-nil, use them instead of the
+text properties.
+
+If BUFFER non-nil, use the provided buffer rather than creating one."
   (interactive)
   (let* ((file-desc (or file-desc
                         (get-text-property (point) 'collab-file-desc)))
@@ -2069,8 +2120,9 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
      ;; Open a directory or project.
      (directory-p
       (let* ((path (collab--encode-filename file-desc))
-             (buf (get-buffer-create (format "%s<collab>" path))))
-        (select-window (display-buffer buf))
+             (buf (or buffer (get-buffer-create (format "%s<collab>" path)))))
+        (when (not buffer)
+          (select-window (display-buffer buf)))
         (collab-dired-mode)
         (puthash file-key buf collab--buffer-table)
         (setq collab--file file-desc
@@ -2088,19 +2140,22 @@ If FILE-DESC, FILENAME, DIRECTORY-P, HOST-ID non-nil, use them instead."
                (suggested-major-mode (plist-get meta :emacs.majorMode))
                (path (collab--encode-filename resp-file-desc))
                (inhibit-read-only t))
-          (select-window
-           (display-buffer
-            (generate-new-buffer (format "%s<collab>" filename))))
-          (collab-monitored-mode -1)
-          (erase-buffer)
-          (insert content)
-          (goto-char (point-min))
-          (if (and (stringp suggested-major-mode)
-                   (functionp (intern-soft suggested-major-mode)))
-              (funcall (intern-soft suggested-major-mode))
-            (let ((buffer-file-name filename))
-              (set-auto-mode)))
-          (collab--enable resp-file-desc site-id path)))))))
+          (when (not buffer)
+            (select-window
+             (display-buffer
+              (generate-new-buffer (format "%s<collab>" filename)))))
+          (with-current-buffer (or buffer (current-buffer))
+            (collab-monitored-mode -1)
+            (erase-buffer)
+            (insert content)
+            (goto-char (point-min))
+            (when (not buffer)
+              (if (and (stringp suggested-major-mode)
+                       (functionp (intern-soft suggested-major-mode)))
+                  (funcall (intern-soft suggested-major-mode))
+                (let ((buffer-file-name filename))
+                  (set-auto-mode))))
+            (collab--enable resp-file-desc site-id path))))))))
 
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
