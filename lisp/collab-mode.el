@@ -841,6 +841,8 @@ PATH should be a string HOST/PROJECT/PATH returned by
                   (proj-name (plist-get proj :name))
                   (filename (file-name-nondirectory this-file-path)))
               (when (string-prefix-p proj-path this-file-path)
+                ;; If it’s a newly created file, save it so the collab
+                ;; server can find it.
                 (let ((file-desc (collab--make-file-desc
                                   collab--my-host-id
                                   proj-name
@@ -1619,7 +1621,7 @@ list."
 
 (defvar collab-hub-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab--open-thing)
+    (define-key map (kbd "RET") #'collab--open-thing-at-point)
     (define-key map (kbd "x") #'collab--delete-doc)
     (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "l") #'collab-share-link)
@@ -1632,6 +1634,8 @@ list."
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
+
+    (define-key map [remap find-file] #'collab-find-file)
     map)
   "Keymap for ‘collab-hub-mode’.")
 
@@ -1639,7 +1643,8 @@ list."
   "Collaboration mode."
   (collab--global-monitoring-mode)
   (setq-local line-spacing 0.2
-              eldoc-idle-delay 0.8)
+              eldoc-idle-delay 0.8
+              collab--default-directory "/")
   (add-hook 'eldoc-documentation-functions #'collab--eldoc 0 t)
   (add-hook 'post-command-hook #'collab--dynamic-highlight)
   (eldoc-mode))
@@ -1769,7 +1774,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
 
 (defvar collab-docs-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab--open-thing)
+    (define-key map (kbd "RET") #'collab--open-thing-at-point)
     (define-key map (kbd "x") #'collab--delete-doc)
     (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "g") #'collab--refresh)
@@ -1872,7 +1877,7 @@ immediately."
        callback
        (substitute-command-keys
         (concat
-         "\\[collab--open-thing] → Open  "
+         "\\[collab--open-thing-at-point] → Open  "
          "\\[collab--delete-doc] → Delete  "
          "\\[collab--disconnect-or-close] → Disconnect  "
          (if (derived-mode-p 'collab-hub-mode)
@@ -1889,13 +1894,15 @@ immediately."
 
 (defvar collab-dired-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'collab--open-thing)
+    (define-key map (kbd "RET") #'collab--open-thing-at-point)
     (define-key map (kbd "x") #'collab--delete-doc)
     (define-key map (kbd "k") #'collab--disconnect-from-doc)
     (define-key map (kbd "g") #'collab--dired-refresh)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
+
+    (define-key map [remap find-file] #'collab-find-file)
     map)
   "Keymap for ‘collab-dired-mode’.")
 
@@ -2098,24 +2105,28 @@ PRED and FLAG see manual."
   "Return a list of available host IDs."
   (mapcar #'car (collab--host-alist)))
 
-(defun collab--open-thing (&optional file-desc filename directory-p buffer)
+(defun collab--open-thing-at-point ()
   "Open the file at point.
 There should be three text properties at point:
 
 - ‘collab-file-desc’
 - ‘collab-filename’
-- ‘collab-directory-p’
+- ‘collab-directory-p’"
+  (interactive)
+  (let ((file-desc (get-text-property (point) 'collab-file-desc))
+        (filename (get-text-property (point) 'collab-filename))
+        (directory-p (get-text-property (point) 'collab-directory-p)))
+    (collab--open-thing file-desc filename directory-p)))
 
-If FILE-DESC, FILENAME, DIRECTORY-P are non-nil, use them instead of the
-text properties.
+(defun collab--open-thing (file-desc filename directory-p &optional buffer)
+  "Open FILE-DESC.
+
+FILENAME is the nondirectory filename for FILE-DESC. DIRECTORY-P is easy
+to understand.
 
 If BUFFER non-nil, use the provided buffer rather than creating one."
   (interactive)
-  (let* ((file-desc (or file-desc
-                        (get-text-property (point) 'collab-file-desc)))
-         (filename (or filename (get-text-property (point) 'collab-filename)))
-         (directory-p (or directory-p (get-text-property (point) 'collab-directory-p)))
-         (file-key (collab--encode-filename file-desc))
+  (let* ((file-key (collab--encode-filename file-desc))
          (buf (gethash file-key collab--buffer-table)))
     (cond
      ((not (and file-desc filename))
@@ -2140,7 +2151,7 @@ If BUFFER non-nil, use the provided buffer rather than creating one."
      ;; Open a file.
      (t
       (collab--catch-error (format "can't connect to %s" file-desc)
-        (let* ((resp (collab--open-file-req file-desc "open"))
+        (let* ((resp (collab--open-file-req file-desc "create"))
                (site-id (plist-get resp :siteId))
                (content (plist-get resp :content))
                (resp-file-desc (plist-get resp :file))
@@ -2232,15 +2243,19 @@ Uses ‘collab--default-directory’ as initial input."
   (let ((path (completing-read
                "Find collab file: "
                #'collab--complete-filename
-               nil nil (or collab--default-directory "/"))))
+               nil nil (if collab--default-directory
+                           (concat (string-trim-right
+                                    collab--default-directory "/")
+                                   "/")
+                         "/"))))
     (if (not (and path (not (string-empty-p path))))
         (user-error "Path is empty")
       (let ((parsed (collab--parse-filename path)))
         (if (not parsed)
             (message "Invalid path format: %s" path)
-          (collab--open-thing (car parsed)
+          (collab--open-thing parsed
                               (file-name-nondirectory path)
-                              (cdr parsed)))))))
+                              nil))))))
 
 ;;;###autoload
 (defun collab-hub ()

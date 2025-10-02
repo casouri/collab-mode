@@ -1162,7 +1162,7 @@ impl Server {
                     host_id: msg.host,
                     message,
                 };
-                next.send_notif(NotificationCode::InternalError, msg);
+                next.send_notif(NotificationCode::InternalError, msg).await;
                 Ok(())
             }
         }
