@@ -274,7 +274,7 @@ pub struct SaveFileParams {
 
 pub type SaveFileResp = SaveFileParams;
 
-// **** DeleteFile
+// **** DeleteFile & CloseFile
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -294,16 +294,6 @@ pub struct DisconnectFileParams {
 }
 
 pub type DisconnectFileResp = DisconnectFileParams;
-
-// **** CloseFile
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseFileParams {
-    pub file: EditorFileDesc,
-}
-
-pub type CloseFileResp = CloseFileParams;
 
 // **** SendOpEditor
 
@@ -447,7 +437,8 @@ pub enum Msg {
     FileMoved(ProjectId, String, String),
     SaveFile(DocId),
     FileSaved(DocId),
-    DeleteFile(FileDesc),
+    // If true, delete, otherwise only close.
+    DeleteFile(FileDesc, bool),
     FileDeleted(FileDesc),
     FileClosed(FileDesc),
     Snapshot(NewSnapshot),

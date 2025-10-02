@@ -695,8 +695,9 @@ impl Server {
                 Ok(())
             }
             "CloseFile" => {
-                let params: CloseFileParams = serde_json::from_value(req.params)?;
-                self.handle_close_file_from_editor(next, params).await?;
+                let params: DeleteFileParams = serde_json::from_value(req.params)?;
+                self.handle_delete_file_from_editor(next, params, false)
+                    .await?;
                 Ok(())
             }
             "DeleteFile" => {
@@ -705,7 +706,8 @@ impl Server {
                 if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                self.handle_delete_file_from_editor(next, params).await?;
+                self.handle_delete_file_from_editor(next, params, true)
+                    .await?;
                 Ok(())
             }
             _ => {
@@ -1065,8 +1067,8 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::DeleteFile(file_desc) => {
-                self.handle_delete_file_from_remote(next, file_desc, msg.host)
+            Msg::DeleteFile(file_desc, delete) => {
+                self.handle_delete_file_from_remote(next, file_desc, msg.host, delete)
                     .await?;
                 Ok(())
             }
@@ -2660,84 +2662,11 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_close_file_from_editor<'a>(
-        &mut self,
-        next: &Next<'a>,
-        params: CloseFileParams,
-    ) -> anyhow::Result<()> {
-        let CloseFileParams { file: editor_file } = params.clone();
-        let host_id = editor_file.host_id().clone();
-
-        // CloseFile can only be used on local files.
-        if host_id != self.host_id {
-            let err = lsp_server::ResponseError {
-                code: ErrorCode::BadRequest as i32,
-                message: "CloseFile can only be used on local files".to_string(),
-                data: None,
-            };
-            next.send_resp((), Some(err)).await;
-            return Ok(());
-        }
-
-        let file_desc: FileDesc = editor_file.clone().into();
-
-        // Find the file in .docs.
-        let path_id = self.path_id_from_file_desc(&file_desc)?;
-        let doc_entry = self.docs.iter().find(|(_, doc)| doc.matches(&path_id));
-
-        if doc_entry.is_none() {
-            let err = lsp_server::ResponseError {
-                code: ErrorCode::IoError as i32,
-                message: format!("File not open: {}", editor_file),
-                data: None,
-            };
-            next.send_resp((), Some(err)).await;
-            return Ok(());
-        }
-
-        let (doc_id, doc) = doc_entry.unwrap();
-        let doc_id = *doc_id;
-
-        // Collect subscribers (including ourself).
-        let mut subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
-        subscribers.push(self.host_id.clone());
-
-        // Remove the doc from self.docs.
-        let mut doc = self.docs.remove(&doc_id).unwrap();
-
-        // Save to disk (send error message if failed, but continue).
-        if let Err(err) = doc.save_to_disk() {
-            let err_msg = format!("Failed to save file before closing: {}", err);
-            tracing::warn!("{}", err_msg);
-            let err_note = ErrorResponseNote {
-                code: ErrorCode::IoError,
-                file: Some(file_desc.clone()),
-                message: err_msg,
-            };
-            next.send_notif(NotificationCode::ErrorResponse, err_note)
-                .await;
-        }
-
-        // Send FileClosed message to all subscribers.
-        for subscriber_id in subscribers {
-            next.send_to_remote_no_req_id(&subscriber_id, Msg::FileClosed(file_desc.clone()))
-                .await;
-        }
-
-        // Return CloseFileResp to editor.
-        let resp = CloseFileResp {
-            file: editor_file.clone(),
-        };
-        next.send_resp(resp, None).await;
-
-        tracing::info!("Closed file: {}", editor_file);
-        Ok(())
-    }
-
     async fn handle_delete_file_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
         params: DeleteFileParams,
+        delete: bool,
     ) -> anyhow::Result<()> {
         let DeleteFileParams { file: editor_file } = params;
         let host_id = editor_file.host_id().clone();
@@ -2745,12 +2674,13 @@ impl Server {
 
         // Remote.
         if host_id != self.host_id {
-            next.send_to_remote(&host_id, Msg::DeleteFile(file)).await;
+            next.send_to_remote(&host_id, Msg::DeleteFile(file, delete))
+                .await;
             return Ok(());
         }
 
         // Local.
-        match self.handle_delete_file_locally(&file).await {
+        match self.handle_delete_file_locally(&file, delete).await {
             Ok(subscribers) => {
                 // Send response to the editor.
                 next.send_resp((), None).await;
@@ -2762,7 +2692,11 @@ impl Server {
                             next.webchannel,
                             &subscriber_id,
                             None,
-                            Msg::FileDeleted(file.clone()),
+                            if delete {
+                                Msg::FileDeleted(file.clone())
+                            } else {
+                                Msg::FileClosed(file.clone())
+                            },
                         )
                         .await;
                     }
@@ -2785,24 +2719,29 @@ impl Server {
         next: Next<'a>,
         file_desc: FileDesc,
         requester: ServerId,
+        delete: bool,
     ) -> anyhow::Result<()> {
         // Check delete permission
         if !self.config.delete_allowed(&requester) {
             next.send_to_remote(
                 &requester,
-                Msg::PermissionDenied("Permission denied for deleting file".to_string()),
+                Msg::PermissionDenied("Permission denied for deleting/closing file".to_string()),
             )
             .await;
             return Ok(());
         }
 
-        match self.handle_delete_file_locally(&file_desc).await {
+        match self.handle_delete_file_locally(&file_desc, delete).await {
             Ok(subscribers) => {
                 let mut requester_notified = false;
 
                 // Send FileDeleted message to all subscribers.
                 for subscriber_id in &subscribers {
-                    let msg = Msg::FileDeleted(file_desc.clone());
+                    let msg = if delete {
+                        Msg::FileDeleted(file_desc.clone())
+                    } else {
+                        Msg::FileClosed(file_desc.clone())
+                    };
                     if subscriber_id == &requester {
                         next.send_to_remote(subscriber_id, msg).await;
                         requester_notified = true;
@@ -2812,7 +2751,11 @@ impl Server {
                 }
 
                 // If the requester is not a subscriber, still send them a response.
-                let msg = Msg::FileDeleted(file_desc.clone());
+                let msg = if delete {
+                    Msg::FileDeleted(file_desc.clone())
+                } else {
+                    Msg::FileClosed(file_desc.clone())
+                };
                 if !requester_notified {
                     next.send_to_remote(&requester, msg).await;
                 }
@@ -2835,6 +2778,7 @@ impl Server {
     async fn handle_delete_file_locally(
         &mut self,
         file: &FileDesc,
+        delete: bool,
     ) -> anyhow::Result<Vec<ServerId>> {
         let (docs_to_remove, path_to_delete, subscribers) =
             self.find_docs_and_path_to_delete(file)?;
@@ -2849,10 +2793,12 @@ impl Server {
                 }
                 tracing::info!("Removed doc {} due to file deletion", doc_id);
             }
+            self.remote_docs.remove(&self.host_id, doc_id);
         }
 
         // Delete the file or directory from disk if there's a path to delete.
-        if let Some(path) = path_to_delete {
+        if delete && path_to_delete.is_some() {
+            let path = path_to_delete.unwrap();
             if path.is_dir() {
                 std::fs::remove_dir_all(&path)
                     .with_context(|| format!("Failed to delete directory: {}", path.display()))?;
