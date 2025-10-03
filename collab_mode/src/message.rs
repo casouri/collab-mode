@@ -400,6 +400,12 @@ pub struct PrintHistoryParams {
     pub debug: bool,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintHistoryResp {
+    pub history: String,
+}
+
 // *** Peer messages
 
 #[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]

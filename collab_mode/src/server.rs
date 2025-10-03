@@ -710,6 +710,11 @@ impl Server {
                     .await?;
                 Ok(())
             }
+            "PrintHistory" => {
+                let params: PrintHistoryParams = serde_json::from_value(req.params)?;
+                self.handle_print_history_from_editor(next, params).await;
+                Ok(())
+            }
             _ => {
                 tracing::warn!("Unknown request method: {}", req.method);
                 // TODO: send back an error response.
@@ -2300,6 +2305,30 @@ impl Server {
         };
         let resp = UndoResp { ops };
         Ok(resp)
+    }
+
+    async fn handle_print_history_from_editor<'a>(
+        &self,
+        next: &Next<'a>,
+        params: PrintHistoryParams,
+    ) -> () {
+        let res = self.get_remote_doc(&params.file);
+        if res.is_none() {
+            next.send_resp(
+                (),
+                Some(lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: format!("File not found: {}", params.file),
+                    data: None,
+                }),
+            )
+            .await;
+        }
+
+        let remote_doc = res.unwrap().1;
+        let history = remote_doc.engine.print_history(params.debug);
+        let resp = PrintHistoryResp { history };
+        next.send_resp(resp, None).await;
     }
 
     async fn handle_connection_state_from_editor<'a>(&self, next: &Next<'a>) -> () {

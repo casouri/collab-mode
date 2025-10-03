@@ -2427,7 +2427,8 @@ detailed history."
         (format "can't print history of %s"
                 (collab--encode-filename collab--file))
       (collab--send-ops-now)
-      (let ((text (collab--print-history-req collab--file debug))
+      (let ((text (plist-get (collab--print-history-req collab--file debug)
+                             :history))
             undo-tip)
         (pop-to-buffer (format "*collab history for %s*"
                                (buffer-name)))

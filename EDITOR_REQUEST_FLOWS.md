@@ -413,6 +413,39 @@ Generates undo/redo operations for a document.
 **Errors**
 - `InternalError`: If RemoteDoc not found
 
+### Print history
+
+Returns a human-readable representation of the operation history for debugging.
+
+**Request**
+```json
+{
+  "method": "PrintHistory",
+  "params": {
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"},
+    "debug": false
+  }
+}
+```
+
+**Response**
+```json
+{
+  "history": "(A printed history)"
+}
+```
+
+**Flow**
+1. Editor sends PrintHistory request with file descriptor and debug flag
+2. Server finds RemoteDoc for the file
+3. Call `engine.print_history(debug)` method
+4. Return PrintHistoryResp with history string
+
+**Note**: This is primarily a debugging tool. The history string format may change between versions.
+
+**Errors**
+- `IoError`: If RemoteDoc not found
+
 ### Move file
 
 Moves or renames a file within a project.
