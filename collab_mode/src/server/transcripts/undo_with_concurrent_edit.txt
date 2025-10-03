@@ -1,0 +1,11 @@
+Name: Undo with Concurrent Edit
+
+E1 INSERT AAA
+E1 SEND
+E2 SEND
+E2 MOVE 3
+E2 INSERT BBB
+E1 UNDO
+E1 SEND
+E2 SEND
+===CHECK===

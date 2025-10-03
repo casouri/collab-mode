@@ -1,0 +1,9 @@
+Name: Three-Way Concurrent Edits
+
+E1 INSERT AAA
+E2 INSERT BBB
+E3 INSERT CCC
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===

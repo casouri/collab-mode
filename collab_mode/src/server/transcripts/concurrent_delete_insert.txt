@@ -1,0 +1,12 @@
+Name: Concurrent Delete and Insert
+
+E1 INSERT Hello World
+E1 SEND
+E2 SEND
+E1 MOVE 11
+E2 MOVE 5
+E1 DELETE 6
+E2 INSERT INSERTED
+E1 SEND
+E2 SEND
+===CHECK===

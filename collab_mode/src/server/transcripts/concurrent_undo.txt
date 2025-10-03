@@ -1,0 +1,13 @@
+Name: Concurrent Undo Operations
+
+E1 INSERT AAA
+E1 SEND
+E2 SEND
+E2 INSERT BBB
+E2 SEND
+E1 SEND
+E1 UNDO
+E2 UNDO
+E1 SEND
+E2 SEND
+===CHECK===

@@ -1,0 +1,12 @@
+Name: Same Position Insert Conflict
+
+E1 INSERT Hello
+E1 SEND
+E2 SEND
+E1 MOVE 5
+E2 MOVE 5
+E1 INSERT AAA
+E2 INSERT BBB
+E1 SEND
+E2 SEND
+===CHECK===
