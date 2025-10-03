@@ -162,7 +162,6 @@ pub fn parse_transcript(
     for line in lines.by_ref() {
         if line.trim().is_empty() {
             if in_headers {
-                in_headers = false;
                 break;
             }
             continue;
@@ -312,14 +311,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
 
     for i in 0..num_editors {
-        let (file_desc, site_id, content) = setup.spokes[i]
-            .editor
-            .open_file(serde_json::json!({
-                "type": "file",
-                "hostId": setup.hub.id.clone(),
-                "id": hub_file
-            }))
-            .await?;
+        let (file_desc, site_id, content) =
+            setup.spokes[i].editor.open_file(hub_file.clone()).await?;
 
         spoke_docs.push(MockDocument::new(&content));
         spoke_pending_ops.push(Vec::new());
@@ -629,4 +622,4 @@ async fn test_all_transcripts() {
 }
 
 // Mock structures from tests.rs - these need to be available
-use super::tests::{setup_hub_and_spoke_servers, MockEditor, TestEnvironment};
+use super::tests::{setup_hub_and_spoke_servers, TestEnvironment};
