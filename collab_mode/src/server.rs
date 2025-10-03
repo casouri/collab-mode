@@ -820,7 +820,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
     ) -> anyhow::Result<()> {
-        tracing::info!("From remote: {:?}", &msg);
+        tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
             Msg::AcceptStopped {
@@ -3154,7 +3154,26 @@ pub fn request_to_string(req: &lsp_server::Request) -> String {
 /// Convert lsp_server::Response to a human-readable string
 pub fn response_to_string(resp: &lsp_server::Response) -> String {
     let result_str = if let Some(ref result) = resp.result {
-        serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
+        // Check if this is an OpenFileResp by looking for content and siteId fields
+        if let Some(obj) = result.as_object() {
+            if obj.contains_key("content") && obj.contains_key("siteId") {
+                // This is an OpenFileResp, truncate the content field
+                let mut truncated = obj.clone();
+                if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+                    let truncated_content = if content.len() > 50 {
+                        format!("{}...", &content[..50])
+                    } else {
+                        content.to_string()
+                    };
+                    truncated.insert("content".to_string(), serde_json::json!(truncated_content));
+                }
+                serde_json::to_string(&truncated).unwrap_or_else(|_| "?".to_string())
+            } else {
+                serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
+            }
+        } else {
+            serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
+        }
     } else {
         "null".to_string()
     };
@@ -3184,6 +3203,36 @@ pub fn message_to_string(msg: &lsp_server::Message) -> String {
         lsp_server::Message::Response(resp) => response_to_string(resp),
         lsp_server::Message::Notification(notif) => notification_to_string(notif),
     }
+}
+
+/// Convert webchannel::Message to a human-readable string, truncating large content fields
+pub fn remote_message_to_string(msg: &webchannel::Message) -> String {
+    use message::Msg;
+    let body_str = match &msg.body {
+        Msg::Snapshot(snapshot) => {
+            let truncated_content = if snapshot.content.len() > 50 {
+                format!("{}...", &snapshot.content[..50])
+            } else {
+                snapshot.content.clone()
+            };
+            format!(
+                "Snapshot(NewSnapshot {{ content: \"{}\", name: \"{}\", seq: {}, site_id: {:?}, file_desc: {:?} }})",
+                truncated_content, snapshot.name, snapshot.seq, snapshot.site_id, snapshot.file_desc
+            )
+        }
+        other => format!("{:?}", other),
+    };
+
+    let req_id_str = if let Some(ref req_id) = msg.req_id {
+        format!(" req_id: {:?}", req_id)
+    } else {
+        String::new()
+    };
+
+    format!(
+        "Message {{ host: {}, body: {}{} }}",
+        msg.host, body_str, req_id_str
+    )
 }
 
 // *** Tests
