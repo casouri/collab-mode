@@ -1,0 +1,193 @@
+#!/bin/bash
+
+# run_transcript - Helper script for running transcript tests
+# Usage:
+#   run_transcript list       - List all available transcripts
+#   run_transcript all        - Run all transcript tests
+#   run_transcript run <name> - Run a specific transcript
+#   run_transcript --help     - Show this help
+
+set -e
+
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Navigate to the workspace root (4 levels up from collab_mode/src/server/tests)
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+# Transcripts directory
+TRANSCRIPTS_DIR="$WORKSPACE_ROOT/collab_mode/src/server/transcripts"
+
+show_help() {
+    cat << EOF
+run_transcript - Helper script for running transcript tests
+
+Usage:
+    run_transcript list                         List all available transcripts
+    run_transcript all [--print-result] [--print-log]     Run all transcript tests
+    run_transcript run <name> [--print-result] [--print-log]  Run a specific transcript test
+    run_transcript --help                       Show this help
+
+Options:
+    --print-result    Print the final content of each editor after the test
+    --print-log       Show test output/logs (adds --nocapture to cargo test)
+
+Examples:
+    run_transcript list
+    run_transcript all
+    run_transcript all --print-result
+    run_transcript all --print-log
+    run_transcript all --print-result --print-log
+    run_transcript run simple_insert
+    run_transcript run simple_insert --print-result
+    run_transcript run simple_insert --print-log
+    run_transcript run simple_insert.txt --print-result --print-log
+
+EOF
+}
+
+list_transcripts() {
+    if [ ! -d "$TRANSCRIPTS_DIR" ]; then
+        echo "Error: Transcripts directory not found: $TRANSCRIPTS_DIR"
+        exit 1
+    fi
+
+    echo "Available transcripts:"
+    echo ""
+
+    local count=0
+    for file in "$TRANSCRIPTS_DIR"/*.txt; do
+        if [ -f "$file" ]; then
+            local basename=$(basename "$file")
+            # Try to extract the Name: header from the file
+            local test_name=$(grep -m 1 "^Name:" "$file" 2>/dev/null | sed 's/^Name:[[:space:]]*//' || echo "")
+
+            if [ -n "$test_name" ]; then
+                echo "  $basename - $test_name"
+            else
+                echo "  $basename"
+            fi
+            count=$((count + 1))
+        fi
+    done
+
+    if [ $count -eq 0 ]; then
+        echo "  No transcript files found."
+    fi
+    echo ""
+    echo "Total: $count transcript(s)"
+}
+
+run_all() {
+    local print_result=""
+    local print_log=""
+
+    # Check for flags
+    for arg in "$@"; do
+        if [ "$arg" = "--print-result" ]; then
+            print_result="1"
+        elif [ "$arg" = "--print-log" ]; then
+            print_log="1"
+        fi
+    done
+
+    echo "Running all transcript tests..."
+    cd "$WORKSPACE_ROOT"
+
+    local env_vars=""
+    local test_args=""
+
+    if [ -n "$print_result" ]; then
+        env_vars="COLLAB_TRANSCRIPT_PRINT_RESULT=1"
+    fi
+
+    if [ -n "$print_log" ]; then
+        test_args="-- --nocapture"
+    fi
+
+    if [ -n "$env_vars" ]; then
+        eval "$env_vars cargo test test_all_transcripts $test_args"
+    else
+        cargo test test_all_transcripts $test_args
+    fi
+}
+
+run_single() {
+    local transcript_name="$1"
+    shift  # Remove first argument
+    local print_result=""
+    local print_log=""
+
+    # Check for flags in remaining arguments
+    for arg in "$@"; do
+        if [ "$arg" = "--print-result" ]; then
+            print_result="1"
+        elif [ "$arg" = "--print-log" ]; then
+            print_log="1"
+        fi
+    done
+
+    if [ -z "$transcript_name" ]; then
+        echo "Error: Please specify a transcript name"
+        echo "Usage: run_transcript run <name> [--print-result] [--print-log]"
+        exit 1
+    fi
+
+    # Add .txt extension if not present
+    if [[ ! "$transcript_name" =~ \.txt$ ]]; then
+        transcript_name="${transcript_name}.txt"
+    fi
+
+    # Check if the transcript file exists
+    if [ ! -f "$TRANSCRIPTS_DIR/$transcript_name" ]; then
+        echo "Error: Transcript not found: $transcript_name"
+        echo ""
+        echo "Available transcripts:"
+        list_transcripts
+        exit 1
+    fi
+
+    echo "Running transcript test: $transcript_name"
+    cd "$WORKSPACE_ROOT"
+
+    local env_vars="COLLAB_TRANSCRIPT=\"$transcript_name\""
+    local test_args=""
+
+    if [ -n "$print_result" ]; then
+        env_vars="$env_vars COLLAB_TRANSCRIPT_PRINT_RESULT=1"
+    fi
+
+    if [ -n "$print_log" ]; then
+        test_args="-- --nocapture"
+    fi
+
+    eval "$env_vars cargo test test_all_transcripts $test_args"
+}
+
+# Main command dispatch
+case "${1:-}" in
+    list)
+        list_transcripts
+        ;;
+    all)
+        shift  # Remove 'all' from arguments
+        run_all "$@"
+        ;;
+    run)
+        shift  # Remove 'run' from arguments
+        run_single "$@"
+        ;;
+    --help|-h|help)
+        show_help
+        ;;
+    "")
+        echo "Error: No command specified"
+        echo ""
+        show_help
+        exit 1
+        ;;
+    *)
+        echo "Error: Unknown command: $1"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac

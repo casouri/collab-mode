@@ -93,11 +93,23 @@ impl MockDocument {
         if let Some(op_obj) = op.get("op") {
             if let Some(ins) = op_obj.get("Ins") {
                 if let Some(arr) = ins.as_array() {
-                    if arr.len() == 1 && arr[0].is_array() {
-                        // Handle nested array format [[pos, text]]
-                        let inner = arr[0].as_array().unwrap();
-                        let pos = inner[0].as_u64().unwrap() as usize;
-                        let text = inner[1].as_str().unwrap();
+                    // Collect all [pos, text] pairs
+                    let mut inserts: Vec<(usize, String)> = Vec::new();
+                    for item in arr {
+                        if let Some(inner) = item.as_array() {
+                            if inner.len() == 2 {
+                                let pos = inner[0].as_u64().unwrap() as usize;
+                                let text = inner[1].as_str().unwrap().to_string();
+                                inserts.push((pos, text));
+                            }
+                        }
+                    }
+
+                    // Sort by position descending (highest first)
+                    // Insert from back to front to avoid position shifting
+                    inserts.sort_by(|a, b| b.0.cmp(&a.0));
+
+                    for (pos, text) in inserts {
                         let chars: Vec<char> = text.chars().collect();
                         for (i, ch) in chars.iter().enumerate() {
                             self.content.insert(pos + i, *ch);
@@ -106,11 +118,23 @@ impl MockDocument {
                 }
             } else if let Some(del) = op_obj.get("Del") {
                 if let Some(arr) = del.as_array() {
-                    if arr.len() == 1 && arr[0].is_array() {
-                        // Handle nested array format [[pos, text]]
-                        let inner = arr[0].as_array().unwrap();
-                        let pos = inner[0].as_u64().unwrap() as usize;
-                        let text = inner[1].as_str().unwrap();
+                    // Collect all [pos, text] pairs
+                    let mut deletes: Vec<(usize, String)> = Vec::new();
+                    for item in arr {
+                        if let Some(inner) = item.as_array() {
+                            if inner.len() == 2 {
+                                let pos = inner[0].as_u64().unwrap() as usize;
+                                let text = inner[1].as_str().unwrap().to_string();
+                                deletes.push((pos, text));
+                            }
+                        }
+                    }
+
+                    // Sort by position descending (highest first)
+                    // Delete from back to front to avoid position shifting
+                    deletes.sort_by(|a, b| b.0.cmp(&a.0));
+
+                    for (pos, text) in deletes {
                         let len = text.chars().count();
 
                         // Verify we're deleting the expected text
@@ -308,6 +332,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
         let mut spoke_files = Vec::new();
         let mut spoke_site_ids = Vec::new();
         let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
+        let mut spoke_last_seqs: Vec<u64> = vec![0; num_editors];
 
         for i in 0..num_editors {
             let (file_desc, site_id, content) =
@@ -415,6 +440,11 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         }
                     }
 
+                    // Track lastSeq
+                    if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
+                        spoke_last_seqs[*editor] = last_seq;
+                    }
+
                     group_seq_counters[*editor] += 1;
                 }
                 TranscriptCommand::Redo { editor } => {
@@ -482,6 +512,11 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         }
                     }
 
+                    // Track lastSeq
+                    if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
+                        spoke_last_seqs[*editor] = last_seq;
+                    }
+
                     group_seq_counters[*editor] += 1;
                 }
                 TranscriptCommand::Send { editor } => {
@@ -500,11 +535,16 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         }
                     }
 
+                    // Track lastSeq
+                    if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
+                        spoke_last_seqs[*editor] = last_seq;
+                    }
+
                     spoke_pending_ops[*editor].clear();
                     sleep(Duration::from_millis(100)).await;
                 }
                 TranscriptCommand::Check => {
-                    // Send all pending ops for all editors
+                    // First round: Send all pending ops for all editors
                     for i in 0..num_editors {
                         let resp = if !spoke_pending_ops[i].is_empty() {
                             setup.spokes[i]
@@ -526,10 +566,59 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             }
                         }
 
+                        // Track lastSeq
+                        if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
+                            spoke_last_seqs[i] = last_seq;
+                        }
+
                         spoke_pending_ops[i].clear();
                     }
 
-                    sleep(Duration::from_millis(500)).await;
+                    // Convergence loop: keep polling until all editors have the same lastSeq
+                    for attempt in 0..10 {
+                        // Check if all editors have converged to the same lastSeq
+                        let max_seq = *spoke_last_seqs.iter().max().unwrap_or(&0);
+                        let all_converged = spoke_last_seqs.iter().all(|&seq| seq == max_seq);
+
+                        if all_converged {
+                            tracing::debug!(
+                                "CHECK: Editors converged at lastSeq {} after {} attempts",
+                                max_seq,
+                                attempt
+                            );
+                            break;
+                        }
+
+                        if attempt == 9 {
+                            return Err(anyhow::anyhow!(
+                                "CHECK failed: editors didn't converge after 10 attempts. lastSeqs: {:?}",
+                                spoke_last_seqs
+                            ));
+                        }
+
+                        // Pull more ops for each editor
+                        for i in 0..num_editors {
+                            let resp = setup.spokes[i]
+                                .editor
+                                .send_ops(spoke_files[i].clone(), vec![])
+                                .await?;
+
+                            // Apply any remote ops
+                            if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
+                                for op in ops {
+                                    spoke_docs[i].apply_remote_op(op)?;
+                                }
+                            }
+
+                            // Update lastSeq
+                            if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
+                                spoke_last_seqs[i] = last_seq;
+                            }
+                        }
+
+                        // Small delay before next iteration
+                        sleep(Duration::from_millis(100)).await;
+                    }
 
                     // Verify all documents have the same content
                     if !spoke_docs.is_empty() {
@@ -538,20 +627,20 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             let content = doc.get_content();
                             if content != expected_content {
                                 return Err(anyhow::anyhow!(
-                                    "Content mismatch at CHECK: Editor {} has '{}', expected '{}'",
+                                    "Content mismatch at CHECK: Editor {} has '{}', expected '{}'. lastSeqs: {:?}",
                                     i + 1,
                                     content,
-                                    expected_content
+                                    expected_content,
+                                    spoke_last_seqs
                                 ));
                             }
                         }
 
-                        // Also verify hub content (if we can fetch it)
-                        // For now we trust that if all spokes agree, the hub should too
                         tracing::info!(
-                            "CHECK passed: All {} editors have content: '{}'",
+                            "CHECK passed: All {} editors have content: '{}' at lastSeq: {:?}",
                             spoke_docs.len(),
-                            expected_content
+                            expected_content,
+                            spoke_last_seqs
                         );
                     }
                 }
@@ -559,6 +648,17 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
         }
 
         tracing::info!("Transcript test '{}' completed successfully", test_name);
+
+        // Print editor results if COLLAB_TRANSCRIPT_PRINT_RESULT is set
+        if std::env::var("COLLAB_TRANSCRIPT_PRINT_RESULT").is_ok() {
+            println!("\n=== Transcript Results for '{}' ===", test_name);
+            for (i, doc) in spoke_docs.iter().enumerate() {
+                println!("Editor {}: '{}'", i + 1, doc.get_content());
+            }
+            println!("lastSeqs: {:?}", spoke_last_seqs);
+            println!("=====================================\n");
+        }
+
         Ok(())
     }
     .await;
