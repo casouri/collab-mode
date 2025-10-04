@@ -1,0 +1,67 @@
+Name: Complex Undo/Redo with Long Text
+
+E1 INSERT In the beginning, there was nothing but darkness and silence across the vast expanse of space.
+E1 SEND
+E2 MOVE 93
+E2 INSERT  Then came the light, brilliant and warm, spreading across the cosmos like ripples on a pond.
+E2 SEND
+===CHECK===
+E1 MOVE 45
+E1 DELETE 28
+E1 INSERT emptiness and void throughout the infinite
+E1 SEND
+E3 MOVE 200
+E3 INSERT  Stars began to form, clustering together in magnificent galaxies.
+E3 SEND
+===CHECK===
+E2 MOVE 150
+E2 INSERT magnificent and awe-inspiring
+E2 SEND
+E1 UNDO
+E1 SEND
+===CHECK===
+E3 MOVE 0
+E3 INSERT Long ago,
+E3 SEND
+E2 MOVE 100
+E2 DELETE 15
+E2 SEND
+===CHECK===
+E1 REDO
+E1 SEND
+E2 UNDO
+E2 SEND
+===CHECK===
+E3 MOVE 50
+E3 INSERT truly
+E3 SEND
+E1 MOVE 200
+E1 INSERT  Planets formed around these stars, some barren, others teeming with potential.
+E1 SEND
+E2 REDO
+E2 SEND
+===CHECK===
+E3 UNDO
+E3 SEND
+E1 MOVE 350
+E1 INSERT  And on one small blue planet, something extraordinary happened: life emerged.
+E1 SEND
+===CHECK===
+E2 MOVE 300
+E2 INSERT  Each world unique in its own way.
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E1 SEND
+E2 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===

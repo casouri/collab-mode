@@ -1,0 +1,127 @@
+Name: Comprehensive Collaboration Stress Test
+
+E1 INSERT Article: The Evolution of Communication\n\nThroughout human history, communication has been the cornerstone of civilization.
+E1 SEND
+===CHECK===
+E2 MOVE 127
+E2 INSERT  From ancient cave paintings to modern digital networks, our ability to share ideas has shaped society.
+E2 SEND
+E3 MOVE 0
+E3 INSERT [Draft v1.0]\n\n
+E3 SEND
+===CHECK===
+E1 MOVE 250
+E1 INSERT \n\nEarly humans relied on oral traditions, passing knowledge through generations via storytelling and song.
+E1 SEND
+E2 MOVE 180
+E2 DELETE 20
+E2 INSERT revolutionary technologies
+E2 SEND
+E3 MOVE 400
+E3 INSERT  These methods were powerful but limited by memory and geographical constraints.
+E3 SEND
+===CHECK===
+E1 MOVE 100
+E1 INSERT remarkable and transformative
+E1 SEND
+E2 MOVE 500
+E2 INSERT \n\nThe invention of writing changed everything, allowing knowledge to be preserved across time and space.
+E2 SEND
+===CHECK===
+E3 MOVE 50
+E3 DELETE 13
+E3 INSERT [Working Draft]
+E3 SEND
+E1 UNDO
+E1 SEND
+E2 MOVE 600
+E2 INSERT  Scribes became the keepers of wisdom, and libraries emerged as temples of learning.
+E2 SEND
+===CHECK===
+E3 MOVE 700
+E3 INSERT \n\nThe printing press democratized knowledge, making books accessible to the masses rather than just the elite.
+E3 SEND
+E1 REDO
+E1 SEND
+E2 UNDO
+E2 SEND
+===CHECK===
+E1 MOVE 850
+E1 INSERT  This sparked revolutions in science, philosophy, and politics across the globe.
+E1 SEND
+E3 MOVE 200
+E3 INSERT groundbreaking
+E3 SEND
+E2 REDO
+E2 SEND
+===CHECK===
+E2 MOVE 1000
+E2 INSERT \n\nIn the modern era, telecommunications shrank the world to the size of a village.
+E2 SEND
+E1 MOVE 1100
+E1 INSERT  Telegraph, telephone, radio, and television each brought people closer together in unprecedented ways.
+E1 SEND
+===CHECK===
+E3 MOVE 1250
+E3 INSERT \n\nToday, the internet represents the pinnacle of human communication technology.
+E3 SEND
+E2 MOVE 1350
+E2 INSERT  Billions of people connect instantly across continents, sharing thoughts, images, and experiences in real-time.
+E2 SEND
+===CHECK===
+E1 MOVE 1500
+E1 INSERT \n\nYet with these advances come new challenges: misinformation, privacy concerns, and the digital divide.
+E1 SEND
+E3 MOVE 1650
+E3 INSERT  As we look to the future, we must navigate these complexities while preserving the human element of connection.
+E3 SEND
+===CHECK===
+E2 MOVE 300
+E2 DELETE 15
+E2 INSERT essential and vital
+E2 SEND
+E1 MOVE 800
+E1 DELETE 25
+E1 INSERT catalyzed transformative changes
+E1 SEND
+===CHECK===
+E3 UNDO
+E3 SEND
+E1 UNDO
+E1 SEND
+E2 UNDO
+E2 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E1 SEND
+E2 SEND
+===CHECK===
+E3 MOVE 1800
+E3 INSERT \n\n[End of Draft - To be continued...]
+E3 SEND
+E1 MOVE 0
+E1 DELETE 15
+E1 INSERT [Final Draft]
+E1 SEND
+===CHECK===
+E2 MOVE 900
+E2 INSERT Furthermore,
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E3 REDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===

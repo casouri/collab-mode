@@ -1,0 +1,49 @@
+Name: Multi-Paragraph Document Editing
+
+E1 INSERT Chapter 1: Introduction\n\nThis is the beginning of our collaborative story.
+E1 SEND
+E2 MOVE 72
+E2 INSERT  The authors gathered from around the world to write this masterpiece.
+E2 SEND
+===CHECK===
+E3 MOVE 146
+E3 INSERT \n\nChapter 2: The Journey Begins\n\nOur heroes set forth on a grand adventure.
+E3 SEND
+E1 MOVE 24
+E1 DELETE 11
+E1 INSERT The Story
+E1 SEND
+===CHECK===
+E2 MOVE 100
+E2 INSERT together
+E2 SEND
+E3 MOVE 200
+E3 INSERT  They carried with them hopes, dreams, and a mysterious map.
+E3 SEND
+E1 MOVE 0
+E1 INSERT Prologue\n\n
+E1 SEND
+===CHECK===
+E2 MOVE 220
+E2 DELETE 10
+E2 INSERT an ancient and
+E2 SEND
+E1 MOVE 30
+E1 INSERT Part I -
+E1 SEND
+E3 MOVE 280
+E3 INSERT \n\nThe map was said to lead to untold treasures and secrets of the old world.
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E1 SEND
+E2 SEND
+===CHECK===

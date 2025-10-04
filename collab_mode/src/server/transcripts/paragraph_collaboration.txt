@@ -1,0 +1,29 @@
+Name: Paragraph Collaboration
+
+E1 INSERT The quick brown fox jumps over the lazy dog.
+E1 SEND
+E2 MOVE 44
+E2 INSERT  This is a classic pangram used in typography.
+E2 SEND
+E3 MOVE 0
+E3 INSERT Once upon a time,
+E3 SEND
+===CHECK===
+E1 MOVE 17
+E1 DELETE 5
+E1 INSERT red
+E2 MOVE 100
+E2 INSERT  It contains every letter of the alphabet at least once.
+E1 SEND
+E2 SEND
+===CHECK===
+E3 MOVE 50
+E3 INSERT extremely
+E3 SEND
+E1 UNDO
+E1 SEND
+===CHECK===
+E2 MOVE 0
+E2 DELETE 17
+E2 SEND
+===CHECK===
