@@ -1,64 +1,63 @@
-# Transcript Test CLI Tool
+# Transcript Test Runner
 
-A command-line tool for managing, viewing, and running transcript tests.
+A bash script for managing and running transcript tests.
 
-## Installation
+## Location
 
-The tool is automatically built with the project:
-```bash
-# Build without test runner (view-only)
-cargo build --bin transcript-runner
-
-# Build with test runner capability
-cargo build --bin transcript-runner --features test-runner
-```
+The script is located at: `collab_mode/src/server/tests/run_transcript`
 
 ## Commands
 
 ### List all transcripts
 ```bash
-cargo run --bin transcript-runner list
+./collab_mode/src/server/tests/run_transcript list
 ```
 Shows all available transcript test files with their names.
 
-### View a transcript
+### Run all tests
 ```bash
-cargo run --bin transcript-runner show <filename>
-# Examples:
-cargo run --bin transcript-runner show simple_insert
-cargo run --bin transcript-runner show simple_insert.txt
+./collab_mode/src/server/tests/run_transcript all
 ```
-Displays the full content of a transcript test file.
+Runs all transcript tests using cargo test.
 
 ### Run a single test
 ```bash
-cargo run --bin transcript-runner --features test-runner test <filename>
+./collab_mode/src/server/tests/run_transcript run <filename>
 # Examples:
-cargo run --bin transcript-runner --features test-runner test simple_insert
-cargo run --bin transcript-runner --features test-runner test concurrent_edits.txt
+./collab_mode/src/server/tests/run_transcript run simple_insert
+./collab_mode/src/server/tests/run_transcript run concurrent_edits.txt
 ```
-Runs a specific transcript test and reports pass/fail status.
+Runs a specific transcript test (with or without .txt extension).
 
-### Run all tests
+### Show help
 ```bash
-cargo test --lib server::transcript_tests::test_all_transcripts
+./collab_mode/src/server/tests/run_transcript --help
 ```
-Runs all transcript tests using the standard test harness.
+Display usage information.
 
 ## Quick Examples
 
 ```bash
 # See what tests are available
-cargo run --bin transcript-runner list
-
-# Look at a specific test
-cargo run --bin transcript-runner show concurrent_edits
-
-# Run a specific test
-cargo run --bin transcript-runner --features test-runner test simple_insert
+./collab_mode/src/server/tests/run_transcript list
 
 # Run all transcript tests
-cargo test --lib server::transcript_tests
+./collab_mode/src/server/tests/run_transcript all
+
+# Run a specific test
+./collab_mode/src/server/tests/run_transcript run simple_insert
+```
+
+## Direct cargo test usage
+
+You can also run tests directly with cargo:
+
+```bash
+# Run all transcript tests
+cargo test test_all_transcripts
+
+# Run a specific transcript by setting COLLAB_TRANSCRIPT env var
+COLLAB_TRANSCRIPT=simple_insert cargo test test_all_transcripts
 ```
 
 ## Exit Codes

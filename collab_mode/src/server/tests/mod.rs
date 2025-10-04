@@ -29,7 +29,7 @@ fn init_test_tracing() {
         .try_init();
 }
 
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub struct TestEnvironment {
     signaling_addr: String,
     signaling_task: Option<tokio::task::JoinHandle<()>>,
@@ -73,7 +73,7 @@ async fn wait_for_signaling_server(url: &str, timeout: Duration) -> anyhow::Resu
 }
 
 impl TestEnvironment {
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub async fn new() -> anyhow::Result<Self> {
         init_test_tracing();
 
@@ -111,7 +111,7 @@ impl TestEnvironment {
         })
     }
 
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub fn signaling_url(&self) -> &str {
         &self.signaling_addr
     }
@@ -123,6 +123,8 @@ impl Drop for TestEnvironment {
         if let Some(task) = self.signaling_task.take() {
             tracing::debug!("Aborting signaling server task");
             task.abort();
+            // Give the task a moment to actually abort before temp_dir is dropped
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 }
@@ -132,7 +134,7 @@ fn create_test_id(prefix: &str) -> ServerId {
     prefix.to_string()
 }
 
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub struct MockEditor {
     tx: mpsc::Sender<lsp_server::Message>,
     rx: mpsc::Receiver<lsp_server::Message>,
@@ -140,7 +142,7 @@ pub struct MockEditor {
 }
 
 impl MockEditor {
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub fn new() -> (
         Self,
         mpsc::Sender<lsp_server::Message>,
@@ -401,7 +403,7 @@ impl MockEditor {
     // Test-specific helper methods
 
     /// Helper: Open a file and return editor file desc, site_id, and content.
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub async fn open_file(
         &mut self,
         file_desc: serde_json::Value,
@@ -429,7 +431,7 @@ impl MockEditor {
     }
 
     /// Helper: Send ops to a document.
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub async fn send_ops(
         &mut self,
         file: serde_json::Value,
@@ -446,7 +448,7 @@ impl MockEditor {
     }
 
     /// Helper: Send undo/redo request.
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub async fn send_undo(
         &mut self,
         file: serde_json::Value,
@@ -469,7 +471,7 @@ impl MockEditor {
     }
 
     /// Helper: Send info to a document.
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub async fn send_info(
         &mut self,
         file: serde_json::Value,
@@ -505,7 +507,7 @@ impl MockEditor {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub async fn share_file(
         &mut self,
         filename: &str,
@@ -531,7 +533,7 @@ impl MockEditor {
     }
 }
 
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub struct ServerSetup {
     pub id: ServerId,
     pub handle: tokio::task::JoinHandle<()>,
@@ -539,14 +541,14 @@ pub struct ServerSetup {
     pub _temp_dir: tempfile::TempDir,
 }
 
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub struct HubAndSpokeSetup {
     pub hub: ServerSetup,
     pub spokes: Vec<ServerSetup>,
 }
 
 impl HubAndSpokeSetup {
-    #[cfg(any(test, feature = "test-runner"))]
+    #[cfg(test)]
     pub fn cleanup(self) {
         self.hub.handle.abort();
         for spoke in self.spokes {
@@ -561,7 +563,7 @@ impl HubAndSpokeSetup {
 ///
 /// If spoke_permissions is provided, it should contain exactly num_spokes permissions,
 /// one for each spoke. If not provided, all spokes get full permissions.
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub async fn setup_hub_and_spoke_servers(
     env: &TestEnvironment,
     num_spokes: usize,

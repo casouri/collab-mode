@@ -3266,8 +3266,8 @@ pub fn remote_message_to_string(msg: &webchannel::Message) -> String {
 
 // *** Tests
 
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub mod tests;
 
-#[cfg(any(test, feature = "test-runner"))]
+#[cfg(test)]
 pub mod transcript_tests;
