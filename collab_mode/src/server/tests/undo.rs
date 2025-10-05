@@ -51,8 +51,8 @@ async fn test_undo_e2e() {
         .await
         .unwrap();
 
-    assert!(!undo_ops.is_empty());
-    let actual_op = &undo_ops[0];
+    assert!(!undo_ops.ops.is_empty());
+    let actual_op = &undo_ops.ops[0];
     let expected_op = serde_json::json!({ "Del": [[0, "UNDO_TEST: "]] });
     assert_eq!(
         serde_json::to_string(&actual_op).unwrap(),
@@ -75,8 +75,8 @@ async fn test_undo_e2e() {
         .send_undo(file_desc.clone(), "Redo")
         .await
         .unwrap();
-    assert!(!redo_ops.is_empty());
-    let actual_redo_op = &redo_ops[0];
+    assert!(!redo_ops.ops.is_empty());
+    let actual_redo_op = &redo_ops.ops[0];
     let expected_redo_op = serde_json::json!({ "Ins": [[0, "UNDO_TEST: "]] });
     assert_eq!(
         serde_json::to_string(&actual_redo_op).unwrap(),

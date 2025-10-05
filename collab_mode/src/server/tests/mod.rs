@@ -6,6 +6,7 @@
 pub use super::*;
 
 use crate::config_man::{ConfigManager, Permission};
+use crate::message::{SendOpsResp, UndoResp};
 use crate::signaling;
 use rand::Rng;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -436,15 +437,19 @@ impl MockEditor {
         &mut self,
         file: serde_json::Value,
         ops: Vec<serde_json::Value>,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.request(
-            "SendOps",
-            serde_json::json!({
-                "file": file,
-                "ops": ops,
-            }),
-        )
-        .await
+    ) -> anyhow::Result<SendOpsResp> {
+        let resp = self
+            .request(
+                "SendOps",
+                serde_json::json!({
+                    "file": file,
+                    "ops": ops,
+                }),
+            )
+            .await?;
+
+        serde_json::from_value(resp)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SendOpsResp: {}", e))
     }
 
     /// Helper: Send undo/redo request.
@@ -453,7 +458,7 @@ impl MockEditor {
         &mut self,
         file: serde_json::Value,
         kind: &str,
-    ) -> anyhow::Result<Vec<serde_json::Value>> {
+    ) -> anyhow::Result<UndoResp> {
         let resp = self
             .request(
                 "Undo",
@@ -464,10 +469,7 @@ impl MockEditor {
             )
             .await?;
 
-        resp["ops"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Missing ops in undo response"))
-            .map(|ops| ops.clone())
+        serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("Failed to parse UndoResp: {}", e))
     }
 
     /// Helper: Send info to a document.

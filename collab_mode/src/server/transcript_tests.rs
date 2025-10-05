@@ -4,6 +4,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 
+use crate::message::{SendOpsResp, UndoResp};
+use crate::types::{EditInstruction, EditorFatOp, EditorLeanOp, EditorOp};
+
 fn init_test_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -22,7 +25,7 @@ fn init_test_tracing() {
 pub struct MockDocument {
     content: Vec<char>,
     cursor: usize,
-    ops_applied: usize,  // Track number of operations applied
+    ops_applied: usize, // Track number of operations applied
 }
 
 impl MockDocument {
@@ -43,22 +46,21 @@ impl MockDocument {
         self.cursor = new_pos.min(self.content.len());
     }
 
-    pub fn insert(&mut self, text: &str) -> serde_json::Value {
+    pub fn insert(&mut self, text: &str) -> EditorFatOp {
         let chars: Vec<char> = text.chars().collect();
         for (i, ch) in chars.iter().enumerate() {
             self.content.insert(self.cursor + i, *ch);
         }
-        let op = serde_json::json!({
-            "op": {
-                "Ins": [self.cursor, text]
-            },
-            "groupSeq": 1
-        });
+        let pos = self.cursor as u64;
         self.cursor += chars.len();
-        op
+
+        EditorFatOp {
+            op: EditorOp::Ins(pos, text.to_string()),
+            group_seq: 1,
+        }
     }
 
-    pub fn delete(&mut self, count: i64) -> Option<serde_json::Value> {
+    pub fn delete(&mut self, count: i64) -> Option<EditorFatOp> {
         if count == 0 {
             return None;
         }
@@ -83,82 +85,75 @@ impl MockDocument {
         self.content.drain(start..end);
         self.cursor = start;
 
-        Some(serde_json::json!({
-            "op": {
-                "Del": [start, deleted_text]
-            },
-            "groupSeq": 1
-        }))
+        Some(EditorFatOp {
+            op: EditorOp::Del(start as u64, deleted_text),
+            group_seq: 1,
+        })
     }
 
-    pub fn apply_remote_op(&mut self, op: &serde_json::Value) -> anyhow::Result<()> {
-        if let Some(op_obj) = op.get("op") {
-            // Increment ops counter for each actual operation applied
-            self.ops_applied += 1;
+    /// Apply an EditInstruction to this mock document.
+    pub fn apply_edit_instruction(&mut self, instr: &EditInstruction) -> anyhow::Result<()> {
+        self.ops_applied += 1;
 
-            if let Some(ins) = op_obj.get("Ins") {
-                if let Some(arr) = ins.as_array() {
-                    // Collect all [pos, text] pairs
-                    let mut inserts: Vec<(usize, String)> = Vec::new();
-                    for item in arr {
-                        if let Some(inner) = item.as_array() {
-                            if inner.len() == 2 {
-                                let pos = inner[0].as_u64().unwrap() as usize;
-                                let text = inner[1].as_str().unwrap().to_string();
-                                inserts.push((pos, text));
-                            }
-                        }
-                    }
+        match instr {
+            EditInstruction::Ins(edits) => {
+                // Collect and convert u64 positions to usize
+                let mut inserts: Vec<(usize, String)> = edits
+                    .iter()
+                    .map(|(pos, text)| (*pos as usize, text.clone()))
+                    .collect();
 
-                    // Sort by position descending (highest first)
-                    // Insert from back to front to avoid position shifting
-                    inserts.sort_by(|a, b| b.0.cmp(&a.0));
+                // Sort by position descending (highest first)
+                // Insert from back to front to avoid position shifting
+                inserts.sort_by(|a, b| b.0.cmp(&a.0));
 
-                    for (pos, text) in inserts {
-                        let chars: Vec<char> = text.chars().collect();
-                        for (i, ch) in chars.iter().enumerate() {
-                            self.content.insert(pos + i, *ch);
-                        }
-                    }
-                }
-            } else if let Some(del) = op_obj.get("Del") {
-                if let Some(arr) = del.as_array() {
-                    // Collect all [pos, text] pairs
-                    let mut deletes: Vec<(usize, String)> = Vec::new();
-                    for item in arr {
-                        if let Some(inner) = item.as_array() {
-                            if inner.len() == 2 {
-                                let pos = inner[0].as_u64().unwrap() as usize;
-                                let text = inner[1].as_str().unwrap().to_string();
-                                deletes.push((pos, text));
-                            }
-                        }
-                    }
-
-                    // Sort by position descending (highest first)
-                    // Delete from back to front to avoid position shifting
-                    deletes.sort_by(|a, b| b.0.cmp(&a.0));
-
-                    for (pos, text) in deletes {
-                        let len = text.chars().count();
-
-                        // Verify we're deleting the expected text
-                        let actual_text: String = self.content[pos..pos + len].iter().collect();
-                        if actual_text != text {
-                            return Err(anyhow::anyhow!(
-                                "Remote delete mismatch at pos {}: expected '{}', got '{}'",
-                                pos,
-                                text,
-                                actual_text
-                            ));
-                        }
-
-                        self.content.drain(pos..pos + len);
+                for (pos, text) in inserts {
+                    let chars: Vec<char> = text.chars().collect();
+                    for (i, ch) in chars.iter().enumerate() {
+                        self.content.insert(pos + i, *ch);
                     }
                 }
             }
+            EditInstruction::Del(edits) => {
+                // Collect and convert u64 positions to usize
+                let mut deletes: Vec<(usize, String)> = edits
+                    .iter()
+                    .map(|(pos, text)| (*pos as usize, text.clone()))
+                    .collect();
+
+                // Sort by position descending (highest first)
+                // Delete from back to front to avoid position shifting
+                deletes.sort_by(|a, b| b.0.cmp(&a.0));
+
+                for (pos, text) in deletes {
+                    let len = text.chars().count();
+
+                    // Verify we're deleting the expected text
+                    let actual_text: String = self.content[pos..pos + len].iter().collect();
+                    if actual_text != text {
+                        return Err(anyhow::anyhow!(
+                            "Delete mismatch at pos {}: expected '{}', got '{}'",
+                            pos,
+                            text,
+                            actual_text
+                        ));
+                    }
+
+                    self.content.drain(pos..pos + len);
+                }
+            }
         }
+
         Ok(())
+    }
+
+    pub fn apply_remote_op(&mut self, op: &serde_json::Value) -> anyhow::Result<()> {
+        // Parse JSON into EditorLeanOp
+        let lean_op: EditorLeanOp = serde_json::from_value(op.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to parse EditorLeanOp: {}", e))?;
+
+        // Apply the instruction using the helper
+        self.apply_edit_instruction(&lean_op.op)
     }
 
     pub fn get_content(&self) -> String {
@@ -297,6 +292,34 @@ pub fn get_editor_count(commands: &[TranscriptCommand]) -> usize {
     max_editor + 1 // Convert from 0-indexed to count
 }
 
+// Helper function to send pending ops and apply remote ops
+async fn send_ops_and_apply_remote(
+    setup: &mut HubAndSpokeSetup,
+    editor_idx: usize,
+    spoke_files: &[serde_json::Value],
+    spoke_pending_ops: &mut [Vec<serde_json::Value>],
+    spoke_docs: &mut [MockDocument],
+    spoke_ops_counts: &mut [usize],
+) -> anyhow::Result<()> {
+    // Always send ops (even if empty) to fetch remote ops
+    let send_resp = setup.spokes[editor_idx]
+        .editor
+        .send_ops(
+            spoke_files[editor_idx].clone(),
+            spoke_pending_ops[editor_idx].clone(),
+        )
+        .await?;
+
+    // Apply remote ops
+    for lean_op in &send_resp.ops {
+        spoke_docs[editor_idx].apply_edit_instruction(&lean_op.op)?;
+    }
+    spoke_ops_counts[editor_idx] = spoke_docs[editor_idx].get_ops_applied();
+    spoke_pending_ops[editor_idx].clear();
+
+    Ok(())
+}
+
 // Run a transcript test
 pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     init_test_tracing();
@@ -367,76 +390,48 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     let group_seq = group_seq_counters[*editor];
                     let mut op = spoke_docs[*editor].insert(text);
                     // Update the groupSeq in the op
-                    if let Some(gs) = op.get_mut("groupSeq") {
-                        *gs = serde_json::json!(group_seq);
-                    }
-                    spoke_pending_ops[*editor].push(op);
+                    op.group_seq = group_seq;
+                    spoke_pending_ops[*editor].push(serde_json::to_value(&op).unwrap());
                     group_seq_counters[*editor] += 1;
                 }
                 TranscriptCommand::Delete { editor, count } => {
                     let group_seq = group_seq_counters[*editor];
                     if let Some(mut op) = spoke_docs[*editor].delete(*count) {
                         // Update the groupSeq in the op
-                        if let Some(gs) = op.get_mut("groupSeq") {
-                            *gs = serde_json::json!(group_seq);
-                        }
-                        spoke_pending_ops[*editor].push(op);
+                        op.group_seq = group_seq;
+                        spoke_pending_ops[*editor].push(serde_json::to_value(&op).unwrap());
                         group_seq_counters[*editor] += 1;
                     }
                 }
                 TranscriptCommand::Undo { editor } => {
                     // First send pending ops and apply received ops
-                    if !spoke_pending_ops[*editor].is_empty() {
-                        let resp = setup.spokes[*editor]
-                            .editor
-                            .send_ops(
-                                spoke_files[*editor].clone(),
-                                spoke_pending_ops[*editor].clone(),
-                            )
-                            .await?;
-
-                        // Apply remote ops
-                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                            for op in ops {
-                                spoke_docs[*editor].apply_remote_op(op)?;
-                            }
-                        }
-                        // Update ops count for this editor
-                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
-
-                        spoke_pending_ops[*editor].clear();
-                    }
+                    send_ops_and_apply_remote(
+                        &mut setup,
+                        *editor,
+                        &spoke_files,
+                        &mut spoke_pending_ops,
+                        &mut spoke_docs,
+                        &mut spoke_ops_counts,
+                    )
+                    .await?;
 
                     // Then send undo request
-                    let ops = setup.spokes[*editor]
+                    let undo_resp = setup.spokes[*editor]
                         .editor
                         .send_undo(spoke_files[*editor].clone(), "Undo")
                         .await?;
 
                     // Apply the undo ops locally
-                    for op in &ops {
-                        // op is like {"Del": [[pos1, text1], [pos2, text2]]} or {"Ins": [[pos1, text1], ...]}
-                        if let Some(del_ops) = op.get("Del").and_then(|v| v.as_array()) {
-                            // The Del value is already an array of [pos, text] pairs
-                            // We need to wrap it in {"op": {"Del": [[pos, text]]}} format
-                            spoke_docs[*editor].apply_remote_op(&serde_json::json!({
-                                "op": {"Del": del_ops}
-                            }))?;
-                        } else if let Some(ins_ops) = op.get("Ins").and_then(|v| v.as_array()) {
-                            // The Ins value is already an array of [pos, text] pairs
-                            // We need to wrap it in {"op": {"Ins": [[pos, text]]}} format
-                            spoke_docs[*editor].apply_remote_op(&serde_json::json!({
-                                "op": {"Ins": ins_ops}
-                            }))?;
-                        }
+                    for instr in &undo_resp.ops {
+                        spoke_docs[*editor].apply_edit_instruction(instr)?;
                     }
                     // Update ops count after applying undo ops locally
                     spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                     // Only send the Undo operation to server if there were actual ops to undo
-                    if !ops.is_empty() {
+                    if !undo_resp.ops.is_empty() {
                         let group_seq = group_seq_counters[*editor];
-                        let resp = setup.spokes[*editor]
+                        let send_resp = setup.spokes[*editor]
                             .editor
                             .send_ops(
                                 spoke_files[*editor].clone(),
@@ -448,10 +443,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             .await?;
 
                         // Apply any remote ops from sending Undo
-                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                            for op in ops {
-                                spoke_docs[*editor].apply_remote_op(op)?;
-                            }
+                        for lean_op in &send_resp.ops {
+                            spoke_docs[*editor].apply_edit_instruction(&lean_op.op)?;
                         }
                         // Update ops count
                         spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
@@ -461,57 +454,33 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 }
                 TranscriptCommand::Redo { editor } => {
                     // First send pending ops and apply received ops
-                    if !spoke_pending_ops[*editor].is_empty() {
-                        let resp = setup.spokes[*editor]
-                            .editor
-                            .send_ops(
-                                spoke_files[*editor].clone(),
-                                spoke_pending_ops[*editor].clone(),
-                            )
-                            .await?;
-
-                        // Apply remote ops
-                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                            for op in ops {
-                                spoke_docs[*editor].apply_remote_op(op)?;
-                            }
-                        }
-                        // Update ops count
-                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
-
-                        spoke_pending_ops[*editor].clear();
-                    }
+                    send_ops_and_apply_remote(
+                        &mut setup,
+                        *editor,
+                        &spoke_files,
+                        &mut spoke_pending_ops,
+                        &mut spoke_docs,
+                        &mut spoke_ops_counts,
+                    )
+                    .await?;
 
                     // Then send redo request
-                    let ops = setup.spokes[*editor]
+                    let redo_resp = setup.spokes[*editor]
                         .editor
                         .send_undo(spoke_files[*editor].clone(), "Redo")
                         .await?;
 
                     // Apply the redo ops locally
-                    for op in &ops {
-                        // op can be either {"Del": [[pos1, text1], ...]} or {"Ins": [[pos1, text1], ...]}
-                        if let Some(del_ops) = op.get("Del").and_then(|v| v.as_array()) {
-                            // The Del value is already an array of [pos, text] pairs
-                            // We need to wrap it in {"op": {"Del": [[pos, text]]}} format
-                            spoke_docs[*editor].apply_remote_op(&serde_json::json!({
-                                "op": {"Del": del_ops}
-                            }))?;
-                        } else if let Some(ins_ops) = op.get("Ins").and_then(|v| v.as_array()) {
-                            // The Ins value is already an array of [pos, text] pairs
-                            // We need to wrap it in {"op": {"Ins": [[pos, text]]}} format
-                            spoke_docs[*editor].apply_remote_op(&serde_json::json!({
-                                "op": {"Ins": ins_ops}
-                            }))?;
-                        }
+                    for instr in &redo_resp.ops {
+                        spoke_docs[*editor].apply_edit_instruction(instr)?;
                     }
                     // Update ops count after applying redo ops locally
                     spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                     // Only send the Redo operation to server if there were actual ops to redo
-                    if !ops.is_empty() {
+                    if !redo_resp.ops.is_empty() {
                         let group_seq = group_seq_counters[*editor];
-                        let resp = setup.spokes[*editor]
+                        let send_resp = setup.spokes[*editor]
                             .editor
                             .send_ops(
                                 spoke_files[*editor].clone(),
@@ -523,10 +492,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             .await?;
 
                         // Apply any remote ops from sending Redo
-                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                            for op in ops {
-                                spoke_docs[*editor].apply_remote_op(op)?;
-                            }
+                        for lean_op in &send_resp.ops {
+                            spoke_docs[*editor].apply_edit_instruction(&lean_op.op)?;
                         }
                         // Update ops count
                         spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
@@ -535,30 +502,21 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     }
                 }
                 TranscriptCommand::Send { editor } => {
-                    let resp = setup.spokes[*editor]
-                        .editor
-                        .send_ops(
-                            spoke_files[*editor].clone(),
-                            spoke_pending_ops[*editor].clone(),
-                        )
-                        .await?;
-
-                    // Apply remote ops
-                    if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                        for op in ops {
-                            spoke_docs[*editor].apply_remote_op(op)?;
-                        }
-                    }
-                    // Update ops count
-                    spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
-
-                    spoke_pending_ops[*editor].clear();
+                    send_ops_and_apply_remote(
+                        &mut setup,
+                        *editor,
+                        &spoke_files,
+                        &mut spoke_pending_ops,
+                        &mut spoke_docs,
+                        &mut spoke_ops_counts,
+                    )
+                    .await?;
                     sleep(Duration::from_millis(100)).await;
                 }
                 TranscriptCommand::Check => {
                     // First round: Send all pending ops for all editors
                     for i in 0..num_editors {
-                        let resp = if !spoke_pending_ops[i].is_empty() {
+                        let send_resp = if !spoke_pending_ops[i].is_empty() {
                             setup.spokes[i]
                                 .editor
                                 .send_ops(spoke_files[i].clone(), spoke_pending_ops[i].clone())
@@ -572,10 +530,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         };
 
                         // Apply remote ops
-                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                            for op in ops {
-                                spoke_docs[i].apply_remote_op(op)?;
-                            }
+                        for lean_op in &send_resp.ops {
+                            spoke_docs[i].apply_edit_instruction(&lean_op.op)?;
                         }
                         // Update ops count
                         spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();
@@ -590,16 +546,14 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
                         // Pull more ops for each editor
                         for i in 0..num_editors {
-                            let resp = setup.spokes[i]
+                            let send_resp = setup.spokes[i]
                                 .editor
                                 .send_ops(spoke_files[i].clone(), vec![])
                                 .await?;
 
                             // Apply any remote ops
-                            if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                                for op in ops {
-                                    spoke_docs[i].apply_remote_op(op)?;
-                                }
+                            for lean_op in &send_resp.ops {
+                                spoke_docs[i].apply_edit_instruction(&lean_op.op)?;
                             }
                             // Update ops count
                             spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();
@@ -764,4 +718,4 @@ async fn test_all_transcripts() {
 }
 
 // Mock structures from tests.rs - these need to be available
-use super::tests::{setup_hub_and_spoke_servers, TestEnvironment};
+use super::tests::{setup_hub_and_spoke_servers, HubAndSpokeSetup, TestEnvironment};

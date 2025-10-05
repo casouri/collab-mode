@@ -73,7 +73,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
         .await
         .unwrap();
 
-    let remote_ops1 = spoke_fetch1["ops"].as_array().unwrap();
+    let remote_ops1 = spoke_fetch1.ops;
     assert_eq!(
         remote_ops1.len(),
         1,
@@ -110,7 +110,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
         .await
         .unwrap();
 
-    let hub_remote_ops1 = hub_fetch1["ops"].as_array().unwrap();
+    let hub_remote_ops1 = hub_fetch1.ops;
     assert_eq!(
         hub_remote_ops1.len(),
         1,
@@ -156,7 +156,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
     tracing::info!("Spoke send ops result 2: {:?}", spoke_send_result2);
 
     // Spoke should receive hub's second op in the response
-    let remote_ops2 = spoke_send_result2["ops"].as_array().unwrap();
+    let remote_ops2 = spoke_send_result2.ops;
     assert_eq!(
         remote_ops2.len(),
         1,
@@ -179,7 +179,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
         .await
         .unwrap();
 
-    let hub_remote_ops2 = hub_fetch2["ops"].as_array().unwrap();
+    let hub_remote_ops2 = hub_fetch2.ops;
     assert_eq!(
         hub_remote_ops2.len(),
         1,
@@ -215,7 +215,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
         .await
         .unwrap();
 
-    let remote_ops3 = spoke_fetch3["ops"].as_array().unwrap();
+    let remote_ops3 = spoke_fetch3.ops;
     assert_eq!(
         remote_ops3.len(),
         1,
@@ -291,7 +291,7 @@ async fn test_bidirectional_ops_hub_owned_file() {
         .unwrap();
 
     // Verify spoke received hub's op
-    let remote_ops = spoke_resp["ops"].as_array().unwrap();
+    let remote_ops = spoke_resp.ops;
     assert_eq!(remote_ops.len(), 1, "Spoke should receive hub's op");
 
     // Hub sends second op and fetches spoke's op
@@ -313,7 +313,7 @@ async fn test_bidirectional_ops_hub_owned_file() {
         .unwrap();
 
     // Verify hub received spoke's op
-    let hub_remote_ops = hub_resp["ops"].as_array().unwrap();
+    let hub_remote_ops = hub_resp.ops;
     assert_eq!(hub_remote_ops.len(), 1, "Hub should receive spoke's op");
 
     // Final sync - both should have all ops
@@ -329,7 +329,7 @@ async fn test_bidirectional_ops_hub_owned_file() {
         .await
         .unwrap();
 
-    let final_spoke_ops = final_spoke_resp["ops"].as_array().unwrap();
+    let final_spoke_ops = final_spoke_resp.ops;
     assert_eq!(
         final_spoke_ops.len(),
         1,

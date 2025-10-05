@@ -75,7 +75,7 @@ async fn test_send_ops_e2e() {
         .send_ops(spoke2_file.clone(), vec![])
         .await
         .unwrap();
-    let remote_ops = fetch_ops_resp["ops"].as_array().unwrap();
+    let remote_ops = fetch_ops_resp.ops;
     assert_eq!(remote_ops.len(), 1);
 
     let op = &remote_ops[0];
@@ -97,7 +97,7 @@ async fn test_send_ops_e2e() {
         .send_ops(spoke1_file.clone(), vec![])
         .await
         .unwrap();
-    let remote_ops = fetch_ops_resp_spoke1["ops"].as_array().unwrap();
+    let remote_ops = fetch_ops_resp_spoke1.ops;
     assert_eq!(remote_ops.len(), 1);
     let op = &remote_ops[0];
     let expected_op = serde_json::json!({
@@ -136,7 +136,7 @@ async fn test_send_ops_e2e() {
         )
         .await
         .unwrap();
-    let remote_ops = send_ops_resp["ops"].as_array().unwrap();
+    let remote_ops = send_ops_resp.ops;
     assert_eq!(remote_ops.len(), 1);
 
     // Spoke 1 later fetches Spoke 2's op (transformed position).
@@ -151,10 +151,8 @@ async fn test_send_ops_e2e() {
         .editor
         .send_ops(spoke1_file.clone(), vec![])
         .await
-        .unwrap()["ops"]
-        .as_array()
         .unwrap()
-        .clone();
+        .ops;
     assert_eq!(ops_from_spoke2.len(), 1);
 
     setup.cleanup();

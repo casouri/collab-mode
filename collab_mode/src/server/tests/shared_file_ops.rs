@@ -75,7 +75,7 @@ async fn test_server_opens_own_shared_file() {
 
     // The lastSeq might be 0 initially since the server processes ops asynchronously
     // What's important is that the op was sent without error
-    let _last_seq = send_ops_resp["lastSeq"].as_u64().unwrap();
+    let _last_seq = send_ops_resp.last_seq;
 
     tracing::info!("Step 4: Verify spoke receives the op");
     // Spoke should receive RemoteOpsArrived notification
@@ -92,10 +92,13 @@ async fn test_server_opens_own_shared_file() {
         .await
         .unwrap();
 
-    let remote_ops = fetch_ops_resp["ops"].as_array().unwrap();
-    assert_eq!(remote_ops.len(), 1, "Spoke should receive 1 op from hub");
+    assert_eq!(
+        fetch_ops_resp.ops.len(),
+        1,
+        "Spoke should receive 1 op from hub"
+    );
 
-    let op = &remote_ops[0];
+    let op = &fetch_ops_resp.ops[0];
     let expected_op = serde_json::json!({
         "op": { "Ins": [[0, "Hub says: "]] },
         "siteId": hub_site_id,
@@ -173,7 +176,7 @@ async fn test_server_opens_own_file_before_remote() {
         .unwrap();
 
     // The lastSeq might be 0 initially since the server processes ops asynchronously
-    let _last_seq = send_ops_resp["lastSeq"].as_u64().unwrap();
+    let _last_seq = send_ops_resp.last_seq;
 
     tracing::info!("Step 4: Verify spoke receives the op");
     // Spoke should receive the op
@@ -189,8 +192,11 @@ async fn test_server_opens_own_file_before_remote() {
         .await
         .unwrap();
 
-    let remote_ops = fetch_ops_resp["ops"].as_array().unwrap();
-    assert_eq!(remote_ops.len(), 1, "Spoke should receive 1 op from hub");
+    assert_eq!(
+        fetch_ops_resp.ops.len(),
+        1,
+        "Spoke should receive 1 op from hub"
+    );
 
     tracing::info!("Test completed successfully - normal case works as expected");
 
