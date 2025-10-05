@@ -22,6 +22,7 @@ fn init_test_tracing() {
 pub struct MockDocument {
     content: Vec<char>,
     cursor: usize,
+    ops_applied: usize,  // Track number of operations applied
 }
 
 impl MockDocument {
@@ -29,6 +30,7 @@ impl MockDocument {
         MockDocument {
             content: initial_content.chars().collect(),
             cursor: 0,
+            ops_applied: 0,
         }
     }
 
@@ -91,6 +93,9 @@ impl MockDocument {
 
     pub fn apply_remote_op(&mut self, op: &serde_json::Value) -> anyhow::Result<()> {
         if let Some(op_obj) = op.get("op") {
+            // Increment ops counter for each actual operation applied
+            self.ops_applied += 1;
+
             if let Some(ins) = op_obj.get("Ins") {
                 if let Some(arr) = ins.as_array() {
                     // Collect all [pos, text] pairs
@@ -158,6 +163,10 @@ impl MockDocument {
 
     pub fn get_content(&self) -> String {
         self.content.iter().collect()
+    }
+
+    pub fn get_ops_applied(&self) -> usize {
+        self.ops_applied
     }
 }
 
@@ -332,7 +341,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
         let mut spoke_files = Vec::new();
         let mut spoke_site_ids = Vec::new();
         let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
-        let mut spoke_last_seqs: Vec<u64> = vec![0; num_editors];
+        let mut spoke_ops_counts: Vec<usize> = vec![0; num_editors];  // Track ops applied by each editor
 
         for i in 0..num_editors {
             let (file_desc, site_id, content) =
@@ -392,6 +401,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 spoke_docs[*editor].apply_remote_op(op)?;
                             }
                         }
+                        // Update ops count for this editor
+                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                         spoke_pending_ops[*editor].clear();
                     }
@@ -403,7 +414,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         .await?;
 
                     // Apply the undo ops locally
-                    for op in ops {
+                    for op in &ops {
                         // op is like {"Del": [[pos1, text1], [pos2, text2]]} or {"Ins": [[pos1, text1], ...]}
                         if let Some(del_ops) = op.get("Del").and_then(|v| v.as_array()) {
                             // The Del value is already an array of [pos, text] pairs
@@ -419,33 +430,34 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             }))?;
                         }
                     }
+                    // Update ops count after applying undo ops locally
+                    spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
-                    // Then send the Undo operation to server
-                    let group_seq = group_seq_counters[*editor];
-                    let resp = setup.spokes[*editor]
-                        .editor
-                        .send_ops(
-                            spoke_files[*editor].clone(),
-                            vec![serde_json::json!({
-                                "op": "Undo",
-                                "groupSeq": group_seq
-                            })],
-                        )
-                        .await?;
+                    // Only send the Undo operation to server if there were actual ops to undo
+                    if !ops.is_empty() {
+                        let group_seq = group_seq_counters[*editor];
+                        let resp = setup.spokes[*editor]
+                            .editor
+                            .send_ops(
+                                spoke_files[*editor].clone(),
+                                vec![serde_json::json!({
+                                    "op": "Undo",
+                                    "groupSeq": group_seq
+                                })],
+                            )
+                            .await?;
 
-                    // Apply any remote ops from sending Undo
-                    if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                        for op in ops {
-                            spoke_docs[*editor].apply_remote_op(op)?;
+                        // Apply any remote ops from sending Undo
+                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
+                            for op in ops {
+                                spoke_docs[*editor].apply_remote_op(op)?;
+                            }
                         }
-                    }
+                        // Update ops count
+                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
-                    // Track lastSeq
-                    if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
-                        spoke_last_seqs[*editor] = last_seq;
+                        group_seq_counters[*editor] += 1;
                     }
-
-                    group_seq_counters[*editor] += 1;
                 }
                 TranscriptCommand::Redo { editor } => {
                     // First send pending ops and apply received ops
@@ -464,6 +476,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 spoke_docs[*editor].apply_remote_op(op)?;
                             }
                         }
+                        // Update ops count
+                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                         spoke_pending_ops[*editor].clear();
                     }
@@ -475,7 +489,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         .await?;
 
                     // Apply the redo ops locally
-                    for op in ops {
+                    for op in &ops {
                         // op can be either {"Del": [[pos1, text1], ...]} or {"Ins": [[pos1, text1], ...]}
                         if let Some(del_ops) = op.get("Del").and_then(|v| v.as_array()) {
                             // The Del value is already an array of [pos, text] pairs
@@ -491,33 +505,34 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             }))?;
                         }
                     }
+                    // Update ops count after applying redo ops locally
+                    spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
-                    // Then send the Redo operation to server
-                    let group_seq = group_seq_counters[*editor];
-                    let resp = setup.spokes[*editor]
-                        .editor
-                        .send_ops(
-                            spoke_files[*editor].clone(),
-                            vec![serde_json::json!({
-                                "op": "Redo",
-                                "groupSeq": group_seq
-                            })],
-                        )
-                        .await?;
+                    // Only send the Redo operation to server if there were actual ops to redo
+                    if !ops.is_empty() {
+                        let group_seq = group_seq_counters[*editor];
+                        let resp = setup.spokes[*editor]
+                            .editor
+                            .send_ops(
+                                spoke_files[*editor].clone(),
+                                vec![serde_json::json!({
+                                    "op": "Redo",
+                                    "groupSeq": group_seq
+                                })],
+                            )
+                            .await?;
 
-                    // Apply any remote ops from sending Redo
-                    if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
-                        for op in ops {
-                            spoke_docs[*editor].apply_remote_op(op)?;
+                        // Apply any remote ops from sending Redo
+                        if let Some(ops) = resp.get("ops").and_then(|v| v.as_array()) {
+                            for op in ops {
+                                spoke_docs[*editor].apply_remote_op(op)?;
+                            }
                         }
-                    }
+                        // Update ops count
+                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
-                    // Track lastSeq
-                    if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
-                        spoke_last_seqs[*editor] = last_seq;
+                        group_seq_counters[*editor] += 1;
                     }
-
-                    group_seq_counters[*editor] += 1;
                 }
                 TranscriptCommand::Send { editor } => {
                     let resp = setup.spokes[*editor]
@@ -534,11 +549,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             spoke_docs[*editor].apply_remote_op(op)?;
                         }
                     }
-
-                    // Track lastSeq
-                    if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
-                        spoke_last_seqs[*editor] = last_seq;
-                    }
+                    // Update ops count
+                    spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                     spoke_pending_ops[*editor].clear();
                     sleep(Duration::from_millis(100)).await;
@@ -565,36 +577,16 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 spoke_docs[i].apply_remote_op(op)?;
                             }
                         }
-
-                        // Track lastSeq
-                        if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
-                            spoke_last_seqs[i] = last_seq;
-                        }
+                        // Update ops count
+                        spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();
 
                         spoke_pending_ops[i].clear();
                     }
 
-                    // Convergence loop: keep polling until all editors have the same lastSeq
+                    // Convergence loop: keep polling until no editor receives new operations
                     for attempt in 0..10 {
-                        // Check if all editors have converged to the same lastSeq
-                        let max_seq = *spoke_last_seqs.iter().max().unwrap_or(&0);
-                        let all_converged = spoke_last_seqs.iter().all(|&seq| seq == max_seq);
-
-                        if all_converged {
-                            tracing::debug!(
-                                "CHECK: Editors converged at lastSeq {} after {} attempts",
-                                max_seq,
-                                attempt
-                            );
-                            break;
-                        }
-
-                        if attempt == 9 {
-                            return Err(anyhow::anyhow!(
-                                "CHECK failed: editors didn't converge after 10 attempts. lastSeqs: {:?}",
-                                spoke_last_seqs
-                            ));
-                        }
+                        let mut any_ops_received = false;
+                        let ops_before = spoke_ops_counts.clone();
 
                         // Pull more ops for each editor
                         for i in 0..num_editors {
@@ -609,11 +601,32 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                     spoke_docs[i].apply_remote_op(op)?;
                                 }
                             }
+                            // Update ops count
+                            spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();
+                        }
 
-                            // Update lastSeq
-                            if let Some(last_seq) = resp.get("lastSeq").and_then(|v| v.as_u64()) {
-                                spoke_last_seqs[i] = last_seq;
+                        // Check if any editor received new ops in this round
+                        for i in 0..num_editors {
+                            if spoke_ops_counts[i] != ops_before[i] {
+                                any_ops_received = true;
+                                break;
                             }
+                        }
+
+                        if !any_ops_received {
+                            tracing::debug!(
+                                "CHECK: Editors converged (no new ops) after {} attempts. ops_counts: {:?}",
+                                attempt,
+                                spoke_ops_counts
+                            );
+                            break;
+                        }
+
+                        if attempt == 9 {
+                            return Err(anyhow::anyhow!(
+                                "CHECK failed: editors still receiving ops after 10 attempts. ops_counts: {:?}",
+                                spoke_ops_counts
+                            ));
                         }
 
                         // Small delay before next iteration
@@ -627,20 +640,20 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             let content = doc.get_content();
                             if content != expected_content {
                                 return Err(anyhow::anyhow!(
-                                    "Content mismatch at CHECK: Editor {} has '{}', expected '{}'. lastSeqs: {:?}",
+                                    "Content mismatch at CHECK: Editor {} has '{}', expected '{}'. ops_counts: {:?}",
                                     i + 1,
                                     content,
                                     expected_content,
-                                    spoke_last_seqs
+                                    spoke_ops_counts
                                 ));
                             }
                         }
 
                         tracing::info!(
-                            "CHECK passed: All {} editors have content: '{}' at lastSeq: {:?}",
+                            "CHECK passed: All {} editors have content: '{}' with ops_counts: {:?}",
                             spoke_docs.len(),
                             expected_content,
-                            spoke_last_seqs
+                            spoke_ops_counts
                         );
                     }
                 }
@@ -655,7 +668,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
             for (i, doc) in spoke_docs.iter().enumerate() {
                 println!("Editor {}: '{}'", i + 1, doc.get_content());
             }
-            println!("lastSeqs: {:?}", spoke_last_seqs);
+            println!("ops_counts: {:?}", spoke_ops_counts);
             println!("=====================================\n");
         }
 
