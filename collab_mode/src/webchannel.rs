@@ -16,11 +16,13 @@ use crate::{
     types::*,
 };
 use anyhow::anyhow;
+use async_trait::async_trait;
 use lsp_server::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_ice::state::ConnectionState;
@@ -30,6 +32,44 @@ use webrtc_util::Conn;
 
 const STREAM_ID_HALF: u16 = 2u16.pow(15);
 const STREAM_ID_INIT: u16 = 1;
+
+/// Trait for message channel operations. Provides async methods for
+/// sending, accepting, connecting, and broadcasting messages.
+#[async_trait]
+pub trait MsgChannel {
+    /// Send a message to a remote host. Doesn't block.
+    async fn send(
+        &self,
+        recipient: &ServerId,
+        req_id: Option<RequestId>,
+        msg: Msg,
+    ) -> anyhow::Result<()>;
+
+    /// Bind on signaling server, and run in a loop and accept
+    /// connections. For each connection, setup message handling
+    /// threads running in the background.
+    async fn accept(
+        &mut self,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+        transport_type: TransportType,
+    ) -> anyhow::Result<()>;
+
+    /// Connect to a remote host through signaling server. Setup
+    /// message handling threads that runs in the background. Blocks
+    /// until the connection is established.
+    async fn connect(
+        &self,
+        remote_hostid: ServerId,
+        my_hostid: ServerId,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+        transport_type: TransportType,
+    ) -> anyhow::Result<()>;
+
+    /// Broadcasts a message to all connected peers. Doesn't block.
+    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()>;
+}
 
 #[derive(fmt_derive::Debug, fmt_derive::Display)]
 pub enum WebchannelError {
@@ -171,7 +211,7 @@ impl WebChannel {
         is_trusted
     }
 
-    pub async fn accept_inner(
+    async fn accept_inner(
         &self,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
@@ -376,7 +416,6 @@ impl WebChannel {
     }
 
     /// Broadcasts a message to all connected peers. Doesn't block.
-    #[allow(dead_code)]
     pub async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
         let message = Message {
             host: self.my_hostid.clone(),
@@ -384,10 +423,36 @@ impl WebChannel {
             req_id,
         };
 
-        for (remote_hostid, tx) in self.assoc_tx.lock().unwrap().iter() {
-            tx.send(message.clone())
+        // Clone the entries to avoid holding the lock across await.
+        let peers: Vec<_> = self
+            .assoc_tx
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(hostid, tx)| (hostid.clone(), tx.clone()))
+            .collect();
+
+        let mut results = Vec::new();
+        for (remote_hostid, tx) in peers {
+            let result = tx
+                .send(message.clone())
                 .await
-                .map_err(|_| anyhow!("Can’t send msg to {}", remote_hostid,))?;
+                .map_err(|_| anyhow!("Can't send msg to {}", remote_hostid));
+            results.push(result);
+        }
+
+        // Check if any sends failed
+        let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+        if !errors.is_empty() {
+            return Err(anyhow!(
+                "Failed to broadcast to {} peer(s): {}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
 
         Ok(())
@@ -469,6 +534,50 @@ impl WebChannel {
         });
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl MsgChannel for WebChannel {
+    async fn send(
+        &self,
+        recipient: &ServerId,
+        req_id: Option<RequestId>,
+        msg: Msg,
+    ) -> anyhow::Result<()> {
+        self.send(recipient, req_id, msg).await
+    }
+
+    async fn accept(
+        &mut self,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+        transport_type: TransportType,
+    ) -> anyhow::Result<()> {
+        self.accept(my_key_cert, signaling_addr, transport_type)
+            .await
+    }
+
+    async fn connect(
+        &self,
+        remote_hostid: ServerId,
+        my_hostid: ServerId,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+        transport_type: TransportType,
+    ) -> anyhow::Result<()> {
+        self.connect(
+            remote_hostid,
+            my_hostid,
+            my_key_cert,
+            signaling_addr,
+            transport_type,
+        )
+        .await
+    }
+
+    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
+        self.broadcast(req_id, msg).await
     }
 }
 
@@ -826,6 +935,443 @@ async fn read_from_stream(
                 })
                 .await;
         }
+    }
+}
+
+// *** Test utilities
+
+/// Travel time configuration for message delivery
+#[derive(Debug, Clone)]
+pub enum TravelTime {
+    /// Random delay between min and max milliseconds
+    Random(u64, u64),
+    /// Fixed delay in milliseconds
+    Ms(u64),
+    /// Instant delivery with no delay
+    Instant,
+}
+
+/// State for a single host in the test factory
+struct HostState {
+    inbox: Vec<Message>,
+    msg_tx: mpsc::Sender<Message>,
+    deliverable: bool,
+}
+
+/// Shared state for the test factory
+struct FactoryState {
+    hosts: HashMap<ServerId, HostState>,
+}
+
+impl FactoryState {
+    /// Synchronous part of deliver - checks deliverable flag, drains inbox.
+    /// Returns messages and msg_tx without holding lock across await.
+    fn deliver_sync(
+        &mut self,
+        hostid: &ServerId,
+    ) -> anyhow::Result<(Vec<Message>, mpsc::Sender<Message>)> {
+        let host_state = self
+            .hosts
+            .get_mut(hostid)
+            .ok_or_else(|| anyhow!("Host {} not found", hostid))?;
+
+        if !host_state.deliverable {
+            return Err(anyhow!("Inbox for {} not deliverable", hostid));
+        }
+
+        let messages = std::mem::take(&mut host_state.inbox);
+        let msg_tx = host_state.msg_tx.clone();
+        Ok((messages, msg_tx))
+    }
+}
+
+/// Factory for creating test web channels with in-memory message passing
+pub struct TestWebChannelFactory {
+    state: Arc<Mutex<FactoryState>>,
+    travel_time: TravelTime,
+}
+
+impl TestWebChannelFactory {
+    pub fn new(travel_time: TravelTime) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FactoryState {
+                hosts: HashMap::new(),
+            })),
+            travel_time,
+        }
+    }
+
+    /// Create a new test channel for a host
+    pub fn get_channel(
+        self: &Arc<Self>,
+        my_hostid: ServerId,
+        msg_tx: mpsc::Sender<Message>,
+    ) -> TestWebChannel {
+        let mut state = self.state.lock().unwrap();
+        state.hosts.insert(
+            my_hostid.clone(),
+            HostState {
+                inbox: Vec::new(),
+                msg_tx,
+                deliverable: false,
+            },
+        );
+
+        TestWebChannel {
+            my_hostid,
+            factory: self.clone(),
+        }
+    }
+
+    /// Deliver messages from a host's inbox to its msg_tx.
+    /// Returns error if inbox is not marked as deliverable.
+    /// If travel_time is 0, delivers synchronously. Otherwise spawns a task
+    /// that waits for the travel time and then delivers all pending messages.
+    pub async fn deliver(&self, hostid: &ServerId) -> anyhow::Result<()> {
+        // Calculate travel time in milliseconds
+        let delay_ms = match &self.travel_time {
+            TravelTime::Instant => 0,
+            TravelTime::Ms(ms) => *ms,
+            TravelTime::Random(min, max) => rand::random::<u64>() % (max - min + 1) + min,
+        };
+
+        if delay_ms == 0 {
+            // Deliver synchronously
+            let (messages, msg_tx) = { self.state.lock().unwrap().deliver_sync(hostid)? };
+
+            for msg in messages {
+                msg_tx
+                    .send(msg)
+                    .await
+                    .map_err(|_| anyhow!("Channel broke for {}", hostid))?;
+            }
+
+            Ok(())
+        } else {
+            // Deliver asynchronously after delay
+            let hostid = hostid.clone();
+            let state = self.state.clone();
+
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+                let (messages, msg_tx) = match state.lock().unwrap().deliver_sync(&hostid) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::debug!("Failed to deliver to {}: {}", hostid, e);
+                        return;
+                    }
+                };
+
+                for msg in messages {
+                    if let Err(e) = msg_tx.send(msg).await {
+                        tracing::error!("Channel broke for {}: {}", hostid, e);
+                        break;
+                    }
+                }
+            });
+
+            Ok(())
+        }
+    }
+}
+
+/// Test web channel that uses in-memory message passing
+pub struct TestWebChannel {
+    my_hostid: ServerId,
+    factory: Arc<TestWebChannelFactory>,
+}
+
+#[async_trait]
+impl MsgChannel for TestWebChannel {
+    async fn send(
+        &self,
+        recipient: &ServerId,
+        req_id: Option<RequestId>,
+        msg: Msg,
+    ) -> anyhow::Result<()> {
+        let message = Message {
+            host: self.my_hostid.clone(),
+            body: msg,
+            req_id,
+        };
+
+        // Push to recipient's inbox
+        {
+            let mut state = self.factory.state.lock().unwrap();
+            let host_state = state
+                .hosts
+                .get_mut(recipient)
+                .ok_or_else(|| anyhow!("Recipient {} not found", recipient))?;
+
+            host_state.inbox.push(message);
+        }
+
+        // Deliver immediately using factory's deliver method
+        self.factory.deliver(recipient).await?;
+
+        Ok(())
+    }
+
+    async fn accept(
+        &mut self,
+        _my_key_cert: ArcKeyCert,
+        _signaling_addr: &str,
+        _transport_type: TransportType,
+    ) -> anyhow::Result<()> {
+        let mut state = self.factory.state.lock().unwrap();
+        let host_state = state
+            .hosts
+            .get_mut(&self.my_hostid)
+            .ok_or_else(|| anyhow!("Host {} not found", self.my_hostid))?;
+
+        host_state.deliverable = true;
+        Ok(())
+    }
+
+    async fn connect(
+        &self,
+        remote_hostid: ServerId,
+        _my_hostid: ServerId,
+        _my_key_cert: ArcKeyCert,
+        _signaling_addr: &str,
+        _transport_type: TransportType,
+    ) -> anyhow::Result<()> {
+        let mut state = self.factory.state.lock().unwrap();
+        let host_state = state
+            .hosts
+            .get_mut(&remote_hostid)
+            .ok_or_else(|| anyhow!("Remote host {} not found", remote_hostid))?;
+
+        host_state.deliverable = true;
+        Ok(())
+    }
+
+    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
+        let message = Message {
+            host: self.my_hostid.clone(),
+            body: msg,
+            req_id,
+        };
+
+        // Collect all deliverable host IDs and push message to their inboxes
+        let deliverable_hosts: Vec<_> = {
+            let mut state = self.factory.state.lock().unwrap();
+            state
+                .hosts
+                .iter_mut()
+                .filter(|(_, host_state)| host_state.deliverable)
+                .map(|(hostid, host_state)| {
+                    host_state.inbox.push(message.clone());
+                    hostid.clone()
+                })
+                .collect()
+        };
+
+        // Deliver to all hosts using factory's deliver method
+        let mut errors = Vec::new();
+        for hostid in deliverable_hosts {
+            if let Err(e) = self.factory.deliver(&hostid).await {
+                errors.push(e);
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(anyhow!(
+                "Failed to broadcast to {} peer(s): {}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn create_test_id(name: &str) -> ServerId {
+        format!("test-{}", name)
+    }
+
+    #[tokio::test]
+    async fn test_sync_send_instant() {
+        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Instant));
+
+        let (tx1, _rx1) = mpsc::channel::<Message>(10);
+        let (tx2, mut rx2) = mpsc::channel::<Message>(10);
+
+        let id1 = create_test_id("host1");
+        let id2 = create_test_id("host2");
+
+        let mut channel1 = factory.get_channel(id1.clone(), tx1);
+        let mut channel2 = factory.get_channel(id2.clone(), tx2);
+
+        // Mark both as deliverable
+        channel1
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("test1")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+        channel2
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("test2")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+
+        // Send message from channel1 to channel2
+        channel1
+            .send(&id2, None, Msg::FileShared(42))
+            .await
+            .unwrap();
+
+        // Should receive immediately with Instant travel time
+        let msg = rx2.recv().await.unwrap();
+        assert_eq!(msg.host, id1);
+        assert!(matches!(msg.body, Msg::FileShared(42)));
+    }
+
+    #[tokio::test]
+    async fn test_sync_send_ms_zero() {
+        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Ms(0)));
+
+        let (tx1, _rx1) = mpsc::channel::<Message>(10);
+        let (tx2, mut rx2) = mpsc::channel::<Message>(10);
+
+        let id1 = create_test_id("sender");
+        let id2 = create_test_id("receiver");
+
+        let mut channel1 = factory.get_channel(id1.clone(), tx1);
+        let mut channel2 = factory.get_channel(id2.clone(), tx2);
+
+        // Mark both as deliverable
+        channel1
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("test1")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+        channel2
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("test2")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+
+        // Send message
+        channel1
+            .send(&id2, None, Msg::FileShared(99))
+            .await
+            .unwrap();
+
+        // Should receive immediately with Ms(0)
+        let msg = rx2.recv().await.unwrap();
+        assert_eq!(msg.host, id1);
+        assert!(matches!(msg.body, Msg::FileShared(99)));
+    }
+
+    #[tokio::test]
+    async fn test_send_to_non_deliverable_fails() {
+        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Instant));
+
+        let (tx1, _rx1) = mpsc::channel::<Message>(10);
+        let (tx2, _rx2) = mpsc::channel::<Message>(10);
+
+        let id1 = create_test_id("sender");
+        let id2 = create_test_id("receiver");
+
+        let mut channel1 = factory.get_channel(id1.clone(), tx1);
+        let _channel2 = factory.get_channel(id2.clone(), tx2);
+
+        // Mark only sender as deliverable, NOT receiver
+        channel1
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("test1")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+
+        // Try to send to non-deliverable recipient - should fail
+        let result = channel1.send(&id2, None, Msg::FileShared(1)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not deliverable"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_broadcast() {
+        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Instant));
+
+        let (tx_sender, _rx_sender) = mpsc::channel::<Message>(10);
+        let (tx_recv1, mut rx_recv1) = mpsc::channel::<Message>(10);
+        let (tx_recv2, mut rx_recv2) = mpsc::channel::<Message>(10);
+
+        let id_sender = create_test_id("sender");
+        let id_recv1 = create_test_id("receiver1");
+        let id_recv2 = create_test_id("receiver2");
+
+        let mut channel_sender = factory.get_channel(id_sender.clone(), tx_sender);
+        let mut channel_recv1 = factory.get_channel(id_recv1.clone(), tx_recv1);
+        let mut channel_recv2 = factory.get_channel(id_recv2.clone(), tx_recv2);
+
+        // Mark all as deliverable
+        channel_sender
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("sender")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+        channel_recv1
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("recv1")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+        channel_recv2
+            .accept(
+                Arc::new(crate::config_man::create_key_cert("recv2")),
+                "test",
+                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+
+        // Broadcast from sender
+        channel_sender
+            .broadcast(None, Msg::FileShared(123))
+            .await
+            .unwrap();
+
+        // Both receivers should get the message
+        let msg1 = rx_recv1.recv().await.unwrap();
+        assert_eq!(msg1.host, id_sender);
+        assert!(matches!(msg1.body, Msg::FileShared(123)));
+
+        let msg2 = rx_recv2.recv().await.unwrap();
+        assert_eq!(msg2.host, id_sender);
+        assert!(matches!(msg2.body, Msg::FileShared(123)));
     }
 }
 
