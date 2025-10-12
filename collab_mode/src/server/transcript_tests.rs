@@ -347,6 +347,133 @@ async fn send_ops_and_apply_remote(
     Ok(())
 }
 
+// Helper function to validate content sync between MockDocument and server
+async fn validate_content_sync(
+    setup: &mut HubAndSpokeSetup,
+    editor_idx: usize,
+    spoke_files: &[serde_json::Value],
+    spoke_docs: &[MockDocument],
+) -> anyhow::Result<()> {
+    // Send OpenFile request to get current server content
+    let (_file_desc, _site_id, server_content) = setup.spokes[editor_idx]
+        .editor
+        .open_file(spoke_files[editor_idx].clone())
+        .await?;
+
+    let mock_content = spoke_docs[editor_idx].get_content();
+
+    if server_content != mock_content {
+        return Err(anyhow::anyhow!(
+            "Content sync error for Editor {}: server has '{}' ({} chars), mock has '{}' ({} chars)",
+            editor_idx + 1,
+            server_content,
+            server_content.len(),
+            mock_content,
+            mock_content.len()
+        ));
+    }
+
+    tracing::debug!(
+        "Content validation passed for Editor {}: {} chars",
+        editor_idx + 1,
+        server_content.len()
+    );
+
+    Ok(())
+}
+
+// Macro to handle errors with diagnostic dumping
+macro_rules! handle_error {
+    ($result:expr, $diagnostics:expr, $spoke_docs:expr, $spoke_pending_ops:expr, $spoke_ops_counts:expr, $group_seq_counters:expr) => {
+        match $result {
+            Ok(val) => val,
+            Err(e) => {
+                $diagnostics.dump_diagnostics(
+                    &e,
+                    $spoke_docs,
+                    $spoke_pending_ops,
+                    $spoke_ops_counts,
+                    $group_seq_counters,
+                );
+                return Err(e);
+            }
+        }
+    };
+}
+
+// Diagnostic state for error reporting
+struct DiagnosticState {
+    command_history: Vec<(usize, TranscriptCommand)>,
+    max_history: usize,
+}
+
+impl DiagnosticState {
+    fn new(max_history: usize) -> Self {
+        DiagnosticState {
+            command_history: Vec::new(),
+            max_history,
+        }
+    }
+
+    fn record_command(&mut self, idx: usize, cmd: TranscriptCommand) {
+        self.command_history.push((idx, cmd));
+        if self.command_history.len() > self.max_history {
+            self.command_history.remove(0);
+        }
+    }
+
+    fn dump_diagnostics(
+        &self,
+        error: &anyhow::Error,
+        spoke_docs: &[MockDocument],
+        spoke_pending_ops: &[Vec<serde_json::Value>],
+        spoke_ops_counts: &[usize],
+        group_seq_counters: &[u32],
+    ) {
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!("ERROR DIAGNOSTICS");
+        eprintln!("{}", "=".repeat(80));
+        eprintln!("Error: {}", error);
+        eprintln!();
+
+        // Dump command history
+        eprintln!(
+            "Command History (last {} commands):",
+            self.command_history.len()
+        );
+        for (idx, cmd) in &self.command_history {
+            eprintln!("  [{}] {:?}", idx + 1, cmd);
+        }
+        eprintln!();
+
+        // Dump mock document states
+        eprintln!("Mock Document States:");
+        for (i, doc) in spoke_docs.iter().enumerate() {
+            let content = doc.get_content();
+            eprintln!("  Editor {}:", i + 1);
+            eprintln!("    Content: '{}'", content);
+            eprintln!("    Length: {} chars", content.len());
+            eprintln!("    Cursor: {}", doc.cursor);
+            eprintln!("    Ops applied: {}", spoke_ops_counts[i]);
+            eprintln!("    Pending ops: {}", spoke_pending_ops[i].len());
+            eprintln!("    Group seq: {}", group_seq_counters[i]);
+        }
+        eprintln!();
+
+        // Dump pending operations
+        eprintln!("Pending Operations:");
+        for (i, pending) in spoke_pending_ops.iter().enumerate() {
+            if !pending.is_empty() {
+                eprintln!("  Editor {}:", i + 1);
+                for (j, op) in pending.iter().enumerate() {
+                    eprintln!("    [{}] {}", j, op);
+                }
+            }
+        }
+        eprintln!("{}\n", "=".repeat(80));
+    }
+}
+
 // Run a transcript test
 pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     init_test_tracing();
@@ -405,9 +532,15 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
         sleep(Duration::from_millis(200)).await;
 
+        // Initialize diagnostic state for error tracking
+        let mut diagnostics = DiagnosticState::new(10);
+
         // Execute commands
         for (cmd_idx, cmd) in commands.iter().enumerate() {
             tracing::debug!("Executing command {}: {:?}", cmd_idx + 1, cmd);
+
+            // Record command in history before executing
+            diagnostics.record_command(cmd_idx, cmd.clone());
 
             match cmd {
                 TranscriptCommand::Move { editor, offset } => {
@@ -432,25 +565,46 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 }
                 TranscriptCommand::Undo { editor } => {
                     // First send pending ops and apply received ops
-                    send_ops_and_apply_remote(
-                        &mut setup,
-                        *editor,
-                        &spoke_files,
-                        &mut spoke_pending_ops,
-                        &mut spoke_docs,
-                        &mut spoke_ops_counts,
-                    )
-                    .await?;
+                    handle_error!(
+                        send_ops_and_apply_remote(
+                            &mut setup,
+                            *editor,
+                            &spoke_files,
+                            &mut spoke_pending_ops,
+                            &mut spoke_docs,
+                            &mut spoke_ops_counts,
+                        )
+                        .await,
+                        &diagnostics,
+                        &spoke_docs,
+                        &spoke_pending_ops,
+                        &spoke_ops_counts,
+                        &group_seq_counters
+                    );
 
                     // Then send undo request
-                    let undo_resp = setup.spokes[*editor]
-                        .editor
-                        .send_undo(spoke_files[*editor].clone(), "Undo")
-                        .await?;
+                    let undo_resp = handle_error!(
+                        setup.spokes[*editor]
+                            .editor
+                            .send_undo(spoke_files[*editor].clone(), "Undo")
+                            .await,
+                        &diagnostics,
+                        &spoke_docs,
+                        &spoke_pending_ops,
+                        &spoke_ops_counts,
+                        &group_seq_counters
+                    );
 
                     // Apply the undo ops locally
                     for instr in &undo_resp.ops {
-                        spoke_docs[*editor].apply_edit_instruction(instr)?;
+                        handle_error!(
+                            spoke_docs[*editor].apply_edit_instruction(instr),
+                            &diagnostics,
+                            &spoke_docs,
+                            &spoke_pending_ops,
+                            &spoke_ops_counts,
+                            &group_seq_counters
+                        );
                     }
                     // Update ops count after applying undo ops locally
                     spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
@@ -458,20 +612,34 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     // Only send the Undo operation to server if there were actual ops to undo
                     if !undo_resp.ops.is_empty() {
                         let group_seq = group_seq_counters[*editor];
-                        let send_resp = setup.spokes[*editor]
-                            .editor
-                            .send_ops(
-                                spoke_files[*editor].clone(),
-                                vec![serde_json::json!({
-                                    "op": "Undo",
-                                    "groupSeq": group_seq
-                                })],
-                            )
-                            .await?;
+                        let send_resp = handle_error!(
+                            setup.spokes[*editor]
+                                .editor
+                                .send_ops(
+                                    spoke_files[*editor].clone(),
+                                    vec![serde_json::json!({
+                                        "op": "Undo",
+                                        "groupSeq": group_seq
+                                    })],
+                                )
+                                .await,
+                            &diagnostics,
+                            &spoke_docs,
+                            &spoke_pending_ops,
+                            &spoke_ops_counts,
+                            &group_seq_counters
+                        );
 
                         // Apply any remote ops from sending Undo
                         for lean_op in &send_resp.ops {
-                            spoke_docs[*editor].apply_edit_instruction(&lean_op.op)?;
+                            handle_error!(
+                                spoke_docs[*editor].apply_edit_instruction(&lean_op.op),
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            );
                         }
                         // Update ops count
                         spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
@@ -481,25 +649,46 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                 }
                 TranscriptCommand::Redo { editor } => {
                     // First send pending ops and apply received ops
-                    send_ops_and_apply_remote(
-                        &mut setup,
-                        *editor,
-                        &spoke_files,
-                        &mut spoke_pending_ops,
-                        &mut spoke_docs,
-                        &mut spoke_ops_counts,
-                    )
-                    .await?;
+                    handle_error!(
+                        send_ops_and_apply_remote(
+                            &mut setup,
+                            *editor,
+                            &spoke_files,
+                            &mut spoke_pending_ops,
+                            &mut spoke_docs,
+                            &mut spoke_ops_counts,
+                        )
+                        .await,
+                        &diagnostics,
+                        &spoke_docs,
+                        &spoke_pending_ops,
+                        &spoke_ops_counts,
+                        &group_seq_counters
+                    );
 
                     // Then send redo request
-                    let redo_resp = setup.spokes[*editor]
-                        .editor
-                        .send_undo(spoke_files[*editor].clone(), "Redo")
-                        .await?;
+                    let redo_resp = handle_error!(
+                        setup.spokes[*editor]
+                            .editor
+                            .send_undo(spoke_files[*editor].clone(), "Redo")
+                            .await,
+                        &diagnostics,
+                        &spoke_docs,
+                        &spoke_pending_ops,
+                        &spoke_ops_counts,
+                        &group_seq_counters
+                    );
 
                     // Apply the redo ops locally
                     for instr in &redo_resp.ops {
-                        spoke_docs[*editor].apply_edit_instruction(instr)?;
+                        handle_error!(
+                            spoke_docs[*editor].apply_edit_instruction(instr),
+                            &diagnostics,
+                            &spoke_docs,
+                            &spoke_pending_ops,
+                            &spoke_ops_counts,
+                            &group_seq_counters
+                        );
                     }
                     // Update ops count after applying redo ops locally
                     spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
@@ -507,20 +696,34 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     // Only send the Redo operation to server if there were actual ops to redo
                     if !redo_resp.ops.is_empty() {
                         let group_seq = group_seq_counters[*editor];
-                        let send_resp = setup.spokes[*editor]
-                            .editor
-                            .send_ops(
-                                spoke_files[*editor].clone(),
-                                vec![serde_json::json!({
-                                    "op": "Redo",
-                                    "groupSeq": group_seq
-                                })],
-                            )
-                            .await?;
+                        let send_resp = handle_error!(
+                            setup.spokes[*editor]
+                                .editor
+                                .send_ops(
+                                    spoke_files[*editor].clone(),
+                                    vec![serde_json::json!({
+                                        "op": "Redo",
+                                        "groupSeq": group_seq
+                                    })],
+                                )
+                                .await,
+                            &diagnostics,
+                            &spoke_docs,
+                            &spoke_pending_ops,
+                            &spoke_ops_counts,
+                            &group_seq_counters
+                        );
 
                         // Apply any remote ops from sending Redo
                         for lean_op in &send_resp.ops {
-                            spoke_docs[*editor].apply_edit_instruction(&lean_op.op)?;
+                            handle_error!(
+                                spoke_docs[*editor].apply_edit_instruction(&lean_op.op),
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            );
                         }
                         // Update ops count
                         spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
@@ -529,36 +732,81 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     }
                 }
                 TranscriptCommand::Send { editor } => {
-                    send_ops_and_apply_remote(
-                        &mut setup,
-                        *editor,
-                        &spoke_files,
-                        &mut spoke_pending_ops,
-                        &mut spoke_docs,
-                        &mut spoke_ops_counts,
-                    )
-                    .await?;
+                    handle_error!(
+                        send_ops_and_apply_remote(
+                            &mut setup,
+                            *editor,
+                            &spoke_files,
+                            &mut spoke_pending_ops,
+                            &mut spoke_docs,
+                            &mut spoke_ops_counts,
+                        )
+                        .await,
+                        &diagnostics,
+                        &spoke_docs,
+                        &spoke_pending_ops,
+                        &spoke_ops_counts,
+                        &group_seq_counters
+                    );
+
+                    // Validate content sync after sending ops
+                    handle_error!(
+                        validate_content_sync(
+                            &mut setup,
+                            *editor,
+                            &spoke_files,
+                            &spoke_docs,
+                        )
+                        .await,
+                        &diagnostics,
+                        &spoke_docs,
+                        &spoke_pending_ops,
+                        &spoke_ops_counts,
+                        &group_seq_counters
+                    );
+
                     sleep(Duration::from_millis(100)).await;
                 }
                 TranscriptCommand::Check => {
                     // First round: Send all pending ops for all editors
                     for i in 0..num_editors {
                         let send_resp = if !spoke_pending_ops[i].is_empty() {
-                            setup.spokes[i]
-                                .editor
-                                .send_ops(spoke_files[i].clone(), spoke_pending_ops[i].clone())
-                                .await?
+                            handle_error!(
+                                setup.spokes[i]
+                                    .editor
+                                    .send_ops(spoke_files[i].clone(), spoke_pending_ops[i].clone())
+                                    .await,
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            )
                         } else {
                             // Send empty request to fetch remote ops
-                            setup.spokes[i]
-                                .editor
-                                .send_ops(spoke_files[i].clone(), vec![])
-                                .await?
+                            handle_error!(
+                                setup.spokes[i]
+                                    .editor
+                                    .send_ops(spoke_files[i].clone(), vec![])
+                                    .await,
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            )
                         };
 
                         // Apply remote ops
                         for lean_op in &send_resp.ops {
-                            spoke_docs[i].apply_edit_instruction(&lean_op.op)?;
+                            handle_error!(
+                                spoke_docs[i].apply_edit_instruction(&lean_op.op),
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            );
                         }
                         // Update ops count
                         spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();
@@ -573,14 +821,28 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
                         // Pull more ops for each editor
                         for i in 0..num_editors {
-                            let send_resp = setup.spokes[i]
-                                .editor
-                                .send_ops(spoke_files[i].clone(), vec![])
-                                .await?;
+                            let send_resp = handle_error!(
+                                setup.spokes[i]
+                                    .editor
+                                    .send_ops(spoke_files[i].clone(), vec![])
+                                    .await,
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            );
 
                             // Apply any remote ops
                             for lean_op in &send_resp.ops {
-                                spoke_docs[i].apply_edit_instruction(&lean_op.op)?;
+                                handle_error!(
+                                    spoke_docs[i].apply_edit_instruction(&lean_op.op),
+                                    &diagnostics,
+                                    &spoke_docs,
+                                    &spoke_pending_ops,
+                                    &spoke_ops_counts,
+                                    &group_seq_counters
+                                );
                             }
                             // Update ops count
                             spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();

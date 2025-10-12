@@ -970,10 +970,6 @@ impl InternalDoc {
     /// Convert internal `op` from internal pos to editor pos, and
     /// apply it to the internal_doc.
     fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
-        tracing::debug!(?op, "convert_internal_op_and_apply");
-        tracing::debug!(?self.ranges, "ranges_before");
-        tracing::debug!(?self.cursors);
-
         let site = op.site();
         let mut cursor = self.get_cursor(&site);
         let instr = match op {
@@ -1001,6 +997,7 @@ impl InternalDoc {
                     }
                 }
                 self.cursors.insert(site.clone(), cursor);
+
                 if live {
                     EditInstruction::Ins(new_edits)
                 } else {
@@ -1009,9 +1006,6 @@ impl InternalDoc {
             }
         };
         self.check_cursor_positions();
-
-        tracing::debug!(?self.ranges, "ranges_after");
-        tracing::debug!(?instr, "converted_op");
 
         instr
     }
@@ -1334,6 +1328,12 @@ impl ClientEngine {
         }
     }
 
+    /// Return the length of the editor document according to the
+    /// engine's internal state.
+    pub fn editor_len(&self) -> u64 {
+        self.internal_doc.editor_len()
+    }
+
     /// Return whether the previous ops we sent to the server have
     /// been acked.
     fn prev_op_acked(&self) -> bool {
@@ -1391,38 +1391,44 @@ impl ClientEngine {
     /// Convert `ops` from an internal op to an editor op, but don’t
     /// apply `ops` to the internal doc.
     pub fn convert_internal_ops_dont_apply(&mut self, ops: Vec<FatOp>) -> Vec<EditInstruction> {
-        // We achieve "don’t apply" by applying each op, and then
-        // applying their inverse. Because for a series of ops, we
-        // have to apply the first op in order to transform the later
-        // op.
+        // We achieve "don't apply" by cloning the internal doc before
+        // applying ops. We need to apply ops to get the correct editor
+        // positions, but then restore the original state.
+        let mut cloned_internal_doc = self.internal_doc.clone();
         let mut converted_ops = vec![];
         for op in ops.iter() {
-            let converted_op = self
-                .internal_doc
-                .convert_internal_op_and_apply(op.op.clone());
+            let converted_op = cloned_internal_doc.convert_internal_op_and_apply(op.op.clone());
             converted_ops.push(converted_op);
         }
-
-        // If the user press "undo" where there’s no more ops to undo,
-        // we return an empty list.
-        if ops.len() > 0 {
-            // Now we need to reverse the affect of applying those
-            // ops. Suppose ops = [1 2 3 4], now mini_history is [1 2
-            // 3 4], we start from inverting 4 and applying I(4). Now
-            // mini_history is [1 2 3 4 I(4)], then we inverse 3,
-            // transform it against 3 4 I(4), now mini_history is [1 2
-            // 3 4 I(4) I(3)], and so on.
-            let mut mini_history = ops.clone();
-            for idx in (0..mini_history.len()).rev() {
-                let mut op = mini_history[idx].clone();
-                op.inverse();
-                op.batch_transform(&mini_history[idx + 1..]);
-                self.internal_doc
-                    .convert_internal_op_and_apply(op.op.clone());
-                mini_history.push(op);
-            }
-        }
         converted_ops
+
+        // For now we're cloning the internal doc for converting the
+        // ops, but we can't convert_and_apply and then "revert" the
+        // internal doc back, because if the internal doc is
+        // [Live(0-10), Dead(10-20), Live(20-30)], and we apply
+        // mark_dead(0, 30), then apply its inverse mark_live(0-30),
+        // we don't get the original state back but rather
+        // [Live(0-30)].
+
+        // If the user press "undo" where there's no more ops to undo,
+        // we return an empty list.
+        // if ops.len() > 0 {
+        //     // Now we need to reverse the affect of applying those
+        //     // ops. Suppose ops = [1 2 3 4], now mini_history is [1 2
+        //     // 3 4], we start from inverting 4 and applying I(4). Now
+        //     // mini_history is [1 2 3 4 I(4)], then we inverse 3,
+        //     // transform it against 3 4 I(4), now mini_history is [1 2
+        //     // 3 4 I(4) I(3)], and so on.
+        //     let mut mini_history = ops.clone();
+        //     for idx in (0..mini_history.len()).rev() {
+        //         let mut op = mini_history[idx].clone();
+        //         op.inverse();
+        //         op.batch_transform(&mini_history[idx + 1..]);
+        //         self.internal_doc
+        //             .convert_internal_op_and_apply(op.op.clone());
+        //         mini_history.push(op);
+        //     }
+        // }
     }
 
     /// Process local op, convert each op to two things: FatOp and
