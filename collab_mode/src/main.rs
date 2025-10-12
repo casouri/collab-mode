@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
             let port = socket_port.clone();
 
             let _ = runtime.spawn(async move {
-                let res = server.run(server_out_tx, server_in_rx).await;
+                let res = server.run(server_out_tx, server_in_rx, None).await;
                 if let Err(err) = res {
                     panic!("Server exited with error: {:#?}", err);
                 }

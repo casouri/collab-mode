@@ -56,8 +56,10 @@ async fn test_expand_project_paths_relative_error() {
 #[tokio::test]
 async fn test_declare_projects_relative_path_error() {
     // DeclareProjects should return error for relative paths.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Try to declare a project with a relative path.
     let result = setup
@@ -124,8 +126,11 @@ async fn test_server_run_config_projects_expansion() {
     let (server_to_editor_tx, mut server_to_editor_rx) = mpsc::channel(100);
 
     // Run server in background task.
-    let server_task =
-        tokio::spawn(async move { server.run(server_to_editor_tx, editor_to_server_rx).await });
+    let server_task = tokio::spawn(async move {
+        server
+            .run(server_to_editor_tx, editor_to_server_rx, None)
+            .await
+    });
 
     // Send Initialize request to verify server is running.
     let init_request = lsp_server::Request {

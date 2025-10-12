@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn test_list_files_top_level() {
     // Test: List top-level projects and virtual projects.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Create two test projects.
     let project1_dir = super::create_test_project().unwrap();
@@ -35,7 +37,7 @@ async fn test_list_files_top_level() {
             "ListProjects",
             serde_json::json!({
                 "hostId": setup.hub.id.clone(),
-                "signalingAddr": env.signaling_url()
+                "signalingAddr": "test"
             }),
         )
         .await

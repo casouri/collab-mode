@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn test_send_info_local_file() {
     // Send info for a local file; spoke should receive InfoReceived.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Share a local file on hub.
     let (hub_file, _site_id) = setup
@@ -77,8 +79,10 @@ async fn test_send_info_local_file() {
 #[tokio::test]
 async fn test_send_info_remote_file() {
     // Spoke sends info for a remote file; hub/subscribers should receive it.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 2, None)
+        .await
+        .unwrap();
 
     // Hub shares a file.
     let (_hub_file, _site_id) = setup
@@ -170,8 +174,10 @@ async fn test_send_info_remote_file() {
 #[tokio::test]
 async fn test_send_info_multiple_subscribers() {
     // Hub sends info; all spokes subscribed to the file should receive it.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 3, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 3, None)
+        .await
+        .unwrap();
 
     // Hub shares a file.
     let (hub_file, _site_id) = setup

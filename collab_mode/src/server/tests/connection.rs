@@ -5,7 +5,7 @@ async fn test_accept_connect() {
     // Test: Basic connection establishment between two servers.
     // Expected: Both editors receive Connected messages indicating successful connection.
 
-    let env = TestEnvironment::new().await.unwrap();
+    let factory = TestChannelFactory::new();
 
     let id1 = "server1".to_string();
     let id2 = "server2".to_string();
@@ -23,17 +23,21 @@ async fn test_accept_connect() {
     let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
     let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
 
+    let factory_arc = factory.inner();
+
     let server1_handle = {
+        let factory_arc = factory_arc.clone();
         tokio::spawn(async move {
-            if let Err(e) = server1.run(server_tx1, server_rx1).await {
+            if let Err(e) = server1.run(server_tx1, server_rx1, Some(factory_arc)).await {
                 tracing::error!("Server1 error: {}", e);
             }
         })
     };
 
     let server2_handle = {
+        let factory_arc = factory_arc.clone();
         tokio::spawn(async move {
-            if let Err(e) = server2.run(server_tx2, server_rx2).await {
+            if let Err(e) = server2.run(server_tx2, server_rx2, Some(factory_arc)).await {
                 tracing::error!("Server2 error: {}", e);
             }
         })
@@ -45,7 +49,7 @@ async fn test_accept_connect() {
             "AcceptConnection",
             serde_json::json!({
                 "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "transportType": "SCTP",
             }),
         )
@@ -66,7 +70,7 @@ async fn test_accept_connect() {
             "Connect",
             serde_json::json!({
                 "hostId": id1.clone(),
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "transportType": "SCTP",
             }),
         )

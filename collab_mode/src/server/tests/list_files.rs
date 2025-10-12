@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn test_list_files_project_directory() {
     // List files in a specific project directory.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     let project_dir = super::create_complex_project().unwrap();
     let project_path = project_dir.path().to_string_lossy().to_string();
@@ -30,7 +32,7 @@ async fn test_list_files_project_directory() {
                     "project": "Project2",
                     "file": "src"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -60,7 +62,7 @@ async fn test_list_files_project_directory() {
                     "project": "Project2",
                     "file": "src/modules"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -86,8 +88,10 @@ async fn test_list_files_project_directory() {
 #[tokio::test]
 async fn test_list_files_from_remote() {
     // Spoke requests listing from hub.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 2, None)
+        .await
+        .unwrap();
 
     // Create project and declare on hub.
     let project_dir = super::create_complex_project().unwrap();
@@ -113,7 +117,7 @@ async fn test_list_files_from_remote() {
                     "project": "Project2",
                     "file": "src/modules"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -139,7 +143,7 @@ async fn test_list_files_from_remote() {
                     "project": "Project2",
                     "file": "src/modules"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -158,8 +162,10 @@ async fn test_list_files_from_remote() {
 #[tokio::test]
 async fn test_list_files_project_not_found() {
     // Request listing with invalid project ID.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     let req_id = 1;
     setup.spokes[0]
@@ -173,7 +179,7 @@ async fn test_list_files_project_not_found() {
                     "project": "/non/existent/project",
                     "file": "src"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -191,8 +197,10 @@ async fn test_list_files_project_not_found() {
 #[tokio::test]
 async fn test_list_files_not_directory() {
     // Request listing of a file path (not directory).
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     let project_dir = super::create_test_project().unwrap();
     let project_path = project_dir.path().to_string_lossy().to_string();
@@ -218,7 +226,7 @@ async fn test_list_files_not_directory() {
                     "project": "TestProject",
                     "file": "test.txt"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -234,8 +242,10 @@ async fn test_list_files_not_directory() {
 #[tokio::test]
 async fn test_list_files_empty_directory() {
     // List an empty directory.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     let project_dir = super::create_complex_project().unwrap();
     let project_path = project_dir.path().to_string_lossy().to_string();
@@ -261,7 +271,7 @@ async fn test_list_files_empty_directory() {
                     "project": "TestProject",
                     "file": "empty"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -280,8 +290,10 @@ async fn test_list_files_empty_directory() {
 #[tokio::test]
 async fn test_list_files_nested_structure() {
     // Verify list of nested structure.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     let project_dir = super::create_complex_project().unwrap();
     let project_path = project_dir.path().to_string_lossy().to_string();
@@ -305,7 +317,7 @@ async fn test_list_files_nested_structure() {
                     "project": "TestProject",
                     "file": "src/modules"
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )
@@ -328,7 +340,7 @@ async fn test_list_files_nested_structure() {
 
 #[tokio::test]
 async fn test_list_files_sorted_alphanumerically() {
-    let mut env = TestEnvironment::new().await.unwrap();
+    let mut env = TestChannelFactory::new();
     let project_dir = tempfile::TempDir::new().unwrap();
 
     // Files intentionally out of order.
@@ -367,7 +379,7 @@ async fn test_list_files_sorted_alphanumerically() {
                     "project": "TestProject",
                     "file": ""
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )

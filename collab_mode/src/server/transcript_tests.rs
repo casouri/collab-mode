@@ -108,6 +108,22 @@ impl MockDocument {
                 inserts.sort_by(|a, b| b.0.cmp(&a.0));
 
                 for (pos, text) in inserts {
+                    let doc_len = self.content.len();
+                    tracing::debug!(
+                        pos,
+                        doc_len,
+                        text_len = text.chars().count(),
+                        ops_applied = self.ops_applied,
+                        "MockDocument applying Ins"
+                    );
+                    if pos > doc_len {
+                        return Err(anyhow::anyhow!(
+                            "Insert position {} out of bounds (doc_len: {}, text: '{}')",
+                            pos,
+                            doc_len,
+                            text
+                        ));
+                    }
                     let chars: Vec<char> = text.chars().collect();
                     for (i, ch) in chars.iter().enumerate() {
                         self.content.insert(pos + i, *ch);
@@ -317,6 +333,17 @@ async fn send_ops_and_apply_remote(
     spoke_ops_counts[editor_idx] = spoke_docs[editor_idx].get_ops_applied();
     spoke_pending_ops[editor_idx].clear();
 
+    // Check if doc length matches server's gapbuf length
+    let mock_len = spoke_docs[editor_idx].get_content().len() as u64;
+    if mock_len != send_resp.doc_len {
+        return Err(anyhow::anyhow!(
+            "MISMATCH: Editor {} MockDocument length {} != server gapbuf length {}",
+            editor_idx + 1,
+            mock_len,
+            send_resp.doc_len
+        ));
+    }
+
     Ok(())
 }
 
@@ -341,8 +368,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
     }
 
     // Setup test environment
-    let _env = TestEnvironment::new().await?;
-    let mut setup = match setup_hub_and_spoke_servers(&_env, num_editors, None).await {
+    let factory = TestChannelFactory::new();
+    let mut setup = match setup_hub_and_spoke_servers(&factory, num_editors, None).await {
         Ok(s) => s,
         Err(e) => return Err(e),
     };
@@ -718,4 +745,4 @@ async fn test_all_transcripts() {
 }
 
 // Mock structures from tests.rs - these need to be available
-use super::tests::{setup_hub_and_spoke_servers, HubAndSpokeSetup, TestEnvironment};
+use super::tests::{setup_hub_and_spoke_servers, HubAndSpokeSetup, TestChannelFactory};

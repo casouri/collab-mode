@@ -2,8 +2,10 @@ use super::*;
 
 #[tokio::test]
 async fn test_delete_file() {
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 2, None)
+        .await
+        .unwrap();
 
     // Create a test project with some files and directories.
     let test_dir = tempfile::tempdir().unwrap();
@@ -149,11 +151,11 @@ async fn test_delete_file() {
 
 #[tokio::test]
 async fn test_delete_file_permission_denied() {
-    let env = TestEnvironment::new().await.unwrap();
+    let factory = TestChannelFactory::new();
 
     // Set up hub and spoke with delete permission denied.
     let mut setup = setup_hub_and_spoke_servers(
-        &env,
+        &factory,
         1,
         Some(vec![Permission {
             write: true,

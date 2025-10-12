@@ -2,8 +2,10 @@ use super::*;
 
 #[tokio::test]
 async fn test_send_ops_e2e() {
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 2, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 2, None)
+        .await
+        .unwrap();
 
     // Create test project with a file and declare on hub.
     let project_dir = super::create_test_project().unwrap();
@@ -160,11 +162,11 @@ async fn test_send_ops_e2e() {
 
 #[tokio::test]
 async fn test_send_ops_permission_denied() {
-    let env = TestEnvironment::new().await.unwrap();
+    let factory = TestChannelFactory::new();
 
     // Set up hub and spoke with write permission denied.
     let mut setup = setup_hub_and_spoke_servers(
-        &env,
+        &factory,
         1,
         Some(vec![Permission {
             write: false,

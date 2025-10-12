@@ -1077,6 +1077,7 @@ impl TestWebChannelFactory {
 }
 
 /// Test web channel that uses in-memory message passing
+#[derive(Clone)]
 pub struct TestWebChannel {
     my_hostid: ServerId,
     factory: Arc<TestWebChannelFactory>,
@@ -1137,13 +1138,60 @@ impl MsgChannel for TestWebChannel {
         _signaling_addr: &str,
         _transport_type: TransportType,
     ) -> anyhow::Result<()> {
-        let mut state = self.factory.state.lock().unwrap();
-        let host_state = state
-            .hosts
-            .get_mut(&remote_hostid)
-            .ok_or_else(|| anyhow!("Remote host {} not found", remote_hostid))?;
+        // Mark both self and remote as deliverable
+        {
+            let mut state = self.factory.state.lock().unwrap();
 
-        host_state.deliverable = true;
+            // Mark remote as deliverable
+            let remote_host_state = state
+                .hosts
+                .get_mut(&remote_hostid)
+                .ok_or_else(|| anyhow!("Remote host {} not found", remote_hostid))?;
+            remote_host_state.deliverable = true;
+
+            // Mark self as deliverable too
+            let my_host_state = state
+                .hosts
+                .get_mut(&self.my_hostid)
+                .ok_or_else(|| anyhow!("My host {} not found", self.my_hostid))?;
+            my_host_state.deliverable = true;
+        }
+
+        // Send Hey messages bidirectionally to establish connection
+        // From connector to remote
+        self.send(
+            &remote_hostid,
+            None,
+            Msg::Hey(HeyMessage {
+                message: "Nice to meet ya".to_string(),
+                credentials: "".to_string(),
+                version: "v1.0.0".to_string(),
+            }),
+        )
+        .await?;
+
+        // From remote back to connector (simulate bidirectional handshake)
+        {
+            let mut state = self.factory.state.lock().unwrap();
+            let my_host_state = state
+                .hosts
+                .get_mut(&self.my_hostid)
+                .ok_or_else(|| anyhow!("My host {} not found", self.my_hostid))?;
+
+            my_host_state.inbox.push(Message {
+                host: remote_hostid.clone(),
+                body: Msg::Hey(HeyMessage {
+                    message: "Welcome to my server".to_string(),
+                    credentials: "".to_string(),
+                    version: "v1.0.0".to_string(),
+                }),
+                req_id: None,
+            });
+        }
+
+        // Deliver the Hey from remote to self
+        self.factory.deliver(&self.my_hostid).await?;
+
         Ok(())
     }
 

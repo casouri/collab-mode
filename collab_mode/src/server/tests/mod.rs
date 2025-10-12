@@ -8,6 +8,7 @@ pub use super::*;
 use crate::config_man::{ConfigManager, Permission};
 use crate::message::{SendOpsResp, UndoResp};
 use crate::signaling;
+use crate::webchannel::{TestWebChannel, TestWebChannelFactory, TravelTime};
 use rand::Rng;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -35,6 +36,33 @@ pub struct TestEnvironment {
     signaling_addr: String,
     signaling_task: Option<tokio::task::JoinHandle<()>>,
     temp_dir: tempfile::TempDir,
+}
+
+/// Factory for creating test web channels for server tests
+#[cfg(test)]
+pub struct TestChannelFactory {
+    factory: Arc<TestWebChannelFactory>,
+}
+
+impl TestChannelFactory {
+    pub fn new() -> Self {
+        init_test_tracing();
+        Self {
+            factory: Arc::new(TestWebChannelFactory::new(TravelTime::Instant)),
+        }
+    }
+
+    pub fn get_channel(
+        &self,
+        host_id: ServerId,
+        msg_tx: mpsc::Sender<webchannel::Message>,
+    ) -> TestWebChannel {
+        self.factory.get_channel(host_id, msg_tx)
+    }
+
+    pub fn inner(&self) -> Arc<TestWebChannelFactory> {
+        self.factory.clone()
+    }
 }
 
 fn get_random_port() -> u16 {
@@ -567,7 +595,7 @@ impl HubAndSpokeSetup {
 /// one for each spoke. If not provided, all spokes get full permissions.
 #[cfg(test)]
 pub async fn setup_hub_and_spoke_servers(
-    env: &TestEnvironment,
+    factory: &TestChannelFactory,
     num_spokes: usize,
     spoke_permissions: Option<Vec<Permission>>,
 ) -> anyhow::Result<HubAndSpokeSetup> {
@@ -616,11 +644,15 @@ pub async fn setup_hub_and_spoke_servers(
     let mut hub_server = Server::new(hub_id.clone(), hub_config)?;
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
 
-    let hub_handle = tokio::spawn(async move {
-        if let Err(e) = hub_server.run(hub_tx, hub_rx).await {
-            tracing::error!("Hub server error: {}", e);
-        }
-    });
+    let factory_arc = factory.inner();
+    let hub_handle = {
+        let factory_arc = factory_arc.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hub_server.run(hub_tx, hub_rx, Some(factory_arc)).await {
+                tracing::error!("Hub server error: {}", e);
+            }
+        })
+    };
 
     // Hub starts accepting connections.
     tracing::info!("Hub server {} starting to accept connections", hub_id);
@@ -629,7 +661,7 @@ pub async fn setup_hub_and_spoke_servers(
             "AcceptConnection",
             serde_json::json!({
                 "hostId": hub_id.clone(),
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "transportType": "SCTP",
             }),
         )
@@ -663,11 +695,17 @@ pub async fn setup_hub_and_spoke_servers(
         let mut spoke_server = Server::new(spoke_id.clone(), spoke_config)?;
         let (mut spoke_editor, spoke_tx, spoke_rx) = MockEditor::new();
 
-        let spoke_handle = tokio::spawn(async move {
-            if let Err(e) = spoke_server.run(spoke_tx, spoke_rx).await {
-                tracing::error!("Spoke server {} error: {}", i + 1, e);
-            }
-        });
+        let spoke_handle = {
+            let factory_arc = factory_arc.clone();
+            tokio::spawn(async move {
+                if let Err(e) = spoke_server
+                    .run(spoke_tx, spoke_rx, Some(factory_arc))
+                    .await
+                {
+                    tracing::error!("Spoke server {} error: {}", i + 1, e);
+                }
+            })
+        };
 
         // Spoke connects to hub.
         tracing::info!("Spoke server {} connecting to hub {}", spoke_id, hub_id);
@@ -676,7 +714,7 @@ pub async fn setup_hub_and_spoke_servers(
                 "Connect",
                 serde_json::json!({
                     "hostId": hub_id.clone(),
-                    "signalingAddr": env.signaling_url(),
+                    "signalingAddr": "test",
                     "transportType": "SCTP",
                 }),
             )

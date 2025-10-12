@@ -6,8 +6,10 @@ use super::*;
 #[tokio::test]
 async fn test_local_ops_sent_to_remote_subscribers() {
     init_test_tracing();
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Step 1: Hub creates/shares a file (hub is the owner)
     let (hub_file_desc, hub_site_id) = setup
@@ -234,8 +236,10 @@ async fn test_local_ops_sent_to_remote_subscribers() {
 #[tokio::test]
 async fn test_bidirectional_ops_hub_owned_file() {
     init_test_tracing();
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Hub creates a file
     let (hub_file_desc, _) = setup

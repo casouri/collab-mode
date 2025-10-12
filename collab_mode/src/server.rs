@@ -3,7 +3,7 @@ use crate::engine::{ClientEngine, ServerEngine};
 use crate::message::{self, *};
 use crate::signaling::SignalingError;
 use crate::types::*;
-use crate::webchannel::{self, WebChannel};
+use crate::webchannel::{self, MsgChannel, TestWebChannel, WebChannel};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -131,6 +131,83 @@ impl RemoteState {
     }
 }
 
+/// Wrapper enum to support both real and test web channels
+#[derive(Clone)]
+enum ChannelImpl {
+    Real(WebChannel),
+    Test(TestWebChannel),
+}
+
+#[async_trait::async_trait]
+impl MsgChannel for ChannelImpl {
+    async fn send(
+        &self,
+        recipient: &ServerId,
+        req_id: Option<lsp_server::RequestId>,
+        msg: message::Msg,
+    ) -> anyhow::Result<()> {
+        match self {
+            ChannelImpl::Real(c) => c.send(recipient, req_id, msg).await,
+            ChannelImpl::Test(c) => c.send(recipient, req_id, msg).await,
+        }
+    }
+
+    async fn accept(
+        &mut self,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+        transport_type: webchannel::TransportType,
+    ) -> anyhow::Result<()> {
+        match self {
+            ChannelImpl::Real(c) => c.accept(my_key_cert, signaling_addr, transport_type).await,
+            ChannelImpl::Test(c) => c.accept(my_key_cert, signaling_addr, transport_type).await,
+        }
+    }
+
+    async fn connect(
+        &self,
+        remote_hostid: ServerId,
+        my_hostid: ServerId,
+        my_key_cert: ArcKeyCert,
+        signaling_addr: &str,
+        transport_type: webchannel::TransportType,
+    ) -> anyhow::Result<()> {
+        match self {
+            ChannelImpl::Real(c) => {
+                c.connect(
+                    remote_hostid,
+                    my_hostid,
+                    my_key_cert,
+                    signaling_addr,
+                    transport_type,
+                )
+                .await
+            }
+            ChannelImpl::Test(c) => {
+                c.connect(
+                    remote_hostid,
+                    my_hostid,
+                    my_key_cert,
+                    signaling_addr,
+                    transport_type,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn broadcast(
+        &self,
+        req_id: Option<lsp_server::RequestId>,
+        msg: message::Msg,
+    ) -> anyhow::Result<()> {
+        match self {
+            ChannelImpl::Real(c) => c.broadcast(req_id, msg).await,
+            ChannelImpl::Test(c) => c.broadcast(req_id, msg).await,
+        }
+    }
+}
+
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server. Once set, this cannot change, because
@@ -201,6 +278,16 @@ impl Doc {
         match instr {
             EditInstruction::Ins(edits) => {
                 for (pos, str) in edits.into_iter().rev() {
+                    let gapbuf_len = self.buffer.len();
+                    tracing::debug!(
+                        pos,
+                        gapbuf_len,
+                        text_len = str.chars().count(),
+                        "LocalDoc applying Ins to gapbuf"
+                    );
+                    if pos as usize > gapbuf_len {
+                        tracing::error!(pos, gapbuf_len, "ERROR: pos > gapbuf_len before insert!");
+                    }
                     self.buffer.insert_many(pos as usize, str.chars());
                 }
             }
@@ -247,6 +334,16 @@ impl RemoteDoc {
         match instruction {
             EditInstruction::Ins(edits) => {
                 for (pos, str) in edits.iter().rev() {
+                    let gapbuf_len = self.buffer.len();
+                    tracing::debug!(
+                        pos,
+                        gapbuf_len,
+                        text_len = str.chars().count(),
+                        "RemoteDoc applying Ins to gapbuf"
+                    );
+                    if *pos as usize > gapbuf_len {
+                        tracing::error!(pos, gapbuf_len, "ERROR: pos > gapbuf_len before insert!");
+                    }
                     self.buffer.insert_many(*pos as usize, str.chars());
                 }
             }
@@ -380,16 +477,21 @@ impl Server {
         &mut self,
         editor_tx: mpsc::Sender<lsp_server::Message>,
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
+        test_channel_factory: Option<Arc<webchannel::TestWebChannelFactory>>,
     ) -> anyhow::Result<()> {
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
 
-        // Use the Server's shared trusted_hosts and accept_mode
-        let webchannel = WebChannel::new(
-            self.host_id.clone(),
-            msg_tx,
-            self.trusted_hosts.clone(),
-            self.accept_mode.clone(),
-        );
+        // Use the Server's shared trusted_hosts and accept_mode, or test channel if provided
+        let webchannel = if let Some(factory) = test_channel_factory {
+            ChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx))
+        } else {
+            ChannelImpl::Real(WebChannel::new(
+                self.host_id.clone(),
+                msg_tx,
+                self.trusted_hosts.clone(),
+                self.accept_mode.clone(),
+            ))
+        };
 
         // Add initial projects
         let mut projects = self.config.config().projects;
@@ -514,7 +616,7 @@ impl Server {
         &mut self,
         msg: lsp_server::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        webchannel: &ChannelImpl,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
@@ -823,7 +925,7 @@ impl Server {
         &mut self,
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &WebChannel,
+        webchannel: &ChannelImpl,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
@@ -944,15 +1046,26 @@ impl Server {
                 file,
                 message,
             } => {
-                next.send_notif(
-                    NotificationCode::ErrorResponse,
-                    ErrorResponseNote {
-                        code,
-                        file,
-                        message,
-                    },
-                )
-                .await;
+                // If this is a response to a request, send error response to editor
+                if msg.req_id.is_some() {
+                    let err = lsp_server::ResponseError {
+                        code: code as i32,
+                        message: message.clone(),
+                        data: None,
+                    };
+                    next.send_resp((), Some(err)).await;
+                } else {
+                    // Otherwise send notification
+                    next.send_notif(
+                        NotificationCode::ErrorResponse,
+                        ErrorResponseNote {
+                            code,
+                            file,
+                            message,
+                        },
+                    )
+                    .await;
+                }
                 Ok(())
             }
             Msg::RequestFile(file_desc, mode) => {
@@ -2289,6 +2402,7 @@ impl Server {
         let resp = SendOpsResp {
             ops: lean_ops,
             last_seq: remote_doc.engine.current_gseq(),
+            doc_len: remote_doc.buffer.len() as u64,
         };
         next.send_resp(resp, None).await;
         Ok(())
@@ -3047,14 +3161,14 @@ impl Server {
 struct Next<'a> {
     editor_tx: &'a mpsc::Sender<lsp_server::Message>,
     req_id: Option<lsp_server::RequestId>,
-    webchannel: &'a WebChannel,
+    webchannel: &'a ChannelImpl,
 }
 
 impl<'a> Next<'a> {
     fn new(
         editor_tx: &'a mpsc::Sender<lsp_server::Message>,
         req_id: Option<lsp_server::RequestId>,
-        webchannel: &'a WebChannel,
+        webchannel: &'a ChannelImpl,
     ) -> Self {
         Next {
             editor_tx,
@@ -3120,7 +3234,7 @@ async fn send_response(
 
 /// Send a message to a remote host via WebChannel with error logging.
 async fn send_to_remote(
-    webchannel: &WebChannel,
+    webchannel: &ChannelImpl,
     host_id: &ServerId,
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,

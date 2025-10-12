@@ -10,8 +10,10 @@ async fn test_server_opens_own_shared_file() {
     // 4. Hub sends an op to the file
     // Previously this would fail with "File not found" because hub didn't create a RemoteDoc for itself
 
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Create test project with a file and declare on hub
     let project_dir = super::create_test_project().unwrap();
@@ -119,8 +121,10 @@ async fn test_server_opens_own_file_before_remote() {
     // Test the opposite case: Hub opens file first, then spoke opens it
     // This should already work, but good to verify
 
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Create test project with a file and declare on hub
     let project_dir = super::create_test_project().unwrap();

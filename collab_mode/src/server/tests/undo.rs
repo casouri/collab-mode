@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn test_undo_e2e() {
     // End-to-end test for Undo/Redo functionality.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Create test project with a file.
     let project_dir = super::create_test_project().unwrap();

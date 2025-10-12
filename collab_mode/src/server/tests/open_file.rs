@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn test_open_file_basic() {
     // Test: Basic file opening from local editor.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Create test project.
     let project_dir = tempfile::TempDir::new().unwrap();
@@ -53,8 +55,10 @@ async fn test_open_file_basic() {
 #[tokio::test]
 async fn test_open_file_from_remote() {
     // Test: Remote server requests file from hub.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 1, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 1, None)
+        .await
+        .unwrap();
 
     // Create test project.
     let project_dir = super::create_test_project().unwrap();
@@ -89,8 +93,10 @@ async fn test_open_file_from_remote() {
 #[tokio::test]
 async fn test_open_file_create_mode() {
     // Test: Create a new file using OpenMode::Create.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Create test project.
     let project_dir = super::create_test_project().unwrap();
@@ -177,8 +183,10 @@ async fn test_open_file_create_mode() {
 #[tokio::test]
 async fn test_open_file_not_found() {
     // Test: Handle file not found error.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Create test project.
     let project_dir = super::create_test_project().unwrap();
@@ -226,8 +234,10 @@ async fn test_open_file_not_found() {
 #[tokio::test]
 async fn test_open_file_bad_request() {
     // Test: Handle bad request (trying to open a directory).
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Request to open a project directory (file is empty).
     let req_id = 1;
@@ -261,8 +271,10 @@ async fn test_open_file_bad_request() {
 #[tokio::test]
 async fn test_open_file_already_open() {
     // Test: Handle already opened file.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Create test project.
     let project_dir = super::create_test_project().unwrap();
@@ -327,8 +339,10 @@ async fn test_open_file_already_open() {
 #[tokio::test]
 async fn test_open_file_doc_id_not_found() {
     // Test: Handle request for non-existent doc by ID via _files.
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     let req_id = 1;
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -366,7 +380,7 @@ async fn test_open_file_doc_id_not_found() {
 
 #[tokio::test]
 async fn test_open_binary_file_rejected() {
-    let mut env = TestEnvironment::new().await.unwrap();
+    let mut env = TestChannelFactory::new();
     let project_dir = tempfile::TempDir::new().unwrap();
 
     // Create a binary file.

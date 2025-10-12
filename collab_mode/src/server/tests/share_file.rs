@@ -2,8 +2,10 @@ use super::*;
 
 #[tokio::test]
 async fn test_share_file_e2e() {
-    let env = TestEnvironment::new().await.unwrap();
-    let mut setup = setup_hub_and_spoke_servers(&env, 0, None).await.unwrap();
+    let factory = TestChannelFactory::new();
+    let mut setup = setup_hub_and_spoke_servers(&factory, 0, None)
+        .await
+        .unwrap();
 
     // Share a file with some content.
     let (file_desc, site_id) = setup

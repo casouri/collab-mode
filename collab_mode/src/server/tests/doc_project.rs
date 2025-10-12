@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn test_doc_project_handling() {
-    let mut env = TestEnvironment::new().await.unwrap();
+    let mut env = TestChannelFactory::new();
     let mut setup = setup_hub_and_spoke_servers(&mut env, 1, None)
         .await
         .unwrap();
@@ -86,7 +86,7 @@ async fn test_doc_project_handling() {
                     "project": "_buffers",
                     "file": ""
                 },
-                "signalingAddr": env.signaling_url(),
+                "signalingAddr": "test",
                 "credential": "test"
             }),
         )

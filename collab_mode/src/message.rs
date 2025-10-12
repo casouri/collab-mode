@@ -309,6 +309,7 @@ pub struct SendOpsParams {
 pub struct SendOpsResp {
     pub ops: Vec<EditorLeanOp>,
     pub last_seq: GlobalSeq,
+    pub doc_len: u64,
 }
 
 // **** SendInfo
