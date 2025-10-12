@@ -1,5 +1,6 @@
 use crate::config_man::{AcceptMode, ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, ServerEngine};
+use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::signaling::SignalingError;
 use crate::types::*;
@@ -298,6 +299,21 @@ impl Doc {
                 }
             }
         }
+
+        // Verify that engine's editor_len matches the actual buffer
+        // length. FIXME: Remove this once we’re certain that the
+        // implementation is bugless, since getting the internal doc
+        // len is O(n).
+        let engine_len = self.engine.editor_len();
+        let buffer_len = self.buffer.len() as u64;
+        if engine_len != buffer_len {
+            return Err(CollabError::DocFatal(format!(
+                "Engine editor_len {} doesn't match buffer len {}",
+                engine_len, buffer_len
+            ))
+            .into());
+        }
+
         Ok(())
     }
 
@@ -330,7 +346,7 @@ impl Doc {
 
 impl RemoteDoc {
     /// Apply an EditInstruction to the buffer.
-    pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) {
+    pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) -> anyhow::Result<()> {
         match instruction {
             EditInstruction::Ins(edits) => {
                 for (pos, str) in edits.iter().rev() {
@@ -354,6 +370,19 @@ impl RemoteDoc {
                 }
             }
         }
+
+        // Verify that engine's editor_len matches the actual buffer length
+        let engine_len = self.engine.editor_len();
+        let buffer_len = self.buffer.len() as u64;
+        if engine_len != buffer_len {
+            return Err(CollabError::DocFatal(format!(
+                "Engine editor_len {} doesn't match buffer len {}",
+                engine_len, buffer_len
+            ))
+            .into());
+        }
+
+        Ok(())
     }
 }
 
@@ -2349,44 +2378,61 @@ impl Server {
         // Drain remote ops from buffer
         let remote_ops: Vec<FatOp> = remote_doc.remote_op_buffer.drain(..).collect();
 
+        let handle_error = async |msg: String, remote_docs: &mut RemoteDocs| -> () {
+            tracing::error!(msg);
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::DocFatal as i32,
+                message: msg,
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            // Remove from remote_docs and mapping.
+            remote_docs.remove(&host_id, doc_id);
+        };
+
         // Process local ops from editor first, because we want to
         // pretent the local ops arrives before the remote ops.
-        for editor_op in ops {
-            // Process the op with the engine
-            let site_seq = remote_doc.next_site_seq;
-            remote_doc.next_site_seq += 1;
+        let process_local_ops = || -> anyhow::Result<()> {
+            for editor_op in ops {
+                // Process the op with the engine
+                let site_seq = remote_doc.next_site_seq;
+                remote_doc.next_site_seq += 1;
 
-            let instructions = remote_doc.engine.process_local_op(editor_op, site_seq);
-
-            match instructions {
-                Ok(instrs) => {
-                    // Apply each processed op to the buffer
-                    for instr in instrs {
-                        remote_doc.apply_edit_instruction(&instr);
-                    }
-                }
-                Err(err) => {
-                    tracing::error!("Failed to process local op: {}", err);
-                    let err = lsp_server::ResponseError {
-                        code: ErrorCode::DocFatal as i32,
-                        message: format!("Failed to process op: {}", err),
-                        data: None,
-                    };
-                    next.send_resp((), Some(err)).await;
-                    // Remove from remote_docs and mapping.
-                    self.remote_docs.remove(&host_id, doc_id);
-                    return Ok(());
+                let instructions = remote_doc.engine.process_local_op(editor_op, site_seq)?;
+                // Apply each processed op to the buffer
+                for instr in instructions {
+                    remote_doc.apply_edit_instruction(&instr)?;
                 }
             }
+            Ok(())
+        };
+        if let Err(err) = process_local_ops() {
+            handle_error(
+                format!("Failed to process local ops: {}", err),
+                &mut self.remote_docs,
+            )
+            .await;
+            return Ok(());
         }
 
         // Process the drained remote ops.
         let mut lean_ops = Vec::new();
-        for remote_op in remote_ops {
-            if let Some((lean_op, _seq)) = remote_doc.engine.process_remote_op(remote_op)? {
-                remote_doc.apply_edit_instruction(&lean_op.op);
-                lean_ops.push(lean_op);
+        let apply_remote_ops = || -> anyhow::Result<()> {
+            for remote_op in remote_ops {
+                if let Some((lean_op, _seq)) = remote_doc.engine.process_remote_op(remote_op)? {
+                    remote_doc.apply_edit_instruction(&lean_op.op)?;
+                    lean_ops.push(lean_op);
+                }
             }
+            Ok(())
+        };
+        if let Err(err) = apply_remote_ops() {
+            handle_error(
+                format!("Failed to apply remote ops: {}", err),
+                &mut self.remote_docs,
+            )
+            .await;
+            return Ok(());
         }
 
         // Package local ops if any

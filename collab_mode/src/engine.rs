@@ -1,7 +1,7 @@
 //! This module provides [ClientEngine] and [ServerEngine] that
 //! implements the client and server part of the OT control algorithm.
 
-use crate::error::{CollabError, CollabResult};
+use crate::error::CollabResult;
 use crate::{op::quatradic_transform, types::*};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -1271,10 +1271,6 @@ pub struct ServerEngine {
     internal_doc: InternalDoc,
     /// The largest global sequence number we've assigned. Starts from 1.
     current_seq: GlobalSeq,
-    /// The length of the document. This is used to check that after
-    /// applying every op, the length of the document and the length
-    /// of the InternalDoc matches.
-    mock_doc_len: u64,
 }
 
 impl ServerEngine {
@@ -1286,6 +1282,12 @@ impl ServerEngine {
     /// Return the current global sequence number.
     pub fn current_seq(&self) -> GlobalSeq {
         self.current_seq
+    }
+
+    /// Return the length of the editor document according to the
+    /// engine's internal state.
+    pub fn editor_len(&self) -> u64 {
+        self.internal_doc.editor_len()
     }
 }
 
@@ -1394,6 +1396,7 @@ impl ClientEngine {
         // We achieve "don't apply" by cloning the internal doc before
         // applying ops. We need to apply ops to get the correct editor
         // positions, but then restore the original state.
+        // FIXME: Maybe we need a more efficient way to do this.
         let mut cloned_internal_doc = self.internal_doc.clone();
         let mut converted_ops = vec![];
         for op in ops.iter() {
@@ -1677,7 +1680,6 @@ impl ServerEngine {
             gh: GlobalHistory::new(),
             internal_doc: InternalDoc::new(init_len),
             current_seq: 0,
-            mock_doc_len: init_len,
         }
     }
 
@@ -1687,43 +1689,6 @@ impl ServerEngine {
         let converted_op = self
             .internal_doc
             .convert_internal_op_and_apply(op.op.clone());
-
-        let mut new_mock_doc_len = self.mock_doc_len;
-        match &converted_op {
-            EditInstruction::Ins(edits) => {
-                for edit in edits {
-                    if edit.0 > self.mock_doc_len as u64 {
-                        return Err(CollabError::DocFatal(format!(
-                            "Op out-of-range, editor_doc_len: {}, op: {:?}",
-                            self.mock_doc_len, &converted_op
-                        )));
-                    }
-                    new_mock_doc_len += edit.1.chars().count() as u64;
-                }
-            }
-            EditInstruction::Del(edits) => {
-                for edit in edits {
-                    if edit.0 + edit.1.chars().count() as u64 > self.mock_doc_len as u64 {
-                        return Err(CollabError::DocFatal(format!(
-                            "Op out-of-range, editor_doc_len: {}, op: {:?}",
-                            self.mock_doc_len, &converted_op
-                        )));
-                    }
-                    new_mock_doc_len -= edit.1.chars().count() as u64;
-                }
-            }
-        }
-        self.mock_doc_len = new_mock_doc_len;
-
-        // FIXME: Remove this potentially expensive test once we are
-        // confident there's no position-bugs anymore.
-        let internal_editor_len = self.internal_doc.editor_len();
-        if internal_editor_len != self.mock_doc_len {
-            return Err(CollabError::DocFatal(format!(
-                "Editor doc & internal doc length mismatch, editor: {}, internal: {}",
-                self.mock_doc_len, internal_editor_len
-            )));
-        }
         Ok(converted_op)
     }
 
