@@ -1413,7 +1413,7 @@ impl ClientEngine {
             // transform it against 3 4 I(4), now mini_history is [1 2
             // 3 4 I(4) I(3)], and so on.
             let mut mini_history = ops.clone();
-            for idx in (mini_history.len() - 1)..0 {
+            for idx in (0..mini_history.len()).rev() {
                 let mut op = mini_history[idx].clone();
                 op.inverse();
                 op.batch_transform(&mini_history[idx + 1..]);
