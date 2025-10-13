@@ -105,6 +105,8 @@ impl MockDocument {
 
                 // Apply inserts in reverse order to avoid position shifting
                 inserts.reverse();
+                let mut last_insert_end_pos: i64 = -1;
+                let mut first_iter = true;
 
                 for (pos, text) in inserts {
                     let doc_len = self.content.len();
@@ -127,6 +129,17 @@ impl MockDocument {
                     for (i, ch) in chars.iter().enumerate() {
                         self.content.insert(pos + i, *ch);
                     }
+                    if first_iter {
+                        last_insert_end_pos = (pos as i64) + (text.chars().count() as i64);
+                        first_iter = false;
+                    } else {
+                        last_insert_end_pos += text.chars().count() as i64;
+                    }
+                }
+
+                // Position cursor at the end of the insert
+                if last_insert_end_pos > -1 {
+                    self.cursor = last_insert_end_pos as usize;
                 }
             }
             EditInstruction::Del(edits) => {
@@ -135,6 +148,9 @@ impl MockDocument {
                     .iter()
                     .map(|(pos, text)| (*pos as usize, text.clone()))
                     .collect();
+
+                // Track the minimum position for cursor positioning
+                let min_pos = deletes.iter().map(|(pos, _)| *pos).min();
 
                 // Apply deletes in reverse order to avoid position shifting
                 deletes.reverse();
@@ -154,6 +170,11 @@ impl MockDocument {
                     }
 
                     self.content.drain(pos..pos + len);
+                }
+
+                // Position cursor at the beginning of the first delete
+                if let Some(pos) = min_pos {
+                    self.cursor = pos;
                 }
             }
         }
