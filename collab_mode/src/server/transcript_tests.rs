@@ -103,9 +103,8 @@ impl MockDocument {
                     .map(|(pos, text)| (*pos as usize, text.clone()))
                     .collect();
 
-                // Sort by position descending (highest first)
-                // Insert from back to front to avoid position shifting
-                inserts.sort_by(|a, b| b.0.cmp(&a.0));
+                // Apply inserts in reverse order to avoid position shifting
+                inserts.reverse();
 
                 for (pos, text) in inserts {
                     let doc_len = self.content.len();
@@ -137,9 +136,8 @@ impl MockDocument {
                     .map(|(pos, text)| (*pos as usize, text.clone()))
                     .collect();
 
-                // Sort by position descending (highest first)
-                // Delete from back to front to avoid position shifting
-                deletes.sort_by(|a, b| b.0.cmp(&a.0));
+                // Apply deletes in reverse order to avoid position shifting
+                deletes.reverse();
 
                 for (pos, text) in deletes {
                     let len = text.chars().count();

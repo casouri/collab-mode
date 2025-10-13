@@ -988,6 +988,12 @@ impl InternalDoc {
                     self.convert_pos(pos, &mut cursor, false);
                     self.mark_to_ins_or_del(pos, text, &cursor, &mut new_edits, live);
                 }
+                // We convert all the segments first, then apply them,
+                // instead of convert-and-apply, because segments are
+                // to be applied together onto the same context. This
+                // is contrast to ops which are to be applied one
+                // after another, so the previous op becomes the next
+                // one’s context.
                 for (pos, len) in new_edits_bare.into_iter() {
                     self.convert_pos(pos, &mut cursor, false);
                     if live {

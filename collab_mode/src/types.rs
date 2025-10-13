@@ -188,6 +188,11 @@ impl EditorOp {
     }
 }
 
+/// The segments inside each op are to be applied in the same time, so
+/// you’ll see things that doesn’t make sense at first glance, like
+/// Ins[(0, “a”), (0, “b”)], meaning insert “ab” at 0. So for both
+/// insert and delete, apply the segments in reverse order to preserve
+/// the positions.
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditInstruction {
     Ins(Vec<(u64, String)>),
