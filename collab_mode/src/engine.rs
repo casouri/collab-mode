@@ -877,7 +877,7 @@ impl InternalDoc {
                 ranges.push((captured_editor_beg, captured_text));
             } else if (live != iter.is_live)
                 && iter.range_beg <= marked_end
-                && marked_end < iter.range_end
+                && marked_end <= iter.range_end
             {
                 //    [   range   ]
                 // [  marked   ]
@@ -909,7 +909,17 @@ impl InternalDoc {
                 let captured_editor_beg = iter.editor_range_beg;
                 ranges.push((captured_editor_beg, captured_text));
             } else {
-                panic!("Unreachable");
+                // Check if iter and marked overlap AND have different states.
+                // They overlap if: iter.range_beg < marked_end AND marked_beg < iter.range_end
+                let overlaps = (live != iter.is_live)
+                    && (iter.range_beg < marked_end && marked_beg < iter.range_end);
+                if overlaps {
+                    panic!(
+                        "Unreachable: ranges overlap but no condition matched. iter_beg={}, iter_end={}, marked_beg={}, marked_end={}, live={}, iter.is_live={}",
+                        iter.range_beg, iter.range_end, marked_beg, marked_end, live, iter.is_live
+                    );
+                }
+                // If they don't overlap or have the same state, just continue to the next iteration.
             }
 
             // Prepare states for the next iteration.
