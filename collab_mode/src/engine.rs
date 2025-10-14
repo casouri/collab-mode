@@ -894,7 +894,7 @@ impl InternalDoc {
                 ranges.push((captured_editor_beg, captured_text));
             } else if (live != iter.is_live)
                 && iter.range_beg > marked_beg
-                && iter.range_end < marked_end
+                && iter.range_end <= marked_end
             {
                 //    [  range  ]
                 // [     marked    ]
@@ -908,6 +908,8 @@ impl InternalDoc {
                     .collect::<String>();
                 let captured_editor_beg = iter.editor_range_beg;
                 ranges.push((captured_editor_beg, captured_text));
+            } else {
+                panic!("Unreachable");
             }
 
             // Prepare states for the next iteration.
