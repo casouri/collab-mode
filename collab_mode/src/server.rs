@@ -2447,7 +2447,8 @@ impl Server {
         // Send response with processed remote ops
         let resp = SendOpsResp {
             ops: lean_ops,
-            last_seq: remote_doc.engine.current_gseq(),
+            last_global_seq: remote_doc.engine.current_gseq(),
+            pending_local_ops: remote_doc.engine.pending_local_ops(),
             doc_len: remote_doc.buffer.len() as u64,
         };
         next.send_resp(resp, None).await;

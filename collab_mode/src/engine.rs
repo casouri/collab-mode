@@ -1379,6 +1379,11 @@ impl ClientEngine {
         }
     }
 
+    /// Return the length of pending local ops that haven’t been acked.
+    pub fn pending_local_ops(&self) -> usize {
+        self.gh.local.len()
+    }
+
     /// Return packaged local ops if it’s appropriate time to send
     /// them out, return None if there’s no pending local ops or it’s
     /// not time. (Client can only send out new local ops when

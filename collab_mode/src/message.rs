@@ -308,7 +308,8 @@ pub struct SendOpsParams {
 #[serde(rename_all = "camelCase")]
 pub struct SendOpsResp {
     pub ops: Vec<EditorLeanOp>,
-    pub last_seq: GlobalSeq,
+    pub last_global_seq: GlobalSeq,
+    pub pending_local_ops: usize,
     pub doc_len: u64,
 }
 
