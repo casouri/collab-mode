@@ -75,9 +75,9 @@ async fn test_server_opens_own_shared_file() {
     let send_ops_resp = send_ops_result.unwrap();
     tracing::info!("Hub successfully sent op, response: {:?}", send_ops_resp);
 
-    // The lastSeq might be 0 initially since the server processes ops asynchronously
+    // The last_global_seq might be 0 initially since the server processes ops asynchronously
     // What's important is that the op was sent without error
-    let _last_seq = send_ops_resp.last_seq;
+    let _last_global_seq = send_ops_resp.last_global_seq;
 
     tracing::info!("Step 4: Verify spoke receives the op");
     // Spoke should receive RemoteOpsArrived notification
@@ -179,8 +179,8 @@ async fn test_server_opens_own_file_before_remote() {
         .await
         .unwrap();
 
-    // The lastSeq might be 0 initially since the server processes ops asynchronously
-    let _last_seq = send_ops_resp.last_seq;
+    // The last_global_seq might be 0 initially since the server processes ops asynchronously
+    let _last_global_seq = send_ops_resp.last_global_seq;
 
     tracing::info!("Step 4: Verify spoke receives the op");
     // Spoke should receive the op

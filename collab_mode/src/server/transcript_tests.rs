@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 
-use crate::message::{SendOpsResp, UndoResp};
+use crate::op::GlobalSeq;
 use crate::types::{EditInstruction, EditorFatOp, EditorLeanOp, EditorOp};
 
 fn init_test_tracing() {
@@ -538,6 +538,8 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
         let mut spoke_site_ids = Vec::new();
         let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
         let mut spoke_ops_counts: Vec<usize> = vec![0; num_editors];  // Track ops applied by each editor
+        let mut spoke_global_seqs: Vec<GlobalSeq> = vec![0; num_editors];  // Track last_global_seq from server
+        let mut spoke_pending_counts: Vec<usize> = vec![0; num_editors];  // Track pending_local_ops from server
 
         for i in 0..num_editors {
             let (file_desc, site_id, content) =
@@ -614,22 +616,21 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         &group_seq_counters
                     );
 
-                    // Apply the undo ops locally
-                    for instr in &undo_resp.ops {
-                        handle_error!(
-                            spoke_docs[*editor].apply_edit_instruction(instr),
-                            &diagnostics,
-                            &spoke_docs,
-                            &spoke_pending_ops,
-                            &spoke_ops_counts,
-                            &group_seq_counters
-                        );
-                    }
-                    // Update ops count after applying undo ops locally
-                    spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
-
                     // Only send the Undo operation to server if there were actual ops to undo
                     if !undo_resp.ops.is_empty() {
+                        // Apply the undo ops locally (server doesn't return them in send_ops response)
+                        for instr in &undo_resp.ops {
+                            handle_error!(
+                                spoke_docs[*editor].apply_edit_instruction(instr),
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            );
+                        }
+                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
+
                         let group_seq = group_seq_counters[*editor];
                         let send_resp = handle_error!(
                             setup.spokes[*editor]
@@ -649,7 +650,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             &group_seq_counters
                         );
 
-                        // Apply any remote ops from sending Undo
+                        // Apply any remote ops from other editors
                         for lean_op in &send_resp.ops {
                             handle_error!(
                                 spoke_docs[*editor].apply_edit_instruction(&lean_op.op),
@@ -660,7 +661,6 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 &group_seq_counters
                             );
                         }
-                        // Update ops count
                         spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                         group_seq_counters[*editor] += 1;
@@ -698,22 +698,21 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         &group_seq_counters
                     );
 
-                    // Apply the redo ops locally
-                    for instr in &redo_resp.ops {
-                        handle_error!(
-                            spoke_docs[*editor].apply_edit_instruction(instr),
-                            &diagnostics,
-                            &spoke_docs,
-                            &spoke_pending_ops,
-                            &spoke_ops_counts,
-                            &group_seq_counters
-                        );
-                    }
-                    // Update ops count after applying redo ops locally
-                    spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
-
                     // Only send the Redo operation to server if there were actual ops to redo
                     if !redo_resp.ops.is_empty() {
+                        // Apply the redo ops locally (server doesn't return them in send_ops response)
+                        for instr in &redo_resp.ops {
+                            handle_error!(
+                                spoke_docs[*editor].apply_edit_instruction(instr),
+                                &diagnostics,
+                                &spoke_docs,
+                                &spoke_pending_ops,
+                                &spoke_ops_counts,
+                                &group_seq_counters
+                            );
+                        }
+                        spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
+
                         let group_seq = group_seq_counters[*editor];
                         let send_resp = handle_error!(
                             setup.spokes[*editor]
@@ -733,7 +732,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             &group_seq_counters
                         );
 
-                        // Apply any remote ops from sending Redo
+                        // Apply any remote ops from other editors
                         for lean_op in &send_resp.ops {
                             handle_error!(
                                 spoke_docs[*editor].apply_edit_instruction(&lean_op.op),
@@ -744,7 +743,6 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 &group_seq_counters
                             );
                         }
-                        // Update ops count
                         spoke_ops_counts[*editor] = spoke_docs[*editor].get_ops_applied();
 
                         group_seq_counters[*editor] += 1;
@@ -784,7 +782,6 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         &group_seq_counters
                     );
 
-                    sleep(Duration::from_millis(100)).await;
                 }
                 TranscriptCommand::Check => {
                     // First round: Send all pending ops for all editors
@@ -833,12 +830,9 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         spoke_pending_ops[i].clear();
                     }
 
-                    // Convergence loop: keep polling until no editor receives new operations
+                    // Convergence loop: poll until all editors have same last_global_seq and zero pending_local_ops
                     for attempt in 0..10 {
-                        let mut any_ops_received = false;
-                        let ops_before = spoke_ops_counts.clone();
-
-                        // Pull more ops for each editor
+                        // Pull more ops for each editor and update tracking
                         for i in 0..num_editors {
                             let send_resp = handle_error!(
                                 setup.spokes[i]
@@ -863,22 +857,23 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                     &group_seq_counters
                                 );
                             }
-                            // Update ops count
+
+                            // Update tracking info
                             spoke_ops_counts[i] = spoke_docs[i].get_ops_applied();
+                            spoke_global_seqs[i] = send_resp.last_global_seq;
+                            spoke_pending_counts[i] = send_resp.pending_local_ops;
                         }
 
-                        // Check if any editor received new ops in this round
-                        for i in 0..num_editors {
-                            if spoke_ops_counts[i] != ops_before[i] {
-                                any_ops_received = true;
-                                break;
-                            }
-                        }
+                        // Check convergence: all editors have same last_global_seq AND all have pending_local_ops == 0
+                        let first_seq = spoke_global_seqs[0];
+                        let all_same_seq = spoke_global_seqs.iter().all(|&seq| seq == first_seq);
+                        let all_zero_pending = spoke_pending_counts.iter().all(|&pending| pending == 0);
 
-                        if !any_ops_received {
+                        if all_same_seq && all_zero_pending {
                             tracing::debug!(
-                                "CHECK: Editors converged (no new ops) after {} attempts. ops_counts: {:?}",
+                                "CHECK: Editors converged after {} attempts. global_seq: {}, ops_counts: {:?}",
                                 attempt,
+                                first_seq,
                                 spoke_ops_counts
                             );
                             break;
@@ -886,10 +881,19 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 
                         if attempt == 9 {
                             return Err(anyhow::anyhow!(
-                                "CHECK failed: editors still receiving ops after 10 attempts. ops_counts: {:?}",
+                                "CHECK failed: editors not converged after 10 attempts. global_seqs: {:?}, pending_counts: {:?}, ops_counts: {:?}",
+                                spoke_global_seqs,
+                                spoke_pending_counts,
                                 spoke_ops_counts
                             ));
                         }
+
+                        tracing::debug!(
+                            "CHECK attempt {}: global_seqs: {:?}, pending_counts: {:?}",
+                            attempt,
+                            spoke_global_seqs,
+                            spoke_pending_counts
+                        );
 
                         // Small delay before next iteration
                         sleep(Duration::from_millis(100)).await;
