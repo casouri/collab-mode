@@ -1574,16 +1574,17 @@ impl ClientEngine {
             }
 
             // Update inferred global seq.
+
+            // When a remote op arrives, all local ops (with inferred
+            // seqs) shift by 1. We need to increment undo_queue
+            // entries pointing to those local ops. NOTE: we must
+            // check ALL entries.
             let prev_current_seq = self.current_seq - 1;
-            for idx in (0..self.gh.undo_queue.len()).rev() {
-                let seq = &mut self.gh.undo_queue[idx];
+            for seq in &mut self.gh.undo_queue {
                 if *seq > prev_current_seq {
-                    // If the sequence is inferred (the refereed op is
-                    // in the local history), the inferred sequence
-                    // increases by 1.
+                    // This entry points to a local op (inferred seq),
+                    // which shifts when a remote op is inserted.
                     *seq += 1;
-                } else {
-                    break;
                 }
             }
 
