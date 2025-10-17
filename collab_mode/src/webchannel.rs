@@ -1093,9 +1093,27 @@ impl MsgChannel for TestWebChannel {
     ) -> anyhow::Result<()> {
         let message = Message {
             host: self.my_hostid.clone(),
-            body: msg,
+            body: msg.clone(),
             req_id,
         };
+
+        // Special case: if sending to ourselves, deliver directly to msg_tx
+        // to avoid deadlock when broadcasting during message processing
+        if recipient == &self.my_hostid {
+            let msg_tx = {
+                let state = self.factory.state.lock().unwrap();
+                let host_state = state
+                    .hosts
+                    .get(recipient)
+                    .ok_or_else(|| anyhow!("Recipient {} not found", recipient))?;
+                host_state.msg_tx.clone()
+            };
+
+            return msg_tx
+                .send(message)
+                .await
+                .map_err(|_| anyhow!("Channel broke for {}", recipient));
+        }
 
         // Push to recipient's inbox
         {
