@@ -1,0 +1,179 @@
+Name: Undo/Redo Chain Invalidation Storm
+
+E1 INSERT Chapter 1: The Beginning of Time
+E1 SEND
+===CHECK===
+E2 MOVE 30
+E2 INSERT \n\nIn the ancient world, civilizations rose and fell like waves upon the shore.
+E2 SEND
+E3 MOVE 0
+E3 INSERT [Document v1.0]\n\n
+E3 SEND
+===CHECK===
+E1 MOVE 100
+E1 INSERT  Empires were built on the foundations of knowledge and power.
+E1 SEND
+E2 MOVE 150
+E2 INSERT  Kings and queens ruled with iron fists, their words becoming law.
+E2 SEND
+E3 MOVE 50
+E3 DELETE 15
+E3 INSERT [DRAFT]
+E3 SEND
+===CHECK===
+E1 INSERT  Wisdom was passed down through generations.
+E1 SEND
+E2 INSERT  Wars raged across continents.
+E2 SEND
+E3 INSERT  Peace was always temporary.
+E3 SEND
+===CHECK===
+E1 UNDO
+E1 SEND
+E2 MOVE 200
+E2 INSERT  Trade routes connected distant lands, bringing exotic goods and new ideas.
+E2 SEND
+===CHECK===
+E3 MOVE 250
+E3 INSERT  Philosophers debated the nature of reality and existence.
+E3 SEND
+E1 REDO
+E1 SEND
+===CHECK===
+E2 UNDO
+E2 SEND
+E1 MOVE 300
+E1 INSERT  Mathematics and science began to flourish in centers of learning.
+E1 SEND
+E3 UNDO
+E3 SEND
+===CHECK===
+E2 INSERT  Agriculture transformed nomadic tribes into settled communities.
+E2 SEND
+E1 MOVE 400
+E1 DELETE 30
+E1 INSERT  Art and culture blossomed in times of prosperity.
+E1 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E2 REDO
+E2 SEND
+E1 UNDO
+E1 SEND
+E3 MOVE 450
+E3 INSERT  Religion shaped the moral fabric of societies.
+E3 SEND
+===CHECK===
+E1 REDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 MOVE 500
+E1 INSERT  Architecture reached new heights with grand temples and monuments.
+E1 SEND
+E2 REDO
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E2 MOVE 550
+E2 INSERT  Literature captured the human experience in epic tales and poetry.
+E2 SEND
+E3 MOVE 600
+E3 INSERT  Music became the universal language of emotion and celebration.
+E3 SEND
+E1 MOVE 650
+E1 INSERT  Innovation drove progress, from the wheel to the written word.
+E1 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E1 SEND
+E2 SEND
+E3 MOVE 700
+E3 INSERT  Leaders emerged who changed the course of history.
+E3 SEND
+===CHECK===
+E1 REDO
+E1 SEND
+E2 INSERT  Inventions revolutionized daily life and expanded human capabilities.
+E2 SEND
+E3 UNDO
+E3 SEND
+===CHECK===
+E2 REDO
+E3 REDO
+E2 SEND
+E3 SEND
+E1 MOVE 800
+E1 DELETE 25
+E1 INSERT  New technologies emerged
+E1 SEND
+===CHECK===
+E3 MOVE 850
+E3 INSERT  Discovery and exploration opened new frontiers.
+E3 SEND
+E1 UNDO
+E1 SEND
+E2 MOVE 900
+E2 INSERT  Traditions were preserved even as societies evolved.
+E2 SEND
+===CHECK===
+E1 REDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 UNDO
+E1 SEND
+E2 REDO
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E1 MOVE 950
+E1 INSERT  The legacy of the past continues to influence the present.
+E1 SEND
+E2 MOVE 1000
+E2 INSERT  Every generation builds upon the achievements of those before.
+E2 SEND
+E3 MOVE 1050
+E3 INSERT  History teaches us the patterns that repeat across time.
+E3 SEND
+===CHECK===
+E1 REDO
+E1 SEND
+E2 UNDO
+E2 SEND
+E3 UNDO
+E3 SEND
+===CHECK===
+E1 MOVE 0
+E1 DELETE 6
+E1 INSERT [FINAL]
+E1 SEND
+E2 REDO
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E3 REDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===

@@ -1,0 +1,217 @@
+Name: Delete/Insert/Undo Marathon
+
+E1 INSERT The quick brown fox jumps over the lazy dog in the meadow while birds sing sweetly in the trees overhead.
+E1 SEND
+===CHECK===
+E2 MOVE 110
+E2 INSERT  Sunshine filters through the leaves, creating dappled patterns on the grass below.
+E2 SEND
+E3 MOVE 0
+E3 INSERT [CHAPTER ONE]
+E3 SEND
+===CHECK===
+E1 MOVE 20
+E1 DELETE 25
+E1 SEND
+E2 MOVE 100
+E2 INSERT  The wind whispers secrets to anyone willing to listen.
+E2 SEND
+===CHECK===
+E3 MOVE 50
+E3 DELETE 30
+E3 SEND
+E1 UNDO
+E1 SEND
+E2 MOVE 150
+E2 INSERT  Nature's symphony plays on endlessly.
+E2 SEND
+===CHECK===
+E1 MOVE 75
+E1 DELETE 40
+E1 SEND
+E3 UNDO
+E3 SEND
+E2 MOVE 200
+E2 DELETE 20
+E2 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E3 MOVE 100
+E3 DELETE 15
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 REDO
+E1 SEND
+E2 INSERT  Flowers bloom in vibrant colors across the landscape.
+E2 SEND
+E3 UNDO
+E3 SEND
+===CHECK===
+E1 MOVE 130
+E1 DELETE 50
+E1 SEND
+E2 REDO
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E3 MOVE 180
+E3 DELETE 35
+E3 SEND
+E1 UNDO
+E1 SEND
+E2 MOVE 220
+E2 DELETE 25
+E2 SEND
+===CHECK===
+E1 REDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 INSERT  Mountains rise majestically in the distance.
+E1 SEND
+E2 REDO
+E2 SEND
+E3 INSERT  Rivers carve their way through ancient stone.
+E3 SEND
+===CHECK===
+E2 MOVE 250
+E2 DELETE 40
+E2 SEND
+E1 MOVE 300
+E1 DELETE 30
+E1 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E1 SEND
+E2 SEND
+E3 MOVE 150
+E3 DELETE 45
+E3 SEND
+===CHECK===
+E1 REDO
+E1 SEND
+E2 REDO
+E2 SEND
+E3 UNDO
+E3 SEND
+===CHECK===
+E1 MOVE 200
+E1 DELETE 60
+E1 SEND
+E2 MOVE 180
+E2 INSERT  Clouds drift lazily across the azure sky.
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E3 MOVE 220
+E3 DELETE 55
+E3 SEND
+E1 UNDO
+E1 SEND
+E2 MOVE 280
+E2 DELETE 35
+E2 SEND
+===CHECK===
+E1 REDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 INSERT  Valleys stretch out endlessly before us.
+E1 SEND
+E2 INSERT  Stars will soon pepper the evening sky.
+E2 SEND
+E3 INSERT  The moon rises slowly over the horizon.
+E3 SEND
+===CHECK===
+E1 MOVE 320
+E1 DELETE 70
+E1 SEND
+E2 REDO
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E2 MOVE 350
+E2 DELETE 50
+E2 SEND
+E3 MOVE 300
+E3 DELETE 40
+E3 SEND
+E1 UNDO
+E1 SEND
+===CHECK===
+E1 REDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 MOVE 0
+E1 DELETE 14
+E1 INSERT [FINAL VERSION]
+E1 SEND
+E2 REDO
+E2 SEND
+E3 REDO
+E3 SEND
+===CHECK===
+E2 MOVE 380
+E2 DELETE 80
+E2 SEND
+E1 MOVE 400
+E1 DELETE 50
+E1 SEND
+E3 MOVE 360
+E3 DELETE 60
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E3 REDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 INSERT  The journey continues into the unknown.
+E2 INSERT  Adventures await those brave enough to seek them.
+E3 INSERT  Tomorrow brings new possibilities and challenges.
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 UNDO
+E2 UNDO
+E3 UNDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
+E1 REDO
+E2 REDO
+E3 REDO
+E1 SEND
+E2 SEND
+E3 SEND
+===CHECK===
