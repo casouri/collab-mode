@@ -139,7 +139,7 @@ async fn test_open_file_create_mode() {
 
     // Send an insert operation to add content.
     let ops = vec![serde_json::json!({
-        "op": {"Ins": [0, "This is a newly created file!"]},
+        "op": {"kind": "Ins", "pos": 0, "content": "This is a newly created file!"},
         "groupSeq": 1
     })];
     let _ = setup.hub.editor.send_ops(file1.clone(), ops).await.unwrap();

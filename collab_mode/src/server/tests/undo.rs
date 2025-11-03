@@ -38,7 +38,7 @@ async fn test_undo_e2e() {
         .send_ops(
             file_desc.clone(),
             vec![serde_json::json!({
-                "op": { "Ins": [0, "UNDO_TEST: "] },
+                "op": { "kind": "Ins", "pos": 0, "content": "UNDO_TEST: " },
                 "groupSeq": 1
             })],
         )
@@ -55,18 +55,20 @@ async fn test_undo_e2e() {
 
     assert!(!undo_ops.ops.is_empty());
     let actual_op = &undo_ops.ops[0];
-    let expected_op = serde_json::json!({ "Del": [[0, "UNDO_TEST: "]] });
-    assert_eq!(
-        serde_json::to_string(&actual_op).unwrap(),
-        serde_json::to_string(&expected_op).unwrap()
-    );
+    let expected_op = crate::types::EditInstruction::Del {
+        edits: vec![crate::types::Edit {
+            pos: 0,
+            content: "UNDO_TEST: ".to_string(),
+        }],
+    };
+    assert_eq!(actual_op, &expected_op);
 
     // Apply the undo by sending an Undo op via SendOps.
     let _ = setup.spokes[0]
         .editor
         .send_ops(
             file_desc.clone(),
-            vec![serde_json::json!({ "op": "Undo", "groupSeq": 2 })],
+            vec![serde_json::json!({ "op": { "kind": "Undo", "context": undo_ops.context }, "groupSeq": 2 })],
         )
         .await
         .unwrap();
@@ -79,11 +81,13 @@ async fn test_undo_e2e() {
         .unwrap();
     assert!(!redo_ops.ops.is_empty());
     let actual_redo_op = &redo_ops.ops[0];
-    let expected_redo_op = serde_json::json!({ "Ins": [[0, "UNDO_TEST: "]] });
-    assert_eq!(
-        serde_json::to_string(&actual_redo_op).unwrap(),
-        serde_json::to_string(&expected_redo_op).unwrap()
-    );
+    let expected_redo_op = crate::types::EditInstruction::Ins {
+        edits: vec![crate::types::Edit {
+            pos: 0,
+            content: "UNDO_TEST: ".to_string(),
+        }],
+    };
+    assert_eq!(actual_redo_op, &expected_redo_op);
 
     setup.cleanup();
 }

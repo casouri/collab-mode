@@ -55,7 +55,10 @@ impl MockDocument {
         self.cursor += chars.len();
 
         EditorFatOp {
-            op: EditorOp::Ins(pos, text.to_string()),
+            op: EditorOp::Ins {
+                pos,
+                content: text.to_string(),
+            },
             group_seq: 1,
         }
     }
@@ -86,7 +89,10 @@ impl MockDocument {
         self.cursor = start;
 
         Some(EditorFatOp {
-            op: EditorOp::Del(start as u64, deleted_text),
+            op: EditorOp::Del {
+                pos: start as u64,
+                content: deleted_text,
+            },
             group_seq: 1,
         })
     }
@@ -96,11 +102,11 @@ impl MockDocument {
         self.ops_applied += 1;
 
         match instr {
-            EditInstruction::Ins(edits) => {
+            EditInstruction::Ins { edits } => {
                 // Collect and convert u64 positions to usize
                 let mut inserts: Vec<(usize, String)> = edits
                     .iter()
-                    .map(|(pos, text)| (*pos as usize, text.clone()))
+                    .map(|edit| (edit.pos as usize, edit.content.clone()))
                     .collect();
 
                 // Apply inserts in reverse order to avoid position shifting
@@ -142,11 +148,11 @@ impl MockDocument {
                     self.cursor = last_insert_end_pos as usize;
                 }
             }
-            EditInstruction::Del(edits) => {
+            EditInstruction::Del { edits } => {
                 // Collect and convert u64 positions to usize
                 let mut deletes: Vec<(usize, String)> = edits
                     .iter()
-                    .map(|(pos, text)| (*pos as usize, text.clone()))
+                    .map(|edit| (edit.pos as usize, edit.content.clone()))
                     .collect();
 
                 // Track the minimum position for cursor positioning
@@ -638,7 +644,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 .send_ops(
                                     spoke_files[*editor].clone(),
                                     vec![serde_json::json!({
-                                        "op": "Undo",
+                                        "op": { "kind": "Undo", "context": undo_resp.context },
                                         "groupSeq": group_seq
                                     })],
                                 )
@@ -720,7 +726,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                                 .send_ops(
                                     spoke_files[*editor].clone(),
                                     vec![serde_json::json!({
-                                        "op": "Redo",
+                                        "op": { "kind": "Redo", "context": redo_resp.context },
                                         "groupSeq": group_seq
                                     })],
                                 )

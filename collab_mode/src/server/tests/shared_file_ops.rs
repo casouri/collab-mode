@@ -60,7 +60,7 @@ async fn test_server_opens_own_shared_file() {
     // Hub sends an op to the file
     // This should work because hub has a RemoteDoc for itself
     let ops = vec![serde_json::json!({
-        "op": { "Ins": [0, "Hub says: "] },
+        "op": { "kind": "Ins", "pos": 0, "content": "Hub says: " },
         "groupSeq": 1
     })];
 
@@ -101,13 +101,16 @@ async fn test_server_opens_own_shared_file() {
     );
 
     let op = &fetch_ops_resp.ops[0];
-    let expected_op = serde_json::json!({
-        "op": { "Ins": [[0, "Hub says: "]] },
-        "siteId": hub_site_id,
-    });
+    // Verify it's an insert operation from the hub
+    assert_eq!(op.site_id, hub_site_id, "Op should be from hub");
+    let expected_edit_inst = crate::types::EditInstruction::Ins {
+        edits: vec![crate::types::Edit {
+            pos: 0,
+            content: "Hub says: ".to_string(),
+        }],
+    };
     assert_eq!(
-        serde_json::to_string(op).unwrap(),
-        serde_json::to_string(&expected_op).unwrap(),
+        &op.op, &expected_edit_inst,
         "Spoke should receive the correct op from hub"
     );
 
@@ -168,7 +171,7 @@ async fn test_server_opens_own_file_before_remote() {
     tracing::info!("Step 3: Hub sends an op");
     // Hub sends an op - this should work fine
     let ops = vec![serde_json::json!({
-        "op": { "Ins": [0, "Working: "] },
+        "op": { "kind": "Ins", "pos": 0, "content": "Working: " },
         "groupSeq": 1
     })];
 

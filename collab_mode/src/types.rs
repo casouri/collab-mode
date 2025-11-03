@@ -41,27 +41,28 @@ pub struct Info {
 }
 
 #[derive(Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind")]
 pub enum EditorOp {
     /// Insert op, with the position and content.
-    Ins(u64, String),
+    Ins { pos: u64, content: String },
     /// Delete op, with the position and content.
-    Del(u64, String),
+    Del { pos: u64, content: String },
     /// Undo op, with the context number.
-    Undo(u64),
+    Undo { context: u64 },
     /// Redo op, with the context number.
-    Redo(u64),
+    Redo { context: u64 },
 }
 
 impl std::fmt::Debug for EditorOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Undo(context) => write!(f, "undo({context})"),
-            Self::Redo(context) => write!(f, "redo({context})"),
-            Self::Ins(pos, content) => {
+            Self::Undo { context } => write!(f, "undo({context})"),
+            Self::Redo { context } => write!(f, "redo({context})"),
+            Self::Ins { pos, content } => {
                 let content = replace_whitespace_char(content.to_string());
                 write!(f, "ins({pos}, {content})")
             }
-            Self::Del(pos, content) => {
+            Self::Del { pos, content } => {
                 let content = replace_whitespace_char(content.to_string());
                 write!(f, "del({pos}, {content})")
             }
@@ -184,12 +185,18 @@ pub struct Project {
 impl EditorOp {
     pub fn kind(&self) -> EditorOpKind {
         match self {
-            EditorOp::Ins(_, _) => EditorOpKind::Original,
-            EditorOp::Del(_, _) => EditorOpKind::Original,
-            EditorOp::Undo(_) => EditorOpKind::Undo,
-            EditorOp::Redo(_) => EditorOpKind::Redo,
+            EditorOp::Ins { .. } => EditorOpKind::Original,
+            EditorOp::Del { .. } => EditorOpKind::Original,
+            EditorOp::Undo { .. } => EditorOpKind::Undo,
+            EditorOp::Redo { .. } => EditorOpKind::Redo,
         }
     }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+pub struct Edit {
+    pub pos: u64,
+    pub content: String,
 }
 
 /// The segments inside each op are to be applied in the same time, so
@@ -198,9 +205,10 @@ impl EditorOp {
 /// insert and delete, apply the segments in reverse order to preserve
 /// the positions.
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind")]
 pub enum EditInstruction {
-    Ins(Vec<(u64, String)>),
-    Del(Vec<(u64, String)>),
+    Ins { edits: Vec<Edit> },
+    Del { edits: Vec<Edit> },
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Deserialize, Serialize)]

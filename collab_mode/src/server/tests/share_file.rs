@@ -24,7 +24,7 @@ async fn test_share_file_e2e() {
 
     // Send ops to the shared doc.
     let ops = vec![serde_json::json!({
-        "op": {"Ins": [30, " More text."]},
+        "op": {"kind": "Ins", "pos": 30, "content": " More text."},
         "groupSeq": 1
     })];
     let _ = setup

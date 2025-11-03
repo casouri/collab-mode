@@ -49,7 +49,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
 
     // Step 4: Hub sends first operation
     let hub_ops1 = vec![serde_json::json!({
-        "op": { "Ins": [0, "Hub1 "] },
+        "op": { "kind": "Ins", "pos": 0, "content": "Hub1 " },
         "groupSeq": 1
     })];
 
@@ -85,7 +85,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
 
     // Step 6: Spoke sends its first operation
     let spoke_ops1 = vec![serde_json::json!({
-        "op": { "Ins": [5, "Spoke1 "] },
+        "op": { "kind": "Ins", "pos": 5, "content": "Spoke1 " },
         "groupSeq": 1
     })];
 
@@ -122,7 +122,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
 
     // Step 8: Hub sends second operation
     let hub_ops2 = vec![serde_json::json!({
-        "op": { "Ins": [13, "Hub2 "] },
+        "op": { "kind": "Ins", "pos": 13, "content": "Hub2 " },
         "groupSeq": 2
     })];
 
@@ -137,7 +137,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
 
     // Step 9: Spoke sends second operation
     let spoke_ops2 = vec![serde_json::json!({
-        "op": { "Ins": [18, "Spoke2 "] },
+        "op": { "kind": "Ins", "pos": 18, "content": "Spoke2 " },
         "groupSeq": 2
     })];
 
@@ -191,7 +191,7 @@ async fn test_local_ops_sent_to_remote_subscribers() {
 
     // Step 11: Hub sends third operation quickly after spoke's second
     let hub_ops3 = vec![serde_json::json!({
-        "op": { "Ins": [26, "Hub3"] },
+        "op": { "kind": "Ins", "pos": 26, "content": "Hub3" },
         "groupSeq": 3
     })];
 
@@ -272,7 +272,7 @@ async fn test_bidirectional_ops_hub_owned_file() {
         .editor
         .send_ops(
             hub_local_file.clone(),
-            vec![serde_json::json!({"op": { "Ins": [5, " Hub1"] }, "groupSeq": 1})],
+            vec![serde_json::json!({"op": { "kind": "Ins", "pos": 5, "content": " Hub1" }, "groupSeq": 1})],
         )
         .await
         .unwrap();
@@ -289,7 +289,7 @@ async fn test_bidirectional_ops_hub_owned_file() {
         .editor
         .send_ops(
             spoke_file_desc.clone(),
-            vec![serde_json::json!({"op": { "Ins": [5, " Spoke1"] }, "groupSeq": 1})],
+            vec![serde_json::json!({"op": { "kind": "Ins", "pos": 5, "content": " Spoke1" }, "groupSeq": 1})],
         )
         .await
         .unwrap();
@@ -311,7 +311,7 @@ async fn test_bidirectional_ops_hub_owned_file() {
         .editor
         .send_ops(
             hub_local_file.clone(),
-            vec![serde_json::json!({"op": { "Ins": [10, " Hub2"] }, "groupSeq": 2})],
+            vec![serde_json::json!({"op": { "kind": "Ins", "pos": 10, "content": " Hub2" }, "groupSeq": 2})],
         )
         .await
         .unwrap();

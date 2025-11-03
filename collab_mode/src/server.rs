@@ -277,8 +277,10 @@ impl Doc {
     pub fn apply_op(&mut self, op: FatOp) -> anyhow::Result<()> {
         let instr = self.engine.convert_internal_op_and_apply(op)?;
         match instr {
-            EditInstruction::Ins(edits) => {
-                for (pos, str) in edits.into_iter().rev() {
+            EditInstruction::Ins { edits } => {
+                for edit in edits.into_iter().rev() {
+                    let pos = edit.pos;
+                    let str = edit.content;
                     let gapbuf_len = self.buffer.len();
                     tracing::debug!(
                         pos,
@@ -292,8 +294,10 @@ impl Doc {
                     self.buffer.insert_many(pos as usize, str.chars());
                 }
             }
-            EditInstruction::Del(edits) => {
-                for (pos, str) in edits.into_iter().rev() {
+            EditInstruction::Del { edits } => {
+                for edit in edits.into_iter().rev() {
+                    let pos = edit.pos;
+                    let str = edit.content;
                     self.buffer
                         .drain((pos as usize)..(pos as usize + str.chars().count()));
                 }
@@ -348,8 +352,10 @@ impl RemoteDoc {
     /// Apply an EditInstruction to the buffer.
     pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) -> anyhow::Result<()> {
         match instruction {
-            EditInstruction::Ins(edits) => {
-                for (pos, str) in edits.iter().rev() {
+            EditInstruction::Ins { edits } => {
+                for edit in edits.iter().rev() {
+                    let pos = edit.pos;
+                    let str = &edit.content;
                     let gapbuf_len = self.buffer.len();
                     tracing::debug!(
                         pos,
@@ -357,16 +363,18 @@ impl RemoteDoc {
                         text_len = str.chars().count(),
                         "RemoteDoc applying Ins to gapbuf"
                     );
-                    if *pos as usize > gapbuf_len {
+                    if pos as usize > gapbuf_len {
                         tracing::error!(pos, gapbuf_len, "ERROR: pos > gapbuf_len before insert!");
                     }
-                    self.buffer.insert_many(*pos as usize, str.chars());
+                    self.buffer.insert_many(pos as usize, str.chars());
                 }
             }
-            EditInstruction::Del(edits) => {
-                for (pos, str) in edits.iter().rev() {
-                    let end = *pos as usize + str.chars().count();
-                    self.buffer.drain((*pos as usize)..end);
+            EditInstruction::Del { edits } => {
+                for edit in edits.iter().rev() {
+                    let pos = edit.pos;
+                    let str = &edit.content;
+                    let end = pos as usize + str.chars().count();
+                    self.buffer.drain((pos as usize)..end);
                 }
             }
         }

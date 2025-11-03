@@ -1311,11 +1311,11 @@ INFO should be a plist JSON object. This request is async."
   "Encode Elisp OP into JSONRPC format."
   (pcase op
     (`(ins ,pos ,str ,group-seq)
-     `( :op (:Ins [,(1- pos) ,str])
+     `( :op (:kind "Ins" :pos ,(1- pos) :content ,str)
         :groupSeq ,group-seq))
 
     (`(del ,pos ,str ,group-seq)
-     `( :op (:Del [,(1- pos) ,str])
+     `( :op (:kind "Del" :pos ,(1- pos) :content ,str)
         :groupSeq ,group-seq))))
 
 (defsubst collab--apply-edit-instruction (instr &optional move-point)
@@ -1323,21 +1323,23 @@ INFO should be a plist JSON object. This request is async."
 If MOVE-POINT non-nil, move point as the edit would."
   (let ((inhibit-modification-hooks t)
         (collab--inhibit-hooks t)
-        (start (point-marker)))
+        (start (point-marker))
+        (kind (plist-get instr :kind))
+        (edits (plist-get instr :edits)))
     (save-restriction
       (widen)
-      (pcase instr
-        (`(:Ins ,edits)
+      (pcase kind
+        ("Ins"
          (mapc (lambda (edit)
-                 (let ((pos (aref edit 0))
-                       (text (aref edit 1)))
+                 (let ((pos (plist-get edit :pos))
+                       (text (plist-get edit :content)))
                    (goto-char (1+ pos))
                    (insert text)))
                (reverse edits)))
-        (`(:Del ,edits)
+        ("Del"
          (mapc (lambda (edit)
-                 (let ((pos (aref edit 0))
-                       (text (aref edit 1)))
+                 (let ((pos (plist-get edit :pos))
+                       (text (plist-get edit :content)))
                    (delete-region (1+ pos) (+ 1 pos (length text)))))
                (reverse edits)))))
     (unless move-point
@@ -1411,7 +1413,8 @@ If REDO is non-nil, redo the most recent undo instead."
                              `( :file ,collab--file
                                 :kind ,(if redo "Redo" "Undo"))
                              :timeout collab-rpc-timeout))
-      (if-let* ((instructions (plist-get resp :ops)))
+      (if-let* ((instructions (plist-get resp :ops))
+                (context (plist-get resp :context)))
           (if (eq (length instructions) 0)
               (message "No more operations to %s" (if redo "redo" "undo"))
             ;; Only ‘seq-map’ can map over vector. TODO: if the op is
@@ -1420,7 +1423,7 @@ If REDO is non-nil, redo the most recent undo instead."
                        (collab--apply-edit-instruction instr t))
                      instructions)
             (collab--send-ops
-             `[( :op ,(if redo "Redo" "Undo")
+             `[( :op (:kind ,(if "Redo" "Undo") :context ,context)
                  :groupSeq ,collab--group-seq)]
              t))
         (user-error "No more operations to %s"

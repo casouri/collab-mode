@@ -55,7 +55,7 @@ async fn test_send_ops_e2e() {
 
     // Step 1: Hub sends op.
     let ops = vec![serde_json::json!({
-        "op": { "Ins": [0, "Modified: "] },
+        "op": { "kind": "Ins", "pos": 0, "content": "Modified: " },
         "groupSeq": 1
     })];
     let _ = setup
@@ -81,11 +81,15 @@ async fn test_send_ops_e2e() {
     assert_eq!(remote_ops.len(), 1);
 
     let op = &remote_ops[0];
-    let expected_op = serde_json::json!({
-        "op": { "Ins": [[0, "Modified: "]] },
-        "siteId": 0,
-    });
-    assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
+    // Verify it's an insert operation from site_id 0
+    assert_eq!(op.site_id, 0);
+    let expected_edit_inst = crate::types::EditInstruction::Ins {
+        edits: vec![crate::types::Edit {
+            pos: 0,
+            content: "Modified: ".to_string(),
+        }],
+    };
+    assert_eq!(&op.op, &expected_edit_inst);
 
     // Spoke 1 also receives and fetches the op.
     let _ = setup.spokes[0]
@@ -102,11 +106,15 @@ async fn test_send_ops_e2e() {
     let remote_ops = fetch_ops_resp_spoke1.ops;
     assert_eq!(remote_ops.len(), 1);
     let op = &remote_ops[0];
-    let expected_op = serde_json::json!({
-        "op": { "Ins": [[0, "Modified: "]] },
-        "siteId": 0,
-    });
-    assert!(serde_json::to_string(op).unwrap() == serde_json::to_string(&expected_op).unwrap());
+    // Verify it's an insert operation from site_id 0
+    assert_eq!(op.site_id, 0);
+    let expected_edit_inst = crate::types::EditInstruction::Ins {
+        edits: vec![crate::types::Edit {
+            pos: 0,
+            content: "Modified: ".to_string(),
+        }],
+    };
+    assert_eq!(&op.op, &expected_edit_inst);
 
     // Step 2: Spoke 1 sends an op.
     let _ = setup.spokes[0]
@@ -114,7 +122,7 @@ async fn test_send_ops_e2e() {
         .send_ops(
             spoke1_file.clone(),
             vec![serde_json::json!({
-                "op": { "Ins": [10, "[Spoke1]"] },
+                "op": { "kind": "Ins", "pos": 10, "content": "[Spoke1]" },
                 "groupSeq": 1
             })],
         )
@@ -132,7 +140,7 @@ async fn test_send_ops_e2e() {
         .send_ops(
             spoke2_file.clone(),
             vec![serde_json::json!({
-                "op": { "Ins": [10, "[Spoke2]"] },
+                "op": { "kind": "Ins", "pos": 10, "content": "[Spoke2]" },
                 "groupSeq": 1
             })],
         )
@@ -204,7 +212,7 @@ async fn test_send_ops_permission_denied() {
         .send_ops(
             file_desc.clone(),
             vec![serde_json::json!({
-                "op": {"Ins": [0, "new text"]},
+                "op": {"kind": "Ins", "pos": 0, "content": "new text"},
                 "groupSeq": 0,
             })],
         )

@@ -941,13 +941,13 @@ impl InternalDoc {
 
         let mut cursor = self.get_cursor(&site);
         let converted_op = match op.clone() {
-            EditorOp::Ins(pos, text) => {
+            EditorOp::Ins { pos, content: text } => {
                 let internal_pos = self.convert_pos(pos, &mut cursor, true);
                 self.apply_ins(internal_pos, text.chars().count() as u64, &mut cursor);
                 self.cursors.insert(site, cursor);
                 Op::Ins((internal_pos, text), site)
             }
-            EditorOp::Del(pos, text) => {
+            EditorOp::Del { pos, content: text } => {
                 let internal_pos = self.convert_pos(pos, &mut cursor, true);
                 let editor_end = pos + text.chars().count() as u64;
                 let internal_len =
@@ -989,7 +989,12 @@ impl InternalDoc {
                 let editor_pos = self.convert_pos(pos, &mut cursor, false);
                 self.apply_ins(pos, text.chars().count() as u64, &mut cursor);
                 self.cursors.insert(site.clone(), cursor);
-                EditInstruction::Ins(vec![(editor_pos, text)])
+                EditInstruction::Ins {
+                    edits: vec![Edit {
+                        pos: editor_pos,
+                        content: text,
+                    }],
+                }
             }
             Op::Mark(edits, live, _) => {
                 let mut new_edits = vec![];
@@ -1016,10 +1021,14 @@ impl InternalDoc {
                 }
                 self.cursors.insert(site.clone(), cursor);
 
+                let new_edits: Vec<Edit> = new_edits
+                    .into_iter()
+                    .map(|(pos, content)| Edit { pos, content })
+                    .collect();
                 if live {
-                    EditInstruction::Ins(new_edits)
+                    EditInstruction::Ins { edits: new_edits }
                 } else {
-                    EditInstruction::Del(new_edits)
+                    EditInstruction::Del { edits: new_edits }
                 }
             }
         };
@@ -1495,21 +1504,25 @@ impl ClientEngine {
         let mut ops = Vec::new();
         let mut instructions = Vec::new();
         match op.clone() {
-            EditorOp::Ins(pos, text) => {
+            EditorOp::Ins { pos, content: text } => {
                 if (text.chars().count() as u64) == 0 {
                     return Err(EngineError::EmptyInsert(op));
                 }
                 ops.push(self.internal_doc.convert_editor_op_and_apply(op, self.site));
-                instructions.push(EditInstruction::Ins(vec![(pos, text)]));
+                instructions.push(EditInstruction::Ins {
+                    edits: vec![Edit { pos, content: text }],
+                });
             }
-            EditorOp::Del(pos, text) => {
+            EditorOp::Del { pos, content: text } => {
                 if self.internal_doc.ranges.len() == 0 {
                     return Err(EngineError::DeleteInEmptyDoc);
                 }
                 ops.push(self.internal_doc.convert_editor_op_and_apply(op, self.site));
-                instructions.push(EditInstruction::Del(vec![(pos, text)]));
+                instructions.push(EditInstruction::Del {
+                    edits: vec![Edit { pos, content: text }],
+                });
             }
-            EditorOp::Undo(context) => {
+            EditorOp::Undo { context } => {
                 check_undo_context(context)?;
                 for fat_op in self.generate_undo_op_1(false) {
                     let lean_op = self.convert_internal_op_and_apply(fat_op.op.clone());
@@ -1517,7 +1530,7 @@ impl ClientEngine {
                     instructions.push(lean_op.op);
                 }
             }
-            EditorOp::Redo(context) => {
+            EditorOp::Redo { context } => {
                 check_undo_context(context)?;
                 for fat_op in self.generate_undo_op_1(true) {
                     let lean_op = self.convert_internal_op_and_apply(fat_op.op.clone());
@@ -1771,10 +1784,10 @@ mod tests {
 
     fn apply_editor_op(doc: &mut String, op: &EditorOp) {
         match op {
-            EditorOp::Ins(pos, text) => {
+            EditorOp::Ins { pos, content: text } => {
                 doc.insert_str(*pos as usize, text);
             }
-            EditorOp::Del(pos, text) => {
+            EditorOp::Del { pos, content: text } => {
                 doc.replace_range(*pos as usize..(*pos as usize) + text.chars().count(), "");
             }
             _ => panic!(),
@@ -1783,14 +1796,17 @@ mod tests {
 
     fn apply(doc: &mut String, op: &EditInstruction) {
         match op {
-            EditInstruction::Ins(edits) => {
-                for (pos, str) in edits.iter().rev() {
-                    doc.insert_str(*pos as usize, &str);
+            EditInstruction::Ins { edits } => {
+                for edit in edits.iter().rev() {
+                    doc.insert_str(edit.pos as usize, &edit.content);
                 }
             }
-            EditInstruction::Del(edits) => {
-                for (pos, str) in edits.iter().rev() {
-                    doc.replace_range((*pos as usize)..(*pos as usize + str.chars().count()), "");
+            EditInstruction::Del { edits } => {
+                for edit in edits.iter().rev() {
+                    doc.replace_range(
+                        (edit.pos as usize)..(edit.pos as usize + edit.content.chars().count()),
+                        "",
+                    );
                 }
             }
         }
@@ -1818,9 +1834,18 @@ mod tests {
 
         let mut server = ServerEngine::new(0);
 
-        let editor_op_a1 = EditorOp::Del(0, "a".to_string());
-        let editor_op_a2 = EditorOp::Ins(2, "x".to_string());
-        let editor_op_b1 = EditorOp::Del(2, "c".to_string());
+        let editor_op_a1 = EditorOp::Del {
+            pos: 0,
+            content: "a".to_string(),
+        };
+        let editor_op_a2 = EditorOp::Ins {
+            pos: 2,
+            content: "x".to_string(),
+        };
+        let editor_op_b1 = EditorOp::Del {
+            pos: 2,
+            content: "c".to_string(),
+        };
         let op_a1 = make_editor_fatop(editor_op_a1.clone(), 1);
         let op_a2 = make_editor_fatop(editor_op_a2.clone(), 2);
         let op_b1 = make_editor_fatop(editor_op_b1.clone(), 1);
@@ -1912,9 +1937,18 @@ mod tests {
 
         let mut server = ServerEngine::new(0);
 
-        let editor_op_a1 = EditorOp::Ins(2, "1".to_string());
-        let editor_op_b1 = EditorOp::Ins(1, "2".to_string());
-        let editor_op_c1 = EditorOp::Del(1, "b".to_string());
+        let editor_op_a1 = EditorOp::Ins {
+            pos: 2,
+            content: "1".to_string(),
+        };
+        let editor_op_b1 = EditorOp::Ins {
+            pos: 1,
+            content: "2".to_string(),
+        };
+        let editor_op_c1 = EditorOp::Del {
+            pos: 1,
+            content: "b".to_string(),
+        };
         let op_a1 = make_editor_fatop(editor_op_a1.clone(), 1);
         let op_b1 = make_editor_fatop(editor_op_b1.clone(), 1);
         let op_c1 = make_editor_fatop(editor_op_c1.clone(), 1);
@@ -2006,12 +2040,36 @@ mod tests {
         let doc_id = 1;
         let mut client_engine = ClientEngine::new(site_id, 1, 0);
         // op1: original edit.
-        let op1 = make_editor_fatop(EditorOp::Ins(0, "{".to_string()), 1);
+        let op1 = make_editor_fatop(
+            EditorOp::Ins {
+                pos: 0,
+                content: "{".to_string(),
+            },
+            1,
+        );
         // Auto-insert parenthesis. I don't know why it deletes the
         // inserted bracket first, but that's what it does.
-        let op2 = make_editor_fatop(EditorOp::Del(0, "{".to_string()), 1);
-        let op3 = make_editor_fatop(EditorOp::Ins(0, "{".to_string()), 1);
-        let op4 = make_editor_fatop(EditorOp::Ins(1, "}".to_string()), 1);
+        let op2 = make_editor_fatop(
+            EditorOp::Del {
+                pos: 0,
+                content: "{".to_string(),
+            },
+            1,
+        );
+        let op3 = make_editor_fatop(
+            EditorOp::Ins {
+                pos: 0,
+                content: "{".to_string(),
+            },
+            1,
+        );
+        let op4 = make_editor_fatop(
+            EditorOp::Ins {
+                pos: 1,
+                content: "}".to_string(),
+            },
+            1,
+        );
         // All four ops have the same group, which is what we want.
 
         client_engine.process_local_op(op1, 1).unwrap();
@@ -2023,10 +2081,42 @@ mod tests {
 
         println!("undo_ops: {:?}", undo_ops);
 
-        assert!(undo_ops[0] == EditInstruction::Del(vec![(1, "}".to_string())]));
-        assert!(undo_ops[1] == EditInstruction::Del(vec![(0, "{".to_string())]));
-        assert!(undo_ops[2] == EditInstruction::Ins(vec![(0, "{".to_string())]));
-        assert!(undo_ops[3] == EditInstruction::Del(vec![(0, "{".to_string())]));
+        assert!(
+            undo_ops[0]
+                == EditInstruction::Del {
+                    edits: vec![Edit {
+                        pos: 1,
+                        content: "}".to_string()
+                    }]
+                }
+        );
+        assert!(
+            undo_ops[1]
+                == EditInstruction::Del {
+                    edits: vec![Edit {
+                        pos: 0,
+                        content: "{".to_string()
+                    }]
+                }
+        );
+        assert!(
+            undo_ops[2]
+                == EditInstruction::Ins {
+                    edits: vec![Edit {
+                        pos: 0,
+                        content: "{".to_string()
+                    }]
+                }
+        );
+        assert!(
+            undo_ops[3]
+                == EditInstruction::Del {
+                    edits: vec![Edit {
+                        pos: 0,
+                        content: "{".to_string()
+                    }]
+                }
+        );
     }
 
     #[test]

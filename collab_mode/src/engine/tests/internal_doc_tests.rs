@@ -344,7 +344,10 @@ fn test_convert_editor_op_ins() {
     let site_id = 1;
 
     // Insert at editor position 15 (after dead range)
-    let editor_op = EditorOp::Ins(15, "hello".to_string());
+    let editor_op = EditorOp::Ins {
+        pos: 15,
+        content: "hello".to_string(),
+    };
     let internal_op = doc.convert_editor_op_and_apply(editor_op, site_id);
 
     match internal_op {
@@ -370,7 +373,10 @@ fn test_convert_editor_op_del() {
     let site_id = 1;
 
     // Delete from editor position 5 to 15
-    let editor_op = EditorOp::Del(5, "0123456789".to_string());
+    let editor_op = EditorOp::Del {
+        pos: 5,
+        content: "0123456789".to_string(),
+    };
     let internal_op = doc.convert_editor_op_and_apply(editor_op, site_id);
 
     match internal_op {
@@ -402,10 +408,10 @@ fn test_convert_internal_op_ins() {
     let edit_instr = doc.convert_internal_op_and_apply(internal_op);
 
     match edit_instr {
-        EditInstruction::Ins(edits) => {
+        EditInstruction::Ins { edits } => {
             assert_eq!(edits.len(), 1);
-            assert_eq!(edits[0].0, 15); // Editor position
-            assert_eq!(edits[0].1, "world");
+            assert_eq!(edits[0].pos, 15); // Editor position
+            assert_eq!(edits[0].content, "world");
         }
         _ => panic!("Expected Ins instruction"),
     }
@@ -422,10 +428,10 @@ fn test_convert_internal_op_mark_dead() {
     let edit_instr = doc.convert_internal_op_and_apply(internal_op);
 
     match edit_instr {
-        EditInstruction::Del(edits) => {
+        EditInstruction::Del { edits } => {
             assert_eq!(edits.len(), 1);
-            assert_eq!(edits[0].0, 10); // Editor position
-            assert_eq!(edits[0].1, "deleted123");
+            assert_eq!(edits[0].pos, 10); // Editor position
+            assert_eq!(edits[0].content, "deleted123");
         }
         _ => panic!("Expected Del instruction"),
     }
@@ -442,10 +448,10 @@ fn test_convert_internal_op_mark_live() {
     let edit_instr = doc.convert_internal_op_and_apply(internal_op);
 
     match edit_instr {
-        EditInstruction::Ins(edits) => {
+        EditInstruction::Ins { edits } => {
             assert_eq!(edits.len(), 1);
-            assert_eq!(edits[0].0, 0); // Editor position (at beginning since all was dead)
-            assert_eq!(edits[0].1, "restored12");
+            assert_eq!(edits[0].pos, 0); // Editor position (at beginning since all was dead)
+            assert_eq!(edits[0].content, "restored12");
         }
         _ => panic!("Expected Ins instruction"),
     }
@@ -519,12 +525,18 @@ fn test_complex_scenario() {
     doc.ranges = vec![Range::Live(11)];
 
     // Site 1 deletes "World" (positions 6-11)
-    let op1 = EditorOp::Del(6, "World".to_string());
+    let op1 = EditorOp::Del {
+        pos: 6,
+        content: "World".to_string(),
+    };
     doc.convert_editor_op_and_apply(op1, site1);
     assert_ranges_eq(&doc.ranges, &[Range::Live(6), Range::Dead(5)]);
 
     // Site 2 inserts " there" at position 5
-    let op2 = EditorOp::Ins(5, " there".to_string());
+    let op2 = EditorOp::Ins {
+        pos: 5,
+        content: " there".to_string(),
+    };
     doc.convert_editor_op_and_apply(op2, site2);
     assert_ranges_eq(&doc.ranges, &[Range::Live(12), Range::Dead(5)]);
 
@@ -541,7 +553,10 @@ fn test_unicode_handling() {
     let unicode_text = "Hello 👋 世界 🌍";
     let char_count = unicode_text.chars().count() as u64;
 
-    let op = EditorOp::Ins(0, unicode_text.to_string());
+    let op = EditorOp::Ins {
+        pos: 0,
+        content: unicode_text.to_string(),
+    };
     doc.convert_editor_op_and_apply(op, site_id);
 
     assert_eq!(doc.editor_len(), char_count);
