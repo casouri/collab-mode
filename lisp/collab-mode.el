@@ -727,6 +727,7 @@ To prevent them from being invoked."
                 #'collab--warn-for-unsupported-undo)
     ;; Other commands
     (define-key map [remap save-buffer] #'collab-save-buffer)
+    (define-key map [remap find-file] #'collab-find-file)
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
@@ -790,7 +791,7 @@ PATH should be a string HOST/PROJECT/PATH returned by
 ‘collab--encode-filename’."
   (setq collab--file file-desc)
   (setq collab--my-site-id my-site-id)
-  (setq collab--default-directory path)
+  (setq collab--default-directory (file-name-directory path))
   (puthash path collab--file collab--doc-id-table)
   (puthash (collab--encode-filename collab--file)
            (current-buffer)
