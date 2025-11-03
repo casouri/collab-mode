@@ -36,6 +36,7 @@ pub enum NotificationCode {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[non_exhaustive]
+#[repr(i32)]
 pub enum ErrorCode {
     // Defined by JSON RPC.
     ParseError = -32700,

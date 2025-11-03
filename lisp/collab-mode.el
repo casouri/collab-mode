@@ -49,7 +49,7 @@ The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   "Cursor color ring."
   :type '(list string))
 
-(defcustom collab-send-ops-delay 0.5
+(defcustom collab-send-ops-delay 1
   "Collab sends ops when Emacs is idle for this much time."
   :type 'number)
 
@@ -744,6 +744,9 @@ To prevent them from being invoked."
         (add-hook 'before-change-functions
                   #'collab--before-change 0 t)
         (add-hook 'after-change-functions #'collab--after-change 0 t)
+        ;; Disconnect when killing buffer to reset site seq
+        ;; verification on the file host.
+        (add-hook #'kill-buffer-hook #'collab-disconnect-buffer 0 t)
         (if collab-hasty-p
             (add-hook 'collab--after-change-hook #'collab--after-change-default 0 t)
           (add-hook 'collab--after-change-hook #'collab--after-change-hasty 0 t))
