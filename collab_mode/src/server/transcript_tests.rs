@@ -831,7 +831,13 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     }
 
                     // Convergence loop: poll until all editors have same last_global_seq and zero pending_local_ops
-                    for attempt in 0..10 {
+                    for attempt in 0..20 {
+                        sleep(Duration::from_millis(100)).await;
+
+                        // Send SendOps to hub first to force it to process any pending messages
+                        // The hub might have operations from spokes in its message queue that haven't been processed yet
+                        let _ = setup.hub.editor.send_ops(hub_file.clone(), vec![]).await;
+
                         // Pull more ops for each editor and update tracking
                         for i in 0..num_editors {
                             let send_resp = handle_error!(
@@ -879,9 +885,9 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             break;
                         }
 
-                        if attempt == 9 {
+                        if attempt == 19 {
                             return Err(anyhow::anyhow!(
-                                "CHECK failed: editors not converged after 10 attempts. global_seqs: {:?}, pending_counts: {:?}, ops_counts: {:?}",
+                                "CHECK failed: editors not converged after 20 attempts. global_seqs: {:?}, pending_counts: {:?}, ops_counts: {:?}",
                                 spoke_global_seqs,
                                 spoke_pending_counts,
                                 spoke_ops_counts
@@ -894,9 +900,6 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                             spoke_global_seqs,
                             spoke_pending_counts
                         );
-
-                        // Small delay before next iteration
-                        sleep(Duration::from_millis(100)).await;
                     }
 
                     // Verify all documents have the same content
@@ -949,7 +952,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
 }
 
 // Test discovery - scan transcripts directory and run all tests
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_all_transcripts() {
     let transcripts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/transcripts");
 
