@@ -452,7 +452,7 @@ pub enum Msg {
     SaveFile(DocId),
     FileSaved(DocId),
     // If true, delete, otherwise only close.
-    DeleteFile(FileDesc, bool),
+    CloseFile(FileDesc, bool),
     FileDeleted(FileDesc),
     FileClosed(FileDesc),
     Snapshot(NewSnapshot),

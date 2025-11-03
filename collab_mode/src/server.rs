@@ -835,7 +835,7 @@ impl Server {
             }
             "CloseFile" => {
                 let params: DeleteFileParams = serde_json::from_value(req.params)?;
-                self.handle_delete_file_from_editor(next, params, false)
+                self.handle_close_file_from_editor(next, params, false)
                     .await?;
                 Ok(())
             }
@@ -845,7 +845,7 @@ impl Server {
                 if !self.check_connection(next, &host_id).await {
                     return Ok(());
                 }
-                self.handle_delete_file_from_editor(next, params, true)
+                self.handle_close_file_from_editor(next, params, true)
                     .await?;
                 Ok(())
             }
@@ -1222,8 +1222,8 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::DeleteFile(file_desc, delete) => {
-                self.handle_delete_file_from_remote(next, file_desc, msg.host, delete)
+            Msg::CloseFile(file_desc, delete) => {
+                self.handle_close_file_from_remote(next, file_desc, msg.host, delete)
                     .await?;
                 Ok(())
             }
@@ -2860,7 +2860,7 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_delete_file_from_editor<'a>(
+    async fn handle_close_file_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
         params: DeleteFileParams,
@@ -2872,13 +2872,13 @@ impl Server {
 
         // Remote.
         if host_id != self.host_id {
-            next.send_to_remote(&host_id, Msg::DeleteFile(file, delete))
+            next.send_to_remote(&host_id, Msg::CloseFile(file, delete))
                 .await;
             return Ok(());
         }
 
         // Local.
-        match self.handle_delete_file_locally(&file, delete).await {
+        match self.handle_close_file_locally(&file, delete).await {
             Ok(subscribers) => {
                 // Send response to the editor.
                 next.send_resp((), None).await;
@@ -2912,7 +2912,7 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_delete_file_from_remote<'a>(
+    async fn handle_close_file_from_remote<'a>(
         &mut self,
         next: Next<'a>,
         file_desc: FileDesc,
@@ -2929,7 +2929,7 @@ impl Server {
             return Ok(());
         }
 
-        match self.handle_delete_file_locally(&file_desc, delete).await {
+        match self.handle_close_file_locally(&file_desc, delete).await {
             Ok(subscribers) => {
                 let mut requester_notified = false;
 
@@ -2973,7 +2973,7 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_delete_file_locally(
+    async fn handle_close_file_locally(
         &mut self,
         file: &FileDesc,
         delete: bool,
