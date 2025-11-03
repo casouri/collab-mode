@@ -2460,11 +2460,11 @@ impl Server {
             .get_remote_doc_mut(&params.file)
             .ok_or_else(|| anyhow::anyhow!("Remote doc not found: {}", params.file))?;
 
-        let ops = match params.kind {
+        let (ops, context) = match params.kind {
             UndoKind::Undo => remote_doc.engine.generate_undo_op(),
             UndoKind::Redo => remote_doc.engine.generate_redo_op(),
         };
-        let resp = UndoResp { ops };
+        let resp = UndoResp { ops, context };
         Ok(resp)
     }
 

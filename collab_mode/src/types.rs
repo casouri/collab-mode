@@ -42,17 +42,21 @@ pub struct Info {
 
 #[derive(Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub enum EditorOp {
+    /// Insert op, with the position and content.
     Ins(u64, String),
+    /// Delete op, with the position and content.
     Del(u64, String),
-    Undo,
-    Redo,
+    /// Undo op, with the context number.
+    Undo(u64),
+    /// Redo op, with the context number.
+    Redo(u64),
 }
 
 impl std::fmt::Debug for EditorOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Undo => write!(f, "undo"),
-            Self::Redo => write!(f, "redo"),
+            Self::Undo(context) => write!(f, "undo({context})"),
+            Self::Redo(context) => write!(f, "redo({context})"),
             Self::Ins(pos, content) => {
                 let content = replace_whitespace_char(content.to_string());
                 write!(f, "ins({pos}, {content})")
@@ -182,8 +186,8 @@ impl EditorOp {
         match self {
             EditorOp::Ins(_, _) => EditorOpKind::Original,
             EditorOp::Del(_, _) => EditorOpKind::Original,
-            EditorOp::Undo => EditorOpKind::Undo,
-            EditorOp::Redo => EditorOpKind::Redo,
+            EditorOp::Undo(_) => EditorOpKind::Undo,
+            EditorOp::Redo(_) => EditorOpKind::Redo,
         }
     }
 }

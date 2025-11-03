@@ -348,6 +348,12 @@ pub struct UndoParams {
 #[serde(rename_all = "camelCase")]
 pub struct UndoResp {
     pub ops: Vec<EditInstruction>,
+    /// Context in which the ops were generated. It’s the total
+    /// history length at the time of generation. Editor must send
+    /// back the undo ops under the same context or else an error is
+    /// thrown. (Basically, don’t apply any other ops between getting
+    /// the undo op and sending the undo ops back.)
+    pub context: u64,
 }
 
 // **** ConnectionState

@@ -1063,6 +1063,11 @@ impl GlobalHistory {
         }
     }
 
+    /// Return the total length of global history + local history.
+    pub fn total_len(&self) -> u64 {
+        (self.global.len() + self.local.len()) as u64
+    }
+
     /// Get the global ops with sequence number larger than `seq`.
     fn ops_after(&self, seq: GlobalSeq) -> Vec<FatOp> {
         if seq < self.global.len() as GlobalSeq {
@@ -1476,6 +1481,17 @@ impl ClientEngine {
         }
         self.current_site_seq = site_seq;
 
+        let check_undo_context = |context: u64| -> EngineResult<()> {
+            if self.gh.total_len() != context {
+                return Err(EngineError::UndoError(format!(
+                        "Undo context mismatch: expected {}, got {}, this means editor sent ops between getting the undo op and sending the undo op back to server",
+                        self.gh.total_len(),
+                        context
+                    )));
+            }
+            Ok(())
+        };
+
         let mut ops = Vec::new();
         let mut instructions = Vec::new();
         match op.clone() {
@@ -1493,14 +1509,16 @@ impl ClientEngine {
                 ops.push(self.internal_doc.convert_editor_op_and_apply(op, self.site));
                 instructions.push(EditInstruction::Del(vec![(pos, text)]));
             }
-            EditorOp::Undo => {
+            EditorOp::Undo(context) => {
+                check_undo_context(context)?;
                 for fat_op in self.generate_undo_op_1(false) {
                     let lean_op = self.convert_internal_op_and_apply(fat_op.op.clone());
                     ops.push(fat_op.op);
                     instructions.push(lean_op.op);
                 }
             }
-            EditorOp::Redo => {
+            EditorOp::Redo(context) => {
+                check_undo_context(context)?;
                 for fat_op in self.generate_undo_op_1(true) {
                     let lean_op = self.convert_internal_op_and_apply(fat_op.op.clone());
                     ops.push(fat_op.op);
@@ -1671,17 +1689,25 @@ impl ClientEngine {
     }
 
     /// Generate an undo op from the current undo tip. Return an empty
-    /// vector if there's no more op to undo.
-    pub fn generate_undo_op(&mut self) -> Vec<EditInstruction> {
+    /// vector if there's no more op to undo. Also return the current
+    /// global seq as context. When editor send the applied ops back,
+    /// we check if the context has changed.
+    pub fn generate_undo_op(&mut self) -> (Vec<EditInstruction>, u64) {
         let ops = self.generate_undo_op_1(false);
-        self.convert_internal_ops_dont_apply(ops)
+        (
+            self.convert_internal_ops_dont_apply(ops),
+            self.gh.total_len(),
+        )
     }
 
     /// Generate a redo op from the current undo tip. Return en empty
     /// vector if there's no more ops to redo.
-    pub fn generate_redo_op(&mut self) -> Vec<EditInstruction> {
+    pub fn generate_redo_op(&mut self) -> (Vec<EditInstruction>, u64) {
         let ops = self.generate_undo_op_1(true);
-        self.convert_internal_ops_dont_apply(ops)
+        (
+            self.convert_internal_ops_dont_apply(ops),
+            self.gh.total_len(),
+        )
     }
 
     /// Print debugging history.
@@ -1993,7 +2019,7 @@ mod tests {
         client_engine.process_local_op(op3, 3).unwrap();
         client_engine.process_local_op(op4, 4).unwrap();
 
-        let undo_ops = client_engine.generate_undo_op();
+        let (undo_ops, _context) = client_engine.generate_undo_op();
 
         println!("undo_ops: {:?}", undo_ops);
 
