@@ -447,12 +447,22 @@ pub enum Msg {
         after: GlobalSeq,
     },
     RequestFile(FileDesc, OpenMode),
-    MoveFile(ProjectId, String, String),
-    FileMoved(ProjectId, String, String),
+    MoveFile {
+        project: ProjectId,
+        source: String,
+        dest: String,
+    },
+    FileMoved {
+        project: ProjectId,
+        source: String,
+        dest: String,
+    },
     SaveFile(DocId),
     FileSaved(DocId),
-    // If true, delete, otherwise only close.
-    CloseFile(FileDesc, bool),
+    CloseFile {
+        file: FileDesc,
+        delete: bool,
+    },
     FileDeleted(FileDesc),
     FileClosed(FileDesc),
     Snapshot(NewSnapshot),

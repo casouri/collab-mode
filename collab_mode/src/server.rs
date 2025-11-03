@@ -1140,12 +1140,20 @@ impl Server {
                     .await?;
                 Ok(())
             }
-            Msg::MoveFile(project_id, old_path, new_path) => {
-                self.handle_move_file(&next, project_id, old_path, new_path, msg.host.clone())
+            Msg::MoveFile {
+                project,
+                source,
+                dest,
+            } => {
+                self.handle_move_file(&next, project, source, dest, msg.host.clone())
                     .await?;
                 Ok(())
             }
-            Msg::FileMoved(project, old_path, new_path) => {
+            Msg::FileMoved {
+                project,
+                source: old_path,
+                dest: new_path,
+            } => {
                 // Non-nil req_id, meaning this is a response to our
                 // request.
                 if msg.req_id.is_some() {
@@ -1158,8 +1166,8 @@ impl Server {
                     };
                     next.send_resp(resp, None).await;
                 } else {
-                    // No req_id, meaning we’re receiving this message
-                    // because a doc we’re subscribed to moved.
+                    // No req_id, meaning we're receiving this message
+                    // because a doc we're subscribed to moved.
                     let msg = FileMovedNotif {
                         host_id: msg.host,
                         project,
@@ -1222,8 +1230,8 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::CloseFile(file_desc, delete) => {
-                self.handle_close_file_from_remote(next, file_desc, msg.host, delete)
+            Msg::CloseFile { file, delete } => {
+                self.handle_close_file_from_remote(next, file, msg.host, delete)
                     .await?;
                 Ok(())
             }
@@ -2193,7 +2201,11 @@ impl Server {
                         next.webchannel,
                         &subscriber_id,
                         req_id,
-                        Msg::FileMoved(project_id.clone(), old_path.clone(), new_path.clone()),
+                        Msg::FileMoved {
+                            project: project_id.clone(),
+                            source: old_path.clone(),
+                            dest: new_path.clone(),
+                        },
                     )
                     .await;
                 }
@@ -2669,8 +2681,15 @@ impl Server {
         } = params;
         if self.host_id != host_id {
             // Handle remotely.
-            next.send_to_remote(&host_id, Msg::MoveFile(project, old_path, new_path))
-                .await;
+            next.send_to_remote(
+                &host_id,
+                Msg::MoveFile {
+                    project,
+                    source: old_path,
+                    dest: new_path,
+                },
+            )
+            .await;
         } else {
             // Handle locally.
             let res = self.move_file_on_disk(&project, &old_path, &new_path).await;
@@ -2701,7 +2720,11 @@ impl Server {
                                 next.webchannel,
                                 &subscriber_id,
                                 None,
-                                Msg::FileMoved(project.clone(), old_path.clone(), new_path.clone()),
+                                Msg::FileMoved {
+                                    project: project.clone(),
+                                    source: old_path.clone(),
+                                    dest: new_path.clone(),
+                                },
                             )
                             .await;
                         }
@@ -2872,7 +2895,7 @@ impl Server {
 
         // Remote.
         if host_id != self.host_id {
-            next.send_to_remote(&host_id, Msg::CloseFile(file, delete))
+            next.send_to_remote(&host_id, Msg::CloseFile { file, delete })
                 .await;
             return Ok(());
         }
