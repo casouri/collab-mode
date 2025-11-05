@@ -2504,6 +2504,7 @@ impl Server {
                 }),
             )
             .await;
+            return;
         }
 
         let remote_doc = res.unwrap().1;
