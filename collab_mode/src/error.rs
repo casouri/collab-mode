@@ -96,8 +96,8 @@ impl From<serde_json::Error> for CollabError {
     }
 }
 
-impl From<rcgen::RcgenError> for CollabError {
-    fn from(value: rcgen::RcgenError) -> Self {
+impl From<rcgen::Error> for CollabError {
+    fn from(value: rcgen::Error) -> Self {
         CollabError::Fatal(format!("Key error: {:#}", value))
     }
 }

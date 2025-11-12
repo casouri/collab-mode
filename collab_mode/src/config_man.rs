@@ -7,17 +7,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct KeyCert {
-    /// The private key. I don’t know if the [rcgen::KeyPair] is the
-    /// same story as [rcgen::Certificate] (see below), but let’s just
-    /// do the same thing and store the DER instead of
-    /// [rcgen::KeyPair].
+    /// The private key. Stored as DER bytes for compatibility with
+    /// external libraries. The [rcgen::KeyPair] can be reconstructed
+    /// from DER when needed.
     pub key_der: Vec<u8>,
-    /// The certificate DER. NOTE: DO NOT use a rcgen::Certificate and
-    /// call [rcgen::Certificate::serialize_der] when you need a DER.
-    /// Despite its name [rcgen::Certificate::serialize_der] actually
-    /// _generates_ a new certificate every time you call it, which
-    /// means it’s return value are different every time it’s invoked.
-    /// See https://github.com/rustls/rcgen/issues/62
+    /// The certificate DER. In rcgen 0.13+, certificates are issued
+    /// once and serialized consistently. Store the DER bytes for
+    /// efficient reuse across DTLS connections.
     pub cert_der: Vec<u8>,
 }
 
@@ -31,10 +27,13 @@ impl KeyCert {
 
     /// Create a DTLS certificate.
     pub fn create_dtls_cert(&self) -> webrtc_dtls::crypto::Certificate {
+        use std::convert::TryInto;
+        let key_der: rustls_pki_types::PrivateKeyDer = self.key_der.as_slice().try_into().unwrap();
         let dtls_cert = webrtc_dtls::crypto::Certificate {
             certificate: vec![rustls::Certificate(self.cert_der.clone())],
             private_key: webrtc_dtls::crypto::CryptoPrivateKey::from_key_pair(
-                &rcgen::KeyPair::from_der(&self.key_der).unwrap(),
+                &rcgen::KeyPair::from_der_and_sign_algo(&key_der, &rcgen::PKCS_ECDSA_P256_SHA256)
+                    .unwrap(),
             )
             .unwrap(),
         };
@@ -56,15 +55,17 @@ pub fn hash_der(der: &[u8]) -> String {
 
 /// Return a clone of `key`.
 pub fn clone_key(key: &rcgen::KeyPair) -> rcgen::KeyPair {
+    use std::convert::TryInto;
     let key_der = key.serialized_der();
-    rcgen::KeyPair::from_der(&key_der).unwrap()
+    let key_der_typed: rustls_pki_types::PrivateKeyDer = key_der.as_ref().try_into().unwrap();
+    rcgen::KeyPair::from_der_and_sign_algo(&key_der_typed, &rcgen::PKCS_ECDSA_P256_SHA256).unwrap()
 }
 
 /// Return a freshly generated key and certificate for `name`.
 pub fn create_key_cert(name: &str) -> KeyCert {
-    let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
-    let cert_der = cert.serialize_der().unwrap();
-    let key_der = cert.get_key_pair().serialize_der();
+    let cert_key = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
+    let cert_der = cert_key.cert.der().to_vec();
+    let key_der = cert_key.key_pair.serialized_der().to_vec();
     KeyCert { key_der, cert_der }
 }
 
@@ -253,7 +254,7 @@ impl ConfigManager {
             let key_pair = rcgen::KeyPair::from_pem(&key_pem)?;
             (key_pair, key_der)
         } else {
-            let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+            let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
             let key_pem = key_pair.serialize_pem();
             let key_der = pem::parse(&key_pem).unwrap().into_contents();
             std::fs::write(key_file, key_pem).map_err(|err| {
@@ -273,10 +274,9 @@ impl ConfigManager {
         } else {
             // The alt subject name doesn't really matter, but let's
             // use the uuid because why not.
-            let mut params = rcgen::CertificateParams::new(vec![uuid]);
-            params.key_pair = Some(key_pair);
-            let cert = rcgen::Certificate::from_params(params).unwrap();
-            let cert_pem = cert.serialize_pem().unwrap();
+            let params = rcgen::CertificateParams::new(vec![uuid])?;
+            let cert = params.self_signed(&key_pair)?;
+            let cert_pem = cert.pem();
             let cert_der = pem::parse(&cert_pem)?.into_contents();
             std::fs::write(cert_file, &cert_pem).map_err(|err| {
                 CollabError::Fatal(format!(
