@@ -49,8 +49,12 @@ The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   "Cursor color ring."
   :type '(list string))
 
-(defcustom collab-send-ops-delay 1
-  "Collab sends ops when Emacs is idle for this much time."
+(defcustom collab-send-ops-delay 0.5
+  "Delay for sendin ops to server.
+
+After user typed something and stoped, Emacs waits for this much time to
+send the pending ops. If user keeps typing, Emacs waits for the user to
+stop typing."
   :type 'number)
 
 (defcustom collab-receive-ops-delay 1
@@ -120,6 +124,15 @@ reconnect to the doc.")
 
 (defvar collab--verbose nil
   "If non-nil, print debugging information.")
+
+(defvar collab--send-ops-threshold 20
+  "Collab-mode send ops when pending ops is this long.
+The measured length is the text length, not ops count.")
+
+(defvar collab-backup-directory "/tmp/collab-mode"
+  "Remote files are wrote to this directory as a local backup.
+Under this directory, the first level sub-directories are each remote
+host, then each project, then files.")
 
 ;;; Generic helpers
 
@@ -237,9 +250,10 @@ For all possible states, see ‘collab--connection-state-req’.
 Return nil if no info for HOST-ID is found."
   (if (equal host-id collab--my-host-id)
       "Connected"
-    (let ((entry (cl-find (lambda (entry)
-                            (equal (plist-get entry :hostId) host-id))
-                          connection-state)))
+    ;; Use ‘seq-find’ which works with arrays.
+    (let ((entry (seq-find (lambda (entry)
+                             (equal (plist-get entry :hostId) host-id))
+                           connection-state)))
       (if entry
           (plist-get entry :state)
         nil))))
@@ -469,7 +483,7 @@ even if the user only typed a few characters and stopped, we
 still want to send them out after a short idle
 delay (‘collab-send-ops-delay’).")
 
-(defvar-local collab--send-ops-idle-timer nil
+(defvar-local collab--send-ops-timer nil
   "Idle timer for sending out ops.")
 
 (defvar-local collab--open-this-doc nil
@@ -537,6 +551,18 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
 ;; tests.
 (defvar-local collab--send-ops-fn #'collab--send-ops
   "Function for sendint ops.")
+
+(defun collab--ops-text-len (ops)
+  "Return the text length of OPS.
+Insertsion and deletion all counts toward the length."
+  (let ((len 0))
+    (dolist (op ops)
+      (pcase op
+        (`(ins ,_ ,str ,_)
+         (setq len (+ len (length str))))
+        (`(del ,_ ,str ,_)
+         (setq len (+ len (length str))))))
+    len))
 
 (defun collab--op-empty-p (op)
   "Return non-nil if OP is an empty ins/del op."
@@ -631,18 +657,23 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
 
 (defun collab--after-change-default ()
   "Default send-ops behavior: setup an idle timer to send ops."
-  (when collab--send-ops-idle-timer
-    (cancel-timer collab--send-ops-idle-timer))
+  (when collab--send-ops-timer
+    (cancel-timer collab--send-ops-timer))
   (let ((buf (current-buffer)))
-    (setq collab--send-ops-idle-timer
-          (run-with-idle-timer
-           collab-send-ops-delay nil
-           (lambda ()
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (unwind-protect
-                     (collab--send-ops-now)
-                   (setq collab--send-ops-idle-timer nil)))))))))
+    ;; Immediately send out pending ops if it’s long enough. Otherwise
+    ;; send out after the idle delay.
+    (if (> (collab--ops-text-len collab--pending-ops)
+           collab--send-ops-threshold)
+        (collab--send-ops-now)
+      (setq collab--send-ops-timer
+            (run-with-timer
+             collab-send-ops-delay nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (unwind-protect
+                       (collab--send-ops-now)
+                     (setq collab--send-ops-timer nil))))))))))
 
 (defun collab--after-change-hasty ()
   "Send ops in every after-change function."
@@ -652,9 +683,12 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
   "Run in ‘collab--send-ops-hook’, send ‘collab--pending-ops’."
   (if (eq (car collab--pending-ops) 'tracking-error)
       ;; TODO, send full buffer.
-      (when collab--verbose
-        (message "Hit a tracking error! Sending full buffer")
-        (message "Reason: %s" (cadr collab--pending-ops)))
+      (progn
+        (when collab--verbose
+          (message "Hit a tracking error! Abort")
+          ;; (message "Hit a tracking error! Sending full buffer")
+          (message "Reason: %s" (cadr collab--pending-ops)))
+        (collab--disable))
     (unwind-protect
         (let ((ops (nreverse collab--pending-ops)))
           (when collab--verbose
@@ -674,7 +708,8 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
      ;; Amalgamate if OP2 inserts right after OP1. Don’t amalgamate if
      ;; OP1 is long enough. Use ‘string-width’ so that one CJK char
      ;; counts as two.
-     (if (and (< (string-width str1) 20)
+     (if (and (< (string-width str1) (+ collab--send-ops-threshold 5))
+              ;; Make this (25) is longer than in ‘collab--after-change-default’.
               (eq pos2 (+ pos1 (length str1))))
          (list 'ins pos1 (concat str1 str2) seq1)
        nil))
@@ -682,7 +717,7 @@ Return the new op if amalgamated, return nil if didn’t amalgamate."
     (`((del ,pos1 ,str1 ,seq1) . (del ,pos2 ,str2 ,_))
      ;; Amalgamate if OP2 deletes right before OP1. Don’t amalgamate
      ;; if OP2 is long enough.
-     (if (and (< (string-width str1) 20)
+     (if (and (< (string-width str1) (+ collab--send-ops-threshold 5))
               (eq (+ pos2 (length str2)) pos1))
          (list 'del pos2 (concat str2 str1) seq1)
        nil))
@@ -749,8 +784,8 @@ To prevent them from being invoked."
         ;; verification on the file host.
         (add-hook #'kill-buffer-hook #'collab-disconnect-buffer 0 t)
         (if collab-hasty-p
-            (add-hook 'collab--after-change-hook #'collab--after-change-default 0 t)
-          (add-hook 'collab--after-change-hook #'collab--after-change-hasty 0 t))
+            (add-hook 'collab--after-change-hook #'collab--after-change-hasty 0 t)
+          (add-hook 'collab--after-change-hook #'collab--after-change-default 0 t))
 
         (unless (member collab--mode-line mode-line-misc-info)
           (setq-local mode-line-misc-info
@@ -824,43 +859,71 @@ PATH should be a string HOST/PROJECT/PATH returned by
               (site-id (plist-get state :site-id)))
     (collab--enable file site-id (collab--encode-filename file))))
 
-;;; Global monioring
+;;; Global monitoring
+
+(defun collab--setup-file (file-desc)
+  "Setup FILE-DESC for collab editing in the current buffer.
+
+Get file content from server and enable monitoring mode. The current
+buffer shouldn’t already be in monitored mode."
+  (cl-assert (not collab-monitored-mode))
+  (collab--catch-error (format "can't connect to %s" file-desc)
+    (let* ((resp (collab--open-file-req file-desc "create"))
+           (site-id (plist-get resp :siteId))
+           (content (plist-get resp :content))
+           (resp-file-desc (plist-get resp :file))
+           (filename (plist-get resp :filename))
+           (meta (plist-get resp :fileMeta))
+           (suggested-major-mode (plist-get meta :emacs.majorMode))
+           (path (collab--encode-filename resp-file-desc))
+           (backup-path (collab--backup-filename file-desc))
+           (inhibit-read-only t))
+
+      (erase-buffer)
+      (insert content)
+      (goto-char (point-min))
+
+      (if (and (stringp suggested-major-mode)
+               (functionp (intern-soft suggested-major-mode)))
+          (funcall (intern-soft suggested-major-mode))
+        (let ((buffer-file-name filename))
+          (set-auto-mode)))
+
+      (collab--enable resp-file-desc site-id path))))
 
 (defun collab--find-file-hook ()
   "Enable collab mode if this file is in a shared project."
   (let ((this-file-path (buffer-file-name))
-        conn-state)
-    (when (and this-file-path (string-prefix-p "/" this-file-path))
-      (unless (plist-get
-               (gethash 'ConnectionState collab--cached-responses) :data)
-        (collab--refetch 'ConnectionState
-                         (lambda ()
-                           (collab--connection-state-req))))
-      (setq conn-state
-            (plist-get (gethash 'ConnectionState collab--cached-responses) :data))
-      (when conn-state
-        (catch 'done
-          (seq-doseq (proj (plist-get conn-state :projects))
-            (let ((proj-path (plist-get proj :path))
-                  (proj-name (plist-get proj :name))
-                  (filename (file-name-nondirectory this-file-path)))
-              (when (string-prefix-p proj-path this-file-path)
-                ;; If it’s a newly created file, save it so the collab
-                ;; server can find it.
-                (let ((file-desc (collab--make-file-desc
-                                  collab--my-host-id
-                                  proj-name
-                                  (string-trim
-                                   (substring this-file-path (length proj-path))
-                                   "/"))))
-                  (collab--open-thing file-desc
-                                      filename
-                                      nil
-                                      (current-buffer))
-                  (collab--msg-event
-                   'info (format "Opening %s in shared project (%s), taking over"
-                                 filename proj-name))
-                  (throw 'done nil))))))))))
+        (conn-state
+         (plist-get
+          (collab--use-query 'ConnectionState
+                             (lambda ()
+                               (collab--connection-state-req))
+                             30)
+          :data)))
+    ;; THIS-FILE-PATH will be nil for directories.
+    (when (and this-file-path
+               (string-prefix-p "/" this-file-path)
+               conn-state)
+      (catch 'done
+        (seq-doseq (proj (plist-get conn-state :projects))
+          (let ((proj-path (plist-get proj :path))
+                (proj-name (plist-get proj :name))
+                (filename (file-name-nondirectory this-file-path)))
+            (when (string-prefix-p proj-path this-file-path)
+              ;; If it’s a newly created file, save it so the collab
+              ;; server can find it.
+              (let ((file-desc (collab--make-file-desc
+                                collab--my-host-id
+                                proj-name
+                                (string-trim
+                                 (substring this-file-path (length proj-path))
+                                 "/"))))
+                (collab--setup-file file-desc)
+                (collab--msg-event
+                 'info (format "Opening %s in shared project (%s), taking over"
+                               filename proj-name))
+                (throw 'done nil)))))))))
 
 (define-minor-mode collab--global-monitoring-mode
   "Collaborative global monitoring mode.
@@ -870,7 +933,7 @@ automatically delegating to collab mode when you open a file that falls
 under a shared project."
   :global t
   (if collab--global-monitoring-mode
-      (add-hook 'find-file-hook #'collab--find-file-hook 0)
+      (add-hook 'find-file-hook #'collab--find-file-hook 70)
     (remove-hook 'find-file-hook #'collab--find-file-hook)))
 
 ;;; JSON-RPC
@@ -1427,7 +1490,7 @@ If REDO is non-nil, redo the most recent undo instead."
                        (collab--apply-edit-instruction instr t))
                      instructions)
             (collab--send-ops
-             `[( :op (:kind ,(if "Redo" "Undo") :context ,context)
+             `[( :op (:kind ,(if redo "Redo" "Undo") :context ,context)
                  :groupSeq ,collab--group-seq)]
              t))
         (user-error "No more operations to %s"
@@ -1460,7 +1523,7 @@ Saves the buffer on the owner’s machine."
   "A hash table of QUERY-KEY to QUERY-DATA.
 QUERY-KEY is an arbitrary list that contains, eg, type of query, query
 params. QUERY-DATA is the data returned by collab server or error, so
-it’s a plist (:data DATA :error ERROR).
+it’s a plist (:data DATA :error ERROR :fetch-time TIMESTAMP).
 
 Currently used keys:
 
@@ -1468,6 +1531,28 @@ Currently used keys:
 - ConnectionState
 - Connected
 - (ListFiles host-id dir)")
+
+(defun collab--invalidate-query (key)
+  "Remove cached data for KEY."
+  (puthash key nil collab--cached-responses))
+
+(defun collab--use-query (key query-fn stale-time)
+  "Return the cached data tagged under KEY.
+
+Call QUERY-FN to fetch data if:
+- The cached data is an error
+- STALE-TIME seconds has passed since the cached data is retrieved
+- There’s no cached data
+
+Returns a plist of (:data DATA :error ERROR :fetch-time TIMESTAMP)."
+  (let* ((cached-data (gethash 'ConnectionState collab--cached-responses))
+         (fetch-time (plist-get cached-data :fetch-time)))
+    (when (or (memq :error cached-data)
+              (and fetch-time
+                   (> (time-to-seconds (time-since fetch-time)) stale-time))
+              (null cached-data))
+      (collab--refetch key query-fn))
+    (gethash 'ConnectionState collab--cached-responses)))
 
 (defun collab--refetch (key query-fn)
   "Run QUERY-FN and save the result under KEY in ‘collab--cached-responses’.
@@ -2035,6 +2120,37 @@ Return nil if parse failed."
             (collab--make-file-desc host-id project (string-join segments "/"))
           (collab--make-file-desc host-id project ""))))))
 
+(defun collab--file-local-p (file-desc)
+  "Return non-nil if FILE-DESC is a local file."
+  (equal (plist-get file-desc :hostId) collab--my-host-id))
+
+(defun collab--project-path (project)
+  "Return the absolute path of PROJECT. If doesn’t exist, return nil.
+
+If can’t fetch data from server, also return nil."
+  (let* ((state (plist-get
+                 (collab--use-query 'ConnectionState
+                                    (lambda ()
+                                      (collab--connection-state-req))
+                                    30)
+                 :data))
+         (projects (plist-get state :projects))
+         (project (seq-find (lambda (proj-data)
+                              (equal (plist-get proj-data :name)
+                                     project))
+                            projects))
+         (project-path (and project (plist-get project :path))))
+    project-path))
+
+(defun collab--local-filename (file-desc)
+  "For local FILE-DESC, return the local full filename.
+Return nil if FILE-DESC isn’t a local file."
+  (when (collab--file-local-p file-desc)
+    (let* ((project (plist-get file-desc :project))
+           (project-path (collab--project-path project)))
+      (expand-file-name (string-trim (plist-get file-desc :file) "/")
+                        project-path))))
+
 (defun collab--encode-filename (file-desc)
   "Encode FILE-DESC into a path.
 
@@ -2045,6 +2161,11 @@ Returned path doesn't have trailing slash even if it's a directory."
     (if (equal file "")
         (format "/%s/%s" host-id project)
       (format "/%s/%s/%s" host-id project file))))
+
+(defun collab--backup-filename (file-desc)
+  "Return the backup file path of FILE-DESC."
+  (expand-file-name (string-trim (collab--encode-filename file-desc) "/")
+                    collab-backup-directory))
 
 (defun collab--encode-parent (file-desc)
   "Encode FILE-DESC into a path of it's parent directory.
@@ -2125,11 +2246,11 @@ There should be three text properties at point:
         (directory-p (get-text-property (point) 'collab-directory-p)))
     (collab--open-thing file-desc filename directory-p)))
 
-(defun collab--open-thing (file-desc filename directory-p &optional buffer)
+(defun collab--open-thing (file-desc filename directory-p)
   "Open FILE-DESC.
 
-FILENAME is the nondirectory filename for FILE-DESC. DIRECTORY-P is easy
-to understand.
+FILENAME is the nondirectory filename for FILE-DESC. DIRECTORY-P is as
+the name suggests.
 
 If BUFFER non-nil, use the provided buffer rather than creating one."
   (interactive)
@@ -2138,51 +2259,45 @@ If BUFFER non-nil, use the provided buffer rather than creating one."
     (cond
      ((not (and file-desc filename))
       (user-error "Can’t find file at point"))
-     ((and (buffer-live-p buf) (if (buffer-local-value 'collab-monitored-mode buf)
-                                   t
-                                 (remhash file-key collab--buffer-table)
-                                 (kill-buffer buf)
-                                 nil))
+     ;; If the file is already opened and connected, just show it.
+     ((and (buffer-live-p buf)
+           (buffer-local-value 'collab-monitored-mode buf))
       (display-buffer buf))
-     ;; Open a directory or project.
+     ;; Open a local file/directory
+     ((collab--file-local-p file-desc)
+      ;; This will run the ‘collab--find-file-hook’ which sets up the
+      ;; collab buffer if it’s a file.
+      (find-file (collab--local-filename file-desc)))
+     ;; Open a remote directory or project.
      (directory-p
       (let* ((path (collab--encode-filename file-desc))
-             (buf (or buffer (get-buffer-create (format "%s<collab>" path)))))
-        (when (not buffer)
-          (select-window (display-buffer buf)))
+             (buf (get-buffer-create (format "%s<collab>" path)))
+             (backup-path (collab--backup-filename file-desc)))
+        (select-window (display-buffer buf))
+        (when (not (file-exists-p backup-path))
+          (mkdir backup-path t))
         (collab-dired-mode)
         (puthash file-key buf collab--buffer-table)
         (setq collab--file file-desc
-              collab--default-directory path)
+              collab--default-directory path
+              default-directory backup-path)
         (collab--dired-refresh)))
-     ;; Open a file.
+     ;; Open a remote file.
      (t
-      (collab--catch-error (format "can't connect to %s" file-desc)
-        (let* ((resp (collab--open-file-req file-desc "create"))
-               (site-id (plist-get resp :siteId))
-               (content (plist-get resp :content))
-               (resp-file-desc (plist-get resp :file))
-               (filename (plist-get resp :filename))
-               (meta (plist-get resp :fileMeta))
-               (suggested-major-mode (plist-get meta :emacs.majorMode))
-               (path (collab--encode-filename resp-file-desc))
-               (inhibit-read-only t))
-          (when (not buffer)
-            (select-window
-             (display-buffer
-              (generate-new-buffer (format "%s<collab>" filename)))))
-          (with-current-buffer (or buffer (current-buffer))
-            (collab-monitored-mode -1)
-            (erase-buffer)
-            (insert content)
-            (goto-char (point-min))
-            (when (not buffer)
-              (if (and (stringp suggested-major-mode)
-                       (functionp (intern-soft suggested-major-mode)))
-                  (funcall (intern-soft suggested-major-mode))
-                (let ((buffer-file-name filename))
-                  (set-auto-mode))))
-            (collab--enable resp-file-desc site-id path))))))))
+      (select-window
+       (display-buffer
+        (if (and buf (buffer-live-p buf))
+            buf
+          (generate-new-buffer (format "%s<collab>" filename)))))
+
+      (collab--setup-file file-desc)
+
+      (let ((backup-path (collab--backup-filename file-desc)))
+        (setq default-directory (file-name-directory backup-path)
+              buffer-file-name backup-path)
+        (when (not (file-exists-p default-directory))
+          (mkdir default-directory t))
+        (write-file backup-path))))))
 
 (defun collab--disconnect-from-doc ()
   "Disconnect from the file at point."
@@ -2331,7 +2446,9 @@ FILE can be either a file or a directory."
   (collab--catch-error "can't share project"
     (collab--declare-project-req project-name path)
     (collab--notify-newly-shared-doc
-     (collab--make-file-desc collab--my-host-id project-name ""))))
+     (collab--make-file-desc collab--my-host-id project-name ""))
+    ;; Refetch shared projects data.
+    (collab--invalidate-query 'ConnectionState)))
 
 (defalias 'collab-reconnect 'collab-resume)
 (defun collab-resume (file-desc)
