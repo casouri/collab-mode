@@ -1,12 +1,15 @@
 ----------------------------------------------------------------------
-My goal for the first half of 2024:
-- Add randomized testing to make sure the core algorithm is bug-free.
-- Add basic public key-based authentication.
-----------------------------------------------------------------------
-
-This is a collaborative editing package that I’ve been working
-on-and-off for a while. It’s far from complete but I want to gather
-some early feedback (and find some people to test it).
+Roadmap:
+- DONE Recover from disconnection
+- DONE Sharing directories
+- DONE Authentication
+- DONE Randomized tests
+- VSCode plugin
+- Addition of a virtual filesystem interface, so external
+  tools/programs can access the files through the fs. This way we can
+  start a LSP server on the remote files.
+  - Access control
+  ----------------------------------------------------------------------
 
 Yes, another collab editing package. I know there’s a pile of
 abandoned collab editing packages already, and whether it’s really
@@ -14,34 +17,31 @@ very useful is questionable in the age of google docs. Nevertheless,
 there seems to be some niche use-cases and I want to make something
 original.
 
-It is still very much a WIP so expect it to break a lot and maybe
-don’t post it on Reddit or HN :-) After all, I might never complete
-and publish it.
-
 My goal for collab-mode is for it to be a p2p, cross-editor, real-time
 collab editing package (Emacs collab with Vim!). It works kind of like
-language servers (LSP): a local “collab server” (called collab
-process) talks to the editor over JSONRPC, and collab processes talk
-among themselves over the internet. Most of the hard work is done by
-the collab process and the editor end should be relatively easy to
-implement.
+language servers (LSP): a local “collab server” talks to the editor
+over JSONRPC, and collab processes talk among themselves over the
+internet. Most of the hard work is done by the collab server and the
+editor integration should be relatively easy to implement.
+
+I also intend this project to have a limited scope. It’ll focus on
+short sessions of collab editing between a few people. Long-lived
+sessions, rich text, hundred-people collaboration, standard messaging
+protocol are all out of scope.
 
 As of right now, collab-mode has these features:
 - Sharing a plain text file
-- Sharing a directory (still have rough edges)
+- Sharing a directory
 - Undo & redo (linear)
 - Builtin NAT traversal
 
 And it lacks:
-- Authentication and access control
-- Auto-resume from network breakage
+- Access control
 - Follow mode
-- Better error message and error handling in general
 - Documentation for writing a editor frontend
 - Any form of API stability whatsoever
 
-And obviously there’s no support for other editors yet.
-
+And obviously there’s no support for other editors besides Emacs yet.
 
 Getting started
 ===============
