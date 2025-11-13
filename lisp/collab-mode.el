@@ -1745,7 +1745,8 @@ list."
   "Render collab mode buffer.
 Also insert ‘collab--current-message’ if it’s non-nil."
   ;; If ConnectionState can fail, we’re probably not connected at all,
-  ;; so just get the data.
+  ;; so just get the data. Assume someone has refetched
+  ;; ConnectionState data before calling this function.
   (let* ((conn-state-data (plist-get
                            (gethash 'ConnectionState collab--cached-responses)
                            :data))

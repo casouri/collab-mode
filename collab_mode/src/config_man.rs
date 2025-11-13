@@ -30,7 +30,7 @@ impl KeyCert {
         use std::convert::TryInto;
         let key_der: rustls_pki_types::PrivateKeyDer = self.key_der.as_slice().try_into().unwrap();
         let dtls_cert = webrtc_dtls::crypto::Certificate {
-            certificate: vec![rustls::Certificate(self.cert_der.clone())],
+            certificate: vec![rustls_pki_types::CertificateDer::from(self.cert_der.clone())],
             private_key: webrtc_dtls::crypto::CryptoPrivateKey::from_key_pair(
                 &rcgen::KeyPair::from_der_and_sign_algo(&key_der, &rcgen::PKCS_ECDSA_P256_SHA256)
                     .unwrap(),

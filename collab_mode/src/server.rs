@@ -516,6 +516,12 @@ impl Server {
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
         test_channel_factory: Option<Arc<webchannel::TestWebChannelFactory>>,
     ) -> anyhow::Result<()> {
+        // webrtc-dtls uses the ring feature of rustls, so there’s an
+        // ambiguity of which provider to use. Here we just set the
+        // default provider to ring explicitly.
+        // REF: https://github.com/rustls/rustls/issues/1938
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
 
         // Use the Server's shared trusted_hosts and accept_mode, or test channel if provided
