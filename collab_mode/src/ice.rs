@@ -47,7 +47,11 @@ pub async fn ice_bind(
 pub async fn ice_accept(
     mut sock: SignalSocket,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
-) -> WebrpcResult<(Arc<impl Conn + Send + Sync>, oneshot::Receiver<()>)> {
+) -> WebrpcResult<(
+    Arc<impl Conn + Send + Sync>,
+    Arc<Agent>,
+    oneshot::Receiver<()>,
+)> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
     let (connected_tx, connected_rx) = watch::channel(());
@@ -70,7 +74,7 @@ pub async fn ice_accept(
         conn = agent.accept(cancel_rx, ufrag, pwd) => {
             drop(connected_tx);
             let conn = conn?;
-            Ok((conn, conn_broke_rx))
+            Ok((conn, agent, conn_broke_rx))
         }
     };
 
@@ -93,7 +97,7 @@ pub async fn ice_connect(
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     my_id: Option<String>,
 ) -> WebrpcResult<(
-    (Arc<impl Conn + Send + Sync>, CertDerHash),
+    (Arc<impl Conn + Send + Sync>, CertDerHash, Arc<Agent>),
     oneshot::Receiver<()>,
 )> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
@@ -125,7 +129,7 @@ pub async fn ice_connect(
         conn = agent.dial(cancel_rx, ufrag, pwd) => {
             drop(connected_tx);
             let conn = conn?;
-            Ok(((conn, their_cert), conn_broke_rx))
+            Ok(((conn, their_cert, agent), conn_broke_rx))
         }
     };
 
@@ -324,7 +328,7 @@ mod tests {
         listener.bind().await?;
         let sock = listener.accept().await?;
 
-        let (conn, _conn_broke_rx) = ice_accept(sock, None).await?;
+        let (conn, _ice_agent, _conn_broke_rx) = ice_accept(sock, None).await?;
         let conn_tx = Arc::clone(&conn);
 
         // Send and receive message.
@@ -353,7 +357,7 @@ mod tests {
     async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
         // We don't verify server_cert until DTLS connection is
         // established. So no use for the server_cert at this layer.
-        let ((conn, _server_cert), _conn_broke_rx) = ice_connect(
+        let ((conn, _server_cert, _ice_agent), _conn_broke_rx) = ice_connect(
             server_id,
             client_key_cert,
             "ws://127.0.0.1:9000",

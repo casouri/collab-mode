@@ -250,7 +250,7 @@ impl WebChannel {
                         .await;
                     return;
                 }
-                let (conn, conn_broke_rx) = conn_result.unwrap();
+                let (conn, ice_agent, conn_broke_rx) = conn_result.unwrap();
 
                 let dtls_connection = create_dtls_server(conn, my_key_cert, their_cert).await;
                 if dtls_connection.is_err() {
@@ -269,7 +269,7 @@ impl WebChannel {
                 }
                 let dtls_connection = dtls_connection.unwrap();
 
-                let sctp_assoc = create_sctp_server(dtls_connection).await;
+                let sctp_assoc = create_sctp_server(dtls_connection.clone()).await;
                 if sctp_assoc.is_err() {
                     tracing::error!(
                         "Failed to create SCTP server: {}",
@@ -289,9 +289,11 @@ impl WebChannel {
                 let res = self_clone
                     .setup_message_handling(
                         &remote_hostid,
-                        sctp_assoc,
+                        sctp_assoc.clone(),
                         STREAM_ID_HALF,
                         conn_broke_rx,
+                        dtls_connection,
+                        ice_agent,
                     )
                     .await;
                 if let Err(e) = res {
@@ -350,7 +352,7 @@ impl WebChannel {
             }
         });
 
-        let ((conn, their_cert), conn_broke_rx) = ice_connect(
+        let ((conn, their_cert, ice_agent), conn_broke_rx) = ice_connect(
             remote_hostid.clone(),
             my_key_cert.clone(),
             signaling_addr,
@@ -359,10 +361,17 @@ impl WebChannel {
         )
         .await?;
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
-        let sctp_assoc = create_sctp_client(dtls_connection).await?;
+        let sctp_assoc = create_sctp_client(dtls_connection.clone()).await?;
 
-        self.setup_message_handling(&remote_hostid, sctp_assoc, 0, conn_broke_rx)
-            .await?;
+        self.setup_message_handling(
+            &remote_hostid,
+            sctp_assoc,
+            0,
+            conn_broke_rx,
+            dtls_connection,
+            ice_agent,
+        )
+        .await?;
 
         self.send(
             &remote_hostid,
@@ -472,6 +481,8 @@ impl WebChannel {
         sctp_assoc: Arc<association::Association>,
         stream_id_base: u16,
         conn_broke_rx: oneshot::Receiver<()>,
+        dtls_conn: Arc<DTLSConn>,
+        ice_agent: Arc<webrtc_ice::agent::Agent>,
     ) -> anyhow::Result<()> {
         // Create channel for outgoing messages
         let (tx, rx) = mpsc::channel(16);
@@ -511,17 +522,29 @@ impl WebChannel {
         tokio::spawn(async move {
             tokio::select! {
                 _ = handle_incoming_messages(
-                    sctp_assoc,
+                    sctp_assoc.clone(),
                     msg_tx_clone.clone(),
                     remote_hostid_clone.clone(),
                     stream_id_base,
-                    conn_broke_rx,
                 ) => (),
                 _ = err_rx.recv() => (),
+                // Why do we need a channel to know that connection broke?
+                // SCTP SHOULD have implemented heartbeat and return None
+                // with connection breaks, but doesn't. Which means when
+                // connection breaks, accept_stream just hangs
+                // indefinitely. To take the matter into our own hands, I
+                // added this channel.
+                _ = conn_broke_rx => (),
             }
 
             // Clean up when connection closes
             assoc_tx_clone.lock().unwrap().remove(&remote_hostid_clone);
+            let res = ice_agent.close().await;
+            tracing::info!("ICE agent closed: {:?}", res);
+            let _ = dtls_conn.close().await;
+            tracing::info!("DTLS connection closed");
+            let _ = sctp_assoc.close().await;
+            tracing::info!("SCTP association closed");
 
             // Connection closed, send ConnectionBroke message
             let _ = msg_tx_clone
@@ -757,59 +780,44 @@ async fn handle_incoming_messages(
     msg_tx: mpsc::Sender<Message>,
     remote_hostid: ServerId,
     stream_id_base: u16,
-    mut conn_broke_rx: oneshot::Receiver<()>,
 ) {
     loop {
-        tokio::select! {
-            stream_result = sctp_assoc.accept_stream() => {
-                match stream_result {
-                    Some(stream) => {
-                        let stream_id = stream.stream_identifier();
-                        // If `stream_id_base` is 2^15, that means we're the
-                        // accept side of the overall connection, which means
-                        // all the streams created by us for sending out
-                        // messages will have stream id greater than that.
-                        // Then, if we get a stream with id greater than 2^15,
-                        // it's from ourself, so don't read from it.
-                        let stream_is_from_us = stream_id_base == 0
-                            && stream_id < STREAM_ID_HALF + STREAM_ID_INIT
-                            || stream_id_base == STREAM_ID_HALF
-                                && stream_id >= STREAM_ID_HALF + STREAM_ID_INIT;
+        let stream_result = sctp_assoc.accept_stream().await;
+        match stream_result {
+            Some(stream) => {
+                let stream_id = stream.stream_identifier();
+                // If `stream_id_base` is 2^15, that means we're the
+                // accept side of the overall connection, which means
+                // all the streams created by us for sending out
+                // messages will have stream id greater than that.
+                // Then, if we get a stream with id greater than 2^15,
+                // it's from ourself, so don't read from it.
+                let stream_is_from_us = stream_id_base == 0
+                    && stream_id < STREAM_ID_HALF + STREAM_ID_INIT
+                    || stream_id_base == STREAM_ID_HALF
+                        && stream_id >= STREAM_ID_HALF + STREAM_ID_INIT;
 
-                        if stream_is_from_us {
-                            let _ = stream.shutdown(std::net::Shutdown::Read).await;
-                            continue;
-                        }
-
-                        let msg_tx = msg_tx.clone();
-                        let remote_hostid = remote_hostid.clone();
-
-                        tracing::info!(
-                            "New stream (#{}) from {}",
-                            stream.stream_identifier(),
-                            remote_hostid
-                        );
-                        tokio::spawn(async move {
-                            read_from_stream(stream, msg_tx, remote_hostid).await;
-                        });
-                    }
-                    None => {
-                        // When this function returns, the caller cleans up
-                        // assoc_tx map and sends connection closed message.
-                        tracing::info!("No more streams from {}", remote_hostid);
-                        break;
-                    }
+                if stream_is_from_us {
+                    let _ = stream.shutdown(std::net::Shutdown::Read).await;
+                    continue;
                 }
+
+                let msg_tx = msg_tx.clone();
+                let remote_hostid = remote_hostid.clone();
+
+                tracing::info!(
+                    "New stream (#{}) from {}",
+                    stream.stream_identifier(),
+                    remote_hostid
+                );
+                tokio::spawn(async move {
+                    read_from_stream(stream, msg_tx, remote_hostid).await;
+                });
             }
-            // Why do we need a channel to know that connection broke?
-            // SCTP SHOULD have implemented heartbeat and return None
-            // with connection breaks, but doesn't. Which means when
-            // connection breaks, accept_stream just hangs
-            // indefinitely. To take the matter into our own hands, I
-            // added this channel.
-            _ = &mut conn_broke_rx => {
-                // ICE connection broke, exit.
-                tracing::info!("Connection broke for {}, closing SCTP association", remote_hostid);
+            None => {
+                // When this function returns, the caller cleans up
+                // assoc_tx map and sends connection closed message.
+                tracing::info!("No more streams from {}", remote_hostid);
                 break;
             }
         }
