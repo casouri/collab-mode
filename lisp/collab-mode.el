@@ -1006,7 +1006,9 @@ Return nil if there’s no parent."
                                     :name "collab"
                                     :process process
                                     :notification-dispatcher
-                                    #'collab--dispatch-notification))
+                                    #'collab--dispatch-notification
+                                    :on-shutdown
+                                    #'collab--shutdown-cleanup))
                (resp (jsonrpc-request conn 'Initialize nil)))
 
           (setq collab--my-host-id (plist-get resp :hostId))
@@ -1107,8 +1109,10 @@ If we receive a ServerError notification, just display a warning."
                         (format "Connection to %s: %s"
                                 (plist-get params :hostId)
                                 (plist-get params :message)))
+     (collab--refetch 'ConnectionState #'collab--connection-state-req)
      (collab--hub-rerender))
     ('Connected
+     (collab--refetch 'ConnectionState #'collab--connection-state-req)
      (let* ((host-id (plist-get params :hostId))
             (hub-buffer (collab--hub-buffer))
             (host-data (collab--host-data host-id)))
@@ -1121,6 +1125,7 @@ If we receive a ServerError notification, just display a warning."
            (collab--list-files-req
             nil host-id (car host-data) (cadr host-data)
             (lambda (status resp)
+              ;; This calls ‘collab--hub-rerender’.
               (collab--list-files-callback host-id nil status resp)))))
        ;; Open the doc we were trying to open before connecting.
        (when (and collab--open-this-doc
@@ -1137,7 +1142,8 @@ If we receive a ServerError notification, just display a warning."
          (collab--list-files-callback host-id nil :error `(:message ,reason))))
      (collab--hub-rerender))
     ('Connecting
-     ;; Don’t need to do anything, we’ll get a connection progress very soon.
+     ;; Don’t need to do anything, we’ll get a connection progress
+     ;; very soon.
      )
     ('FileListUpdated
      ;; TODO
@@ -2048,10 +2054,20 @@ immediately."
 
 ;;; Interactive commands
 
+(defun collab--shudown-cleanup ()
+  "Cleanup function ran when collab is shutdown."
+  ;; Disable all collab buffers.
+  (maphash (lambda (key val)
+             (with-current-buffer val
+               (when collab-monitored-mode
+                 (collab--disable))))
+           collab--buffer-table))
+
 (defun collab-shutdown ()
   "Shutdown the connection to the collab process."
   (interactive)
   (when collab--jsonrpc-connection
+    ;; Shutdown function is called in the on-shutdown callback.
     (jsonrpc-shutdown collab--jsonrpc-connection)
     (setq collab--jsonrpc-connection nil)))
 
