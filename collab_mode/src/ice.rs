@@ -180,7 +180,10 @@ fn ice_monitor_progress(
             tokio::spawn(async move {
                 tracing::debug!("Closing ICE agent due to terminal state: {:?}", state);
                 if let Err(err) = agent_to_close.close().await {
-                    tracing::error!("Error closing ICE agent: {:?}", err);
+                    // Don't log if already closed
+                    if err != webrtc_ice::Error::ErrClosed {
+                        tracing::error!("Error closing ICE agent: {:?}", err);
+                    }
                 } else {
                     tracing::debug!("ICE agent closed successfully");
                 }
