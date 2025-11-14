@@ -234,7 +234,7 @@ pub struct EditorLeanOp {
 
 /// A snapshot of a document. Returned by the server when a site
 /// requests a file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NewSnapshot {
     /// The file content.
     pub content: String,
@@ -249,6 +249,31 @@ pub struct NewSnapshot {
     /// Doc id on the remote server.
     pub doc_id: DocId,
 }
+
+impl std::fmt::Debug for NewSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let chars: Vec<char> = self.content.chars().collect();
+        let len = chars.len();
+
+        let content_str = if len <= 50 {
+            self.content.clone()
+        } else {
+            let head: String = chars[..20].iter().collect();
+            let tail: String = chars[len - 20..].iter().collect();
+            format!("'{}'\u{2026}'{}' ({} chars)", head, tail, len)
+        };
+
+        f.debug_struct("NewSnapshot")
+            .field("content", &content_str)
+            .field("name", &self.name)
+            .field("seq", &self.seq)
+            .field("site_id", &self.site_id)
+            .field("file_desc", &self.file_desc)
+            .field("doc_id", &self.doc_id)
+            .finish()
+    }
+}
+
 #[allow(dead_code)]
 pub fn empty_json_map() -> JsonMap {
     serde_json::Map::new()
