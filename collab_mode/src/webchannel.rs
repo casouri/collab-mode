@@ -803,16 +803,28 @@ async fn handle_incoming_messages(
             }
             // Why do we need a channel to know that connection broke?
             // SCTP SHOULD have implemented heartbeat and return None
-            // with connection breaks, but doesn’t. Which means when
+            // with connection breaks, but doesn't. Which means when
             // connection breaks, accept_stream just hangs
             // indefinitely. To take the matter into our own hands, I
             // added this channel.
             _ = &mut conn_broke_rx => {
                 // ICE connection broke, exit.
-                tracing::info!("Connection broke for {}", remote_hostid);
+                tracing::info!("Connection broke for {}, closing SCTP association", remote_hostid);
                 break;
             }
         }
+    }
+
+    // No need to use the shutdown method (graceful shutdown) since
+    // something already went wrong.
+    if let Err(e) = sctp_assoc.close().await {
+        tracing::error!(
+            "Failed to close SCTP association for {}: {}",
+            remote_hostid,
+            e
+        );
+    } else {
+        tracing::debug!("SCTP association closed successfully for {}", remote_hostid);
     }
 }
 

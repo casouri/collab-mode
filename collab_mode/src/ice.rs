@@ -156,6 +156,9 @@ fn ice_monitor_progress(
 
         // Check for terminal states and close the agent
         if state == ConnectionState::Failed
+            // Technically disconnected state is recoverable with
+            // ice_restart, but to keep things simple, we just
+            // reconnect from scratch.
             || state == ConnectionState::Disconnected
             || state == ConnectionState::Closed
         {
@@ -172,12 +175,18 @@ fn ice_monitor_progress(
             // Signal connection breakage.
             drop(conn_broke_tx.take());
 
-            Box::pin(async move {
+            // Spawn task to close the agent in case there’s any lock
+            // contention if we return a callback function to do it.
+            tokio::spawn(async move {
                 tracing::debug!("Closing ICE agent due to terminal state: {:?}", state);
                 if let Err(err) = agent_to_close.close().await {
                     tracing::error!("Error closing ICE agent: {:?}", err);
+                } else {
+                    tracing::debug!("ICE agent closed successfully");
                 }
-            })
+            });
+
+            Box::pin(async move {})
         } else {
             Box::pin(async move {})
         }
