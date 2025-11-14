@@ -166,7 +166,6 @@ fn ice_monitor_progress(
             || state == ConnectionState::Disconnected
             || state == ConnectionState::Closed
         {
-            let agent_to_close = agent_clone.clone();
             let description = match state {
                 ConnectionState::Failed => "failed",
                 ConnectionState::Disconnected => "broke",
@@ -176,22 +175,8 @@ fn ice_monitor_progress(
 
             let _ = error_tx.try_send(WebrpcError::ICEError(format!("Connection {}", description)));
 
-            // Signal connection breakage.
+            // Signal connection breakage. Webchannel will close the agent.
             drop(conn_broke_tx.take());
-
-            // Spawn task to close the agent in case there’s any lock
-            // contention if we return a callback function to do it.
-            tokio::spawn(async move {
-                tracing::debug!("Closing ICE agent due to terminal state: {:?}", state);
-                if let Err(err) = agent_to_close.close().await {
-                    // Don't log if already closed
-                    if err != webrtc_ice::Error::ErrClosed {
-                        tracing::error!("Error closing ICE agent: {:?}", err);
-                    }
-                } else {
-                    tracing::debug!("ICE agent closed successfully");
-                }
-            });
 
             Box::pin(async move {})
         } else {
