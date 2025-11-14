@@ -1135,12 +1135,14 @@ If we receive a ServerError notification, just display a warning."
            (setq collab--open-this-doc nil)
            (collab--open-thing file-desc filename directory-p)))))
     ('ConnectionBroke
-     (let ((host-id (plist-get params :hostId))
-           (reason (plist-get params :reason))
-           (hub-buffer (collab--hub-buffer)))
-       (when (buffer-live-p hub-buffer)
-         (collab--list-files-callback host-id nil :error `(:message ,reason))))
-     (collab--hub-rerender))
+     (let* ((host-id (plist-get params :hostId))
+            (reason (plist-get params :reason))
+            (message (plist-get resp :message))
+            (err (format "Connection to %s broke, %s, %s"
+                         host reason (or message ""))))
+       (collab--msg-event 'error err)
+       (when (buffer-live-p (collab--hub-buffer))
+         (collab--hub-render))))
     ('Connecting
      ;; Don’t need to do anything, we’ll get a connection progress
      ;; very soon.
