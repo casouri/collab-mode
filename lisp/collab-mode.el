@@ -2054,7 +2054,7 @@ immediately."
 
 ;;; Interactive commands
 
-(defun collab--shudown-cleanup ()
+(defun collab--shutdown-cleanup (&optional _connection)
   "Cleanup function ran when collab is shutdown."
   ;; Disable all collab buffers.
   (maphash (lambda (key val)
@@ -2324,7 +2324,8 @@ If BUFFER non-nil, use the provided buffer rather than creating one."
       (collab--catch-error
           (format "can't disconnect from %s"
                   (collab--encode-filename file-desc))
-        (collab--disconnect-from-file-req file-desc)))
+        (when (jsonrpc-running-p collab--jsonrpc-connection)
+          (collab--disconnect-from-file-req file-desc))))
     (let* ((file-key (collab--encode-filename file-desc))
            (buf (when file-desc
                   (gethash file-key collab--buffer-table))))
