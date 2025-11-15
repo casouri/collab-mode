@@ -940,7 +940,7 @@ async fn read_from_stream(
         }
     }
 
-    let _ = stream.shutdown(std::net::Shutdown::Read).await;
+    let _ = stream.shutdown(std::net::Shutdown::Both).await;
 
     // Deserialize the message
     // match bincode::deserialize::<Message>(&full_buffer) {
