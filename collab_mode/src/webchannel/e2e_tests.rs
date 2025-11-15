@@ -15,6 +15,13 @@ mod e2e_tests {
 
     // Helper function to initialize tracing for tests
     fn init_test_tracing() {
+        // Initialize rustls crypto provider (ring) to avoid ambiguity.
+        // webrtc-dtls uses the ring feature of rustls, so there's an
+        // ambiguity of which provider to use. Here we just set the
+        // default provider to ring explicitly.
+        // REF: https://github.com/rustls/rustls/issues/1938
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env()
