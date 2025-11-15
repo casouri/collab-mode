@@ -934,6 +934,8 @@ under a shared project."
   :global t
   (if collab--global-monitoring-mode
       (progn
+        ;; ‘find-file-hook’ doesn’t work, eglot uses
+        ;; ‘after-change-major-mode-hook’ too.
         (add-hook 'after-change-major-mode-hook #'collab--find-file-hook 70)
         (setq collab--sync-cursor-timer
               (run-with-idle-timer 1 t #'collab--send-cursor-pos)))
