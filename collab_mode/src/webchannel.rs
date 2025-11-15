@@ -30,8 +30,8 @@ use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
 use webrtc_sctp::{association, stream};
 use webrtc_util::Conn;
 
-const STREAM_ID_HALF: u16 = 2u16.pow(15);
-const STREAM_ID_INIT: u16 = 1;
+const STREAM_ID_CLIENT_INIT: u16 = 1; // Client uses odd stream IDs: 1, 3, 5, ...
+const STREAM_ID_SERVER_INIT: u16 = 2; // Server uses even stream IDs: 2, 4, 6, ...
 
 /// Trait for message channel operations. Provides async methods for
 /// sending, accepting, connecting, and broadcasting messages.
@@ -130,7 +130,7 @@ impl WebChannel {
             my_hostid,
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
-            next_stream_id: Arc::new(AtomicU16::new(STREAM_ID_INIT)),
+            next_stream_id: Arc::new(AtomicU16::new(0)), // Will be set in setup_message_handling
             accepting: Arc::new(Mutex::new(HashMap::new())),
             trusted_hosts,
             accept_mode,
@@ -290,7 +290,7 @@ impl WebChannel {
                     .setup_message_handling(
                         &remote_hostid,
                         sctp_assoc.clone(),
-                        STREAM_ID_HALF,
+                        STREAM_ID_SERVER_INIT,
                         conn_broke_rx,
                         dtls_connection,
                         ice_agent,
@@ -366,7 +366,7 @@ impl WebChannel {
         self.setup_message_handling(
             &remote_hostid,
             sctp_assoc,
-            0,
+            STREAM_ID_CLIENT_INIT,
             conn_broke_rx,
             dtls_connection,
             ice_agent,
@@ -471,19 +471,19 @@ impl WebChannel {
         Ok(())
     }
 
-    /// Create a threads that accepts SCTP streams from remote and read
+    /// Create threads that accept SCTP streams from remote and read
     /// the message and sends to message channel; create another thread
     /// that reads from outgoing message channel and sends to remote
     /// host.
     ///
-    /// `stream_id_base`: If caller is on the accept side, create
-    /// stream id from 2^15 + 1 (id_base=2^15); on connect side,
-    /// create stream id from 1 (id_base=0).
+    /// `stream_id_init`: Initial stream ID for this side. Server uses
+    /// even IDs (2, 4, 6, ...), client uses odd IDs (1, 3, 5, ...).
+    /// Stream IDs increment by 2 and wrap around on overflow.
     async fn setup_message_handling(
         &self,
         remote_hostid: &ServerId,
         sctp_assoc: Arc<association::Association>,
-        stream_id_base: u16,
+        stream_id_init: u16,
         conn_broke_rx: oneshot::Receiver<()>,
         dtls_conn: Arc<DTLSConn>,
         ice_agent: Arc<webrtc_ice::agent::Agent>,
@@ -505,6 +505,10 @@ impl WebChannel {
             map.insert(remote_hostid.clone(), tx);
         }
 
+        // Initialize the stream ID counter to the initial value for this side.
+        // This will be 1 for client (odd IDs) or 2 for server (even IDs).
+        self.next_stream_id.store(stream_id_init, Ordering::SeqCst);
+
         // Spawn task to handle outgoing messages.
         let sctp_assoc_clone = sctp_assoc.clone();
         let next_stream_id = self.next_stream_id.clone();
@@ -518,7 +522,6 @@ impl WebChannel {
                 next_stream_id,
                 remote_hostid_clone,
                 msg_tx_clone,
-                stream_id_base,
                 err_tx,
             )
             .await;
@@ -535,7 +538,7 @@ impl WebChannel {
                     sctp_assoc.clone(),
                     msg_tx_clone.clone(),
                     remote_hostid_clone.clone(),
-                    stream_id_base,
+                    stream_id_init,
                 ) => (),
                 _ = err_rx.recv() => (),
                 // Why do we need a channel to know that connection broke?
@@ -699,20 +702,25 @@ async fn create_sctp_client(
 // *** Helper functions for WebChannel
 
 // Read messages from `rx` and send them out to remote. Open a new
-// stream for every message to send out. When creating new steam id,
-// add `stream_id_base` to it, so the two ends of the connection
-// create non-overlapping stream ids.
+// stream for every message to send out. Stream IDs increment by 2
+// with wrapping to maintain odd/even property, ensuring the two ends
+// of the connection create non-overlapping stream IDs.
 async fn handle_outgoing_messages(
     mut rx: mpsc::Receiver<Message>,
     sctp_assoc: Arc<association::Association>,
     next_stream_id: Arc<AtomicU16>,
     remote_hostid: ServerId,
     msg_tx: mpsc::Sender<Message>,
-    stream_id_base: u16,
     err_tx: mpsc::Sender<()>,
 ) {
     while let Some(message) = rx.recv().await {
-        let stream_id = stream_id_base + next_stream_id.fetch_add(1, Ordering::SeqCst);
+        // Fetch current stream ID and increment by 2 with wrapping.
+        // This maintains odd/even property: odd stays odd, even stays even.
+        let stream_id = next_stream_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.wrapping_add(2))
+            })
+            .unwrap();
 
         // open_stream only errs when _ourselves_ accept_stream
         // blocked, which shouldn’t happen. So just drop and let
@@ -783,30 +791,25 @@ async fn handle_outgoing_messages(
 
 // Listen for new SCTP streams, each stream is a new message. For each
 // new stream, spawn a new thread that reads a message from it and
-// send to `msg_tx`. `stream_id_base` is the same as the one passed to
+// send to `msg_tx`. `stream_id_init` is the same as the one passed to
 // `handle_outgoing_messages`, we use it to determine which streams we
-// get are actually from ourselves.
+// get are actually from ourselves by checking odd/even parity.
 async fn handle_incoming_messages(
     sctp_assoc: Arc<association::Association>,
     msg_tx: mpsc::Sender<Message>,
     remote_hostid: ServerId,
-    stream_id_base: u16,
+    stream_id_init: u16,
 ) {
     loop {
         let stream_result = sctp_assoc.accept_stream().await;
         match stream_result {
             Some(stream) => {
                 let stream_id = stream.stream_identifier();
-                // If `stream_id_base` is 2^15, that means we're the
-                // accept side of the overall connection, which means
-                // all the streams created by us for sending out
-                // messages will have stream id greater than that.
-                // Then, if we get a stream with id greater than 2^15,
-                // it's from ourself, so don't read from it.
-                let stream_is_from_us = stream_id_base == 0
-                    && stream_id < STREAM_ID_HALF + STREAM_ID_INIT
-                    || stream_id_base == STREAM_ID_HALF
-                        && stream_id >= STREAM_ID_HALF + STREAM_ID_INIT;
+                // Check if stream has same odd/even parity as our init value.
+                // If so, it's from ourselves, so don't read from it.
+                // Client (init=1, odd) ignores odd streams.
+                // Server (init=2, even) ignores even streams.
+                let stream_is_from_us = (stream_id % 2) == (stream_id_init % 2);
 
                 if stream_is_from_us {
                     let _ = stream.shutdown(std::net::Shutdown::Read).await;
