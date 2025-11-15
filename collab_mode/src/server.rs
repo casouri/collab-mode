@@ -524,7 +524,8 @@ impl Server {
 
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
 
-        // Use the Server's shared trusted_hosts and accept_mode, or test channel if provided
+        // Use the Server's shared trusted_hosts and accept_mode, or
+        // test channel if provided
         let webchannel = if let Some(factory) = test_channel_factory {
             ChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx))
         } else {
@@ -1270,7 +1271,7 @@ impl Server {
             }
             Msg::InfoFromClient(info) => {
                 // Received from a client, broadcast to all subscribers
-                let res = self.broadcast_info(&next, info, None).await;
+                let res = self.broadcast_info(&next, info).await;
                 if let Err(err) = res {
                     tracing::warn!("{} when handling InfoFromClient from {}", err, msg.host);
                 }
@@ -1282,10 +1283,11 @@ impl Server {
                     let editor_file =
                         EditorFileDesc::new(remote_doc.file_desc.clone(), msg.host.clone());
 
-                    let info_json = serde_json::to_value(&info.value)?;
+                    let info_json = serde_json::from_str(&info.value)?;
                     let note = SendInfoNote {
                         file: editor_file,
                         info: info_json,
+                        sender: info.sender,
                     };
                     next.send_notif(NotificationCode::InfoReceived, note).await;
                 } else {
@@ -2343,7 +2345,7 @@ impl Server {
             let info_value = serde_json::to_string(&info)?;
             let info = Info {
                 doc_id,
-                sender: file.host_id().clone(),
+                sender: self.host_id.clone(),
                 value: info_value,
             };
 
@@ -2372,12 +2374,9 @@ impl Server {
             value: info_value,
         };
 
-        let host_id = self.host_id.clone();
         // This call shouldn’t return any error since we already
         // verified that the doc exists.
-        self.broadcast_info(next, info, Some(&host_id))
-            .await
-            .unwrap();
+        self.broadcast_info(next, info).await.unwrap();
         Ok(())
     }
 
@@ -3124,22 +3123,19 @@ impl Server {
         }
     }
 
-    async fn broadcast_info<'a>(
-        &mut self,
-        next: &Next<'a>,
-        info: Info,
-        exclude_host: Option<&ServerId>,
-    ) -> anyhow::Result<()> {
+    /// Broadcast `info`, excluding the sender of it.
+    async fn broadcast_info<'a>(&mut self, next: &Next<'a>, info: Info) -> anyhow::Result<()> {
         let doc_id = info.doc_id;
         let doc = self.docs.get(&doc_id);
         if doc.is_none() {
             return Err(anyhow!("Doc {} not found", doc_id));
         }
         let doc = doc.unwrap();
+        let sender = &info.sender;
 
         // Send InfoFromServer to all subscribers except the excluded host.
         for (subscriber_host_id, _) in &doc.subscribers {
-            if Some(subscriber_host_id) != exclude_host {
+            if subscriber_host_id != sender {
                 next.send_to_remote(subscriber_host_id, Msg::InfoFromServer(info.clone()))
                     .await;
             }
@@ -3207,7 +3203,6 @@ impl Server {
     }
 
     fn remote_connected(&self, host_id: &ServerId) -> bool {
-        dbg!(&self.active_remotes);
         if let Some(remote) = self.active_remotes.get(host_id) {
             remote.state == ConnectionState::Connected
         } else {

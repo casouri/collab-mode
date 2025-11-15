@@ -349,9 +349,8 @@ command that acts on a collab-monitored buffer."
 (defvar-local collab--my-site-id nil
   "My site-id.")
 
-(defvar collab--sync-cursor-timer-table
-  (make-hash-table :test #'equal)
-  "Hash table mapping (doc-id . host-id) to sync cursor timers.")
+(defvar collab--sync-cursor-timer nil
+  "Global idle timer for sending cursor position.")
 
 (defun collab--move-cursor (host-id pos &optional mark)
   "Move user (HOST-ID)’s cursor overlay to POS.
@@ -391,34 +390,19 @@ If MARK non-nil, show active region."
           (overlay-put ov 'after-string nil))))))
 
 (defvar collab-monitored-mode)
-;; FIXME: Need update.
-(defun collab--send-cursor-pos-1 (buffer)
-  "Send cursor position of BUFFER to the collab process."
-  (when (equal buffer (current-buffer))
-    (collab--check-precondition)
-    (collab--catch-error "can’t send cursor position to remote"
-      (collab--send-info-req
-       collab--file
-       (if (region-active-p)
-           `( :type "common.pos" :point ,(point)
-              :mark ,(mark))
-         `(:type "common.pos" :point ,(point)))))
-    (remhash (collab--encode-filename collab--file)
-             collab--sync-cursor-timer-table)))
 
-;; FIXME: Use a global idle time like send-ops.
 (defun collab--send-cursor-pos ()
-  "Move user (SITE-ID)’s cursor overlay to POS."
-  (collab--check-precondition)
-  (let ((file-key (collab--encode-filename collab--file)))
-    (when (null (gethash file-key
-                         collab--sync-cursor-timer-table))
-      ;; Run with an idle timer to we don’t interrupt scrolling, etc.
-      (let ((timer (run-with-idle-timer
-                    0.5 nil #'collab--send-cursor-pos-1
-                    (current-buffer))))
-        (puthash file-key timer
-                 collab--sync-cursor-timer-table)))))
+  "Send cursor position if current buffer is in collab mode."
+  (when (and collab-monitored-mode collab--file)
+    (let ((file-key (collab--encode-filename collab--file)))
+      (when (null (gethash file-key collab--sync-cursor-timer-table))
+        (collab--catch-error "can’t send cursor position to remote"
+          (collab--send-info-req
+           collab--file
+           (if (region-active-p)
+               `( :type "common.pos" :point ,(point)
+                  :mark ,(mark))
+             `(:type "common.pos" :point ,(point)))))))))
 
 ;;; Global state
 
@@ -451,6 +435,22 @@ Each event is a string.")
 ;; Used for debugging.
 (defvar collab--pause-auto-update nil
   "If non-nil, Emacs don’t apply changes from remote automatically.")
+
+(defun collab--shutdown-cleanup (&optional _connection)
+  "Cleanup function ran when collab is shutdown."
+  ;; Disable all collab buffers.
+  (maphash (lambda (key val)
+             (when (buffer-live-p val)
+               (with-current-buffer val
+                 (when collab-monitored-mode
+                   (collab--disable)))))
+           collab--buffer-table)
+  (collab--global-monitoring-mode -1)
+  (setq collab--doc-id-table (make-hash-table :test #'equal))
+  (setq collab--buffer-table (make-hash-table :test #'equal))
+  (setq collab--stashed-state-plist nil)
+  (setq collab--dispatcher-timer-table (make-hash-table :test #'equal))
+  (setq collab--events nil))
 
 ;;; Local state
 
@@ -933,8 +933,14 @@ automatically delegating to collab mode when you open a file that falls
 under a shared project."
   :global t
   (if collab--global-monitoring-mode
-      (add-hook 'find-file-hook #'collab--find-file-hook 70)
-    (remove-hook 'find-file-hook #'collab--find-file-hook)))
+      (progn
+        (add-hook 'after-change-major-mode-hook #'collab--find-file-hook 70)
+        (setq collab--sync-cursor-timer
+              (run-with-idle-timer 1 t #'collab--send-cursor-pos)))
+    (remove-hook 'after-change-major-mode-hook #'collab--find-file-hook)
+    (when collab--sync-cursor-timer
+      (cancel-timer collab--sync-cursor-timer))
+    (setq collab--sync-cursor-timer nil)))
 
 ;;; JSON-RPC
 
@@ -1076,7 +1082,7 @@ If we receive a ServerError notification, just display a warning."
     ('InfoReceived
      (let ((file (plist-get params :file))
            (host-id (plist-get params :sender))
-           (value (plist-get params :value)))
+           (value (plist-get params :info)))
        (pcase (plist-get value :type)
          ("common.pos"
           (let* ((pos (plist-get value :point))
@@ -1137,9 +1143,12 @@ If we receive a ServerError notification, just display a warning."
     ('ConnectionBroke
      (let* ((host-id (plist-get params :hostId))
             (reason (plist-get params :reason))
-            (message (plist-get resp :message))
-            (err (format "Connection to %s broke, %s, %s"
-                         host reason (or message ""))))
+            (message (plist-get params :message))
+            (err (string-join
+                  (list (format "Connection to %s broke" host-id)
+                        reason
+                        (or message ""))
+                  ", ")))
        (collab--msg-event 'error err)
        (when (buffer-live-p (collab--hub-buffer))
          (collab--hub-render))))
@@ -2055,15 +2064,6 @@ immediately."
                            'collab-host-id host-id)))))
 
 ;;; Interactive commands
-
-(defun collab--shutdown-cleanup (&optional _connection)
-  "Cleanup function ran when collab is shutdown."
-  ;; Disable all collab buffers.
-  (maphash (lambda (key val)
-             (with-current-buffer val
-               (when collab-monitored-mode
-                 (collab--disable))))
-           collab--buffer-table))
 
 (defun collab-shutdown ()
   "Shutdown the connection to the collab process."

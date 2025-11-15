@@ -402,11 +402,15 @@ impl WebChannel {
 
         if recipient == &self.my_hostid {
             // If recipient is ourselves, send to our own message channel.
-            return self
-                .msg_tx
-                .send(message)
-                .await
-                .map_err(|_| anyhow!("Channel broke"));
+            // Create a separate task to send it to avoid deadlock.
+            let msg_tx = self.msg_tx.clone();
+            tokio::spawn(async move {
+                let res = msg_tx.send(message).await;
+                if let Err(err) = res {
+                    tracing::error!("Failed to send message to ourselvs: {:?}", err);
+                }
+            });
+            return Ok(());
         }
 
         let tx = self
@@ -489,13 +493,19 @@ impl WebChannel {
 
         let (err_tx, mut err_rx) = mpsc::channel::<()>(1);
 
-        // Store the sender in the association map
-        self.assoc_tx
-            .lock()
-            .unwrap()
-            .insert(remote_hostid.clone(), tx);
+        // Store the sender in the association map.
+        {
+            let mut map = self.assoc_tx.lock().unwrap();
+            if map.get(remote_hostid).is_some() {
+                return Err(anyhow!(
+                    "There’s an existing connection to {}",
+                    remote_hostid
+                ));
+            }
+            map.insert(remote_hostid.clone(), tx);
+        }
 
-        // Spawn task to handle outgoing messages
+        // Spawn task to handle outgoing messages.
         let sctp_assoc_clone = sctp_assoc.clone();
         let next_stream_id = self.next_stream_id.clone();
         let remote_hostid_clone = remote_hostid.clone();
@@ -514,7 +524,7 @@ impl WebChannel {
             .await;
         });
 
-        // Spawn task to handle incoming streams
+        // Spawn task to handle incoming streams.
         let msg_tx_clone = self.msg_tx.clone();
         let remote_hostid_clone = remote_hostid.to_string();
         let assoc_tx_clone = self.assoc_tx.clone();
@@ -539,12 +549,13 @@ impl WebChannel {
 
             // Clean up when connection closes
             assoc_tx_clone.lock().unwrap().remove(&remote_hostid_clone);
+
+            let res = sctp_assoc.close().await;
+            tracing::info!("SCTP association closed: {:?}", res);
+            let res = dtls_conn.close().await;
+            tracing::info!("DTLS connection closed: {:?}", res);
             let res = ice_agent.close().await;
             tracing::info!("ICE agent closed: {:?}", res);
-            let _ = dtls_conn.close().await;
-            tracing::info!("DTLS connection closed");
-            let _ = sctp_assoc.close().await;
-            tracing::info!("SCTP association closed");
 
             // Connection closed, send ConnectionBroke message
             let _ = msg_tx_clone

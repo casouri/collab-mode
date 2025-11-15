@@ -328,6 +328,7 @@ pub struct SendInfoParams {
 pub struct SendInfoNote {
     pub file: EditorFileDesc,
     pub info: serde_json::Value,
+    pub sender: ServerId,
 }
 
 // **** Undo
