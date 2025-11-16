@@ -210,6 +210,27 @@ If NO-MESSAGE is non-nil, don’t message, only and to events."
            (propertize message 'face face))
    collab--events 30))
 
+(defun collab--prettify-host-id (host-id)
+  "Return HOST-ID with UUID part displayed as '...'.
+
+HOST-ID should be in the format '<human-readable-name>-<uuid>'.
+The full host-id is preserved in the string, only the display is affected.
+A tooltip shows the full host-id on hover."
+  (if (string-match (rx bos
+                        (group (* anychar))
+                        (group "-" (* anychar))
+                        eos)
+                    host-id)
+      (let* ((name-part (match-string 1 host-id))
+             (full-str (copy-sequence host-id)))
+        (put-text-property (length name-part) (length full-str)
+                           'display "..." full-str)
+        (put-text-property (length name-part) (length full-str)
+                           'help-echo host-id full-str)
+        full-str)
+    ;; If pattern doesn't match, return as-is.
+    host-id))
+
 (defun collab--host-idx (host-id)
   "Get HOST-ID’s index in ‘collab--known-hosts’.
 Add the host to the list if it doesn’t exists in it."
@@ -1115,7 +1136,8 @@ If we receive a ServerError notification, just display a warning."
     ('ConnectionProgress
      (collab--msg-event 'default
                         (format "Connection to %s: %s"
-                                (plist-get params :hostId)
+                                (collab--prettify-host-id
+                                 (plist-get params :hostId))
                                 (plist-get params :message)))
      (collab--refetch 'ConnectionState #'collab--connection-state-req)
      (collab--hub-rerender))
@@ -1147,7 +1169,8 @@ If we receive a ServerError notification, just display a warning."
             (reason (plist-get params :reason))
             (message (plist-get params :message))
             (err (string-join
-                  (list (format "Connection to %s broke" host-id)
+                  (list (format "Connection to %s broke"
+                                (collab--prettify-host-id host-id))
                         reason
                         (or message ""))
                   ", ")))
@@ -1651,7 +1674,9 @@ shouldn’t end with a newline."
   (let* ((beg (point))
          (files (seq-map #'identity (plist-get resp :files))))
     ;; 1. Insert host line.
-    (insert (propertize (if (equal host collab--my-host-id) "Your files" host)
+    (insert (propertize (if (equal host collab--my-host-id)
+                            "Your files"
+                          (collab--prettify-host-id host))
                         'face 'collab-host
                         'collab-host-line t))
     ;; 1.1 Insert status.
@@ -1713,11 +1738,13 @@ list."
      (puthash (list 'ListFiles host dir) (list :data resp) collab--cached-responses))
     (:error
      (let ((err (format "Failed to list files of %s. %s"
-                        host (or (plist-get resp :message) ""))))
+                        (collab--prettify-host-id host)
+                        (or (plist-get resp :message) ""))))
        (puthash (list 'ListFiles host dir) (list :error err) collab--cached-responses)
        (collab--msg-event 'error err)))
     (:timeout
-     (let ((err (format "Timed out listing files of %s" host)))
+     (let ((err (format "Timed out listing files of %s"
+                        (collab--prettify-host-id host))))
        (puthash (list 'ListFiles host dir) (list :error err) collab--cached-responses)
        (collab--msg-event 'error err))))
   (collab--hub-rerender))
@@ -2033,9 +2060,11 @@ immediately."
     (forward-line (1- line))))
 
 (defun collab--dired-render ()
-  "Draw the current ‘collab-dired-mode’ buffer from scratch."
+  "Draw the current 'collab-dired-mode' buffer from scratch."
   (when (and (derived-mode-p 'collab-dired-mode) collab--file)
-    (collab--catch-error (format "can’t connect to %s" (collab--file-desc-host-id collab--file))
+    (collab--catch-error (format "can't connect to %s"
+                                 (collab--prettify-host-id
+                                  (collab--file-desc-host-id collab--file)))
       (let* ((file-desc collab--file)
              (host-id (collab--file-desc-host-id collab--file))
              (host-data (collab--host-data host-id))
@@ -2045,7 +2074,8 @@ immediately."
              (file-list (seq-map #'identity
                                  (plist-get file-list-resp :files)))
              (parent-file-desc (collab--file-desc-parent file-desc)))
-        (insert (propertize (or (collab--encode-parent file-desc) host-id)
+        (insert (propertize (or (collab--encode-parent file-desc)
+                                (collab--prettify-host-id host-id))
                             'face 'dired-header)
                 ":\n")
         (insert ".\n")
@@ -2175,8 +2205,10 @@ Return nil if FILE-DESC isn’t a local file."
 (defun collab--encode-filename (file-desc)
   "Encode FILE-DESC into a path.
 
-Returned path doesn't have trailing slash even if it's a directory."
-  (let ((host-id (plist-get file-desc :hostId))
+Returned path doesn't have trailing slash even if it's a directory.
+The host-id in the path is truncated for display but preserved in full."
+  (let ((host-id (collab--prettify-host-id
+                  (plist-get file-desc :hostId)))
         (project (plist-get file-desc :project))
         (file (plist-get file-desc :file)))
     (if (equal file "")
@@ -2202,7 +2234,9 @@ SEGMENTS is a list of path segments. DIR-P is t if SEGMENTS is meant to
 be a directory (the original path string ends with slash)."
   (let ((append-slash (lambda (str) (concat str "/"))))
     (if (eq (length segments) 0)
-        (seq-map append-slash (collab--get-available-hosts))
+        (seq-map append-slash
+                 (seq-map #'collab--prettify-host-id
+                          (collab--get-available-hosts)))
       (condition-case nil
           (let* ((host (car segments))
                  (host-data (alist-get host (collab--host-alist)
