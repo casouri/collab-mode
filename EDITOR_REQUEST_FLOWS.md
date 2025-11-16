@@ -8,6 +8,12 @@ The server maintains two types of documents:
 - **Local documents** (`docs`): Documents owned and hosted by this server
 - **Remote documents** (`remote_docs`): Documents hosted by other servers that this server has opened
 
+**Special case: Dual server/client role**
+- When a server opens one of its own local documents (e.g., through OpenFile), it acts as both the server (host) and a client for that document
+- The document exists in both `docs` (as the authoritative host) and `remote_docs` (as a client/subscriber)
+- This dual role enables the server to edit its own documents using the same client interface
+- Messages sent to self in this configuration are handled asynchronously to prevent deadlock
+
 All editor requests follow a similar pattern:
 1. Editor sends a request to the server
 2. Server determines if the target is local or remote
@@ -209,7 +215,7 @@ Opens a file for editing, creating it if necessary.
 {
   "method": "OpenFile",
   "params": {
-    "fileDesc": {"hostId": "server-id", "project": "myproject", "file": "src/main.rs"},
+    "file": {"hostId": "server-id", "project": "myproject", "file": "src/main.rs"},
     "mode": "Open" // or "Create"
   }
 }
@@ -337,9 +343,16 @@ Sends editing operations from the editor to apply to a document.
     {"op": {"Ins": [[5, "hello"]]}, "siteId": 1},
     {"op": {"Del": [[3, "abc"]]}, "siteId": 1}
   ],
-  "lastSeq": 42
+  "lastGlobalSeq": 42,
+  "pendingLocalOps": 0,
+  "docLen": 1234
 }
 ```
+
+The response includes validation fields for the editor:
+- `lastGlobalSeq`: Last global sequence number processed by the server
+- `pendingLocalOps`: Number of pending local operations not yet sent to remote
+- `docLen`: Current document length for validation
 
 **Flow**
 1. Editor sends SendOps with operations and file descriptor
@@ -563,6 +576,8 @@ Closes a local document, saving it to disk and notifying subscribers.
   "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
 }
 ```
+
+**Note**: CloseFile uses the `DeleteFileParams` type for its request parameters (same structure as DeleteFile).
 
 **Flow**
 1. Editor sends CloseFile request
@@ -912,6 +927,12 @@ Returns the current connection states for all active remote servers.
       "filename": "readme.md",
       "meta": {"version": "1.0"}
     }
+  ],
+  "projects": [
+    {
+      "name": "project1",
+      "path": "/absolute/path/to/project1"
+    }
   ]
 }
 ```
@@ -935,11 +956,13 @@ Returns the current connection states for all active remote servers.
      - `file`: EditorFileDesc for the document
      - `filename`: Human-readable name of the document
      - `meta`: Document metadata
-7. Returns ConnectionStateResp with:
+7. Server collects all declared projects from configuration
+8. Returns ConnectionStateResp with:
    - `connections`: Array of connection entries for active remote connections
    - `accepting`: Array of signaling addresses where the server is accepting incoming connections
    - `live`: Array of locally hosted documents that may have subscribers
    - `connected`: Array of remote documents this server has opened
+   - `projects`: Array of declared projects with their names and absolute paths
 
 **State values**
 - `Connected`: Connection established and active
@@ -951,7 +974,7 @@ Returns the current connection states for all active remote servers.
 
 Sends metadata/information about a document to remote subscribers.
 
-**Notification**
+**SendInfo notification (from editor to server)**
 ```json
 {
   "method": "SendInfo",
@@ -962,26 +985,48 @@ Sends metadata/information about a document to remote subscribers.
 }
 ```
 
+**InfoReceived notification (from server to editor)**
+```json
+{
+  "method": "InfoReceived",
+  "params": {
+    "info": {"cursor": 42, "selection": [10, 20]},
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"},
+    "sender": "sending-host-id"
+  }
+}
+```
+
 **Flow**
 1. Editor sends SendInfo notification with metadata and file
 2. **If file is remote**:
    - Get `doc_id` and `site_id` from RemoteDoc
-   - Create Info message with `doc_id`, sender `site_id`, and serialized value
+   - Create Info message with:
+     - `doc_id`: Document identifier
+     - `sender`: This server's `host_id` (the actual sender, not the file's host)
+     - `value`: Serialized info data
    - Send `Msg::InfoFromClient(info)` to remote host
    - **Remote server processing**:
-     - Receives info containing `doc_id`, sender `site_id`, and value
+     - Receives info containing `doc_id`, `sender` host ID, and value
      - Broadcasts info to all subscribers of the document
      - Sends `Msg::InfoFromServer(info)` to each subscriber
-     - Skips sending back to original sender
+     - Automatically excludes the original sender using `info.sender` field
    - **Other clients receive**:
      - Receive `Msg::InfoFromServer` notification
      - Match `doc_id` to their remote documents
-     - Send InfoReceived notification to their editor
+     - Send InfoReceived notification to their editor with `sender` field
 3. **If file is local**:
    - Find document by PathId
-   - Create Info message with `doc_id` and `site_id`
+   - Create Info message with:
+     - `doc_id`: Document identifier
+     - `sender`: This server's `host_id`
+     - `value`: Serialized info data
    - Broadcast `Msg::InfoFromServer(info)` to all subscribers
-   - Skip sending to ourselves
+   - Automatically excludes ourselves using `info.sender` field
+4. **Special case: Self-messaging**:
+   - When a document is both local and remote (server acts as both host and client for its own document), the server exists in both `docs` and `remote_docs`
+   - Messages sent to self are handled asynchronously via a spawned task to prevent deadlock
+   - The sender exclusion logic ensures you don't receive your own info updates
 
 **Note**: SendInfo is a notification, not a request. No response is sent back to the editor.
 
@@ -1015,11 +1060,13 @@ The `ErrorResponse` notification is sent to the editor when errors occur during 
   "method": "ErrorResponse",
   "params": {
     "code": 103,  // Error code (e.g., 103 for DocFatal)
-    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"},  // Optional
+    "file": {"type": "ProjectFile", "project": "myproject", "file": "doc.txt"},  // Optional FileDesc (not EditorFileDesc)
     "message": "Document fatal error: sequence mismatch"
   }
 }
 ```
+
+**Note**: The `file` field uses `FileDesc` format (without `hostId`), not `EditorFileDesc`. It can be null if the error is not associated with a specific file.
 
 **When it's sent**
 - **DocFatal errors** (code 103): When the document state becomes corrupted.
