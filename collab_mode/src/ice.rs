@@ -4,7 +4,6 @@ use crate::signaling::{
     client::{Listener, Socket as SignalSocket},
     EndpointId,
 };
-use crate::types::ArcKeyCert;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -28,20 +27,7 @@ struct ICECredential {
     pwd: String,
 }
 
-/// Bind to `id` with `key` on the signaling server at
-/// `signaling_addr`. `signaling_addr` should be a valid websocket
-/// url.
-pub async fn ice_bind(
-    id: EndpointId,
-    my_key_cert: ArcKeyCert,
-    signaling_addr: &str,
-) -> WebrpcResult<Listener> {
-    let mut listener = Listener::new(signaling_addr, id, my_key_cert).await?;
-    listener.bind().await?;
-    Ok(listener)
-}
-
-/// Accept connections from `sock`. If `progress_tx` isn’t None,
+/// Accept connections from `sock`. If `progress_tx` isn't None,
 /// report progress to it while establishing connection.
 #[instrument(skip_all)]
 pub async fn ice_accept(
@@ -85,17 +71,14 @@ pub async fn ice_accept(
     result
 }
 
-/// Connect to the endpoint with `id` and `key` on the signaling
-/// server at signaling_addr`. `signaling_addr` should be a valid
-/// websocket url. If `progress_tx` isn’t None, report progress to it
+/// Connect to the endpoint with `id` using `listener`.
+/// If `progress_tx` isn't None, report progress to it
 /// while establishing connection.
-#[instrument(skip(my_key_cert, progress_tx))]
+#[instrument(skip(progress_tx))]
 pub async fn ice_connect(
+    listener: &mut Listener,
     id: EndpointId,
-    my_key_cert: ArcKeyCert,
-    signaling_addr: &str,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
-    my_id: Option<String>,
 ) -> WebrpcResult<(
     (Arc<impl Conn + Send + Sync>, CertDerHash, Arc<Agent>),
     oneshot::Receiver<()>,
@@ -105,8 +88,6 @@ pub async fn ice_connect(
     let (connected_tx, connected_rx) = watch::channel(());
     let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
 
-    let my_id = my_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut listener = Listener::new(signaling_addr, my_id, my_key_cert).await?;
     let agent = Arc::new(make_ice_agent(true).await?);
     let cred = ice_credential(&agent).await;
     let sock = listener
@@ -150,7 +131,6 @@ fn ice_monitor_progress(
     error_tx: mpsc::Sender<WebrpcError>,
     conn_broke_tx: oneshot::Sender<()>,
 ) {
-    let agent_clone = agent.clone();
     let mut conn_broke_tx = Some(conn_broke_tx);
     agent.on_connection_state_change(Box::new(move |state| {
         tracing::debug!(?state, "ICE state changed");
@@ -311,8 +291,8 @@ mod tests {
         // Connect to the signaling server.
         let mut listener = Listener::new("ws://127.0.0.1:9000", id, server_key_cert).await?;
         listener.bind().await?;
-        let sock = listener.accept().await?;
 
+        let sock = listener.accept().await?;
         let (conn, _ice_agent, _conn_broke_rx) = ice_accept(sock, None).await?;
         let conn_tx = Arc::clone(&conn);
 
@@ -342,14 +322,10 @@ mod tests {
     async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
         // We don't verify server_cert until DTLS connection is
         // established. So no use for the server_cert at this layer.
-        let ((conn, _server_cert, _ice_agent), _conn_broke_rx) = ice_connect(
-            server_id,
-            client_key_cert,
-            "ws://127.0.0.1:9000",
-            None,
-            None,
-        )
-        .await?;
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let mut listener = Listener::new("ws://127.0.0.1:9000", client_id, client_key_cert).await?;
+        let ((conn, _server_cert, _ice_agent), _conn_broke_rx) =
+            ice_connect(&mut listener, server_id, None).await?;
         let conn_tx = Arc::clone(&conn);
 
         // Send and receive message.

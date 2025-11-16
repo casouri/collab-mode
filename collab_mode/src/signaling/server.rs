@@ -119,8 +119,14 @@ impl Server {
                 .await;
             return Err(SignalingError::IdTaken(id));
         }
-        let server_info = EndpointInfo { msg_tx };
-        endpoint_map.insert(id, server_info);
+        let server_info = EndpointInfo {
+            msg_tx: msg_tx.clone(),
+        };
+        endpoint_map.insert(id.clone(), server_info);
+
+        let _ = msg_tx
+            .send(SignalingMessage::Bound(id.clone()).into())
+            .await;
         Ok(())
     }
 

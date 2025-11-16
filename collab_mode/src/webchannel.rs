@@ -8,8 +8,9 @@
 //! Deserialize, but there’s really no need for it. So we just make
 //! it take a Msg, it’s convenient and simple.
 
-use crate::ice::{ice_accept, ice_bind, ice_connect};
+use crate::ice::{ice_accept, ice_connect};
 use crate::message::{HeyMessage, Msg};
+use crate::signaling::client::Listener;
 use crate::{
     config_man::{hash_der, AcceptMode},
     signaling::CertDerHash,
@@ -61,7 +62,6 @@ pub trait MsgChannel {
     async fn connect(
         &self,
         remote_hostid: ServerId,
-        my_hostid: ServerId,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
         transport_type: TransportType,
@@ -110,9 +110,8 @@ pub struct WebChannel {
     msg_tx: mpsc::Sender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
     next_stream_id: Arc<AtomicU16>,
-    /// Wether there’s an accepting thread running already for a
-    /// signaling server URL.
-    accepting: Arc<Mutex<HashMap<String, bool>>>,
+    /// Listeners for each signaling server URL.
+    listeners: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Listener>>>>>,
     /// Trusted hosts with their certificate hashes for verification
     trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
     /// Accept mode controlling how to handle incoming connections
@@ -131,7 +130,7 @@ impl WebChannel {
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU16::new(0)), // Will be set in setup_message_handling
-            accepting: Arc::new(Mutex::new(HashMap::new())),
+            listeners: Arc::new(Mutex::new(HashMap::new())),
             trusted_hosts,
             accept_mode,
         }
@@ -146,34 +145,27 @@ impl WebChannel {
         self.assoc_tx.lock().unwrap().keys().cloned().collect()
     }
 
-    /// Bind on signaling server, and run in a loop and accept
-    /// connections. For each connection, setup message handling
-    /// threads running in the background.
-    pub async fn accept(
-        &mut self,
-        my_key_cert: ArcKeyCert,
+    /// Get or create a listener for the given signaling server URL.
+    async fn get_or_create_listener(
+        &self,
         signaling_addr: &str,
-        _transport_type: TransportType,
-    ) -> anyhow::Result<()> {
-        let accepting = {
-            let mut accepting_map = self.accepting.lock().unwrap();
-            let accepting = accepting_map
-                .get(signaling_addr)
-                .map_or(false, |x| x.clone());
-            accepting_map.insert(signaling_addr.to_string(), true);
-            accepting
-        };
-
-        if accepting {
-            Err(anyhow!(WebchannelError::AlreadyAccepting))
-        } else {
-            let res = self.accept_inner(my_key_cert, signaling_addr).await;
-            self.accepting
-                .lock()
-                .unwrap()
-                .insert(signaling_addr.to_string(), false);
-            res
+        my_key_cert: ArcKeyCert,
+    ) -> anyhow::Result<Arc<tokio::sync::Mutex<Listener>>> {
+        // Check if listener already exists.
+        {
+            let listeners = self.listeners.lock().unwrap();
+            if let Some(listener) = listeners.get(signaling_addr) {
+                return Ok(listener.clone());
+            }
         }
+
+        // Create new listener.
+        let listener = Listener::new(signaling_addr, self.hostid(), my_key_cert).await?;
+        let listener_arc = Arc::new(tokio::sync::Mutex::new(listener));
+
+        let mut listeners = self.listeners.lock().unwrap();
+        listeners.insert(signaling_addr.to_string(), listener_arc.clone());
+        Ok(listener_arc)
     }
 
     /// Check if a certificate hash is trusted based on the configured trusted hosts
@@ -211,48 +203,58 @@ impl WebChannel {
         is_trusted
     }
 
-    async fn accept_inner(
-        &self,
+    /// Run in a loop and accept
+    /// connections. For each connection, setup message handling
+    /// threads running in the background.
+    pub async fn accept(
+        &mut self,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
+        _transport_type: TransportType,
     ) -> anyhow::Result<()> {
-        let mut listener = ice_bind(self.hostid(), my_key_cert, signaling_addr).await?;
+        let listener = self
+            .get_or_create_listener(signaling_addr, my_key_cert.clone())
+            .await?;
+        listener.lock().await.bind().await?;
 
         loop {
-            let sock = listener.accept().await?;
-            let their_cert = sock.cert_hash();
-            let remote_hostid = sock.id();
-
-            // Check if the certificate is trusted
-            if !self.is_cert_trusted(&their_cert, &remote_hostid) {
-                // Continue to next connection attempt
-                continue;
-            }
-
             let self_clone = self.clone();
-            let my_key_cert = listener.my_key_cert.clone();
+            let my_key_cert_clone = my_key_cert.clone();
             let msg_tx = self.msg_tx.clone();
-            let remote_hostid_clone = remote_hostid.to_string();
+            let listener_clone = listener.clone();
 
             tokio::spawn(async move {
+                let sock_result = listener_clone.lock().await.accept().await;
+                if sock_result.is_err() {
+                    tracing::error!(
+                        "Failed to accept signaling connection: {}",
+                        sock_result.err().unwrap()
+                    );
+                    return;
+                }
+                let sock = sock_result.unwrap();
+                let their_cert = sock.cert_hash();
+                let remote_hostid = sock.id();
+
                 let conn_result = ice_accept(sock, None).await;
                 if conn_result.is_err() {
                     tracing::error!(
                         "Failed to accept ICE connection: {}",
                         conn_result.err().unwrap()
                     );
-                    let _ = msg_tx
-                        .send(Message {
-                            host: remote_hostid_clone.clone(),
-                            body: Msg::ConnectionBroke(remote_hostid),
-                            req_id: None,
-                        })
-                        .await;
                     return;
                 }
                 let (conn, ice_agent, conn_broke_rx) = conn_result.unwrap();
 
-                let dtls_connection = create_dtls_server(conn, my_key_cert, their_cert).await;
+                // Check if the certificate is trusted
+                if !self_clone.is_cert_trusted(&their_cert, &remote_hostid) {
+                    // Continue to next connection attempt
+                    return;
+                }
+
+                let remote_hostid_clone = remote_hostid.clone();
+
+                let dtls_connection = create_dtls_server(conn, my_key_cert_clone, their_cert).await;
                 if dtls_connection.is_err() {
                     tracing::error!(
                         "Failed to create DTLS server: {}",
@@ -328,7 +330,6 @@ impl WebChannel {
     pub async fn connect(
         &self,
         remote_hostid: ServerId,
-        my_hostid: ServerId,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
         _transport_type: TransportType,
@@ -352,12 +353,13 @@ impl WebChannel {
             }
         });
 
+        let listener = self
+            .get_or_create_listener(signaling_addr, my_key_cert.clone())
+            .await?;
         let ((conn, their_cert, ice_agent), conn_broke_rx) = ice_connect(
+            &mut *listener.lock().await,
             remote_hostid.clone(),
-            my_key_cert.clone(),
-            signaling_addr,
             Some(progress_tx),
-            Some(my_hostid),
         )
         .await?;
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
@@ -598,19 +600,12 @@ impl MsgChannel for WebChannel {
     async fn connect(
         &self,
         remote_hostid: ServerId,
-        my_hostid: ServerId,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
         transport_type: TransportType,
     ) -> anyhow::Result<()> {
-        self.connect(
-            remote_hostid,
-            my_hostid,
-            my_key_cert,
-            signaling_addr,
-            transport_type,
-        )
-        .await
+        self.connect(remote_hostid, my_key_cert, signaling_addr, transport_type)
+            .await
     }
 
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
@@ -1185,7 +1180,6 @@ impl MsgChannel for TestWebChannel {
     async fn connect(
         &self,
         remote_hostid: ServerId,
-        _my_hostid: ServerId,
         _my_key_cert: ArcKeyCert,
         _signaling_addr: &str,
         _transport_type: TransportType,

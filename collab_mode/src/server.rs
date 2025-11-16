@@ -4,7 +4,7 @@ use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::signaling::SignalingError;
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, TestWebChannel, WebChannel};
+use crate::webchannel::{self, MsgChannel, TestWebChannel, WebChannel, WebchannelError};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -168,31 +168,18 @@ impl MsgChannel for ChannelImpl {
     async fn connect(
         &self,
         remote_hostid: ServerId,
-        my_hostid: ServerId,
         my_key_cert: ArcKeyCert,
         signaling_addr: &str,
         transport_type: webchannel::TransportType,
     ) -> anyhow::Result<()> {
         match self {
             ChannelImpl::Real(c) => {
-                c.connect(
-                    remote_hostid,
-                    my_hostid,
-                    my_key_cert,
-                    signaling_addr,
-                    transport_type,
-                )
-                .await
+                c.connect(remote_hostid, my_key_cert, signaling_addr, transport_type)
+                    .await
             }
             ChannelImpl::Test(c) => {
-                c.connect(
-                    remote_hostid,
-                    my_hostid,
-                    my_key_cert,
-                    signaling_addr,
-                    transport_type,
-                )
-                .await
+                c.connect(remote_hostid, my_key_cert, signaling_addr, transport_type)
+                    .await
             }
         }
     }
@@ -878,9 +865,9 @@ impl Server {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
 
-                if self.accepting.get(&params.signaling_addr).is_some() {
-                    return Ok(());
-                }
+                // Always assume we aren’t accepting and try it, if
+                // we’re already accepting, webchannel.accept will
+                // return an error, see below.
                 self.accepting.insert(params.signaling_addr.clone(), ());
                 next.send_notif(
                     NotificationCode::AcceptingConnection,
@@ -898,6 +885,14 @@ impl Server {
                     let res = webchannel_1
                         .accept(key_cert, &params.signaling_addr, params.transport_type)
                         .await;
+                    // If we’re already accepting, then perfect, don’t
+                    // need to do anything else.
+                    if let Err(ref err) = res {
+                        if matches!(err.downcast_ref(), Some(WebchannelError::AlreadyAccepting)) {
+                            return;
+                        }
+                    }
+                    // If some other error, inform the editor.
                     if let Err(err) = res {
                         tracing::warn!("Stopped accepting connection: {}", err);
                         let msg = match err.downcast_ref() {
@@ -1375,13 +1370,7 @@ impl Server {
 
         tokio::spawn(async move {
             if let Err(err) = webchannel_1
-                .connect(
-                    host_id.clone(),
-                    my_host_id.clone(),
-                    key_cert,
-                    &signaling_addr,
-                    transport_type,
-                )
+                .connect(host_id.clone(), key_cert, &signaling_addr, transport_type)
                 .await
             {
                 let msg = format!("Failed to connect to {}: {}", host_id, err);

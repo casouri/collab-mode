@@ -86,6 +86,8 @@ pub enum SignalingMessage {
     /// signaling server. The second argument is the public key in PEM
     /// format.
     Bind(EndpointId, CertDerHash),
+    /// Acknowledge bind request.
+    Bound(EndpointId),
     /// Connect request. (sender_id, receiver_id, sender_sdp, sender_key).
     Connect(EndpointId, EndpointId, SDP, CertDerHash),
     /// Send candidate. (sender_id, receiver_id, sender_candidate).

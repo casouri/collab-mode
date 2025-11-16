@@ -174,7 +174,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2,
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -267,7 +266,6 @@ mod e2e_tests {
         channel2
             .connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2,
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -398,7 +396,6 @@ mod e2e_tests {
             channel
                 .connect(
                     hub_id.clone(),
-                    id.clone(),
                     key_cert.clone(),
                     env.signaling_url(),
                     TransportType::SCTP,
@@ -562,7 +559,6 @@ mod e2e_tests {
         channel2
             .connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -653,7 +649,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -710,7 +705,6 @@ mod e2e_tests {
         channel2
             .connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2,
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -823,13 +817,7 @@ mod e2e_tests {
             let signaling_url = env.signaling_url().to_string();
             tokio::spawn(async move {
                 channel2
-                    .connect(
-                        id1.clone(),
-                        id2.clone(),
-                        key_cert2,
-                        &signaling_url,
-                        TransportType::SCTP,
-                    )
+                    .connect(id1.clone(), key_cert2, &signaling_url, TransportType::SCTP)
                     .await
             })
         };
@@ -918,7 +906,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1003,7 +990,6 @@ mod e2e_tests {
             Duration::from_secs(3),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1072,7 +1058,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1171,7 +1156,6 @@ mod e2e_tests {
             Duration::from_secs(2),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1205,7 +1189,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel3.connect(
                 id1.clone(),
-                id3.clone(),
                 key_cert3.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1309,7 +1292,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel2.connect(
                 id1.clone(),
-                id2.clone(),
                 key_cert2.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1365,7 +1347,6 @@ mod e2e_tests {
             Duration::from_secs(2),
             channel3.connect(
                 id1.clone(),
-                id3.clone(),
                 key_cert3.clone(),
                 env.signaling_url(),
                 TransportType::SCTP,
@@ -1391,7 +1372,6 @@ mod e2e_tests {
             Duration::from_secs(5),
             channel4.connect(
                 id1.clone(),
-                id4.clone(),
                 key_cert2.clone(), // Using same cert as channel2
                 env.signaling_url(),
                 TransportType::SCTP,

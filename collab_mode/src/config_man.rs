@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct KeyCert {
     /// The private key. Stored as DER bytes for compatibility with
     /// external libraries. The [rcgen::KeyPair] can be reconstructed

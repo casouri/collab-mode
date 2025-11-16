@@ -51,6 +51,7 @@ fn expect_text(msg: Message) -> SignalingResult<String> {
 
 /// A listener that can be used to either listen for connections from
 /// other endpoints or connect to other endpoints.
+#[derive(Debug)]
 pub struct Listener {
     /// The id for this endpoint.
     pub my_id: EndpointId,
@@ -65,6 +66,8 @@ pub struct Listener {
     send_receive_task: JoinHandle<()>,
     /// Handle to the message processing task
     process_message_task: JoinHandle<()>,
+    /// This is closed when we receive Bound message.
+    bound_tx: mpsc::Sender<()>,
 }
 
 /// A socket that can be used to exchange ICE candidates.
@@ -109,6 +112,7 @@ impl Listener {
             tokio::spawn(send_receive_stream(stream, in_tx, out_rx).instrument(span));
 
         let der_hash = my_key_cert.cert_der_hash();
+        let (bound_tx, mut bound_rx) = mpsc::channel(1);
 
         let span = tracing::info_span!(
             "listener_process_message",
@@ -130,6 +134,7 @@ impl Listener {
                         out_tx_clone.clone(),
                         sock_tx.clone(),
                         &mut endpoint_map,
+                        &mut bound_rx,
                     )
                     .await;
                     if let Err(err) = res {
@@ -148,6 +153,7 @@ impl Listener {
             out_tx,
             send_receive_task,
             process_message_task,
+            bound_tx,
         };
 
         Ok(listener)
@@ -156,12 +162,18 @@ impl Listener {
     /// Share `sdp` on the signal server under `id`, and start
     /// listening for incoming connections.
     pub async fn bind(&mut self) -> SignalingResult<()> {
+        // Only send bind message if not already bound.
+        if self.bound_tx.is_closed() {
+            return Ok(());
+        }
+
         let cert_hash = self.my_key_cert.cert_der_hash();
         let msg = SignalingMessage::Bind(self.my_id.clone(), cert_hash);
         self.out_tx
             .send(msg.into())
             .await
             .map_err(|_err| SignalingError::Closed)?;
+        let _ = self.bound_tx.closed().await;
         Ok(())
     }
 
@@ -275,6 +287,7 @@ async fn listener_process_message(
     out_tx: mpsc::Sender<Message>,
     sock_tx: mpsc::UnboundedSender<SignalingResult<Socket>>,
     endpoint_map: &mut HashMap<EndpointId, mpsc::UnboundedSender<ICECandidate>>,
+    bound_rx: &mut mpsc::Receiver<()>,
 ) -> SignalingResult<()> {
     let msg = expect_text(msg?)?;
     let msg: SignalingMessage =
@@ -332,6 +345,10 @@ async fn listener_process_message(
                     "Received a candidate but we don't have that client in the client_map"
                 );
             }
+            Ok(())
+        }
+        SignalingMessage::Bound(_id) => {
+            bound_rx.close();
             Ok(())
         }
         msg => Err(SignalingError::UnexpectedMessage(
