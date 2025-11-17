@@ -42,7 +42,7 @@ use tracing::Instrument;
 fn expect_text(msg: Message) -> SignalingResult<String> {
     match msg {
         Message::Text(text) => Ok(text),
-        msg => Err(SignalingError::WebsocketError(format!(
+        msg => Err(SignalingError::OtherError(format!(
             "Expected text ws message but got {:?}",
             msg
         ))),
@@ -172,7 +172,7 @@ impl Listener {
         self.out_tx
             .send(msg.into())
             .await
-            .map_err(|_err| SignalingError::Closed)?;
+            .map_err(|_err| SignalingError::ConnectionBroke)?;
         let _ = self.bound_tx.closed().await;
         Ok(())
     }
@@ -181,11 +181,11 @@ impl Listener {
     /// `their_id`.
     pub async fn connect(&mut self, their_id: EndpointId, sdp: SDP) -> SignalingResult<Socket> {
         let cert_hash = self.my_key_cert.cert_der_hash();
-        let msg = SignalingMessage::Connect(self.my_id.clone(), their_id, sdp, cert_hash);
+        let msg = SignalingMessage::Connect(self.my_id.clone(), their_id, sdp, cert_hash, true);
         self.out_tx
             .send(msg.into())
             .await
-            .map_err(|_err| SignalingError::Closed)?;
+            .map_err(|_err| SignalingError::ConnectionBroke)?;
         self.accept().await
     }
 
@@ -195,7 +195,7 @@ impl Listener {
         if let Some(sock) = self.sock_rx.recv().await {
             sock
         } else {
-            Err(SignalingError::Closed)
+            Err(SignalingError::ConnectionBroke)
         }
     }
 }
@@ -218,11 +218,12 @@ impl Socket {
             self.their_id.clone(),
             sdp,
             self.my_cert.clone(),
+            false, // We're responding, not initiating
         );
         self.msg_tx
             .send(msg.into())
             .await
-            .map_err(|_err| SignalingError::Closed)?;
+            .map_err(|_err| SignalingError::ConnectionBroke)?;
         Ok(())
     }
 
@@ -232,7 +233,7 @@ impl Socket {
         self.msg_tx
             .send(msg.into())
             .await
-            .map_err(|_err| SignalingError::Closed)?;
+            .map_err(|_err| SignalingError::ConnectionBroke)?;
         Ok(())
     }
 
@@ -274,7 +275,7 @@ impl CandidateSender {
         self.msg_tx
             .send(msg.into())
             .await
-            .map_err(|_err| SignalingError::Closed)?;
+            .map_err(|_err| SignalingError::ConnectionBroke)?;
         Ok(())
     }
 }
@@ -290,10 +291,10 @@ async fn listener_process_message(
     bound_rx: &mut mpsc::Receiver<()>,
 ) -> SignalingResult<()> {
     let msg = expect_text(msg?)?;
-    let msg: SignalingMessage =
-        serde_json::from_str(&msg).map_err(|err| SignalingError::ParseError(err.to_string()))?;
+    let msg: SignalingMessage = serde_json::from_str(&msg)
+        .map_err(|err| SignalingError::OtherError(format!("Parse error: {}", err)))?;
     match msg {
-        SignalingMessage::Connect(their_id, my_id, their_sdp, their_cert) => {
+        SignalingMessage::Connect(their_id, my_id, their_sdp, their_cert, _initiator) => {
             let (msg_tx, msg_rx) = mpsc::unbounded_channel();
             endpoint_map.insert(their_id.clone(), msg_tx);
             let sock = Socket {
@@ -309,21 +310,11 @@ async fn listener_process_message(
             sock_tx.send(Ok(sock)).unwrap();
             Ok(())
         }
-        SignalingMessage::NoEndpointForId(id) => {
+        SignalingMessage::Error(_id, message) => {
+            // Receiver is never dropped while Listener is live.
             sock_tx
-                .send(Err(SignalingError::NoEndpointForId(id)))
-                // Receiver is never dropped while Listener is live.
+                .send(Err(SignalingError::OtherError(message)))
                 .unwrap();
-            Ok(())
-        }
-        SignalingMessage::IdTaken(id) => {
-            // Receiver is never dropped while Listener is live.
-            sock_tx.send(Err(SignalingError::IdTaken(id))).unwrap();
-            Ok(())
-        }
-        SignalingMessage::TimesUp(time) => {
-            // Receiver is never dropped while Listener is live.
-            sock_tx.send(Err(SignalingError::TimesUp(time))).unwrap();
             Ok(())
         }
         SignalingMessage::Candidate(their_id, _my_id, their_candidate) => {
@@ -351,10 +342,10 @@ async fn listener_process_message(
             bound_rx.close();
             Ok(())
         }
-        msg => Err(SignalingError::UnexpectedMessage(
-            "SignalingMessage".to_string(),
-            msg,
-        )),
+        msg => Err(SignalingError::OtherError(format!(
+            "Unexpected SignalingMessage: {:?}",
+            msg
+        ))),
     }
 }
 

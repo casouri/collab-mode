@@ -1,9 +1,5 @@
 use crate::error::{WebrpcError, WebrpcResult};
 use crate::signaling::CertDerHash;
-use crate::signaling::{
-    client::{Listener, Socket as SignalSocket},
-    EndpointId,
-};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -27,57 +23,14 @@ struct ICECredential {
     pwd: String,
 }
 
-/// Accept connections from `sock`. If `progress_tx` isn't None,
-/// report progress to it while establishing connection.
-#[instrument(skip_all)]
-pub async fn ice_accept(
-    mut sock: SignalSocket,
-    progress_tx: Option<mpsc::Sender<ConnectionState>>,
-) -> WebrpcResult<(
-    Arc<impl Conn + Send + Sync>,
-    Arc<Agent>,
-    oneshot::Receiver<()>,
-)> {
-    let (error_tx, mut error_rx) = mpsc::channel(1);
-    let (cancel_tx, cancel_rx) = mpsc::channel(1);
-    let (connected_tx, connected_rx) = watch::channel(());
-    let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
-
-    let (ufrag, pwd) = get_ice_credential(&sock)?;
-    let agent = Arc::new(make_ice_agent(false).await?);
-    send_ice_credential(&mut sock, &agent).await?;
-
-    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone(), conn_broke_tx);
-    let candidate_task = ice_exchange_candidates(agent.clone(), sock, error_tx, connected_rx)?;
-
-    let result = tokio::select! {
-        err = error_rx.recv() => {
-            drop(connected_tx);
-            drop(cancel_tx);
-            // We hold error_tx, this should never panic.
-            Err(err.unwrap().into())
-        }
-        conn = agent.accept(cancel_rx, ufrag, pwd) => {
-            drop(connected_tx);
-            let conn = conn?;
-            Ok((conn, agent, conn_broke_rx))
-        }
-    };
-
-    // Terminate candidate_task.
-    candidate_task.abort();
-    let _ = candidate_task.await;
-
-    result
-}
-
-/// Connect to the endpoint with `id` using `listener`.
-/// If `progress_tx` isn't None, report progress to it
-/// while establishing connection.
-#[instrument(skip(progress_tx))]
-pub async fn ice_connect(
-    listener: &mut Listener,
-    id: EndpointId,
+/// Connect using an existing Sock from SignalingClient.
+///
+/// This is the unified connection method that replaces separate
+/// ice_connect and ice_accept paths. Both sides use the same process.
+/// If `progress_tx` isn't None, report progress to it while establishing connection.
+#[instrument(skip(progress_tx, sock))]
+pub async fn ice_connect_with_sock(
+    mut sock: crate::signaling::client_new::Sock,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
 ) -> WebrpcResult<(
     (Arc<impl Conn + Send + Sync>, CertDerHash, Arc<Agent>),
@@ -90,15 +43,23 @@ pub async fn ice_connect(
 
     let agent = Arc::new(make_ice_agent(true).await?);
     let cred = ice_credential(&agent).await;
-    let sock = listener
-        .connect(id, serde_json::to_string(&cred).unwrap())
-        .await?;
-    let (ufrag, pwd) = get_ice_credential(&sock)?;
-    let their_cert = sock.cert_hash();
+
+    // Send our SDP (ICE credentials) to peer
+    sock.send_sdp(serde_json::to_string(&cred).unwrap())
+        .await
+        .map_err(|e| WebrpcError::SignalingError(e.to_string()))?;
+
+    // Receive peer's SDP
+    let peer_sdp = sock
+        .recv_sdp()
+        .await
+        .map_err(|e| WebrpcError::SignalingError(e.to_string()))?;
+    let (ufrag, pwd) = get_ice_credential_from_sdp(&peer_sdp)?;
+    let their_cert = sock.cert_hash().to_string();
 
     ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone(), conn_broke_tx);
     let candidate_task =
-        ice_exchange_candidates(agent.clone(), sock, error_tx.clone(), connected_rx)?;
+        ice_exchange_candidates_with_sock(agent.clone(), sock, error_tx.clone(), connected_rx)?;
 
     let result = tokio::select! {
         err = error_rx.recv() => {
@@ -119,6 +80,68 @@ pub async fn ice_connect(
     let _ = candidate_task.await;
 
     result
+}
+
+/// Helper to parse ICE credentials from SDP string.
+fn get_ice_credential_from_sdp(sdp: &str) -> WebrpcResult<(String, String)> {
+    let cred: ICECredential = serde_json::from_str(sdp)
+        .map_err(|e| WebrpcError::ParseError(format!("Failed to parse ICE credential: {}", e)))?;
+    Ok((cred.ufrag, cred.pwd))
+}
+
+/// Exchange ICE candidates with peer using Sock.
+fn ice_exchange_candidates_with_sock(
+    agent: Arc<Agent>,
+    mut sock: crate::signaling::client_new::Sock,
+    error_tx: mpsc::Sender<WebrpcError>,
+    connected_rx: watch::Receiver<()>,
+) -> WebrpcResult<JoinHandle<()>> {
+    // Send candidates using the on_candidate callback
+    let candidate_sender = sock.candidate_sender();
+    agent.on_candidate(Box::new(move |candidate| {
+        if connected_rx.has_changed().is_err() {
+            return Box::pin(async {});
+        }
+        if let Some(candidate) = candidate {
+            let candidate = candidate.marshal();
+            let mut candidate_sender = candidate_sender.clone();
+
+            tracing::info!(candidate, "Found ICE candidate");
+
+            tokio::spawn(async move {
+                let res = candidate_sender.send_candidate(candidate).await;
+                if let Err(err) = res {
+                    tracing::error!(?err, "Error sending ICE candidate");
+                }
+            });
+        }
+        Box::pin(async {})
+    }));
+
+    // Receive candidates
+    let agent_1 = agent.clone();
+    let candidate_task = tokio::spawn(async move {
+        while let Some(candidate) = sock.recv_candidate().await {
+            let func = || {
+                tracing::info!(?candidate, "Received ICE candidate");
+
+                let candidate = unmarshal_candidate(&candidate)?;
+                let candidate: Arc<dyn Candidate + Send + Sync> = Arc::new(candidate);
+                agent_1.add_remote_candidate(&candidate)?;
+                Ok::<(), WebrpcError>(())
+            };
+            if let Err(err) = func() {
+                // If we can't send error, the connection is likely established
+                let _ = error_tx.send(err).await;
+                break;
+            }
+        }
+        tracing::info!("Candidate receiver task ending");
+    });
+
+    // Gather candidates
+    agent.gather_candidates()?;
+    Ok(candidate_task)
 }
 
 /// Monitor the handshake progress. If connection failed, send an error
@@ -166,12 +189,6 @@ fn ice_monitor_progress(
 }
 
 /// Get the ufrag and pwd from `sock`.
-fn get_ice_credential(sock: &SignalSocket) -> WebrpcResult<(String, String)> {
-    let remote_cred: ICECredential = serde_json::from_str(&sock.sdp())
-        .map_err(|err| WebrpcError::ParseError(err.to_string()))?;
-    Ok((remote_cred.ufrag, remote_cred.pwd))
-}
-
 async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
     let mut config = AgentConfig::default();
     config.is_controlling = controlling;
@@ -202,186 +219,8 @@ async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
     Ok(Agent::new(config).await?)
 }
 
-/// Send ICE credential of `agent` to `sock`.
-async fn send_ice_credential(sock: &mut SignalSocket, agent: &Agent) -> WebrpcResult<()> {
-    let local_cred = ice_credential(agent).await;
-    tracing::info!(?local_cred, "Sending SDP");
-    sock.send_sdp(serde_json::to_string(&local_cred).unwrap())
-        .await?;
-    Ok(())
-}
-
 /// Get local credential of `agent`
 async fn ice_credential(agent: &Agent) -> ICECredential {
     let (ufrag, pwd) = agent.get_local_user_credentials().await;
     ICECredential { ufrag, pwd }
-}
-
-/// Start gathering candidates and exchange candidates with remote
-/// endpoint. If `connected_rx` is closed, don't send any candidates
-/// out. Errors are sent to `err_tx`. Returns a JoinHandle for the
-/// candidate receiver task that should be aborted after connection.
-#[instrument(skip_all)]
-fn ice_exchange_candidates(
-    agent: Arc<Agent>,
-    mut sock: SignalSocket,
-    error_tx: mpsc::Sender<WebrpcError>,
-    connected_rx: watch::Receiver<()>,
-) -> WebrpcResult<JoinHandle<()>> {
-    // Send candidate.
-    let candidate_sender = sock.candidate_sender();
-    agent.on_candidate(Box::new(move |candidate| {
-        if connected_rx.has_changed().is_err() {
-            return Box::pin(async {});
-        }
-        if let Some(candidate) = candidate {
-            let candidate = candidate.marshal();
-            let candidate_sender = candidate_sender.clone();
-
-            tracing::info!(candidate, "Found ICE candidate");
-
-            tokio::spawn(async move {
-                let res = candidate_sender.send_candidate(candidate).await;
-                if let Err(err) = res {
-                    tracing::error!(?err, "Error sending ICE candidate");
-                }
-            });
-        }
-        Box::pin(async {})
-    }));
-
-    // Receive candidate - store the JoinHandle so we can abort it later.
-    let agent_1 = agent.clone();
-    let candidate_task = tokio::spawn(async move {
-        while let Some(candidate) = sock.recv_candidate().await {
-            let func = || {
-                tracing::info!(?candidate, "Received ICE candidate");
-
-                let candidate = unmarshal_candidate(&candidate)?;
-                let candidate: Arc<dyn Candidate + Send + Sync> = Arc::new(candidate);
-                agent_1.add_remote_candidate(&candidate)?;
-                Ok::<(), WebrpcError>(())
-            };
-            if let Err(err) = func() {
-                // If we can't send error, the connection is likely established
-                let _ = error_tx.send(err).await;
-                break;
-            }
-        }
-        tracing::info!("Candidate receiver task ending");
-    });
-
-    // Gather candidate.
-    agent.gather_candidates()?;
-    Ok(candidate_task)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ice_accept, ice_connect};
-    use crate::{
-        config_man::create_key_cert,
-        signaling::{client::Listener, server::run_signaling_server},
-        types::ArcKeyCert,
-    };
-    use std::{path::Path, sync::Arc};
-    use webrtc_util::Conn;
-
-    async fn test_server(id: String, server_key_cert: ArcKeyCert) -> anyhow::Result<()> {
-        // Connect to the signaling server.
-        let mut listener = Listener::new("ws://127.0.0.1:9000", id, server_key_cert).await?;
-        listener.bind().await?;
-
-        let sock = listener.accept().await?;
-        let (conn, _ice_agent, _conn_broke_rx) = ice_accept(sock, None).await?;
-        let conn_tx = Arc::clone(&conn);
-
-        // Send and receive message.
-        tokio::spawn(async move {
-            for i in 0..5 {
-                let res = conn_tx.send(format!("server msg {i}").as_bytes()).await;
-                if let Err(err) = res {
-                    panic!("Error sending message {:?}", err);
-                }
-            }
-        });
-        let mut count = 0;
-        let mut buf = vec![0u8; 1500];
-        while let Ok(len) = conn.recv(&mut buf[..]).await {
-            let msg = std::str::from_utf8(&buf[..len]).unwrap();
-            println!("Server received msg: {:?}", msg);
-            assert!(msg == format!("client msg {}", count));
-            count += 1;
-            if count == 4 {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn test_client(server_id: String, client_key_cert: ArcKeyCert) -> anyhow::Result<()> {
-        // We don't verify server_cert until DTLS connection is
-        // established. So no use for the server_cert at this layer.
-        let client_id = uuid::Uuid::new_v4().to_string();
-        let mut listener = Listener::new("ws://127.0.0.1:9000", client_id, client_key_cert).await?;
-        let ((conn, _server_cert, _ice_agent), _conn_broke_rx) =
-            ice_connect(&mut listener, server_id, None).await?;
-        let conn_tx = Arc::clone(&conn);
-
-        // Send and receive message.
-        tokio::spawn(async move {
-            for i in 0..5 {
-                let res = conn_tx.send(format!("client msg {i}").as_bytes()).await;
-                if let Err(err) = res {
-                    panic!("Error sending message {:?}", err);
-                }
-            }
-        });
-        let mut buf = vec![0u8; 1500];
-        let mut count = 0;
-        while let Ok(len) = conn.recv(&mut buf[..]).await {
-            let msg = std::str::from_utf8(&buf[..len]).unwrap();
-            println!("Client received msg: {:?}", msg);
-            assert!(msg == format!("server msg {}", count));
-            count += 1;
-            if count == 4 {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    #[ignore]
-    fn webrtc_test() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let db_path = Path::new("/tmp/collab-signal-db.sqlite3");
-        std::fs::remove_file(&db_path).unwrap();
-        let _ = runtime.spawn(async move {
-            let res = run_signaling_server("127.0.0.1:9000", &db_path).await;
-            println!("Signaling server: {:?}", res);
-            res.unwrap();
-        });
-
-        let server_id = "server#1".to_string();
-        let client_id = "client#1".to_string();
-        let server_key_cert = Arc::new(create_key_cert(&server_id));
-        let client_key_cert = Arc::new(create_key_cert(&client_id));
-
-        let server_id_1 = server_id.clone();
-        let handle = runtime.spawn(async {
-            let res = test_server(server_id_1, server_key_cert).await;
-            println!("Server: {:?}", res);
-            res.unwrap();
-        });
-        let _ =
-            runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_secs(1)).await });
-        let _ = runtime.block_on(async {
-            let res = test_client(server_id, client_key_cert).await;
-            println!("Client: {:?}", res);
-            res.unwrap();
-        });
-
-        let _ = runtime.block_on(async { handle.await });
-    }
 }

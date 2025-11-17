@@ -484,6 +484,12 @@ pub enum Msg {
     IceProgress(ServerId, String),
     Hey(HeyMessage),
 
+    // Signaling messages
+    /// Message from signaling server. (signaling_addr, message)
+    SignalingMsg(String, crate::signaling::SignalingMessage),
+    /// Error from signaling connection. (signaling_addr, error)
+    SignalingErr(String, crate::signaling::SignalingError),
+
     // Errors
     FailedToConnect(ServerId, String),
     ConnectionBroke(ServerId),
@@ -491,10 +497,10 @@ pub enum Msg {
     SerializationErr(String),
     PermissionDenied(String),
     BadRequest(String),
-    // Fatal error that shouldn’t happen (not a fault, ie, a bug in
+    // Fatal error that shouldn't happen (not a fault, ie, a bug in
     // code), must reset the doc.
     DocFatal(DocId, String),
-    // If we need to respond to a request from a remote’s editor with
+    // If we need to respond to a request from a remote's editor with
     // an error, use this message.
     ErrorResp {
         code: ErrorCode,

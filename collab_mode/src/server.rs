@@ -2,9 +2,8 @@ use crate::config_man::{AcceptMode, ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, ServerEngine};
 use crate::error::CollabError;
 use crate::message::{self, *};
-use crate::signaling::SignalingError;
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, TestWebChannel, WebChannel, WebchannelError};
+use crate::webchannel::{self, MsgChannel, TestWebChannel, WebChannel};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -153,34 +152,15 @@ impl MsgChannel for ChannelImpl {
         }
     }
 
-    async fn accept(
-        &mut self,
-        my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        transport_type: webchannel::TransportType,
-    ) -> anyhow::Result<()> {
-        match self {
-            ChannelImpl::Real(c) => c.accept(my_key_cert, signaling_addr, transport_type).await,
-            ChannelImpl::Test(c) => c.accept(my_key_cert, signaling_addr, transport_type).await,
-        }
-    }
-
     async fn connect(
         &self,
         remote_hostid: ServerId,
+        sock: Option<crate::signaling::client_new::Sock>,
         my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        transport_type: webchannel::TransportType,
     ) -> anyhow::Result<()> {
         match self {
-            ChannelImpl::Real(c) => {
-                c.connect(remote_hostid, my_key_cert, signaling_addr, transport_type)
-                    .await
-            }
-            ChannelImpl::Test(c) => {
-                c.connect(remote_hostid, my_key_cert, signaling_addr, transport_type)
-                    .await
-            }
+            ChannelImpl::Real(c) => c.connect(remote_hostid, sock, my_key_cert).await,
+            ChannelImpl::Test(c) => c.connect(remote_hostid, sock, my_key_cert).await,
         }
     }
 
@@ -231,6 +211,10 @@ pub struct Server {
     trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
     /// Accept mode for incoming connections (shared with WebChannel)
     accept_mode: Arc<Mutex<AcceptMode>>,
+    /// Map of signaling clients by signaling server address
+    signaling_clients: HashMap<String, crate::signaling::client_new::SignalingClient>,
+    /// Map of host IDs we're currently establishing connections with to their signaling server address
+    pending_connections: Arc<Mutex<HashMap<ServerId, String>>>,
 }
 
 // *** Impl Doc
@@ -493,6 +477,8 @@ impl Server {
             key_cert: Arc::new(key_cert),
             trusted_hosts,
             accept_mode,
+            signaling_clients: HashMap::new(),
+            pending_connections: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok(server)
     }
@@ -514,11 +500,11 @@ impl Server {
         // Use the Server's shared trusted_hosts and accept_mode, or
         // test channel if provided
         let webchannel = if let Some(factory) = test_channel_factory {
-            ChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx))
+            ChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx.clone()))
         } else {
             ChannelImpl::Real(WebChannel::new(
                 self.host_id.clone(),
-                msg_tx,
+                msg_tx.clone(),
                 self.trusted_hosts.clone(),
                 self.accept_mode.clone(),
             ))
@@ -543,7 +529,7 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx).await;
                     // Normally the handler shouldn’t return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -553,7 +539,7 @@ impl Server {
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel, &msg_tx).await;
                     // Normally the handler shouldn’t return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -586,7 +572,7 @@ impl Server {
 
                     let next = Next::new(&editor_tx, None, &webchannel);
                     for (host, remote) in need_connect {
-                        self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type).await;
+                        self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type, &msg_tx).await;
                     }
 
                 }
@@ -648,6 +634,7 @@ impl Server {
         msg: lsp_server::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &ChannelImpl,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
@@ -669,7 +656,7 @@ impl Server {
             lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
                 let next = Next::new(editor_tx, None, webchannel);
-                if let Err(err) = self.handle_editor_notification(&next, notif).await {
+                if let Err(err) = self.handle_editor_notification(&next, notif, msg_tx).await {
                     tracing::error!("Failed to handle editor notification: {}", err);
                     let params = serde_json::json!({
                         "message": err.to_string(),
@@ -860,15 +847,22 @@ impl Server {
         &mut self,
         next: &Next<'a>,
         notif: lsp_server::Notification,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
 
-                // Always assume we aren’t accepting and try it, if
-                // we’re already accepting, webchannel.accept will
-                // return an error, see below.
+                // Check if we already have a SignalingClient for this address
+                if self.signaling_clients.contains_key(&params.signaling_addr) {
+                    // Already accepting on this address
+                    return Ok(());
+                }
+
+                // Mark as accepting
                 self.accepting.insert(params.signaling_addr.clone(), ());
+
+                // Notify editor that we're accepting
                 next.send_notif(
                     NotificationCode::AcceptingConnection,
                     serde_json::json!({
@@ -876,54 +870,29 @@ impl Server {
                     }),
                 )
                 .await;
-                let key_cert = self.key_cert.clone();
-                let mut webchannel_1 = next.webchannel.clone();
-                let signaling_addr_1 = params.signaling_addr.clone();
-                let my_host_id = self.host_id.clone();
 
-                tokio::spawn(async move {
-                    let res = webchannel_1
-                        .accept(key_cert, &params.signaling_addr, params.transport_type)
-                        .await;
-                    // If we’re already accepting, then perfect, don’t
-                    // need to do anything else.
-                    if let Err(ref err) = res {
-                        if matches!(err.downcast_ref(), Some(WebchannelError::AlreadyAccepting)) {
-                            return;
-                        }
+                // Create or get SignalingClient
+                match self
+                    .get_or_create_signaling_client(&params.signaling_addr, msg_tx)
+                    .await
+                {
+                    Ok(_client) => {
+                        // Successfully bound to signaling server
                     }
-                    // If some other error, inform the editor.
-                    if let Err(err) = res {
-                        tracing::warn!("Stopped accepting connection: {}", err);
-                        let msg = match err.downcast_ref() {
-                            Some(SignalingError::TimesUp(time)) => {
-                                format!("Allocated signaling time is up ({}s)", time)
-                            }
-                            Some(SignalingError::Closed) => {
-                                format!("Signaling server closed the connection")
-                            }
-                            Some(SignalingError::IdTaken(id)) => {
-                                format!("Host id {} is already taken", id)
-                            }
-                            _ => err.to_string(),
-                        };
-                        // We have to send a message to ourselves to
-                        // continue next step because this is a
-                        // background task which doesn’t have access
-                        // to self so we can’t update the accepting
-                        // state.
-                        send_to_remote(
-                            &webchannel_1,
-                            &my_host_id,
-                            None,
-                            Msg::AcceptStopped {
-                                signaling_addr: signaling_addr_1,
-                                reason: msg,
+                    Err(err) => {
+                        tracing::error!("Failed to bind SignalingClient: {}", err);
+                        self.accepting.remove(&params.signaling_addr);
+                        next.send_notif(
+                            NotificationCode::ErrorResponse,
+                            ErrorResponseNote {
+                                code: ErrorCode::InternalError,
+                                file: None,
+                                message: format!("Failed to bind to signaling server: {}", err),
                             },
                         )
                         .await;
                     }
-                });
+                }
             }
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
@@ -933,6 +902,7 @@ impl Server {
                         params.host_id,
                         params.signaling_addr,
                         params.transport_type,
+                        msg_tx,
                     )
                     .await;
                 } else {
@@ -965,6 +935,7 @@ impl Server {
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &ChannelImpl,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
@@ -1318,6 +1289,14 @@ impl Server {
                 next.send_notif(NotificationCode::ErrorResponse, msg).await;
                 Ok(())
             }
+            Msg::SignalingMsg(signaling_addr, signaling_msg) => {
+                self.handle_signaling_msg(signaling_addr, signaling_msg, &next, webchannel, msg_tx)
+                    .await
+            }
+            Msg::SignalingErr(signaling_addr, signaling_err) => {
+                self.handle_signaling_err(signaling_addr, signaling_err, &next)
+                    .await
+            }
             _ => {
                 let message = format!(
                     "Unrecognized message type from {}: {:?}",
@@ -1334,6 +1313,55 @@ impl Server {
         }
     }
 
+    /// Get an existing SignalingClient for the given address, or create a new one.
+    ///
+    /// This method handles SignalingClient creation and message forwarding setup.
+    async fn get_or_create_signaling_client(
+        &mut self,
+        signaling_addr: &str,
+        main_msg_tx: &mpsc::Sender<webchannel::Message>,
+    ) -> anyhow::Result<crate::signaling::client_new::SignalingClient> {
+        // Check if client already exists
+        if let Some(client) = self.signaling_clients.get(signaling_addr) {
+            return Ok(client.clone());
+        }
+
+        // Create new SignalingClient
+        let (signaling_msg_tx, mut signaling_msg_rx) = mpsc::channel::<Msg>(16);
+
+        let client = crate::signaling::client_new::SignalingClient::bind(
+            signaling_addr.to_string(),
+            self.host_id.clone(),
+            self.key_cert.clone(),
+            signaling_msg_tx,
+        )
+        .await?;
+
+        // Store the client
+        self.signaling_clients
+            .insert(signaling_addr.to_string(), client.clone());
+
+        // Spawn message forwarding task
+        let main_msg_tx_clone = main_msg_tx.clone();
+        let my_host_id = self.host_id.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = signaling_msg_rx.recv().await {
+                // Wrap Msg in webchannel::Message and send to main loop
+                let web_msg = webchannel::Message {
+                    host: my_host_id.clone(),
+                    body: msg,
+                    req_id: None,
+                };
+                if let Err(e) = main_msg_tx_clone.send(web_msg).await {
+                    tracing::error!("Failed to forward message from SignalingClient: {}", e);
+                    break;
+                }
+            }
+        });
+
+        Ok(client)
+    }
+
     // **** Handler functions
 
     async fn connect<'a>(
@@ -1341,11 +1369,31 @@ impl Server {
         next: &Next<'a>,
         host_id: ServerId,
         signaling_addr: String,
-        transport_type: webchannel::TransportType,
+        _transport_type: webchannel::TransportType,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
     ) {
         if host_id == self.host_id {
             return;
         }
+
+        // Check if we're already connecting to avoid duplicates
+        if self
+            .pending_connections
+            .lock()
+            .unwrap()
+            .contains_key(&host_id)
+        {
+            tracing::debug!(
+                "Already connecting to {}, skipping duplicate request",
+                host_id
+            );
+            return;
+        }
+        self.pending_connections
+            .lock()
+            .unwrap()
+            .insert(host_id.clone(), signaling_addr.clone());
+
         next.send_notif(
             NotificationCode::Connecting,
             ConnectingNote {
@@ -1354,34 +1402,82 @@ impl Server {
         )
         .await;
 
-        // If there’s an existing remote, keep the reconnect time/stride.
+        // If there's an existing remote, keep the reconnect time/stride.
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
             remote.state = ConnectionState::Connecting;
         } else {
             self.active_remotes.insert(
                 host_id.clone(),
-                RemoteState::connecting(signaling_addr.clone(), transport_type.clone()),
+                RemoteState::connecting(signaling_addr.clone(), webchannel::TransportType::SCTP),
             );
         }
 
-        let key_cert = self.key_cert.clone();
-        let webchannel_1 = next.webchannel.clone();
-        let my_host_id = self.host_id.clone();
-
-        tokio::spawn(async move {
-            if let Err(err) = webchannel_1
-                .connect(host_id.clone(), key_cert, &signaling_addr, transport_type)
-                .await
-            {
-                let msg = format!("Failed to connect to {}: {}", host_id, err);
-                tracing::error!(msg);
-                send_to_remote(
-                    &webchannel_1,
-                    &my_host_id,
-                    None,
-                    Msg::FailedToConnect(host_id, err.to_string()),
+        // Get or create SignalingClient for this signaling address
+        let signaling_client = match self
+            .get_or_create_signaling_client(&signaling_addr, msg_tx)
+            .await
+        {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!("Failed to get/create SignalingClient: {}", e);
+                self.pending_connections.lock().unwrap().remove(&host_id);
+                next.send_notif(
+                    NotificationCode::ErrorResponse,
+                    ErrorResponseNote {
+                        code: ErrorCode::InternalError,
+                        file: None,
+                        message: format!("Failed to connect to signaling server: {}", e),
+                    },
                 )
                 .await;
+                return;
+            }
+        };
+
+        // Create Sock for the peer
+        // Note: We use empty string for peer_cert since we don't have it yet when initiating.
+        // The actual cert verification happens at DTLS level.
+        let sock = signaling_client
+            .create_sock(
+                host_id.clone(),
+                String::new(), // Placeholder cert - will be verified at DTLS level
+                None,          // No peer SDP yet - we're initiating
+            )
+            .await;
+
+        // Spawn connection task
+        let key_cert = self.key_cert.clone();
+        let webchannel = next.webchannel.clone();
+        let host_id_clone = host_id.clone();
+        let pending_connections = self.pending_connections.clone();
+        let msg_tx_clone = msg_tx.clone();
+        let my_host_id = self.host_id.clone();
+        let signaling_client_clone = signaling_client.clone();
+
+        tokio::spawn(async move {
+            match webchannel
+                .connect(host_id_clone.clone(), Some(sock), key_cert)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!("Connected to {}", host_id_clone);
+                    pending_connections.lock().unwrap().remove(&host_id_clone);
+                }
+                Err(err) => {
+                    tracing::error!("Failed to connect to {}: {}", host_id_clone, err);
+                    pending_connections.lock().unwrap().remove(&host_id_clone);
+
+                    // Clean up Sock from SignalingClient
+                    signaling_client_clone.remove_sock(&host_id_clone).await;
+
+                    // Send FailedToConnect message to main loop
+                    let web_msg = webchannel::Message {
+                        host: my_host_id,
+                        body: Msg::FailedToConnect(host_id_clone.clone(), err.to_string()),
+                        req_id: None,
+                    };
+                    let _ = msg_tx_clone.send(web_msg).await;
+                }
             }
         });
     }
@@ -3222,6 +3318,178 @@ impl Server {
         }
 
         connected
+    }
+
+    /// Handle SignalingMsg from signaling client.
+    async fn handle_signaling_msg<'a>(
+        &mut self,
+        signaling_addr: String,
+        msg: crate::signaling::SignalingMessage,
+        next: &Next<'a>,
+        _webchannel: &ChannelImpl,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+    ) -> anyhow::Result<()> {
+        use crate::signaling::SignalingMessage;
+
+        match msg {
+            SignalingMessage::Bound(_id) => {
+                // No-op, already handled by SignalingClient
+                Ok(())
+            }
+
+            SignalingMessage::Connect(peer_id, _my_id, peer_sdp, peer_cert, _initiator) => {
+                tracing::info!("Received Connect message from {}", peer_id);
+
+                // Check if we're already connecting to this peer
+                if self
+                    .pending_connections
+                    .lock()
+                    .unwrap()
+                    .contains_key(&peer_id)
+                {
+                    tracing::debug!(
+                        "Already connecting to {}, ignoring duplicate Connect",
+                        peer_id
+                    );
+                    return Ok(());
+                }
+
+                // Mark as pending to prevent duplicate connection attempts
+                self.pending_connections
+                    .lock()
+                    .unwrap()
+                    .insert(peer_id.clone(), signaling_addr.clone());
+
+                // Get the SignalingClient for this signaling server
+                let signaling_client = match self.signaling_clients.get(&signaling_addr) {
+                    Some(client) => client.clone(),
+                    None => {
+                        tracing::error!("No SignalingClient for address {}", signaling_addr);
+                        self.pending_connections.lock().unwrap().remove(&peer_id);
+                        return Ok(());
+                    }
+                };
+
+                // Create a Sock for this peer connection
+                let sock = signaling_client
+                    .create_sock(
+                        peer_id.clone(),
+                        peer_cert.clone(),
+                        Some(peer_sdp.clone()), // We have peer's SDP from Connect message
+                    )
+                    .await;
+
+                // Establish WebChannel connection using the sock
+                let key_cert = self.key_cert.clone();
+                let webchannel_clone = _webchannel.clone();
+                let peer_id_clone = peer_id.clone();
+                let pending_connections = self.pending_connections.clone();
+                let msg_tx_clone = msg_tx.clone();
+                let my_host_id = self.host_id.clone();
+                let signaling_client_clone = signaling_client.clone();
+
+                tokio::spawn(async move {
+                    match webchannel_clone
+                        .connect(peer_id_clone.clone(), Some(sock), key_cert)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!("Successfully connected to peer {}", peer_id_clone);
+                            // Remove from pending after successful connection
+                            pending_connections.lock().unwrap().remove(&peer_id_clone);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, e);
+                            pending_connections.lock().unwrap().remove(&peer_id_clone);
+
+                            // Clean up Sock from SignalingClient
+                            signaling_client_clone.remove_sock(&peer_id_clone).await;
+
+                            // Send FailedToConnect message to main loop
+                            let web_msg = webchannel::Message {
+                                host: my_host_id,
+                                body: Msg::FailedToConnect(peer_id_clone.clone(), e.to_string()),
+                                req_id: None,
+                            };
+                            let _ = msg_tx_clone.send(web_msg).await;
+                        }
+                    }
+                });
+
+                Ok(())
+            }
+
+            SignalingMessage::Error(_endpoint_id, message) => {
+                // Send error to editor
+                next.send_notif(
+                    NotificationCode::ErrorResponse,
+                    ErrorResponseNote {
+                        code: ErrorCode::InternalError,
+                        file: None,
+                        message: format!("Signaling error: {}", message),
+                    },
+                )
+                .await;
+                Ok(())
+            }
+
+            _ => {
+                // Other variants are no-op
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle SignalingErr from signaling client.
+    async fn handle_signaling_err<'a>(
+        &mut self,
+        signaling_addr: String,
+        error: crate::signaling::SignalingError,
+        next: &Next<'a>,
+    ) -> anyhow::Result<()> {
+        use crate::signaling::SignalingError;
+
+        match error {
+            SignalingError::ConnectionBroke => {
+                // Remove SignalingClient from map
+                self.signaling_clients.remove(&signaling_addr);
+
+                // Remove from accepting map
+                self.accepting.remove(&signaling_addr);
+
+                // Send AcceptStopped notification
+                next.send_notif(
+                    NotificationCode::AcceptStopped,
+                    serde_json::json!({
+                        "signalingAddr": signaling_addr,
+                        "reason": "Connection to signaling server broke",
+                    }),
+                )
+                .await;
+
+                // Clear pending connections for this signaling server only
+                self.pending_connections
+                    .lock()
+                    .unwrap()
+                    .retain(|_peer_id, addr| addr != &signaling_addr);
+
+                Ok(())
+            }
+
+            SignalingError::OtherError(message) => {
+                // Send error notification to editor
+                next.send_notif(
+                    NotificationCode::ErrorResponse,
+                    ErrorResponseNote {
+                        code: ErrorCode::InternalError,
+                        file: None,
+                        message: format!("Signaling error: {}", message),
+                    },
+                )
+                .await;
+                Ok(())
+            }
+        }
     }
 }
 

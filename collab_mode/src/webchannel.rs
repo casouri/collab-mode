@@ -8,9 +8,7 @@
 //! Deserialize, but there’s really no need for it. So we just make
 //! it take a Msg, it’s convenient and simple.
 
-use crate::ice::{ice_accept, ice_connect};
 use crate::message::{HeyMessage, Msg};
-use crate::signaling::client::Listener;
 use crate::{
     config_man::{hash_der, AcceptMode},
     signaling::CertDerHash,
@@ -34,8 +32,22 @@ use webrtc_util::Conn;
 const STREAM_ID_CLIENT_INIT: u16 = 1; // Client uses odd stream IDs: 1, 3, 5, ...
 const STREAM_ID_SERVER_INIT: u16 = 2; // Server uses even stream IDs: 2, 4, 6, ...
 
+/// Determine which side uses odd stream IDs based on host ID ordering.
+///
+/// The host with lexicographically smaller ID uses odd stream IDs (1, 3, 5...)
+/// The host with larger ID uses even stream IDs (2, 4, 6...)
+///
+/// This ensures both sides agree on stream ID parity without negotiation.
+fn stream_id_init(my_id: &str, peer_id: &str) -> u16 {
+    if my_id < peer_id {
+        STREAM_ID_CLIENT_INIT // 1 (odd)
+    } else {
+        STREAM_ID_SERVER_INIT // 2 (even)
+    }
+}
+
 /// Trait for message channel operations. Provides async methods for
-/// sending, accepting, connecting, and broadcasting messages.
+/// sending, connecting, and broadcasting messages.
 #[async_trait]
 pub trait MsgChannel {
     /// Send a message to a remote host. Doesn't block.
@@ -46,25 +58,16 @@ pub trait MsgChannel {
         msg: Msg,
     ) -> anyhow::Result<()>;
 
-    /// Bind on signaling server, and run in a loop and accept
-    /// connections. For each connection, setup message handling
-    /// threads running in the background.
-    async fn accept(
-        &mut self,
-        my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        transport_type: TransportType,
-    ) -> anyhow::Result<()>;
-
-    /// Connect to a remote host through signaling server. Setup
-    /// message handling threads that runs in the background. Blocks
-    /// until the connection is established.
+    /// Connect to a peer using a Sock from SignalingClient.
+    ///
+    /// For WebChannel: sock parameter is required (unwrapped).
+    /// For TestWebChannel: sock is ignored (hosts assumed connected).
+    /// Stream ID parity determined by host ID ordering.
     async fn connect(
         &self,
         remote_hostid: ServerId,
+        sock: Option<crate::signaling::client_new::Sock>,
         my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        transport_type: TransportType,
     ) -> anyhow::Result<()>;
 
     /// Broadcasts a message to all connected peers. Doesn't block.
@@ -110,8 +113,6 @@ pub struct WebChannel {
     msg_tx: mpsc::Sender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
     next_stream_id: Arc<AtomicU16>,
-    /// Listeners for each signaling server URL.
-    listeners: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Listener>>>>>,
     /// Trusted hosts with their certificate hashes for verification
     trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
     /// Accept mode controlling how to handle incoming connections
@@ -130,7 +131,6 @@ impl WebChannel {
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU16::new(0)), // Will be set in setup_message_handling
-            listeners: Arc::new(Mutex::new(HashMap::new())),
             trusted_hosts,
             accept_mode,
         }
@@ -143,29 +143,6 @@ impl WebChannel {
     #[allow(dead_code)]
     pub fn active_remotes(&self) -> Vec<ServerId> {
         self.assoc_tx.lock().unwrap().keys().cloned().collect()
-    }
-
-    /// Get or create a listener for the given signaling server URL.
-    async fn get_or_create_listener(
-        &self,
-        signaling_addr: &str,
-        my_key_cert: ArcKeyCert,
-    ) -> anyhow::Result<Arc<tokio::sync::Mutex<Listener>>> {
-        // Check if listener already exists.
-        {
-            let listeners = self.listeners.lock().unwrap();
-            if let Some(listener) = listeners.get(signaling_addr) {
-                return Ok(listener.clone());
-            }
-        }
-
-        // Create new listener.
-        let listener = Listener::new(signaling_addr, self.hostid(), my_key_cert).await?;
-        let listener_arc = Arc::new(tokio::sync::Mutex::new(listener));
-
-        let mut listeners = self.listeners.lock().unwrap();
-        listeners.insert(signaling_addr.to_string(), listener_arc.clone());
-        Ok(listener_arc)
     }
 
     /// Check if a certificate hash is trusted based on the configured trusted hosts
@@ -203,172 +180,60 @@ impl WebChannel {
         is_trusted
     }
 
-    /// Run in a loop and accept
-    /// connections. For each connection, setup message handling
-    /// threads running in the background.
-    pub async fn accept(
-        &mut self,
-        my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        _transport_type: TransportType,
-    ) -> anyhow::Result<()> {
-        let listener = self
-            .get_or_create_listener(signaling_addr, my_key_cert.clone())
-            .await?;
-        listener.lock().await.bind().await?;
-
-        loop {
-            let self_clone = self.clone();
-            let my_key_cert_clone = my_key_cert.clone();
-            let msg_tx = self.msg_tx.clone();
-            let listener_clone = listener.clone();
-
-            tokio::spawn(async move {
-                let sock_result = listener_clone.lock().await.accept().await;
-                if sock_result.is_err() {
-                    tracing::error!(
-                        "Failed to accept signaling connection: {}",
-                        sock_result.err().unwrap()
-                    );
-                    return;
-                }
-                let sock = sock_result.unwrap();
-                let their_cert = sock.cert_hash();
-                let remote_hostid = sock.id();
-
-                let conn_result = ice_accept(sock, None).await;
-                if conn_result.is_err() {
-                    tracing::error!(
-                        "Failed to accept ICE connection: {}",
-                        conn_result.err().unwrap()
-                    );
-                    return;
-                }
-                let (conn, ice_agent, conn_broke_rx) = conn_result.unwrap();
-
-                // Check if the certificate is trusted
-                if !self_clone.is_cert_trusted(&their_cert, &remote_hostid) {
-                    // Continue to next connection attempt
-                    return;
-                }
-
-                let remote_hostid_clone = remote_hostid.clone();
-
-                let dtls_connection = create_dtls_server(conn, my_key_cert_clone, their_cert).await;
-                if dtls_connection.is_err() {
-                    tracing::error!(
-                        "Failed to create DTLS server: {}",
-                        dtls_connection.err().unwrap()
-                    );
-                    let _ = msg_tx
-                        .send(Message {
-                            host: remote_hostid_clone.clone(),
-                            body: Msg::ConnectionBroke(remote_hostid),
-                            req_id: None,
-                        })
-                        .await;
-                    return;
-                }
-                let dtls_connection = dtls_connection.unwrap();
-
-                let sctp_assoc = create_sctp_server(dtls_connection.clone()).await;
-                if sctp_assoc.is_err() {
-                    tracing::error!(
-                        "Failed to create SCTP server: {}",
-                        sctp_assoc.err().unwrap()
-                    );
-                    let _ = msg_tx
-                        .send(Message {
-                            host: remote_hostid_clone.clone(),
-                            body: Msg::ConnectionBroke(remote_hostid),
-                            req_id: None,
-                        })
-                        .await;
-                    return;
-                }
-                let sctp_assoc = sctp_assoc.unwrap();
-
-                let res = self_clone
-                    .setup_message_handling(
-                        &remote_hostid,
-                        sctp_assoc.clone(),
-                        STREAM_ID_SERVER_INIT,
-                        conn_broke_rx,
-                        dtls_connection,
-                        ice_agent,
-                    )
-                    .await;
-                if let Err(e) = res {
-                    tracing::error!("Failed to setup message handling: {}", e);
-                    let _ = msg_tx
-                        .send(Message {
-                            host: remote_hostid_clone.clone(),
-                            body: Msg::ConnectionBroke(remote_hostid),
-                            req_id: None,
-                        })
-                        .await;
-                }
-
-                let _ = self_clone
-                    .send(
-                        &remote_hostid_clone,
-                        None,
-                        Msg::Hey(HeyMessage {
-                            message: "Welcom to my server".to_string(),
-                            credentials: "".to_string(),
-                            version: "v1.0.0".to_string(),
-                        }),
-                    )
-                    .await;
-            });
-        }
-    }
-
-    /// Connect to a remote host through signaling server. Setup
-    /// message handling threads that runs in the background. Blocks
-    /// until the connection is established.
+    /// Connect using an existing Sock from SignalingClient.
+    ///
+    /// This is the unified connection method that works for both
+    /// initiating and accepting connections. Stream ID parity is
+    /// determined by host ID ordering rather than initiator/acceptor roles.
     pub async fn connect(
         &self,
         remote_hostid: ServerId,
+        sock: Option<crate::signaling::client_new::Sock>,
         my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        _transport_type: TransportType,
     ) -> anyhow::Result<()> {
+        let sock = sock.expect("WebChannel::connect requires a Sock parameter");
+        let peer_id = sock.id().to_string();
+
+        // Determine stream ID parity based on host ID ordering
+        let stream_id = stream_id_init(&self.my_hostid, &peer_id);
+
+        tracing::info!(
+            "Connecting with sock: my_id={}, peer_id={}, stream_id={}",
+            self.my_hostid,
+            peer_id,
+            stream_id
+        );
+
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
         let msg_tx = self.msg_tx.clone();
         let hostid = self.hostid();
-        let remote_hostid_1 = remote_hostid.clone();
+        let peer_id_clone = peer_id.clone();
 
-        // Spawn a thread that sends ICE progress to editor.
+        // Spawn a thread that sends ICE progress to editor
         tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
                 tracing::info!("ICE progress: {progress}");
                 let _ = msg_tx
                     .send(Message {
                         host: hostid.clone(),
-                        body: Msg::IceProgress(remote_hostid_1.clone(), progress.to_string()),
+                        body: Msg::IceProgress(peer_id_clone.clone(), progress.to_string()),
                         req_id: None,
                     })
                     .await;
             }
         });
 
-        let listener = self
-            .get_or_create_listener(signaling_addr, my_key_cert.clone())
-            .await?;
-        let ((conn, their_cert, ice_agent), conn_broke_rx) = ice_connect(
-            &mut *listener.lock().await,
-            remote_hostid.clone(),
-            Some(progress_tx),
-        )
-        .await?;
+        // Use the new ice_connect_with_sock function
+        let ((conn, their_cert, ice_agent), conn_broke_rx) =
+            crate::ice::ice_connect_with_sock(sock, Some(progress_tx)).await?;
+
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
         let sctp_assoc = create_sctp_client(dtls_connection.clone()).await?;
 
         self.setup_message_handling(
-            &remote_hostid,
+            &peer_id,
             sctp_assoc,
-            STREAM_ID_CLIENT_INIT,
+            stream_id,
             conn_broke_rx,
             dtls_connection,
             ice_agent,
@@ -376,7 +241,7 @@ impl WebChannel {
         .await?;
 
         self.send(
-            &remote_hostid,
+            &peer_id,
             None,
             Msg::Hey(HeyMessage {
                 message: "Nice to meet ya".to_string(),
@@ -389,7 +254,7 @@ impl WebChannel {
         Ok(())
     }
 
-    /// Send a message to a remote host. Doesn’t block.
+    /// Send a message to a remote host. Doesn't block.
     pub async fn send(
         &self,
         recipient: &ServerId,
@@ -587,25 +452,13 @@ impl MsgChannel for WebChannel {
         self.send(recipient, req_id, msg).await
     }
 
-    async fn accept(
-        &mut self,
-        my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        transport_type: TransportType,
-    ) -> anyhow::Result<()> {
-        self.accept(my_key_cert, signaling_addr, transport_type)
-            .await
-    }
-
     async fn connect(
         &self,
         remote_hostid: ServerId,
+        sock: Option<crate::signaling::client_new::Sock>,
         my_key_cert: ArcKeyCert,
-        signaling_addr: &str,
-        transport_type: TransportType,
     ) -> anyhow::Result<()> {
-        self.connect(remote_hostid, my_key_cert, signaling_addr, transport_type)
-            .await
+        self.connect(remote_hostid, sock, my_key_cert).await
     }
 
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
@@ -1161,28 +1014,11 @@ impl MsgChannel for TestWebChannel {
         Ok(())
     }
 
-    async fn accept(
-        &mut self,
-        _my_key_cert: ArcKeyCert,
-        _signaling_addr: &str,
-        _transport_type: TransportType,
-    ) -> anyhow::Result<()> {
-        let mut state = self.factory.state.lock().unwrap();
-        let host_state = state
-            .hosts
-            .get_mut(&self.my_hostid)
-            .ok_or_else(|| anyhow!("Host {} not found", self.my_hostid))?;
-
-        host_state.deliverable = true;
-        Ok(())
-    }
-
     async fn connect(
         &self,
         remote_hostid: ServerId,
+        _sock: Option<crate::signaling::client_new::Sock>,
         _my_key_cert: ArcKeyCert,
-        _signaling_addr: &str,
-        _transport_type: TransportType,
     ) -> anyhow::Result<()> {
         // Mark both self and remote as deliverable
         {

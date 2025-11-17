@@ -83,9 +83,9 @@ impl Server {
         }
     }
 
-    /// Bind a collab server to `id`. return IdTaken if some endpoint
+    /// Bind a collab server to `id`. Return error if some endpoint
     /// is already connected with that id, or some endpoint has
-    /// connected with that id and the pub key doesn’t match.
+    /// connected with that id and the pub key doesn't match.
     async fn bind_endpoint(
         &self,
         id: EndpointId,
@@ -106,7 +106,13 @@ impl Server {
         };
         if id_taken {
             let _ = msg_tx
-                .send(SignalingMessage::IdTaken(id.clone()).into())
+                .send(
+                    SignalingMessage::Error(
+                        id.clone(),
+                        "ID already taken or key mismatch".to_string(),
+                    )
+                    .into(),
+                )
                 .await;
         }
         // Then check current connection, as long as we hold the lock
@@ -115,9 +121,9 @@ impl Server {
         let mut endpoint_map = self.endpoint_map.write().await;
         if endpoint_map.contains_key(&id) {
             let _ = msg_tx
-                .send(SignalingMessage::IdTaken(id.clone()).into())
+                .send(SignalingMessage::Error(id.clone(), "ID already taken".to_string()).into())
                 .await;
-            return Err(SignalingError::IdTaken(id));
+            return Err(SignalingError::OtherError("ID already taken".to_string()));
         }
         let server_info = EndpointInfo {
             msg_tx: msg_tx.clone(),
@@ -137,15 +143,27 @@ impl Server {
         receiver_id: EndpointId,
         sdp: SDP,
         sender_key: CertDerHash,
+        initiator: bool,
         resp_tx: &mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
-        tracing::info!(sender_id, receiver_id, sender_key, "Handle req: connect()");
+        tracing::info!(
+            sender_id,
+            receiver_id,
+            sender_key,
+            initiator,
+            "Handle req: connect()"
+        );
         let endpoint_info = self.get_endpoint_info(&receiver_id).await;
         match endpoint_info {
             Some(endpoint_info) => {
-                // Notify connection listener.
-                let connect_req =
-                    SignalingMessage::Connect(sender_id.clone(), receiver_id, sdp, sender_key);
+                // Notify connection listener. Set initiator to true for the recipient.
+                let connect_req = SignalingMessage::Connect(
+                    sender_id.clone(),
+                    receiver_id,
+                    sdp,
+                    sender_key,
+                    initiator,
+                );
                 // If connection broke, we just return from
                 // handle_connection, no need for error handling here.
                 let _ = endpoint_info.msg_tx.send(connect_req.into()).await;
@@ -153,12 +171,18 @@ impl Server {
             }
             None => {
                 // Didn't find the endpoint with this id.
-                let resp = SignalingMessage::NoEndpointForId(receiver_id.clone());
+                let resp = SignalingMessage::Error(
+                    sender_id.clone(),
+                    format!("No endpoint found for id: {}", receiver_id),
+                );
                 // If connection broke, we just return from
                 // handle_connection, no need for error handling here.
                 let _ = resp_tx.send(resp.into()).await;
                 let _ = resp_tx.send(Message::Close(None)).await;
-                Err(SignalingError::NoEndpointForId(receiver_id.clone()))
+                Err(SignalingError::OtherError(format!(
+                    "No endpoint for id: {}",
+                    receiver_id
+                )))
             }
         }
     }
@@ -226,7 +250,7 @@ async fn handle_message(
                         .await?;
                     *endpoint_id = Some(id);
                 }
-                SignalingMessage::Connect(sender_id, receiver_id, sdp, sender_key) => {
+                SignalingMessage::Connect(sender_id, receiver_id, sdp, sender_key, initiator) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
@@ -236,7 +260,14 @@ async fn handle_message(
                         *endpoint_id = Some(sender_id.clone());
                     }
                     server
-                        .connect_to_endpoint(&sender_id, receiver_id, sdp, sender_key, &resp_tx)
+                        .connect_to_endpoint(
+                            &sender_id,
+                            receiver_id,
+                            sdp,
+                            sender_key,
+                            initiator,
+                            &resp_tx,
+                        )
                         .await?;
                 }
                 SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
@@ -255,7 +286,10 @@ async fn handle_message(
                         );
                         their_info.msg_tx.send(msg.into()).await?;
                     } else {
-                        let msg = SignalingMessage::NoEndpointForId(receiver_id);
+                        let msg = SignalingMessage::Error(
+                            sender_id.clone(),
+                            format!("No endpoint found for id: {}", receiver_id),
+                        );
                         resp_tx.send(msg.into()).await?;
                     }
                 }
@@ -305,11 +339,16 @@ async fn send_receive_stream(
     loop {
         tokio::select! {
             _ = time_rx.recv() => {
-                stream.send(SignalingMessage::TimesUp(allocated_hrs).into()).await.unwrap();
-                tracing::debug!("Sent time’s up message to client");
+                // Note: we don't know the endpoint_id here, so use empty string
+                let err_msg = SignalingMessage::Error(
+                    "".to_string(),
+                    format!("Allocated time of {} hours is up", allocated_hrs)
+                );
+                let _ = stream.send(err_msg.into()).await;
+                tracing::debug!("Sent time's up message to client");
                 stream.send(Message::Close(Some(CloseFrame {
                     code: CloseCode::Policy,
-                    reason: Cow::Owned("Time’s up".to_string())
+                    reason: Cow::Owned("Time's up".to_string())
                 }))).await.unwrap();
                 return;
             }

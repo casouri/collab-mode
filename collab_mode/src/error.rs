@@ -153,10 +153,7 @@ impl From<bincode::Error> for WebrpcError {
 
 impl From<crate::signaling::SignalingError> for WebrpcError {
     fn from(value: crate::signaling::SignalingError) -> Self {
-        match value {
-            crate::signaling::SignalingError::TimesUp(time) => WebrpcError::SignalingTimesUp(time),
-            value => WebrpcError::SignalingError(value.to_string()),
-        }
+        WebrpcError::SignalingError(value.to_string())
     }
 }
 
