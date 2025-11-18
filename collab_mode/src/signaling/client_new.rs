@@ -5,16 +5,12 @@
 //! connections can be handled through a single SignalingClient.
 
 use crate::config_man::ArcKeyCert;
-use crate::message::Msg;
-use crate::signaling::{
-    CertDerHash, EndpointId, ICECandidate, SignalingError, SignalingMessage, SDP,
-};
+use crate::signaling::{CertDerHash, EndpointId, ICECandidate, SignalingMessage, SDP};
 use anyhow::anyhow;
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite as tung;
@@ -29,8 +25,6 @@ pub struct SignalingClient {
     id: EndpointId,
     /// My key/cert for authentication
     my_key_cert: ArcKeyCert,
-    /// Channel to send messages to Server
-    msg_tx: mpsc::Sender<Msg>,
     /// Channel to send outgoing messages to signaling server
     msg_out_tx: mpsc::Sender<SignalingMessage>,
     /// Whether we're bound to signaling server
@@ -53,7 +47,6 @@ pub struct Sock {
     peer_id: EndpointId,
     my_cert: CertDerHash,
     peer_cert: CertDerHash,
-    peer_sdp: Option<SDP>,
     sdp_rx: mpsc::Receiver<SDP>,
     candidate_tx: mpsc::Sender<SignalingMessage>,
     candidate_rx: mpsc::UnboundedReceiver<ICECandidate>,
@@ -68,7 +61,7 @@ impl SignalingClient {
         addr: String,
         id: EndpointId,
         my_key_cert: ArcKeyCert,
-        msg_tx: mpsc::Sender<Msg>,
+        signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
     ) -> anyhow::Result<Self> {
         // Create channels for outgoing messages.
         let (msg_out_tx, msg_out_rx) = mpsc::channel(16);
@@ -81,7 +74,7 @@ impl SignalingClient {
         let addr_clone = addr.clone();
         let id_clone = id.clone();
         let my_key_cert_clone = my_key_cert.clone();
-        let msg_tx_clone = msg_tx.clone();
+        let signaling_msg_tx_clone = signaling_msg_tx.clone();
         let bound_clone = bound.clone();
         let socks_clone = socks.clone();
 
@@ -96,7 +89,7 @@ impl SignalingClient {
                 addr_clone,
                 id_clone,
                 my_key_cert_clone,
-                msg_tx_clone,
+                signaling_msg_tx_clone,
                 msg_out_rx,
                 bound_clone,
                 socks_clone,
@@ -115,7 +108,6 @@ impl SignalingClient {
             addr,
             id,
             my_key_cert,
-            msg_tx,
             msg_out_tx,
             bound,
             socks,
@@ -135,12 +127,7 @@ impl SignalingClient {
     ///
     /// The Sock allows exchanging SDP and ICE candidates with the peer
     /// through the signaling server.
-    pub async fn create_sock(
-        &self,
-        peer_id: EndpointId,
-        peer_cert: CertDerHash,
-        peer_sdp: Option<SDP>,
-    ) -> Sock {
+    pub async fn create_sock(&self, peer_id: EndpointId, peer_cert: CertDerHash) -> Sock {
         let (sdp_tx, sdp_rx) = mpsc::channel(1);
         let (candidate_tx, candidate_rx) = mpsc::unbounded_channel();
 
@@ -161,7 +148,6 @@ impl SignalingClient {
             peer_id,
             my_cert: self.my_key_cert.cert_der_hash(),
             peer_cert,
-            peer_sdp,
             sdp_rx,
             candidate_tx: self.msg_out_tx.clone(),
             candidate_rx,
@@ -181,14 +167,8 @@ impl SignalingClient {
 
 impl Sock {
     /// Send SDP to peer through signaling server.
-    pub async fn send_sdp(&self, sdp: SDP, initiator: bool) -> anyhow::Result<()> {
-        let msg = SignalingMessage::Connect(
-            self.my_id.clone(),
-            self.peer_id.clone(),
-            sdp,
-            self.my_cert.clone(),
-            initiator,
-        );
+    pub async fn send_sdp(&self, sdp: SDP) -> anyhow::Result<()> {
+        let msg = SignalingMessage::SDP(self.my_id.clone(), self.peer_id.clone(), sdp);
         self.candidate_tx
             .send(msg)
             .await
@@ -197,12 +177,6 @@ impl Sock {
 
     /// Receive SDP from peer.
     pub async fn recv_sdp(&mut self) -> anyhow::Result<SDP> {
-        // If we already have peer_sdp, return it.
-        if let Some(sdp) = self.peer_sdp.take() {
-            return Ok(sdp);
-        }
-
-        // Otherwise wait for it.
         self.sdp_rx
             .recv()
             .await
@@ -275,7 +249,7 @@ async fn send_receive_stream(
     addr: String,
     id: EndpointId,
     _my_key_cert: ArcKeyCert,
-    msg_tx: mpsc::Sender<Msg>,
+    signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
     mut msg_out_rx: mpsc::Receiver<SignalingMessage>,
     bound: Arc<Mutex<bool>>,
     socks: Arc<Mutex<HashMap<EndpointId, SockTx>>>,
@@ -284,10 +258,11 @@ async fn send_receive_stream(
     let stream_result = tung::connect_async(&addr).await;
     if let Err(e) = stream_result {
         tracing::error!("Failed to connect to signaling server {}: {}", addr, e);
-        let _ = msg_tx
-            .send(Msg::SignalingErr(
+        // Send error as SignalingMessage::Error
+        let _ = signaling_msg_tx
+            .send((
                 addr.clone(),
-                SignalingError::OtherError(format!("Failed to connect: {}", e)),
+                SignalingMessage::Error(id.clone(), format!("Failed to connect: {}", e)),
             ))
             .await;
         return;
@@ -310,7 +285,7 @@ async fn send_receive_stream(
                                         signaling_msg,
                                         &addr,
                                         &id,
-                                        &msg_tx,
+                                        &signaling_msg_tx,
                                         &bound,
                                         &socks,
                                     ).await {
@@ -319,26 +294,26 @@ async fn send_receive_stream(
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to parse signaling message: {}", e);
-                                    let _ = msg_tx.send(Msg::SignalingErr(
+                                    let _ = signaling_msg_tx.send((
                                         addr.clone(),
-                                        SignalingError::OtherError(format!("Parse error: {}", e)),
+                                        SignalingMessage::Error(id.clone(), format!("Parse error: {}", e)),
                                     )).await;
                                 }
                             }
                         }
                         Ok(tung::tungstenite::Message::Close(_)) => {
                             tracing::info!("Signaling server closed connection");
-                            let _ = msg_tx.send(Msg::SignalingErr(
+                            let _ = signaling_msg_tx.send((
                                 addr.clone(),
-                                SignalingError::ConnectionBroke,
+                                SignalingMessage::Error(id.clone(), "Connection closed".to_string()),
                             )).await;
                             break;
                         }
                         Err(e) => {
                             tracing::error!("Websocket error: {}", e);
-                            let _ = msg_tx.send(Msg::SignalingErr(
+                            let _ = signaling_msg_tx.send((
                                 addr.clone(),
-                                SignalingError::ConnectionBroke,
+                                SignalingMessage::Error(id.clone(), format!("Websocket error: {}", e)),
                             )).await;
                             break;
                         }
@@ -346,9 +321,9 @@ async fn send_receive_stream(
                     }
                 } else {
                     tracing::info!("Websocket stream closed");
-                    let _ = msg_tx.send(Msg::SignalingErr(
+                    let _ = signaling_msg_tx.send((
                         addr.clone(),
-                        SignalingError::ConnectionBroke,
+                        SignalingMessage::Error(id.clone(), "Websocket stream closed".to_string()),
                     )).await;
                     break;
                 }
@@ -360,9 +335,9 @@ async fn send_receive_stream(
                     let text = serde_json::to_string(&signaling_msg).unwrap();
                     if let Err(e) = ws_tx.send(tung::tungstenite::Message::Text(text)).await {
                         tracing::error!("Failed to send to websocket: {}", e);
-                        let _ = msg_tx.send(Msg::SignalingErr(
+                        let _ = signaling_msg_tx.send((
                             addr.clone(),
-                            SignalingError::ConnectionBroke,
+                            SignalingMessage::Error(id.clone(), format!("Failed to send: {}", e)),
                         )).await;
                         break;
                     }
@@ -383,7 +358,7 @@ async fn handle_incoming_message(
     msg: SignalingMessage,
     addr: &str,
     _my_id: &EndpointId,
-    msg_tx: &mpsc::Sender<Msg>,
+    signaling_msg_tx: &mpsc::Sender<(String, SignalingMessage)>,
     bound: &Arc<Mutex<bool>>,
     socks: &Arc<Mutex<HashMap<EndpointId, SockTx>>>,
 ) -> anyhow::Result<()> {
@@ -394,11 +369,25 @@ async fn handle_incoming_message(
                 *bound.lock().unwrap() = true;
             }
             // Forward to Server
-            let _ = msg_tx.send(Msg::SignalingMsg(addr.to_string(), msg)).await;
+            let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
         }
 
         SignalingMessage::Connect(..) => {
-            let _ = msg_tx.send(Msg::SignalingMsg(addr.to_string(), msg)).await;
+            let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
+        }
+
+        SignalingMessage::SDP(sender_id, _my_id, sdp) => {
+            // Route SDP to the appropriate sock
+            let sock_tx = {
+                let socks_map = socks.lock().unwrap();
+                socks_map.get(sender_id).map(|tx| tx.sdp_tx.clone())
+            };
+
+            if let Some(sdp_tx) = sock_tx {
+                let _ = sdp_tx.send(sdp.clone()).await;
+            } else {
+                tracing::debug!("Received SDP from unknown peer {}, dropping", sender_id);
+            }
         }
 
         SignalingMessage::Candidate(sender_id, _my_id, candidate) => {
@@ -420,7 +409,7 @@ async fn handle_incoming_message(
 
         SignalingMessage::Error(_endpoint_id, _message) => {
             // Forward error to Server
-            let _ = msg_tx.send(Msg::SignalingMsg(addr.to_string(), msg)).await;
+            let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
         }
 
         _ => {

@@ -152,6 +152,13 @@ impl MsgChannel for ChannelImpl {
         }
     }
 
+    fn is_connected(&self, remote_hostid: &ServerId) -> bool {
+        match self {
+            ChannelImpl::Real(c) => c.is_connected(remote_hostid),
+            ChannelImpl::Test(c) => c.is_connected(remote_hostid),
+        }
+    }
+
     async fn connect(
         &self,
         remote_hostid: ServerId,
@@ -496,6 +503,8 @@ impl Server {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
+        let (signaling_msg_tx, mut signaling_msg_rx) =
+            mpsc::channel::<(String, crate::signaling::SignalingMessage)>(16);
 
         // Use the Server's shared trusted_hosts and accept_mode, or
         // test channel if provided
@@ -529,7 +538,7 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx, &signaling_msg_tx).await;
                     // Normally the handler shouldn’t return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -540,11 +549,19 @@ impl Server {
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
                     let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel, &msg_tx).await;
-                    // Normally the handler shouldn’t return an error.
+                    // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
                     if let Err(err) = res {
                         tracing::error!("Failed to handle remote message: {}", err);
+                    }
+                },
+                // Handle messages from signaling clients.
+                Some((signaling_addr, signaling_msg)) = signaling_msg_rx.recv() => {
+                    let next = Next::new(&editor_tx, None, &webchannel);
+                    let res = self.handle_signaling_msg(signaling_addr, signaling_msg, &next, &webchannel, &msg_tx).await;
+                    if let Err(err) = res {
+                        tracing::error!("Failed to handle signaling message: {}", err);
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
@@ -572,7 +589,7 @@ impl Server {
 
                     let next = Next::new(&editor_tx, None, &webchannel);
                     for (host, remote) in need_connect {
-                        self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type, &msg_tx).await;
+                        self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type, &msg_tx, &signaling_msg_tx).await;
                     }
 
                 }
@@ -635,6 +652,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &ChannelImpl,
         msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
@@ -656,7 +674,10 @@ impl Server {
             lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
                 let next = Next::new(editor_tx, None, webchannel);
-                if let Err(err) = self.handle_editor_notification(&next, notif, msg_tx).await {
+                if let Err(err) = self
+                    .handle_editor_notification(&next, notif, msg_tx, signaling_msg_tx)
+                    .await
+                {
                     tracing::error!("Failed to handle editor notification: {}", err);
                     let params = serde_json::json!({
                         "message": err.to_string(),
@@ -848,6 +869,7 @@ impl Server {
         next: &Next<'a>,
         notif: lsp_server::Notification,
         msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
@@ -873,7 +895,7 @@ impl Server {
 
                 // Create or get SignalingClient
                 match self
-                    .get_or_create_signaling_client(&params.signaling_addr, msg_tx)
+                    .get_or_create_signaling_client(&params.signaling_addr, &signaling_msg_tx)
                     .await
                 {
                     Ok(_client) => {
@@ -903,6 +925,7 @@ impl Server {
                         params.signaling_addr,
                         params.transport_type,
                         msg_tx,
+                        &signaling_msg_tx,
                     )
                     .await;
                 } else {
@@ -1319,7 +1342,7 @@ impl Server {
     async fn get_or_create_signaling_client(
         &mut self,
         signaling_addr: &str,
-        main_msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
     ) -> anyhow::Result<crate::signaling::client_new::SignalingClient> {
         // Check if client already exists.
         if let Some(client) = self.signaling_clients.get(signaling_addr) {
@@ -1327,37 +1350,17 @@ impl Server {
         }
 
         // Create new SignalingClient.
-        let (signaling_msg_tx, mut signaling_msg_rx) = mpsc::channel::<Msg>(16);
-
         let client = crate::signaling::client_new::SignalingClient::bind(
             signaling_addr.to_string(),
             self.host_id.clone(),
             self.key_cert.clone(),
-            signaling_msg_tx,
+            signaling_msg_tx.clone(),
         )
         .await?;
 
         // Store the client.
         self.signaling_clients
             .insert(signaling_addr.to_string(), client.clone());
-
-        // Spawn message forwarding task
-        let main_msg_tx_clone = main_msg_tx.clone();
-        let my_host_id = self.host_id.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = signaling_msg_rx.recv().await {
-                // Wrap Msg in webchannel::Message and send to main loop
-                let web_msg = webchannel::Message {
-                    host: my_host_id.clone(),
-                    body: msg,
-                    req_id: None,
-                };
-                if let Err(e) = main_msg_tx_clone.send(web_msg).await {
-                    tracing::error!("Failed to forward message from SignalingClient: {}", e);
-                    break;
-                }
-            }
-        });
 
         Ok(client)
     }
@@ -1370,7 +1373,8 @@ impl Server {
         host_id: ServerId,
         signaling_addr: String,
         _transport_type: webchannel::TransportType,
-        msg_tx: &mpsc::Sender<webchannel::Message>,
+        _msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
     ) {
         if host_id == self.host_id {
             return;
@@ -1414,7 +1418,7 @@ impl Server {
 
         // Get or create SignalingClient for this signaling address
         let signaling_client = match self
-            .get_or_create_signaling_client(&signaling_addr, msg_tx)
+            .get_or_create_signaling_client(&signaling_addr, signaling_msg_tx)
             .await
         {
             Ok(client) => client,
@@ -1434,52 +1438,32 @@ impl Server {
             }
         };
 
-        // Create Sock for the peer
-        // Note: We use empty string for peer_cert since we don't have it yet when initiating.
-        // The actual cert verification happens at DTLS level.
-        let sock = signaling_client
-            .create_sock(
-                host_id.clone(),
-                String::new(), // Placeholder cert - will be verified at DTLS level
-                None,          // No peer SDP yet - we're initiating
+        // Send Connect message to signaling server
+        // SDP exchange will happen later via ice_connect_with_sock
+        let my_cert = self.key_cert.cert_der_hash();
+        let connect_msg = crate::signaling::SignalingMessage::Connect(
+            self.host_id.clone(),
+            host_id.clone(),
+            my_cert,
+            true, // initiator = true (we're initiating)
+        );
+
+        if let Err(e) = signaling_client.send(connect_msg).await {
+            tracing::error!("Failed to send Connect message: {}", e);
+            self.pending_connections.lock().unwrap().remove(&host_id);
+            next.send_notif(
+                NotificationCode::ErrorResponse,
+                ErrorResponseNote {
+                    code: ErrorCode::InternalError,
+                    file: None,
+                    message: format!("Failed to send Connect message: {}", e),
+                },
             )
             .await;
+        }
 
-        // Spawn connection task
-        let key_cert = self.key_cert.clone();
-        let webchannel = next.webchannel.clone();
-        let host_id_clone = host_id.clone();
-        let pending_connections = self.pending_connections.clone();
-        let msg_tx_clone = msg_tx.clone();
-        let my_host_id = self.host_id.clone();
-        let signaling_client_clone = signaling_client.clone();
-
-        tokio::spawn(async move {
-            match webchannel
-                .connect(host_id_clone.clone(), Some(sock), key_cert)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!("Connected to {}", host_id_clone);
-                    pending_connections.lock().unwrap().remove(&host_id_clone);
-                }
-                Err(err) => {
-                    tracing::error!("Failed to connect to {}: {}", host_id_clone, err);
-                    pending_connections.lock().unwrap().remove(&host_id_clone);
-
-                    // Clean up Sock from SignalingClient
-                    signaling_client_clone.remove_sock(&host_id_clone).await;
-
-                    // Send FailedToConnect message to main loop
-                    let web_msg = webchannel::Message {
-                        host: my_host_id,
-                        body: Msg::FailedToConnect(host_id_clone.clone(), err.to_string()),
-                        req_id: None,
-                    };
-                    let _ = msg_tx_clone.send(web_msg).await;
-                }
-            }
-        });
+        // The connection will continue in handle_signaling_msg when we receive
+        // the peer's Connect response message
     }
 
     // If host_id is not us, delegate to remote, if it’s us, handle
@@ -3337,7 +3321,7 @@ impl Server {
                 Ok(())
             }
 
-            SignalingMessage::Connect(peer_id, _my_id, peer_sdp, peer_cert, initiator) => {
+            SignalingMessage::Connect(peer_id, _my_id, peer_cert, _initiator) => {
                 tracing::info!("Received Connect message from {}", peer_id);
 
                 // Check if we're already connecting to this peer.
@@ -3372,17 +3356,14 @@ impl Server {
                 };
 
                 // Create a Sock for this peer connection
+                // SDP exchange will happen via ice_connect_with_sock
                 let sock = signaling_client
-                    .create_sock(
-                        peer_id.clone(),
-                        peer_cert.clone(),
-                        Some(peer_sdp.clone()), // We have peer's SDP from Connect message
-                    )
+                    .create_sock(peer_id.clone(), peer_cert.clone())
                     .await;
 
                 // Establish WebChannel connection using the sock
                 let key_cert = self.key_cert.clone();
-                let webchannel_clone = _webchannel.clone();
+                let webchannel_clone = webchannel.clone();
                 let peer_id_clone = peer_id.clone();
                 let pending_connections = self.pending_connections.clone();
                 let msg_tx_clone = msg_tx.clone();

@@ -28,7 +28,7 @@ use tokio_tungstenite::WebSocketStream;
 use tracing::{instrument, Instrument};
 
 use super::key_store::{self, PubKeyStore};
-use super::{CertDerHash, SignalingError, SignalingResult, SDP};
+use super::{CertDerHash, SignalingError, SignalingResult};
 
 /// Run the signaling server on `addr`. Addr should be of the form
 /// "ip:port".
@@ -141,7 +141,6 @@ impl Server {
         &self,
         sender_id: &EndpointId,
         receiver_id: EndpointId,
-        sdp: SDP,
         sender_key: CertDerHash,
         initiator: bool,
         resp_tx: &mpsc::Sender<Message>,
@@ -156,11 +155,10 @@ impl Server {
         let endpoint_info = self.get_endpoint_info(&receiver_id).await;
         match endpoint_info {
             Some(endpoint_info) => {
-                // Notify connection listener. Set initiator to true for the recipient.
+                // Notify connection listener.
                 let connect_req = SignalingMessage::Connect(
                     sender_id.clone(),
                     receiver_id,
-                    sdp,
                     sender_key,
                     initiator,
                 );
@@ -250,7 +248,7 @@ async fn handle_message(
                         .await?;
                     *endpoint_id = Some(id);
                 }
-                SignalingMessage::Connect(sender_id, receiver_id, sdp, sender_key, initiator) => {
+                SignalingMessage::Connect(sender_id, receiver_id, sender_key, initiator) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
@@ -263,12 +261,33 @@ async fn handle_message(
                         .connect_to_endpoint(
                             &sender_id,
                             receiver_id,
-                            sdp,
                             sender_key,
                             initiator,
                             &resp_tx,
                         )
                         .await?;
+                }
+                SignalingMessage::SDP(sender_id, receiver_id, sdp) => {
+                    check_id(&sender_id, endpoint_id, &resp_tx).await?;
+
+                    if endpoint_id.is_none() {
+                        let resp = resp_unsupported(
+                            "You should send a Connect or Bind message before sending SDP message",
+                        );
+                        resp_tx.send(resp).await?;
+                        return Ok(());
+                    }
+                    if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
+                        let msg =
+                            SignalingMessage::SDP(sender_id.clone(), receiver_id.clone(), sdp);
+                        their_info.msg_tx.send(msg.into()).await?;
+                    } else {
+                        let msg = SignalingMessage::Error(
+                            sender_id.clone(),
+                            format!("No endpoint found for id: {}", receiver_id),
+                        );
+                        resp_tx.send(msg.into()).await?;
+                    }
                 }
                 SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;

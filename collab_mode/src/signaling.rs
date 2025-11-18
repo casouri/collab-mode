@@ -71,9 +71,11 @@ pub enum SignalingMessage {
     Bind(EndpointId, CertDerHash),
     /// Acknowledge bind request.
     Bound(EndpointId),
-    /// Connect request. (sender_id, receiver_id, sender_sdp, sender_key, initiator).
+    /// Connect request. (sender_id, receiver_id, sender_key, initiator).
     /// The initiator field indicates whether the sender initiated the connection.
-    Connect(EndpointId, EndpointId, SDP, CertDerHash, bool),
+    Connect(EndpointId, EndpointId, CertDerHash, bool),
+    /// Send SDP. (sender_id, receiver_id, sender_sdp).
+    SDP(EndpointId, EndpointId, SDP),
     /// Send candidate. (sender_id, receiver_id, sender_candidate).
     Candidate(EndpointId, EndpointId, ICECandidate),
     /// Error message. (endpoint_id, error_description).

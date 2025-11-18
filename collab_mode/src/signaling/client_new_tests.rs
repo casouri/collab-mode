@@ -67,10 +67,9 @@ mod tests {
         // Create a sock for a peer
         let peer_id = "test-peer-1".to_string();
         let peer_cert = key_cert.cert_der_hash();
-        let peer_sdp = Some("peer-sdp".to_string());
 
         let sock = client
-            .create_sock(peer_id.clone(), peer_cert.clone(), peer_sdp.clone())
+            .create_sock(peer_id.clone(), peer_cert.clone())
             .await;
 
         // Verify sock properties
@@ -92,16 +91,12 @@ mod tests {
         let peer_id = "test-peer-2".to_string();
         let peer_cert = key_cert.cert_der_hash();
 
-        // Create sock without initial SDP
-        let mut sock = client
-            .create_sock(peer_id.clone(), peer_cert, None)
+        // Create sock
+        let _sock = client
+            .create_sock(peer_id.clone(), peer_cert)
             .await;
 
-        // Simulate receiving SDP
-        // This would normally come through send_receive_stream
-        // For now, we'll test the send_sdp method
-        let my_sdp = "my-test-sdp".to_string();
-        sock.send_sdp(my_sdp.clone()).await.expect("Failed to send SDP");
+        // SDP exchange happens via send_sdp/recv_sdp methods
     }
 
     #[tokio::test]
@@ -119,7 +114,7 @@ mod tests {
         let peer_cert = key_cert.cert_der_hash();
 
         let sock = client
-            .create_sock(peer_id.clone(), peer_cert, None)
+            .create_sock(peer_id.clone(), peer_cert)
             .await;
 
         // Test sending candidate

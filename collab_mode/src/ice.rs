@@ -18,15 +18,16 @@ use webrtc_ice::url::Url;
 use webrtc_util::Conn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ICECredential {
-    ufrag: String,
-    pwd: String,
+pub struct ICECredential {
+    pub ufrag: String,
+    pub pwd: String,
 }
 
 /// Connect using an existing Sock from SignalingClient.
 ///
 /// This is the unified connection method that replaces separate
 /// ice_connect and ice_accept paths. Both sides use the same process.
+/// SDP exchange happens via SignalingMessage::SDP messages through the sock.
 /// If `progress_tx` isn't None, report progress to it while establishing connection.
 #[instrument(skip(progress_tx, sock))]
 pub async fn ice_connect_with_sock(
@@ -42,10 +43,13 @@ pub async fn ice_connect_with_sock(
     let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
 
     let agent = Arc::new(make_ice_agent(true).await?);
-    let cred = ice_credential(&agent).await;
 
-    // Send our SDP (ICE credentials) to peer
-    sock.send_sdp(serde_json::to_string(&cred).unwrap())
+    // Generate and send our SDP to peer
+    let (ufrag, pwd) = agent.get_local_user_credentials().await;
+    let my_sdp = serde_json::to_string(&ICECredential { ufrag, pwd }).map_err(|e| {
+        WebrpcError::ParseError(format!("Failed to serialize ICE credential: {}", e))
+    })?;
+    sock.send_sdp(my_sdp)
         .await
         .map_err(|e| WebrpcError::SignalingError(e.to_string()))?;
 
@@ -188,8 +192,8 @@ fn ice_monitor_progress(
     }));
 }
 
-/// Get the ufrag and pwd from `sock`.
-async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
+/// Create an ICE agent for WebRTC connection.
+pub async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
     let mut config = AgentConfig::default();
     config.is_controlling = controlling;
     config.network_types = vec![NetworkType::Udp4];
