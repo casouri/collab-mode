@@ -10,11 +10,12 @@ use crate::signaling::{
     CertDerHash, EndpointId, ICECandidate, SignalingError, SignalingMessage, SDP,
 };
 use anyhow::anyhow;
+use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite as tung;
 use tracing::Instrument;
@@ -69,14 +70,14 @@ impl SignalingClient {
         my_key_cert: ArcKeyCert,
         msg_tx: mpsc::Sender<Msg>,
     ) -> anyhow::Result<Self> {
-        // Create channels for outgoing messages
+        // Create channels for outgoing messages.
         let (msg_out_tx, msg_out_rx) = mpsc::channel(16);
 
-        // Shared state
+        // Shared state.
         let bound = Arc::new(Mutex::new(false));
         let socks = Arc::new(Mutex::new(HashMap::new()));
 
-        // Spawn background task
+        // Spawn background task.
         let addr_clone = addr.clone();
         let id_clone = id.clone();
         let my_key_cert_clone = my_key_cert.clone();
@@ -103,13 +104,12 @@ impl SignalingClient {
             .instrument(span),
         );
 
-        // Send initial Bind message with timeout
         let cert_hash = my_key_cert.cert_der_hash();
         let bind_msg = SignalingMessage::Bind(id.clone(), cert_hash);
-        tokio::time::timeout(Duration::from_secs(10), msg_out_tx.send(bind_msg))
+        msg_out_tx
+            .send(bind_msg)
             .await
-            .map_err(|_| anyhow!("Timeout sending Bind message to signaling server"))?
-            .map_err(|_| anyhow!("Failed to send Bind message"))?;
+            .context("Failed to send Bind message")?;
 
         Ok(SignalingClient {
             addr,
@@ -141,13 +141,12 @@ impl SignalingClient {
         peer_cert: CertDerHash,
         peer_sdp: Option<SDP>,
     ) -> Sock {
-        // Create channels for this sock
         let (sdp_tx, sdp_rx) = mpsc::channel(1);
         let (candidate_tx, candidate_rx) = mpsc::unbounded_channel();
 
-        // Add to socks map
+        // Add to socks map.
         {
-            let mut socks = self.socks.lock().await;
+            let mut socks = self.socks.lock().unwrap();
             socks.insert(
                 peer_id.clone(),
                 SockTx {
@@ -169,28 +168,26 @@ impl SignalingClient {
         }
     }
 
-    /// Check if bound to signaling server.
+    /// Check if bound on signaling server.
     pub async fn is_bound(&self) -> bool {
-        *self.bound.lock().await
+        self.bound.lock().unwrap().clone()
     }
 
-    /// Remove a Sock from the map when connection closes or fails.
-    ///
-    /// This prevents memory leaks from accumulating Sock entries.
+    /// Remove a Sock from the map.
     pub async fn remove_sock(&self, peer_id: &str) {
-        self.socks.lock().await.remove(peer_id);
+        self.socks.lock().unwrap().remove(peer_id);
     }
 }
 
 impl Sock {
     /// Send SDP to peer through signaling server.
-    pub async fn send_sdp(&self, sdp: SDP) -> anyhow::Result<()> {
+    pub async fn send_sdp(&self, sdp: SDP, initiator: bool) -> anyhow::Result<()> {
         let msg = SignalingMessage::Connect(
             self.my_id.clone(),
             self.peer_id.clone(),
             sdp,
             self.my_cert.clone(),
-            true, // We're initiating/responding
+            initiator,
         );
         self.candidate_tx
             .send(msg)
@@ -200,12 +197,12 @@ impl Sock {
 
     /// Receive SDP from peer.
     pub async fn recv_sdp(&mut self) -> anyhow::Result<SDP> {
-        // If we already have peer_sdp, return it
+        // If we already have peer_sdp, return it.
         if let Some(sdp) = self.peer_sdp.take() {
             return Ok(sdp);
         }
 
-        // Otherwise wait for it
+        // Otherwise wait for it.
         self.sdp_rx
             .recv()
             .await
@@ -306,7 +303,7 @@ async fn send_receive_stream(
                 if let Some(msg_result) = msg {
                     match msg_result {
                         Ok(tung::tungstenite::Message::Text(text)) => {
-                            // Parse and route message
+                            // Parse and route message.
                             match serde_json::from_str::<SignalingMessage>(&text) {
                                 Ok(signaling_msg) => {
                                     if let Err(e) = handle_incoming_message(
@@ -378,7 +375,7 @@ async fn send_receive_stream(
     }
 
     // Cleanup
-    tracing::info!("send_receive_stream exiting for {}", addr);
+    tracing::info!("send_receive_stream for {} exiting", addr);
 }
 
 /// Handle an incoming signaling message and route it appropriately.
@@ -393,38 +390,31 @@ async fn handle_incoming_message(
     match &msg {
         SignalingMessage::Bound(_id) => {
             // Set bound flag
-            *bound.lock().await = true;
+            {
+                *bound.lock().unwrap() = true;
+            }
             // Forward to Server
             let _ = msg_tx.send(Msg::SignalingMsg(addr.to_string(), msg)).await;
         }
 
-        SignalingMessage::Connect(peer_id, _my_id, peer_sdp, _peer_cert, _initiator) => {
-            // Check if we have a sock for this peer
-            let sock_tx = {
-                let socks_map = socks.lock().await;
-                socks_map.get(peer_id).map(|tx| tx.sdp_tx.clone())
-            };
-
-            if let Some(sdp_tx) = sock_tx {
-                // Route SDP to the existing sock
-                let _ = sdp_tx.send(peer_sdp.clone()).await;
-            } else {
-                // No existing sock - forward Connect to Server for handling
-                let _ = msg_tx.send(Msg::SignalingMsg(addr.to_string(), msg)).await;
-            }
+        SignalingMessage::Connect(..) => {
+            let _ = msg_tx.send(Msg::SignalingMsg(addr.to_string(), msg)).await;
         }
 
-        SignalingMessage::Candidate(peer_id, _my_id, candidate) => {
+        SignalingMessage::Candidate(sender_id, _my_id, candidate) => {
             // Route candidate to the appropriate sock
             let sock_tx = {
-                let socks_map = socks.lock().await;
-                socks_map.get(peer_id).map(|tx| tx.candidate_tx.clone())
+                let socks_map = socks.lock().unwrap();
+                socks_map.get(sender_id).map(|tx| tx.candidate_tx.clone())
             };
 
             if let Some(candidate_tx) = sock_tx {
                 let _ = candidate_tx.send(candidate.clone());
             } else {
-                tracing::debug!("Received candidate for unknown peer {}, dropping", peer_id);
+                tracing::debug!(
+                    "Received candidate from unknown peer {}, dropping",
+                    sender_id
+                );
             }
         }
 

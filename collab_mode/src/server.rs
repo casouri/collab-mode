@@ -1321,12 +1321,12 @@ impl Server {
         signaling_addr: &str,
         main_msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<crate::signaling::client_new::SignalingClient> {
-        // Check if client already exists
+        // Check if client already exists.
         if let Some(client) = self.signaling_clients.get(signaling_addr) {
             return Ok(client.clone());
         }
 
-        // Create new SignalingClient
+        // Create new SignalingClient.
         let (signaling_msg_tx, mut signaling_msg_rx) = mpsc::channel::<Msg>(16);
 
         let client = crate::signaling::client_new::SignalingClient::bind(
@@ -1337,7 +1337,7 @@ impl Server {
         )
         .await?;
 
-        // Store the client
+        // Store the client.
         self.signaling_clients
             .insert(signaling_addr.to_string(), client.clone());
 
@@ -3326,35 +3326,36 @@ impl Server {
         signaling_addr: String,
         msg: crate::signaling::SignalingMessage,
         next: &Next<'a>,
-        _webchannel: &ChannelImpl,
+        webchannel: &ChannelImpl,
         msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<()> {
         use crate::signaling::SignalingMessage;
 
         match msg {
             SignalingMessage::Bound(_id) => {
-                // No-op, already handled by SignalingClient
+                // TODO: no-op for now, in the future send a message to editor.
                 Ok(())
             }
 
-            SignalingMessage::Connect(peer_id, _my_id, peer_sdp, peer_cert, _initiator) => {
+            SignalingMessage::Connect(peer_id, _my_id, peer_sdp, peer_cert, initiator) => {
                 tracing::info!("Received Connect message from {}", peer_id);
 
-                // Check if we're already connecting to this peer
-                if self
-                    .pending_connections
-                    .lock()
-                    .unwrap()
-                    .contains_key(&peer_id)
+                // Check if we're already connecting to this peer.
+                if webchannel.is_connected(&peer_id)
+                    || self
+                        .pending_connections
+                        .lock()
+                        .unwrap()
+                        .contains_key(&peer_id)
                 {
-                    tracing::debug!(
-                        "Already connecting to {}, ignoring duplicate Connect",
+                    tracing::info!(
+                        "Already connecting/connected to {}, ignoring duplicate connection request",
                         peer_id
                     );
                     return Ok(());
                 }
 
-                // Mark as pending to prevent duplicate connection attempts
+                // Mark as pending to prevent duplicate connection attempts.
                 self.pending_connections
                     .lock()
                     .unwrap()
