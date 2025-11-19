@@ -9,11 +9,7 @@
 //! it take a Msg, it’s convenient and simple.
 
 use crate::message::{HeyMessage, Msg};
-use crate::{
-    config_man::{hash_der, AcceptMode},
-    signaling::CertDerHash,
-    types::*,
-};
+use crate::{config_man::hash_der, signaling::CertDerHash, types::*};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use lsp_server::RequestId;
@@ -49,7 +45,7 @@ fn stream_id_init(my_id: &str, peer_id: &str) -> u16 {
 /// Trait for message channel operations. Provides async methods for
 /// sending, connecting, and broadcasting messages.
 #[async_trait]
-pub trait MsgChannel {
+pub trait MsgChannel: Send + Sync {
     /// Send a message to a remote host. Doesn't block.
     async fn send(
         &self,
@@ -115,26 +111,16 @@ pub struct WebChannel {
     msg_tx: mpsc::Sender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
     next_stream_id: Arc<AtomicU16>,
-    /// Trusted hosts with their certificate hashes for verification
-    trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
-    /// Accept mode controlling how to handle incoming connections
-    accept_mode: Arc<Mutex<AcceptMode>>,
 }
 
 impl WebChannel {
-    pub fn new(
-        my_hostid: ServerId,
-        msg_tx: mpsc::Sender<Message>,
-        trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
-        accept_mode: Arc<Mutex<AcceptMode>>,
-    ) -> Self {
+    pub fn new(my_hostid: ServerId, msg_tx: mpsc::Sender<Message>) -> Self {
         Self {
             my_hostid,
             msg_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
-            next_stream_id: Arc::new(AtomicU16::new(0)), // Will be set in setup_message_handling
-            trusted_hosts,
-            accept_mode,
+            // Will be set in setup_message_handling to 1 or 2.
+            next_stream_id: Arc::new(AtomicU16::new(0)),
         }
     }
 
@@ -142,48 +128,8 @@ impl WebChannel {
         self.my_hostid.clone()
     }
 
-    #[allow(dead_code)]
-    pub fn active_remotes(&self) -> Vec<ServerId> {
-        self.assoc_tx.lock().unwrap().keys().cloned().collect()
-    }
-
     pub fn is_connected(&self, remote_hostid: &ServerId) -> bool {
         self.assoc_tx.lock().unwrap().contains_key(remote_hostid)
-    }
-
-    /// Check if a certificate hash is trusted based on the configured trusted hosts
-    fn is_cert_trusted(&self, cert_hash: &str, remote_hostid: &str) -> bool {
-        // Check accept mode first
-        let accept_mode = self.accept_mode.lock().unwrap().clone();
-        let mut trusted = self.trusted_hosts.lock().unwrap();
-
-        let is_trusted = if matches!(accept_mode, AcceptMode::All) {
-            tracing::info!(
-                "Accepted connection from {} with certificate hash {} (AcceptMode::All)",
-                remote_hostid,
-                cert_hash
-            );
-            true
-        } else {
-            let cert_found = trusted.values().any(|hash| hash == cert_hash);
-            if cert_found {
-                tracing::info!(
-                    "Accepted connection from {} with trusted certificate hash {}",
-                    remote_hostid,
-                    cert_hash
-                );
-            } else {
-                tracing::warn!(
-                    "Refusing connection from {}, certificate hash {} not in trusted hosts",
-                    remote_hostid,
-                    cert_hash
-                );
-            }
-            cert_found
-        };
-
-        trusted.insert(remote_hostid.to_string(), cert_hash.to_string());
-        is_trusted
     }
 
     /// Connect using an existing Sock from SignalingClient.
@@ -204,7 +150,7 @@ impl WebChannel {
         let stream_id = stream_id_init(&self.my_hostid, &peer_id);
 
         tracing::info!(
-            "Connecting with sock: my_id={}, peer_id={}, stream_id={}",
+            "Connecting with sock: my_id={}, peer_id={}, init_stream_id={}",
             self.my_hostid,
             peer_id,
             stream_id
@@ -229,13 +175,14 @@ impl WebChannel {
             }
         });
 
-        // Use the new ice_connect_with_sock function
+        // Establish connection with ICE.
         let ((conn, their_cert, ice_agent), conn_broke_rx) =
             crate::ice::ice_connect_with_sock(sock, Some(progress_tx)).await?;
 
         let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
         let sctp_assoc = create_sctp_client(dtls_connection.clone()).await?;
 
+        // Spawn background tasks to handle messages.
         self.setup_message_handling(
             &peer_id,
             sctp_assoc,
@@ -274,7 +221,7 @@ impl WebChannel {
         };
 
         if recipient == &self.my_hostid {
-            // If recipient is ourselves, send to our own message channel.
+            // If recipient is ourself, send to our own message channel.
             // Create a separate task to send it to avoid deadlock.
             let msg_tx = self.msg_tx.clone();
             tokio::spawn(async move {
@@ -349,9 +296,9 @@ impl WebChannel {
     /// that reads from outgoing message channel and sends to remote
     /// host.
     ///
-    /// `stream_id_init`: Initial stream ID for this side. Server uses
-    /// even IDs (2, 4, 6, ...), client uses odd IDs (1, 3, 5, ...).
-    /// Stream IDs increment by 2 and wrap around on overflow.
+    /// `stream_id_init`: Initial stream ID for this side. One side
+    /// uses even IDs (2, 4, 6, ...), the other uses odd IDs (1, 3, 5,
+    /// ...). Stream IDs increment by 2 and wrap around on overflow.
     async fn setup_message_handling(
         &self,
         remote_hostid: &ServerId,

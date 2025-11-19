@@ -3,7 +3,7 @@ use crate::engine::{ClientEngine, ServerEngine};
 use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, TestWebChannel, WebChannel};
+use crate::webchannel::{self, MsgChannel, WebChannel};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -131,58 +131,6 @@ impl RemoteState {
     }
 }
 
-/// Wrapper enum to support both real and test web channels
-#[derive(Clone)]
-enum ChannelImpl {
-    Real(WebChannel),
-    Test(TestWebChannel),
-}
-
-#[async_trait::async_trait]
-impl MsgChannel for ChannelImpl {
-    async fn send(
-        &self,
-        recipient: &ServerId,
-        req_id: Option<lsp_server::RequestId>,
-        msg: message::Msg,
-    ) -> anyhow::Result<()> {
-        match self {
-            ChannelImpl::Real(c) => c.send(recipient, req_id, msg).await,
-            ChannelImpl::Test(c) => c.send(recipient, req_id, msg).await,
-        }
-    }
-
-    fn is_connected(&self, remote_hostid: &ServerId) -> bool {
-        match self {
-            ChannelImpl::Real(c) => c.is_connected(remote_hostid),
-            ChannelImpl::Test(c) => c.is_connected(remote_hostid),
-        }
-    }
-
-    async fn connect(
-        &self,
-        remote_hostid: ServerId,
-        sock: Option<crate::signaling::client_new::Sock>,
-        my_key_cert: ArcKeyCert,
-    ) -> anyhow::Result<()> {
-        match self {
-            ChannelImpl::Real(c) => c.connect(remote_hostid, sock, my_key_cert).await,
-            ChannelImpl::Test(c) => c.connect(remote_hostid, sock, my_key_cert).await,
-        }
-    }
-
-    async fn broadcast(
-        &self,
-        req_id: Option<lsp_server::RequestId>,
-        msg: message::Msg,
-    ) -> anyhow::Result<()> {
-        match self {
-            ChannelImpl::Real(c) => c.broadcast(req_id, msg).await,
-            ChannelImpl::Test(c) => c.broadcast(req_id, msg).await,
-        }
-    }
-}
-
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server. Once set, this cannot change, because
@@ -214,10 +162,10 @@ pub struct Server {
     config: ConfigManager,
     /// Key and certificate for the server.
     key_cert: Arc<KeyCert>,
-    /// Trusted hosts with their certificate hashes (shared with WebChannel)
-    trusted_hosts: Arc<Mutex<HashMap<ServerId, String>>>,
-    /// Accept mode for incoming connections (shared with WebChannel)
-    accept_mode: Arc<Mutex<AcceptMode>>,
+    /// Trusted hosts with their certificate hashes
+    trusted_hosts: HashMap<ServerId, String>,
+    /// Accept mode for incoming connections
+    accept_mode: AcceptMode,
     /// Map of signaling clients by signaling server address
     signaling_clients: HashMap<String, crate::signaling::client_new::SignalingClient>,
     /// Map of host IDs we're currently establishing connections with to their signaling server address
@@ -465,8 +413,8 @@ impl Server {
 
         // Get config values for trusted_hosts and accept_mode
         let current_config = config.config();
-        let trusted_hosts = Arc::new(Mutex::new(current_config.trusted_hosts));
-        let accept_mode = Arc::new(Mutex::new(current_config.accept_mode));
+        let trusted_hosts = current_config.trusted_hosts;
+        let accept_mode = current_config.accept_mode;
 
         let server = Server {
             host_id,
@@ -506,17 +454,11 @@ impl Server {
         let (signaling_msg_tx, mut signaling_msg_rx) =
             mpsc::channel::<(String, crate::signaling::SignalingMessage)>(16);
 
-        // Use the Server's shared trusted_hosts and accept_mode, or
-        // test channel if provided
-        let webchannel = if let Some(factory) = test_channel_factory {
-            ChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx.clone()))
+        // Use the Server's test channel if provided, otherwise use WebChannel
+        let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
+            Arc::new(factory.get_channel(self.host_id.clone(), msg_tx.clone()))
         } else {
-            ChannelImpl::Real(WebChannel::new(
-                self.host_id.clone(),
-                msg_tx.clone(),
-                self.trusted_hosts.clone(),
-                self.accept_mode.clone(),
-            ))
+            Arc::new(WebChannel::new(self.host_id.clone(), msg_tx.clone()))
         };
 
         // Add initial projects
@@ -538,8 +480,8 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx, &signaling_msg_tx).await;
-                    // Normally the handler shouldn’t return an error.
+                    let res = self.handle_editor_message(msg, &editor_tx, &*webchannel, &msg_tx, &signaling_msg_tx).await;
+                    // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
                     if let Err(err) = res {
@@ -548,7 +490,7 @@ impl Server {
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel, &msg_tx).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, webchannel.clone(), &msg_tx).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -558,8 +500,8 @@ impl Server {
                 },
                 // Handle messages from signaling clients.
                 Some((signaling_addr, signaling_msg)) = signaling_msg_rx.recv() => {
-                    let next = Next::new(&editor_tx, None, &webchannel);
-                    let res = self.handle_signaling_msg(signaling_addr, signaling_msg, &next, &webchannel, &msg_tx).await;
+                    let next = Next::new(&editor_tx, None, &*webchannel);
+                    let res = self.handle_signaling_msg(signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx).await;
                     if let Err(err) = res {
                         tracing::error!("Failed to handle signaling message: {}", err);
                     }
@@ -587,7 +529,7 @@ impl Server {
                         remote.next_reconnect_time = Instant::now() + stride;
                     }
 
-                    let next = Next::new(&editor_tx, None, &webchannel);
+                    let next = Next::new(&editor_tx, None, &*webchannel);
                     for (host, remote) in need_connect {
                         self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type, &msg_tx, &signaling_msg_tx).await;
                     }
@@ -645,12 +587,47 @@ impl Server {
         }
     }
 
+    /// Check if a certificate hash is trusted based on the configured trusted hosts.
+    pub fn is_cert_trusted(&mut self, cert_hash: &str, remote_hostid: &str) -> bool {
+        // Check accept mode first
+        let accept_mode = self.accept_mode;
+
+        let is_trusted = if matches!(accept_mode, AcceptMode::All) {
+            tracing::info!(
+                "Accepted connection from {} with certificate hash {} (AcceptMode::All)",
+                remote_hostid,
+                cert_hash
+            );
+            true
+        } else {
+            let cert_found = self.trusted_hosts.values().any(|hash| hash == cert_hash);
+            if cert_found {
+                tracing::info!(
+                    "Accepted connection from {} with trusted certificate hash {}",
+                    remote_hostid,
+                    cert_hash
+                );
+            } else {
+                tracing::warn!(
+                    "Refusing connection from {}, certificate hash {} not in trusted hosts",
+                    remote_hostid,
+                    cert_hash
+                );
+            }
+            cert_found
+        };
+
+        self.trusted_hosts
+            .insert(remote_hostid.to_string(), cert_hash.to_string());
+        is_trusted
+    }
+
     #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
     async fn handle_editor_message(
         &mut self,
         msg: lsp_server::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &ChannelImpl,
+        webchannel: &dyn MsgChannel,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
     ) -> anyhow::Result<()> {
@@ -894,6 +871,7 @@ impl Server {
                 .await;
 
                 // Create or get SignalingClient
+                // FIX: Use imperative error handling
                 match self
                     .get_or_create_signaling_client(&params.signaling_addr, &signaling_msg_tx)
                     .await
@@ -957,11 +935,11 @@ impl Server {
         &mut self,
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &ChannelImpl,
+        webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
-        let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
+        let next = Next::new(editor_tx, msg.req_id.clone(), &*webchannel);
         match msg.body {
             Msg::AcceptStopped {
                 signaling_addr,
@@ -1034,7 +1012,7 @@ impl Server {
                 // We might get new trusted host from accepting
                 // connection, try to save it.
                 let mut config = self.config.config();
-                config.trusted_hosts = self.trusted_hosts.lock().unwrap().clone();
+                config.trusted_hosts = self.trusted_hosts.clone();
                 let _ = self.config.replace_and_save(config);
                 Ok(())
             }
@@ -1313,8 +1291,14 @@ impl Server {
                 Ok(())
             }
             Msg::SignalingMsg(signaling_addr, signaling_msg) => {
-                self.handle_signaling_msg(signaling_addr, signaling_msg, &next, webchannel, msg_tx)
-                    .await
+                self.handle_signaling_msg(
+                    signaling_addr,
+                    signaling_msg,
+                    &next,
+                    webchannel.clone(),
+                    msg_tx,
+                )
+                .await
             }
             Msg::SignalingErr(signaling_addr, signaling_err) => {
                 self.handle_signaling_err(signaling_addr, signaling_err, &next)
@@ -1387,16 +1371,17 @@ impl Server {
             .unwrap()
             .contains_key(&host_id)
         {
-            tracing::debug!(
+            tracing::info!(
                 "Already connecting to {}, skipping duplicate request",
                 host_id
             );
             return;
         }
-        self.pending_connections
-            .lock()
-            .unwrap()
-            .insert(host_id.clone(), signaling_addr.clone());
+
+        // Don’t set pending_connections here, we check
+        // pending_connections again when receiving Connect message,
+        // and set the flag to true there, where we actually starts
+        // establishing connection.
 
         next.send_notif(
             NotificationCode::Connecting,
@@ -1428,7 +1413,7 @@ impl Server {
                 next.send_notif(
                     NotificationCode::ErrorResponse,
                     ErrorResponseNote {
-                        code: ErrorCode::InternalError,
+                        code: ErrorCode::NetworkError,
                         file: None,
                         message: format!("Failed to connect to signaling server: {}", e),
                     },
@@ -1445,7 +1430,7 @@ impl Server {
             self.host_id.clone(),
             host_id.clone(),
             my_cert,
-            true, // initiator = true (we're initiating)
+            true,
         );
 
         if let Err(e) = signaling_client.send(connect_msg).await {
@@ -1454,7 +1439,7 @@ impl Server {
             next.send_notif(
                 NotificationCode::ErrorResponse,
                 ErrorResponseNote {
-                    code: ErrorCode::InternalError,
+                    code: ErrorCode::NetworkError,
                     file: None,
                     message: format!("Failed to send Connect message: {}", e),
                 },
@@ -1463,7 +1448,7 @@ impl Server {
         }
 
         // The connection will continue in handle_signaling_msg when we receive
-        // the peer's Connect response message
+        // the peer's Connect response message.
     }
 
     // If host_id is not us, delegate to remote, if it’s us, handle
@@ -3238,8 +3223,7 @@ impl Server {
         // Update accept_mode if provided
         if let Some(mode) = params.accept_mode {
             config.accept_mode = mode;
-            // Update the shared accept_mode
-            *self.accept_mode.lock().unwrap() = mode;
+            self.accept_mode = mode;
         }
 
         // Add trusted hosts if provided
@@ -3248,11 +3232,7 @@ impl Server {
                 config
                     .trusted_hosts
                     .insert(host_id.clone(), cert_hash.clone());
-                // Update the shared trusted_hosts
-                self.trusted_hosts
-                    .lock()
-                    .unwrap()
-                    .insert(host_id, cert_hash);
+                self.trusted_hosts.insert(host_id, cert_hash);
             }
         }
 
@@ -3260,8 +3240,7 @@ impl Server {
         if let Some(hosts_to_remove) = params.remove_trusted_hosts {
             for host_id in hosts_to_remove {
                 config.trusted_hosts.remove(&host_id);
-                // Update the shared trusted_hosts
-                self.trusted_hosts.lock().unwrap().remove(&host_id);
+                self.trusted_hosts.remove(&host_id);
             }
         }
 
@@ -3310,7 +3289,7 @@ impl Server {
         signaling_addr: String,
         msg: crate::signaling::SignalingMessage,
         next: &Next<'a>,
-        webchannel: &ChannelImpl,
+        webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
     ) -> anyhow::Result<()> {
         use crate::signaling::SignalingMessage;
@@ -3339,13 +3318,30 @@ impl Server {
                     return Ok(());
                 }
 
+                // Check if the certificate is trusted.
+                if !self.is_cert_trusted(&peer_cert, &peer_id) {
+                    let msg = ErrorResponseNote {
+                        code: ErrorCode::PermissionDenied,
+                        file: None,
+                        message: format!(
+                            "Refusing connection from {}: certificate not trusted",
+                            peer_id
+                        ),
+                    };
+                    next.send_notif(NotificationCode::ErrorResponse, msg).await;
+                    return Ok(());
+                }
+
                 // Mark as pending to prevent duplicate connection attempts.
                 self.pending_connections
                     .lock()
                     .unwrap()
                     .insert(peer_id.clone(), signaling_addr.clone());
 
-                // Get the SignalingClient for this signaling server
+                // Get the SignalingClient for this signaling server.
+                // If we receives a signaling message, we SHUOLD have
+                // a signaling client, so not using get_or_create
+                // here.
                 let signaling_client = match self.signaling_clients.get(&signaling_addr) {
                     Some(client) => client.clone(),
                     None => {
@@ -3355,13 +3351,14 @@ impl Server {
                     }
                 };
 
-                // Create a Sock for this peer connection
-                // SDP exchange will happen via ice_connect_with_sock
+                // Create a Sock for this peer connection. Sock
+                // handles sending receiving SDP and ICE candidate
+                // to/from the remote peer through signaling server.
                 let sock = signaling_client
                     .create_sock(peer_id.clone(), peer_cert.clone())
                     .await;
 
-                // Establish WebChannel connection using the sock
+                // Establish WebChannel connection using the sock.
                 let key_cert = self.key_cert.clone();
                 let webchannel_clone = webchannel.clone();
                 let peer_id_clone = peer_id.clone();
@@ -3406,7 +3403,7 @@ impl Server {
                 next.send_notif(
                     NotificationCode::ErrorResponse,
                     ErrorResponseNote {
-                        code: ErrorCode::InternalError,
+                        code: ErrorCode::NetworkError,
                         file: None,
                         message: format!("Signaling error: {}", message),
                     },
@@ -3480,14 +3477,14 @@ impl Server {
 struct Next<'a> {
     editor_tx: &'a mpsc::Sender<lsp_server::Message>,
     req_id: Option<lsp_server::RequestId>,
-    webchannel: &'a ChannelImpl,
+    webchannel: &'a dyn MsgChannel,
 }
 
 impl<'a> Next<'a> {
     fn new(
         editor_tx: &'a mpsc::Sender<lsp_server::Message>,
         req_id: Option<lsp_server::RequestId>,
-        webchannel: &'a ChannelImpl,
+        webchannel: &'a dyn MsgChannel,
     ) -> Self {
         Next {
             editor_tx,
@@ -3553,7 +3550,7 @@ async fn send_response(
 
 /// Send a message to a remote host via WebChannel with error logging.
 async fn send_to_remote(
-    webchannel: &ChannelImpl,
+    webchannel: &dyn MsgChannel,
     host_id: &ServerId,
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,

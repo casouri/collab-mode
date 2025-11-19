@@ -58,6 +58,8 @@ pub enum ErrorCode {
     PermissionDenied = 104,
     /// IO error, like file not found or permission denied.
     IoError = 105,
+    /// Network error, like connection timeout.
+    NetworkError = 106,
     /// Wrong arguments like empty filename.
     BadRequest = 113,
     /// Not connected to the remote.

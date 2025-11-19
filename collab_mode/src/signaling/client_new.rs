@@ -45,10 +45,9 @@ struct SockTx {
 pub struct Sock {
     my_id: EndpointId,
     peer_id: EndpointId,
-    my_cert: CertDerHash,
     peer_cert: CertDerHash,
     sdp_rx: mpsc::Receiver<SDP>,
-    candidate_tx: mpsc::Sender<SignalingMessage>,
+    msg_out_tx: mpsc::Sender<SignalingMessage>,
     candidate_rx: mpsc::UnboundedReceiver<ICECandidate>,
 }
 
@@ -146,10 +145,9 @@ impl SignalingClient {
         Sock {
             my_id: self.id.clone(),
             peer_id,
-            my_cert: self.my_key_cert.cert_der_hash(),
             peer_cert,
             sdp_rx,
-            candidate_tx: self.msg_out_tx.clone(),
+            msg_out_tx: self.msg_out_tx.clone(),
             candidate_rx,
         }
     }
@@ -169,7 +167,7 @@ impl Sock {
     /// Send SDP to peer through signaling server.
     pub async fn send_sdp(&self, sdp: SDP) -> anyhow::Result<()> {
         let msg = SignalingMessage::SDP(self.my_id.clone(), self.peer_id.clone(), sdp);
-        self.candidate_tx
+        self.msg_out_tx
             .send(msg)
             .await
             .map_err(|_| anyhow!("Signaling channel closed"))
@@ -186,7 +184,7 @@ impl Sock {
     /// Send ICE candidate to peer.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> anyhow::Result<()> {
         let msg = SignalingMessage::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
-        self.candidate_tx
+        self.msg_out_tx
             .send(msg)
             .await
             .map_err(|_| anyhow!("Signaling channel closed"))
@@ -214,7 +212,7 @@ impl Sock {
         CandidateSender {
             my_id: self.my_id.clone(),
             peer_id: self.peer_id.clone(),
-            candidate_tx: self.candidate_tx.clone(),
+            candidate_tx: self.msg_out_tx.clone(),
         }
     }
 }
