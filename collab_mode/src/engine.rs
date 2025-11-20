@@ -410,6 +410,7 @@ impl InternalDoc {
         }
     }
 
+    #[allow(dead_code)]
     /// Apply an insertion as internal position `pos` of `len`
     /// characters. `cursor` should point to the range that receives
     /// the insertion.

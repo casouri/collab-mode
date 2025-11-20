@@ -20,11 +20,11 @@ use tracing::Instrument;
 #[derive(Clone)]
 pub struct SignalingClient {
     /// Signaling server address
-    addr: String,
+    _addr: String,
     /// My endpoint ID
     id: EndpointId,
     /// My key/cert for authentication
-    my_key_cert: ArcKeyCert,
+    _my_key_cert: ArcKeyCert,
     /// Channel to send outgoing messages to signaling server
     msg_out_tx: mpsc::Sender<SignalingMessage>,
     /// Whether we're bound to signaling server
@@ -104,9 +104,9 @@ impl SignalingClient {
             .context("Failed to send Bind message")?;
 
         Ok(SignalingClient {
-            addr,
+            _addr: addr,
             id,
-            my_key_cert,
+            _my_key_cert: my_key_cert,
             msg_out_tx,
             bound,
             socks,

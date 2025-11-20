@@ -16,7 +16,6 @@ use std::collections::HashMap;
 pub enum NotificationCode {
     RemoteOpsArrived,    // Editor should fetch remote ops.
     FileListUpdated,     // Editor should update the file list.
-    SuggestOpenFile,     // Editor should suggest to open a file.
     ConnectionBroke,     // Editor should indicate connection is broken.
     FailedToConnect,     // Editor should show reason for failed connection attempt.
     Connecting,          // Editor should set connection state of the host to "connecting".
@@ -64,21 +63,6 @@ pub enum ErrorCode {
     BadRequest = 113,
     /// Not connected to the remote.
     NotConnected = 114,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SuggestOpenFileParams {
-    /// Absolute path to the file that the peer suggests to open.
-    pub filename: String,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// Mostly for testing, since server auto-connect on other operations.
-pub struct HeyParams {
-    pub host_id: ServerId,
-    pub message: String,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -139,13 +123,6 @@ pub struct InitResp {
 pub struct AcceptConnectionParams {
     pub signaling_addr: String,
     pub transport_type: TransportType,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionBrokeParams {
-    /// Description of how kind of connection broke and why.
-    pub desc: String,
 }
 
 // **** Update config (accept mode and trusted hosts)
@@ -296,8 +273,6 @@ pub struct DisconnectFileParams {
     pub file: EditorFileDesc,
 }
 
-pub type DisconnectFileResp = DisconnectFileParams;
-
 // **** SendOpEditor
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -321,8 +296,8 @@ pub struct SendOpsResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendInfoParams {
-    pub info: JsonMap,
     pub file: EditorFileDesc,
+    pub info: JsonMap,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

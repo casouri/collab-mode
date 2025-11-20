@@ -68,16 +68,10 @@ pub trait MsgChannel: Send + Sync {
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()>;
 
+    #[allow(dead_code)]
     /// Broadcasts a message to all connected peers. Doesn't block.
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()>;
 }
-
-#[derive(fmt_derive::Debug, fmt_derive::Display)]
-pub enum WebchannelError {
-    AlreadyAccepting,
-}
-
-impl std::error::Error for WebchannelError {}
 
 /// Types of transport. currently only SCTP, we might add webrtc
 /// later.
@@ -93,16 +87,6 @@ pub struct Message {
     pub host: ServerId,
     pub body: Msg,
     pub req_id: Option<RequestId>,
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeclareProjectEntry {
-    /// Absolute path to the project root.
-    pub filename: String,
-    /// Name of the project.
-    pub name: String,
-    pub meta: JsonMap,
 }
 
 #[derive(Clone)]
@@ -139,7 +123,7 @@ impl WebChannel {
     /// determined by host ID ordering rather than initiator/acceptor roles.
     pub async fn connect(
         &self,
-        remote_hostid: ServerId,
+        _remote_hostid: ServerId,
         sock: Option<crate::signaling::client_new::Sock>,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
@@ -159,7 +143,9 @@ impl WebChannel {
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
         let msg_tx = self.msg_tx.clone();
         let hostid = self.hostid();
+        let hostid_clone = hostid.clone();
         let peer_id_clone = peer_id.clone();
+        let as_server = stream_id_init(&hostid_clone, &peer_id) == 1;
 
         // Spawn a thread that sends ICE progress to editor
         tokio::spawn(async move {
@@ -179,8 +165,16 @@ impl WebChannel {
         let ((conn, their_cert, ice_agent), conn_broke_rx) =
             crate::ice::ice_connect_with_sock(sock, Some(progress_tx)).await?;
 
-        let dtls_connection = create_dtls_client(conn, my_key_cert, their_cert).await?;
-        let sctp_assoc = create_sctp_client(dtls_connection.clone()).await?;
+        let dtls_connection = if as_server {
+            create_dtls_server(conn, my_key_cert, their_cert).await?
+        } else {
+            create_dtls_client(conn, my_key_cert, their_cert).await?
+        };
+        let sctp_assoc = if as_server {
+            create_sctp_server(dtls_connection.clone()).await?
+        } else {
+            create_sctp_client(dtls_connection.clone()).await?
+        };
 
         // Spawn background tasks to handle messages.
         self.setup_message_handling(
@@ -248,6 +242,7 @@ impl WebChannel {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Broadcasts a message to all connected peers. Doesn't block.
     pub async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
         let message = Message {
@@ -924,7 +919,7 @@ pub struct TestWebChannel {
 
 #[async_trait]
 impl MsgChannel for TestWebChannel {
-    fn is_connected(&self, remote_hostid: &ServerId) -> bool {
+    fn is_connected(&self, _remote_hostid: &ServerId) -> bool {
         true
     }
 

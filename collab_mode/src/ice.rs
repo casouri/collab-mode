@@ -222,9 +222,3 @@ pub async fn make_ice_agent(controlling: bool) -> WebrpcResult<Agent> {
 
     Ok(Agent::new(config).await?)
 }
-
-/// Get local credential of `agent`
-async fn ice_credential(agent: &Agent) -> ICECredential {
-    let (ufrag, pwd) = agent.get_local_user_credentials().await;
-    ICECredential { ufrag, pwd }
-}
