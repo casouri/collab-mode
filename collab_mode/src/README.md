@@ -47,24 +47,42 @@ synchronize the messages and keep track of peers. At that point might
 as well make it fully centralized for simpler design and better
 performance.
 
-# Connection and RPC
+# Connection among servers
 
-We use webrtc data channels to establish p2p connections. It needs a
-public signaling server, which is implemented in
-[crate::signaling::server] The collab server (“host”) registers with a
-UUID on the signaling server, and collab client can connect to the
-server by querying the signaling server.
+We use webrtc to establish p2p connections (or rather, parts of
+webrtc). It needs a public signaling server, which is implemented in
+[crate::signaling::server]. A collab server (“host”) registers with an
+id on the signaling server, and other hosts can connect to it by
+querying the signaling server.
 
-For RPC, we implement a simple RPC ([crate::webrpc]) on top of webrtc
-data channel.
+Authenticate using public keys. Signaling server reserves an id-key
+mapping for a host as long as the server maintains a connection to it,
+but doesn’t persist the mapping on disk/db (for easier maintenance).
+But each host will store each other’s public key and verify it against
+the id. For the first connection, hosts need to enable accept-all
+mode, but once the connection is made and public key stored, they can
+go back to trusted-only mode. Users can also add id-key mapping
+manually for max safety.
+
+Editor plugin can auto-generate long and memorable id for users, like
+`acelice-<three>-<random>-<words>`.
 
 # Communicating with editor
 
-[crate::jsonrpc] provides a jsonrpc server that faces the editor. The
-jsonrpc server creates a [crate::collab_doc::Doc] upon editor
-request, by either sharing to the local server or connecting to a
-remote server, and delgates editor requests to
-[crate::collab_doc::Doc].
+[crate::editor_receptor] provides a jsonrpc server that faces the editor.
+
+# Message processing
+
+The server ([crate::server]) runs a sync main loop and reads messages
+from three channels: one from editor, one from webchannel (remote
+hosts), one from signaling servers. For async operations, we basically
+use message to carry the context. and use message as continuation. For
+example, server receive editor message, process it (sync), send a
+message to remote host; remote host returns a message, server reads
+and process it (sync) and sends a message back to editor. Compare this
+to the opposite approach where server receives a editor message,
+spawns a thread to handle it, send a message to remote host and await
+on a response, then sending a message back to editor.
 
 # OT control algorithm
 

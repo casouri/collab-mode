@@ -163,7 +163,7 @@ impl WebChannel {
 
         // Establish connection with ICE.
         let ((conn, their_cert, ice_agent), conn_broke_rx) =
-            crate::ice::ice_connect_with_sock(sock, Some(progress_tx)).await?;
+            crate::ice::ice_connect_with_sock(sock, Some(progress_tx), as_server).await?;
 
         let dtls_connection = if as_server {
             create_dtls_server(conn, my_key_cert, their_cert).await?
@@ -1097,26 +1097,30 @@ mod tests {
         let id1 = create_test_id("host1");
         let id2 = create_test_id("host2");
 
-        let mut channel1 = factory.get_channel(id1.clone(), tx1);
-        let mut channel2 = factory.get_channel(id2.clone(), tx2);
+        let channel1 = factory.get_channel(id1.clone(), tx1);
+        let channel2 = factory.get_channel(id2.clone(), tx2);
 
-        // Mark both as deliverable
+        // Mark both as deliverable by connecting to each other
         channel1
-            .accept(
+            .connect(
+                id2.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("test1")),
-                "test",
-                TransportType::SCTP,
             )
             .await
             .unwrap();
         channel2
-            .accept(
+            .connect(
+                id1.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("test2")),
-                "test",
-                TransportType::SCTP,
             )
             .await
             .unwrap();
+
+        // Drain Hey messages from connection establishment
+        let _ = rx2.recv().await; // Hey from channel1
+        let _ = rx2.recv().await; // Hey from channel2 to itself
 
         // Send message from channel1 to channel2
         channel1
@@ -1140,26 +1144,30 @@ mod tests {
         let id1 = create_test_id("sender");
         let id2 = create_test_id("receiver");
 
-        let mut channel1 = factory.get_channel(id1.clone(), tx1);
-        let mut channel2 = factory.get_channel(id2.clone(), tx2);
+        let channel1 = factory.get_channel(id1.clone(), tx1);
+        let channel2 = factory.get_channel(id2.clone(), tx2);
 
-        // Mark both as deliverable
+        // Mark both as deliverable by connecting to each other
         channel1
-            .accept(
+            .connect(
+                id2.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("test1")),
-                "test",
-                TransportType::SCTP,
             )
             .await
             .unwrap();
         channel2
-            .accept(
+            .connect(
+                id1.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("test2")),
-                "test",
-                TransportType::SCTP,
             )
             .await
             .unwrap();
+
+        // Drain Hey messages from connection establishment
+        let _ = rx2.recv().await; // Hey from channel1
+        let _ = rx2.recv().await; // Hey from channel2 to itself
 
         // Send message
         channel1
@@ -1183,18 +1191,10 @@ mod tests {
         let id1 = create_test_id("sender");
         let id2 = create_test_id("receiver");
 
-        let mut channel1 = factory.get_channel(id1.clone(), tx1);
+        let channel1 = factory.get_channel(id1.clone(), tx1);
         let _channel2 = factory.get_channel(id2.clone(), tx2);
 
-        // Mark only sender as deliverable, NOT receiver
-        channel1
-            .accept(
-                Arc::new(crate::config_man::create_key_cert("test1")),
-                "test",
-                TransportType::SCTP,
-            )
-            .await
-            .unwrap();
+        // Don't connect - both channels are not deliverable
 
         // Try to send to non-deliverable recipient - should fail
         let result = channel1.send(&id2, None, Msg::FileShared(1)).await;
@@ -1214,35 +1214,49 @@ mod tests {
         let id_recv1 = create_test_id("receiver1");
         let id_recv2 = create_test_id("receiver2");
 
-        let mut channel_sender = factory.get_channel(id_sender.clone(), tx_sender);
-        let mut channel_recv1 = factory.get_channel(id_recv1.clone(), tx_recv1);
-        let mut channel_recv2 = factory.get_channel(id_recv2.clone(), tx_recv2);
+        let channel_sender = factory.get_channel(id_sender.clone(), tx_sender);
+        let channel_recv1 = factory.get_channel(id_recv1.clone(), tx_recv1);
+        let channel_recv2 = factory.get_channel(id_recv2.clone(), tx_recv2);
 
-        // Mark all as deliverable
+        // Mark all as deliverable by connecting them
         channel_sender
-            .accept(
+            .connect(
+                id_recv1.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("sender")),
-                "test",
-                TransportType::SCTP,
             )
             .await
             .unwrap();
         channel_recv1
-            .accept(
+            .connect(
+                id_sender.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("recv1")),
-                "test",
-                TransportType::SCTP,
+            )
+            .await
+            .unwrap();
+        channel_sender
+            .connect(
+                id_recv2.clone(),
+                None,
+                Arc::new(crate::config_man::create_key_cert("sender")),
             )
             .await
             .unwrap();
         channel_recv2
-            .accept(
+            .connect(
+                id_sender.clone(),
+                None,
                 Arc::new(crate::config_man::create_key_cert("recv2")),
-                "test",
-                TransportType::SCTP,
             )
             .await
             .unwrap();
+
+        // Drain Hey messages from connection establishment
+        let _ = rx_recv1.recv().await; // Hey from sender
+        let _ = rx_recv1.recv().await; // Hey from recv1 to itself
+        let _ = rx_recv2.recv().await; // Hey from sender
+        let _ = rx_recv2.recv().await; // Hey from recv2 to itself
 
         // Broadcast from sender
         channel_sender

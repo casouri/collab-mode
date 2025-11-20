@@ -29,12 +29,14 @@ pub struct ICECredential {
 /// ice_connect and ice_accept paths. Both sides use the same process.
 /// SDP exchange happens via SignalingMessage::SDP messages through the sock.
 /// If `progress_tx` isn't None, report progress to it while establishing connection.
+/// The `is_server` parameter determines ICE agent role (must differ between peers).
 #[instrument(skip(progress_tx, sock))]
 pub async fn ice_connect_with_sock(
     mut sock: crate::signaling::client_new::Sock,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
+    is_server: bool,
 ) -> WebrpcResult<(
-    (Arc<impl Conn + Send + Sync>, CertDerHash, Arc<Agent>),
+    (Arc<dyn Conn + Send + Sync>, CertDerHash, Arc<Agent>),
     oneshot::Receiver<()>,
 )> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
@@ -42,7 +44,7 @@ pub async fn ice_connect_with_sock(
     let (connected_tx, connected_rx) = watch::channel(());
     let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
 
-    let agent = Arc::new(make_ice_agent(true).await?);
+    let agent = Arc::new(make_ice_agent(is_server).await?);
 
     // Generate and send our SDP to peer
     let (ufrag, pwd) = agent.get_local_user_credentials().await;
@@ -65,17 +67,36 @@ pub async fn ice_connect_with_sock(
     let candidate_task =
         ice_exchange_candidates_with_sock(agent.clone(), sock, error_tx.clone(), connected_rx)?;
 
-    let result = tokio::select! {
-        err = error_rx.recv() => {
-            drop(connected_tx);
-            drop(cancel_tx);
-            // We hold error_tx, this should never panic.
-            Err(err.unwrap().into())
+    // Controlling side dials, controlled side accepts
+    let result = if is_server {
+        tokio::select! {
+            err = error_rx.recv() => {
+                drop(connected_tx);
+                drop(cancel_tx);
+                // We hold error_tx, this should never panic.
+                Err(err.unwrap().into())
+            }
+            conn = agent.dial(cancel_rx, ufrag, pwd) => {
+                drop(connected_tx);
+                let conn = conn?;
+                let conn: Arc<dyn Conn + Send + Sync> = conn;
+                Ok(((conn, their_cert, agent), conn_broke_rx))
+            }
         }
-        conn = agent.dial(cancel_rx, ufrag, pwd) => {
-            drop(connected_tx);
-            let conn = conn?;
-            Ok(((conn, their_cert, agent), conn_broke_rx))
+    } else {
+        tokio::select! {
+            err = error_rx.recv() => {
+                drop(connected_tx);
+                drop(cancel_tx);
+                // We hold error_tx, this should never panic.
+                Err(err.unwrap().into())
+            }
+            conn = agent.accept(cancel_rx, ufrag, pwd) => {
+                drop(connected_tx);
+                let conn = conn?;
+                let conn: Arc<dyn Conn + Send + Sync> = conn;
+                Ok(((conn, their_cert, agent), conn_broke_rx))
+            }
         }
     };
 
