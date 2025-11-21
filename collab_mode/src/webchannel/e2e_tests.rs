@@ -348,16 +348,165 @@ mod e2e_tests {
         tracing::info!("test_basic_connection completed successfully");
     }
 
-    #[ignore] // Needs rewrite: .accept() and .connect() methods removed, must use SignalingClient API
     #[tokio::test]
     async fn test_large_message_chunking() {
-        todo!("Test needs complete rewrite for new SignalingClient-based API")
+        tracing::info!("Starting test_large_message_chunking");
+        let env = TestEnvironment::new().await.unwrap();
+
+        let (tx1, mut rx1) = mpsc::channel::<Message>(100);
+        let (tx2, _rx2) = mpsc::channel::<Message>(100);
+
+        let id1 = create_test_id("host1");
+        let id2 = create_test_id("host2");
+
+        let channel1 = WebChannel::new(id1.clone(), tx1);
+        let channel2 = WebChannel::new(id2.clone(), tx2);
+
+        let key_cert1 = create_test_key_cert(&id1);
+        let key_cert2 = create_test_key_cert(&id2);
+
+        establish_connection_pair(
+            &channel1,
+            id1.clone(),
+            key_cert1,
+            &channel2,
+            id2.clone(),
+            key_cert2,
+            env.signaling_url(),
+        )
+        .await
+        .unwrap();
+
+        consume_automatic_messages(&mut rx1).await;
+
+        // Create a large message (100KB of data)
+        let large_content = "x".repeat(100 * 1024);
+        let test_msg = Msg::ShareSingleFile {
+            filename: "large_file.txt".to_string(),
+            meta: "{}".to_string(),
+            content: crate::types::FileContentOrPath::Content(large_content.clone()),
+        };
+
+        tracing::info!("Sending large message ({} bytes)", large_content.len());
+        channel2.send(&id1, None, test_msg).await.unwrap();
+
+        // Receive and verify
+        let received = timeout(Duration::from_secs(10), rx1.recv()).await;
+        assert!(
+            received.is_ok(),
+            "Should receive large message within timeout"
+        );
+
+        let msg = received.unwrap().unwrap();
+        assert_eq!(msg.host, id2);
+        match msg.body {
+            Msg::ShareSingleFile { content, .. } => {
+                if let crate::types::FileContentOrPath::Content(c) = content {
+                    assert_eq!(c.len(), large_content.len(), "Content length should match");
+                    assert_eq!(c, large_content, "Content should match exactly");
+                } else {
+                    panic!("Expected Content, got Path");
+                }
+            }
+            _ => panic!("Unexpected message type: {:?}", msg.body),
+        }
+
+        tracing::info!("test_large_message_chunking completed successfully");
     }
 
-    #[ignore] // Needs rewrite: .accept() and .connect() methods removed, must use SignalingClient API
     #[tokio::test]
     async fn test_multiple_concurrent_connections() {
-        todo!("Test needs complete rewrite for new SignalingClient-based API")
+        tracing::info!("Starting test_multiple_concurrent_connections");
+        let env = TestEnvironment::new().await.unwrap();
+
+        // Create two separate connection pairs: A↔B and C↔D
+        // (Each pair uses separate signaling clients, avoiding ID conflicts)
+        let (tx_a, mut rx_a) = mpsc::channel::<Message>(100);
+        let (tx_b, _rx_b) = mpsc::channel::<Message>(100);
+        let (tx_c, mut rx_c) = mpsc::channel::<Message>(100);
+        let (tx_d, _rx_d) = mpsc::channel::<Message>(100);
+
+        let id_a = create_test_id("host_a");
+        let id_b = create_test_id("host_b");
+        let id_c = create_test_id("host_c");
+        let id_d = create_test_id("host_d");
+
+        let channel_a = WebChannel::new(id_a.clone(), tx_a);
+        let channel_b = WebChannel::new(id_b.clone(), tx_b);
+        let channel_c = WebChannel::new(id_c.clone(), tx_c);
+        let channel_d = WebChannel::new(id_d.clone(), tx_d);
+
+        let key_cert_a = create_test_key_cert(&id_a);
+        let key_cert_b = create_test_key_cert(&id_b);
+        let key_cert_c = create_test_key_cert(&id_c);
+        let key_cert_d = create_test_key_cert(&id_d);
+
+        // Establish A ↔ B connection
+        tracing::info!("Establishing A ↔ B connection");
+        establish_connection_pair(
+            &channel_a,
+            id_a.clone(),
+            key_cert_a.clone(),
+            &channel_b,
+            id_b.clone(),
+            key_cert_b.clone(),
+            env.signaling_url(),
+        )
+        .await
+        .unwrap();
+
+        // Establish C ↔ D connection (completely separate pair)
+        tracing::info!("Establishing C ↔ D connection");
+        establish_connection_pair(
+            &channel_c,
+            id_c.clone(),
+            key_cert_c.clone(),
+            &channel_d,
+            id_d.clone(),
+            key_cert_d.clone(),
+            env.signaling_url(),
+        )
+        .await
+        .unwrap();
+
+        // Consume automatic messages
+        consume_automatic_messages(&mut rx_a).await;
+        consume_automatic_messages(&mut rx_c).await;
+
+        // Test B → A message
+        tracing::info!("Sending B → A");
+        channel_b
+            .send(&id_a, None, Msg::FileShared(100))
+            .await
+            .unwrap();
+
+        // Test D → C message
+        tracing::info!("Sending D → C");
+        channel_d
+            .send(&id_c, None, Msg::FileShared(200))
+            .await
+            .unwrap();
+
+        // Verify both connections work independently
+        let received_a = timeout(Duration::from_secs(5), rx_a.recv()).await;
+        assert!(received_a.is_ok(), "Should receive message at A");
+        let msg_a = received_a.unwrap().unwrap();
+        assert_eq!(msg_a.host, id_b);
+        match msg_a.body {
+            Msg::FileShared(doc_id) => assert_eq!(doc_id, 100),
+            _ => panic!("Unexpected message type"),
+        }
+
+        let received_c = timeout(Duration::from_secs(5), rx_c.recv()).await;
+        assert!(received_c.is_ok(), "Should receive message at C");
+        let msg_c = received_c.unwrap().unwrap();
+        assert_eq!(msg_c.host, id_d);
+        match msg_c.body {
+            Msg::FileShared(doc_id) => assert_eq!(doc_id, 200),
+            _ => panic!("Unexpected message type"),
+        }
+
+        tracing::info!("test_multiple_concurrent_connections completed successfully");
     }
 
     #[ignore] // No recovery in webchannel.
@@ -366,21 +515,184 @@ mod e2e_tests {
         todo!("Test needs complete rewrite for new SignalingClient-based API")
     }
 
-    #[ignore] // Needs rewrite: .accept() and .connect() methods removed, must use SignalingClient API
     #[tokio::test]
     async fn test_certificate_validation() {
-        todo!("Test needs complete rewrite for new SignalingClient-based API")
+        tracing::info!("Starting test_certificate_validation");
+        let env = TestEnvironment::new().await.unwrap();
+
+        let (tx1, _rx1) = mpsc::channel::<Message>(100);
+        let (tx2, _rx2) = mpsc::channel::<Message>(100);
+
+        let id1 = create_test_id("host1");
+        let id2 = create_test_id("host2");
+
+        let channel1 = WebChannel::new(id1.clone(), tx1);
+        let channel2 = WebChannel::new(id2.clone(), tx2);
+
+        let key_cert1 = create_test_key_cert(&id1);
+        let key_cert2 = create_test_key_cert(&id2);
+
+        // Get expected certificate hashes before connection
+        let expected_cert1 = key_cert1.cert_der_hash();
+        let expected_cert2 = key_cert2.cert_der_hash();
+
+        // Verify certificate hashes are non-empty and properly formatted
+        assert!(!expected_cert1.is_empty(), "Cert hash should not be empty");
+        assert!(!expected_cert2.is_empty(), "Cert hash should not be empty");
+        assert!(
+            expected_cert1.contains(':'),
+            "Cert hash should be colon-separated hex"
+        );
+        assert!(
+            expected_cert2.contains(':'),
+            "Cert hash should be colon-separated hex"
+        );
+        assert_ne!(expected_cert1, expected_cert2, "Certs should be different");
+
+        // Establish connection (this validates certs during handshake)
+        establish_connection_pair(
+            &channel1,
+            id1.clone(),
+            key_cert1,
+            &channel2,
+            id2.clone(),
+            key_cert2,
+            env.signaling_url(),
+        )
+        .await
+        .unwrap();
+
+        tracing::info!("test_certificate_validation completed successfully");
     }
 
-    #[ignore] // Needs rewrite: .accept() and .connect() methods removed, must use SignalingClient API
     #[tokio::test]
     async fn test_high_throughput() {
-        todo!("Test needs complete rewrite for new SignalingClient-based API")
+        tracing::info!("Starting test_high_throughput");
+        let env = TestEnvironment::new().await.unwrap();
+
+        let (tx1, mut rx1) = mpsc::channel::<Message>(1000);
+        let (tx2, _rx2) = mpsc::channel::<Message>(1000);
+
+        let id1 = create_test_id("host1");
+        let id2 = create_test_id("host2");
+
+        let channel1 = WebChannel::new(id1.clone(), tx1);
+        let channel2 = WebChannel::new(id2.clone(), tx2);
+
+        let key_cert1 = create_test_key_cert(&id1);
+        let key_cert2 = create_test_key_cert(&id2);
+
+        establish_connection_pair(
+            &channel1,
+            id1.clone(),
+            key_cert1,
+            &channel2,
+            id2.clone(),
+            key_cert2,
+            env.signaling_url(),
+        )
+        .await
+        .unwrap();
+
+        consume_automatic_messages(&mut rx1).await;
+
+        // Send 100 messages rapidly
+        let num_messages = 100;
+        tracing::info!("Sending {} messages", num_messages);
+
+        for i in 0..num_messages {
+            channel2.send(&id1, None, Msg::FileShared(i)).await.unwrap();
+        }
+
+        // Receive all messages
+        let mut received_ids: Vec<u32> = Vec::new();
+        for _ in 0..num_messages {
+            let received = timeout(Duration::from_secs(10), rx1.recv()).await;
+            assert!(
+                received.is_ok(),
+                "Should receive message {} within timeout",
+                received_ids.len()
+            );
+            let msg = received.unwrap().unwrap();
+            match msg.body {
+                Msg::FileShared(doc_id) => {
+                    received_ids.push(doc_id);
+                }
+                _ => panic!("Unexpected message type: {:?}", msg.body),
+            }
+        }
+
+        assert_eq!(received_ids.len(), num_messages as usize);
+
+        // Verify messages arrived in order
+        for (i, &doc_id) in received_ids.iter().enumerate() {
+            assert_eq!(
+                doc_id, i as u32,
+                "Message {} should have doc_id {}, got {}",
+                i, i, doc_id
+            );
+        }
+
+        tracing::info!("test_high_throughput completed successfully");
     }
 
-    #[ignore] // Needs rewrite: .accept() and .connect() methods removed, must use SignalingClient API
     #[tokio::test]
     async fn test_ice_progress_messages() {
-        todo!("Test needs complete rewrite for new SignalingClient-based API")
+        tracing::info!("Starting test_ice_progress_messages");
+        let env = TestEnvironment::new().await.unwrap();
+
+        let (tx1, mut rx1) = mpsc::channel::<Message>(100);
+        let (tx2, _rx2) = mpsc::channel::<Message>(100);
+
+        let id1 = create_test_id("host1");
+        let id2 = create_test_id("host2");
+
+        let channel1 = WebChannel::new(id1.clone(), tx1);
+        let channel2 = WebChannel::new(id2.clone(), tx2);
+
+        let key_cert1 = create_test_key_cert(&id1);
+        let key_cert2 = create_test_key_cert(&id2);
+
+        establish_connection_pair(
+            &channel1,
+            id1.clone(),
+            key_cert1,
+            &channel2,
+            id2.clone(),
+            key_cert2,
+            env.signaling_url(),
+        )
+        .await
+        .unwrap();
+
+        // Collect all ICE progress messages
+        let mut ice_states: Vec<String> = Vec::new();
+        loop {
+            match timeout(Duration::from_millis(500), rx1.recv()).await {
+                Ok(Some(msg)) => {
+                    if let Msg::IceProgress(_, state) = msg.body {
+                        ice_states.push(state);
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Verify we received expected ICE progress states
+        tracing::info!("Received ICE states: {:?}", ice_states);
+        assert!(
+            !ice_states.is_empty(),
+            "Should receive ICE progress messages"
+        );
+        assert!(
+            ice_states.contains(&"Checking".to_string()),
+            "Should have Checking state"
+        );
+        assert!(
+            ice_states.contains(&"Connected".to_string()),
+            "Should have Connected state"
+        );
+
+        tracing::info!("test_ice_progress_messages completed successfully");
     }
 }
