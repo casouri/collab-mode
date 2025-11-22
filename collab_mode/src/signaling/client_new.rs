@@ -5,7 +5,7 @@
 //! connections can be handled through a single SignalingClient.
 
 use crate::config_man::ArcKeyCert;
-use crate::signaling::{CertDerHash, EndpointId, ICECandidate, SignalingMessage, SDP};
+use crate::signaling::{CertDerHash, EndpointId, ICECandidate, SignalingMsg, SDP};
 use anyhow::anyhow;
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -21,7 +21,7 @@ pub struct SignalingChannel {
     /// Map of signaling clients by signaling server address
     clients: Arc<Mutex<HashMap<String, SignalingClient>>>,
     /// Channel to send signaling messages to Server
-    signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+    signaling_msg_tx: mpsc::Sender<(String, SignalingMsg)>,
     /// Channel to send internal messages to Server
     msg_tx: mpsc::Sender<crate::webchannel::Message>,
 }
@@ -29,7 +29,7 @@ pub struct SignalingChannel {
 impl SignalingChannel {
     /// Create a new SignalingChannel.
     pub fn new(
-        signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+        signaling_msg_tx: mpsc::Sender<(String, SignalingMsg)>,
         msg_tx: mpsc::Sender<crate::webchannel::Message>,
     ) -> Self {
         SignalingChannel {
@@ -75,7 +75,7 @@ impl SignalingChannel {
     }
 
     /// Send a message to a signaling server.
-    pub async fn send(&self, signaling_addr: &str, msg: SignalingMessage) -> anyhow::Result<()> {
+    pub async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
         let client = {
             let clients = self.clients.lock().unwrap();
             clients
@@ -119,7 +119,7 @@ pub struct SignalingClient {
     /// My key/cert for authentication
     _my_key_cert: ArcKeyCert,
     /// Channel to send outgoing messages to signaling server
-    msg_out_tx: mpsc::Sender<SignalingMessage>,
+    msg_out_tx: mpsc::Sender<SignalingMsg>,
     /// Whether we're bound to signaling server
     bound: Arc<Mutex<bool>>,
     /// Map of active peer connections, when we receive SDP or
@@ -144,7 +144,7 @@ pub struct Sock {
     peer_id: EndpointId,
     peer_cert: CertDerHash,
     sdp_rx: mpsc::Receiver<SDP>,
-    msg_out_tx: mpsc::Sender<SignalingMessage>,
+    msg_out_tx: mpsc::Sender<SignalingMsg>,
     candidate_rx: mpsc::UnboundedReceiver<ICECandidate>,
 }
 
@@ -157,7 +157,7 @@ impl SignalingClient {
         addr: String,
         id: EndpointId,
         my_key_cert: ArcKeyCert,
-        signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+        signaling_msg_tx: mpsc::Sender<(String, SignalingMsg)>,
         msg_tx: mpsc::Sender<crate::webchannel::Message>,
         cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> anyhow::Result<Self> {
@@ -203,7 +203,7 @@ impl SignalingClient {
         );
 
         let cert_hash = my_key_cert.cert_der_hash();
-        let bind_msg = SignalingMessage::Bind(id.clone(), cert_hash);
+        let bind_msg = SignalingMsg::Bind(id.clone(), cert_hash);
         msg_out_tx
             .send(bind_msg)
             .await
@@ -222,7 +222,7 @@ impl SignalingClient {
     }
 
     /// Send a message to the signaling server.
-    pub async fn send(&self, msg: SignalingMessage) -> anyhow::Result<()> {
+    pub async fn send(&self, msg: SignalingMsg) -> anyhow::Result<()> {
         self.msg_out_tx
             .send(msg)
             .await
@@ -273,7 +273,7 @@ impl SignalingClient {
 impl Sock {
     /// Send SDP to peer through signaling server.
     pub async fn send_sdp(&self, sdp: SDP) -> anyhow::Result<()> {
-        let msg = SignalingMessage::SDP(self.my_id.clone(), self.peer_id.clone(), sdp);
+        let msg = SignalingMsg::SDP(self.my_id.clone(), self.peer_id.clone(), sdp);
         self.msg_out_tx
             .send(msg)
             .await
@@ -290,7 +290,7 @@ impl Sock {
 
     /// Send ICE candidate to peer.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> anyhow::Result<()> {
-        let msg = SignalingMessage::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
+        let msg = SignalingMsg::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
         self.msg_out_tx
             .send(msg)
             .await
@@ -329,13 +329,13 @@ impl Sock {
 pub struct CandidateSender {
     my_id: EndpointId,
     peer_id: EndpointId,
-    candidate_tx: mpsc::Sender<SignalingMessage>,
+    candidate_tx: mpsc::Sender<SignalingMsg>,
 }
 
 impl CandidateSender {
     /// Send ICE candidate to peer.
     pub async fn send_candidate(&mut self, candidate: ICECandidate) -> anyhow::Result<()> {
-        let msg = SignalingMessage::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
+        let msg = SignalingMsg::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
         self.candidate_tx
             .send(msg)
             .await
@@ -354,9 +354,9 @@ async fn send_receive_stream(
     addr: String,
     id: EndpointId,
     _my_key_cert: ArcKeyCert,
-    signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+    signaling_msg_tx: mpsc::Sender<(String, SignalingMsg)>,
     msg_tx: mpsc::Sender<crate::webchannel::Message>,
-    mut msg_out_rx: mpsc::Receiver<SignalingMessage>,
+    mut msg_out_rx: mpsc::Receiver<SignalingMsg>,
     bound: Arc<Mutex<bool>>,
     socks: Arc<Mutex<HashMap<EndpointId, SockTx>>>,
     mut shutdown_rx: mpsc::Receiver<()>,
@@ -390,7 +390,7 @@ async fn send_receive_stream(
                     match msg_result {
                         Ok(tung::tungstenite::Message::Text(text)) => {
                             // Parse and route message.
-                            match serde_json::from_str::<SignalingMessage>(&text) {
+                            match serde_json::from_str::<SignalingMsg>(&text) {
                                 Ok(signaling_msg) => {
                                     if let Err(e) = handle_incoming_message(
                                         signaling_msg,
@@ -503,15 +503,15 @@ async fn send_receive_stream(
 
 /// Handle an incoming signaling message and route it appropriately.
 async fn handle_incoming_message(
-    msg: SignalingMessage,
+    msg: SignalingMsg,
     addr: &str,
     _my_id: &EndpointId,
-    signaling_msg_tx: &mpsc::Sender<(String, SignalingMessage)>,
+    signaling_msg_tx: &mpsc::Sender<(String, SignalingMsg)>,
     bound: &Arc<Mutex<bool>>,
     socks: &Arc<Mutex<HashMap<EndpointId, SockTx>>>,
 ) -> anyhow::Result<()> {
     match &msg {
-        SignalingMessage::Bound(_id) => {
+        SignalingMsg::Bound(_id) => {
             // Set bound flag
             {
                 *bound.lock().unwrap() = true;
@@ -520,11 +520,11 @@ async fn handle_incoming_message(
             let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
         }
 
-        SignalingMessage::Connect(..) => {
+        SignalingMsg::Connect(..) => {
             let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
         }
 
-        SignalingMessage::SDP(sender_id, _my_id, sdp) => {
+        SignalingMsg::SDP(sender_id, _my_id, sdp) => {
             // Route SDP to the appropriate sock
             let sock_tx = {
                 let socks_map = socks.lock().unwrap();
@@ -540,7 +540,7 @@ async fn handle_incoming_message(
             }
         }
 
-        SignalingMessage::Candidate(sender_id, _my_id, candidate) => {
+        SignalingMsg::Candidate(sender_id, _my_id, candidate) => {
             // Route candidate to the appropriate sock
             let sock_tx = {
                 let socks_map = socks.lock().unwrap();
@@ -559,9 +559,9 @@ async fn handle_incoming_message(
             }
         }
 
-        SignalingMessage::IdTaken(_endpoint_id, _message)
-        | SignalingMessage::IdNotFound(_endpoint_id, _message)
-        | SignalingMessage::TimeUp(_endpoint_id, _message) => {
+        SignalingMsg::IdTaken(_endpoint_id, _message)
+        | SignalingMsg::IdNotFound(_endpoint_id, _message)
+        | SignalingMsg::TimeUp(_endpoint_id, _message) => {
             // Forward error to Server
             let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
         }

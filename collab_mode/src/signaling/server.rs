@@ -8,7 +8,7 @@
 //! Serving requests mostly consists of adding entries to the map, and
 //! relaying messages to the endpoint with the target id.
 
-use crate::signaling::{EndpointId, SignalingMessage};
+use crate::signaling::{EndpointId, SignalingMsg};
 use futures_util::{SinkExt, StreamExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -107,7 +107,7 @@ impl Server {
         if id_taken {
             let _ = msg_tx
                 .send(
-                    SignalingMessage::IdTaken(
+                    SignalingMsg::IdTaken(
                         id.clone(),
                         "ID already taken or key mismatch".to_string(),
                     )
@@ -121,7 +121,7 @@ impl Server {
         let mut endpoint_map = self.endpoint_map.write().await;
         if endpoint_map.contains_key(&id) {
             let _ = msg_tx
-                .send(SignalingMessage::IdTaken(id.clone(), "ID already taken".to_string()).into())
+                .send(SignalingMsg::IdTaken(id.clone(), "ID already taken".to_string()).into())
                 .await;
             return Err(SignalingError::OtherError("ID already taken".to_string()));
         }
@@ -130,9 +130,7 @@ impl Server {
         };
         endpoint_map.insert(id.clone(), server_info);
 
-        let _ = msg_tx
-            .send(SignalingMessage::Bound(id.clone()).into())
-            .await;
+        let _ = msg_tx.send(SignalingMsg::Bound(id.clone()).into()).await;
         Ok(())
     }
 
@@ -156,12 +154,8 @@ impl Server {
         match endpoint_info {
             Some(endpoint_info) => {
                 // Notify connection listener.
-                let connect_req = SignalingMessage::Connect(
-                    sender_id.clone(),
-                    receiver_id,
-                    sender_key,
-                    initiator,
-                );
+                let connect_req =
+                    SignalingMsg::Connect(sender_id.clone(), receiver_id, sender_key, initiator);
                 // If connection broke, we just return from
                 // handle_connection, no need for error handling here.
                 let _ = endpoint_info.msg_tx.send(connect_req.into()).await;
@@ -169,7 +163,7 @@ impl Server {
             }
             None => {
                 // Didn't find the endpoint with this id.
-                let resp = SignalingMessage::IdNotFound(
+                let resp = SignalingMsg::IdNotFound(
                     sender_id.clone(),
                     format!("No endpoint found for id: {}", receiver_id),
                 );
@@ -240,15 +234,15 @@ async fn handle_message(
     }
     match msg {
         Message::Text(msg) => {
-            let msg: SignalingMessage = serde_json::from_str(&msg)?;
+            let msg: SignalingMsg = serde_json::from_str(&msg)?;
             match msg {
-                SignalingMessage::Bind(id, key) => {
+                SignalingMsg::Bind(id, key) => {
                     server
                         .bind_endpoint(id.clone(), key.clone(), resp_tx.clone())
                         .await?;
                     *endpoint_id = Some(id);
                 }
-                SignalingMessage::Connect(sender_id, receiver_id, sender_key, initiator) => {
+                SignalingMsg::Connect(sender_id, receiver_id, sender_key, initiator) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
@@ -267,7 +261,7 @@ async fn handle_message(
                         )
                         .await?;
                 }
-                SignalingMessage::SDP(sender_id, receiver_id, sdp) => {
+                SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
@@ -278,18 +272,17 @@ async fn handle_message(
                         return Ok(());
                     }
                     if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
-                        let msg =
-                            SignalingMessage::SDP(sender_id.clone(), receiver_id.clone(), sdp);
+                        let msg = SignalingMsg::SDP(sender_id.clone(), receiver_id.clone(), sdp);
                         their_info.msg_tx.send(msg.into()).await?;
                     } else {
-                        let msg = SignalingMessage::IdNotFound(
+                        let msg = SignalingMsg::IdNotFound(
                             sender_id.clone(),
                             format!("No endpoint found for id: {}", receiver_id),
                         );
                         resp_tx.send(msg.into()).await?;
                     }
                 }
-                SignalingMessage::Candidate(sender_id, receiver_id, candidate) => {
+                SignalingMsg::Candidate(sender_id, receiver_id, candidate) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
@@ -298,14 +291,14 @@ async fn handle_message(
                         return Ok(());
                     }
                     if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
-                        let msg = SignalingMessage::Candidate(
+                        let msg = SignalingMsg::Candidate(
                             sender_id.clone(),
                             receiver_id.clone(),
                             candidate,
                         );
                         their_info.msg_tx.send(msg.into()).await?;
                     } else {
-                        let msg = SignalingMessage::IdNotFound(
+                        let msg = SignalingMsg::IdNotFound(
                             sender_id.clone(),
                             format!("No endpoint found for id: {}", receiver_id),
                         );
@@ -359,7 +352,7 @@ async fn send_receive_stream(
         tokio::select! {
             _ = time_rx.recv() => {
                 // Note: we don't know the endpoint_id here, so use empty string
-                let err_msg = SignalingMessage::TimeUp(
+                let err_msg = SignalingMsg::TimeUp(
                     "".to_string(),
                     format!("Allocated time of {} hours is up", allocated_hrs)
                 );

@@ -478,7 +478,7 @@ impl Server {
 
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
         let (signaling_msg_tx, mut signaling_msg_rx) =
-            mpsc::channel::<(String, crate::signaling::SignalingMessage)>(16);
+            mpsc::channel::<(String, crate::signaling::SignalingMsg)>(16);
 
         // Create SignalingChannel
         let mut signaling_channel = crate::signaling::client_new::SignalingChannel::new(
@@ -1505,7 +1505,7 @@ impl Server {
         // Send Connect message to signaling server
         // SDP exchange will happen later via ice_connect_with_sock
         let my_cert = self.key_cert.cert_der_hash();
-        let connect_msg = crate::signaling::SignalingMessage::Connect(
+        let connect_msg = crate::signaling::SignalingMsg::Connect(
             self.host_id.clone(),
             host_id.clone(),
             my_cert,
@@ -3371,16 +3371,16 @@ impl Server {
     async fn handle_signaling_msg<'a>(
         &mut self,
         signaling_addr: String,
-        msg: crate::signaling::SignalingMessage,
+        msg: crate::signaling::SignalingMsg,
         next: &Next<'a>,
         webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) -> anyhow::Result<()> {
-        use crate::signaling::SignalingMessage;
+        use crate::signaling::SignalingMsg;
 
         match msg {
-            SignalingMessage::Bound(_id) => {
+            SignalingMsg::Bound(_id) => {
                 // Update state to Connected
                 if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
                     state.state = ConnectionState::Connected;
@@ -3389,7 +3389,7 @@ impl Server {
                 Ok(())
             }
 
-            SignalingMessage::Connect(peer_id, _my_id, peer_cert, _initiator) => {
+            SignalingMsg::Connect(peer_id, _my_id, peer_cert, _initiator) => {
                 tracing::info!("Received Connect message from {}", peer_id);
 
                 // Check if we're already connecting to this peer.
@@ -3483,9 +3483,9 @@ impl Server {
             // AcceptStopped handler will do the work). For
             // IdNotFound, it’s not a fatal error so no need to do
             // anything either.
-            SignalingMessage::IdTaken(_endpoint_id, message)
-            | SignalingMessage::IdNotFound(_endpoint_id, message)
-            | SignalingMessage::TimeUp(_endpoint_id, message) => {
+            SignalingMsg::IdTaken(_endpoint_id, message)
+            | SignalingMsg::IdNotFound(_endpoint_id, message)
+            | SignalingMsg::TimeUp(_endpoint_id, message) => {
                 // Send error to editor
                 next.send_notif(
                     NotificationCode::ErrorResponse,

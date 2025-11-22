@@ -469,7 +469,7 @@ pub enum Msg {
 
     // Signaling messages
     /// Message from signaling server. (signaling_addr, message)
-    SignalingMsg(String, crate::signaling::SignalingMessage),
+    SignalingMsg(String, crate::signaling::SignalingMsg),
 
     // Errors
     FailedToConnect(ServerId, String),

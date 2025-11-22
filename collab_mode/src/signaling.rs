@@ -65,7 +65,7 @@ impl From<rusqlite::Error> for SignalingError {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum SignalingMessage {
+pub enum SignalingMsg {
     /// An endpoint sends this message to bind to the id on the
     /// signaling server. The second argument is the certificate hash.
     Bind(EndpointId, CertDerHash),
@@ -86,7 +86,7 @@ pub enum SignalingMessage {
     TimeUp(EndpointId, String),
 }
 
-impl Into<tung::tungstenite::Message> for SignalingMessage {
+impl Into<tung::tungstenite::Message> for SignalingMsg {
     fn into(self) -> tung::tungstenite::Message {
         tung::tungstenite::Message::Text(serde_json::to_string(&self).unwrap())
     }

@@ -119,15 +119,15 @@ mod e2e_tests {
 
     /// Wait for Bound message from signaling server
     async fn wait_for_bound(
-        sig_rx: &mut mpsc::Receiver<(String, crate::signaling::SignalingMessage)>,
+        sig_rx: &mut mpsc::Receiver<(String, crate::signaling::SignalingMsg)>,
         expected_id: &str,
     ) {
-        use crate::signaling::SignalingMessage;
+        use crate::signaling::SignalingMsg;
         let (_addr, msg) = timeout(Duration::from_secs(2), sig_rx.recv())
             .await
             .expect("Timeout waiting for Bound message")
             .expect("Expected Bound message");
-        if let SignalingMessage::Bound(id) = msg {
+        if let SignalingMsg::Bound(id) = msg {
             assert_eq!(id, expected_id, "Bound ID mismatch");
         } else {
             panic!("Expected Bound message, got {:?}", msg);
@@ -155,7 +155,7 @@ mod e2e_tests {
         signaling_url: String,
     ) -> anyhow::Result<(
         crate::signaling::client_new::SignalingClient,
-        mpsc::Receiver<(String, crate::signaling::SignalingMessage)>,
+        mpsc::Receiver<(String, crate::signaling::SignalingMsg)>,
     )> {
         let (sig_tx, mut sig_rx) = mpsc::channel(10);
         let (msg_tx, _msg_rx) = mpsc::channel(10);
@@ -177,20 +177,20 @@ mod e2e_tests {
 
     /// Wait for Connect message and create Sock
     async fn wait_for_connect_and_create_sock(
-        sig_rx: &mut mpsc::Receiver<(String, crate::signaling::SignalingMessage)>,
+        sig_rx: &mut mpsc::Receiver<(String, crate::signaling::SignalingMsg)>,
         sig_client: &crate::signaling::client_new::SignalingClient,
         my_id: String,
         my_cert_hash: String,
         expected_peer_id: Option<String>,
     ) -> anyhow::Result<crate::signaling::client_new::Sock> {
-        use crate::signaling::SignalingMessage;
+        use crate::signaling::SignalingMsg;
 
         let (_addr, msg) = timeout(Duration::from_secs(5), sig_rx.recv())
             .await
             .map_err(|_| anyhow::anyhow!("Timeout waiting for Connect message"))?
             .ok_or(anyhow::anyhow!("Channel closed"))?;
 
-        if let SignalingMessage::Connect(sender_id, receiver_id, sender_cert, initiator) = msg {
+        if let SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator) = msg {
             assert_eq!(receiver_id, my_id, "Connect receiver ID mismatch");
             if let Some(expected) = expected_peer_id {
                 assert_eq!(sender_id, expected, "Connect sender ID mismatch");
@@ -200,7 +200,7 @@ mod e2e_tests {
             // If initiator=false, this is already a response, so don't respond to it
             if initiator {
                 let response =
-                    SignalingMessage::Connect(receiver_id, sender_id.clone(), my_cert_hash, false);
+                    SignalingMsg::Connect(receiver_id, sender_id.clone(), my_cert_hash, false);
                 sig_client.send(response).await?;
             }
 
@@ -223,7 +223,7 @@ mod e2e_tests {
         key_cert_b: ArcKeyCert,
         signaling_url: &str,
     ) -> anyhow::Result<()> {
-        use crate::signaling::SignalingMessage;
+        use crate::signaling::SignalingMsg;
 
         // Create and bind SignalingClients
         let (sig_client_a, mut sig_rx_a) = create_bound_signaling_client(
@@ -245,7 +245,7 @@ mod e2e_tests {
 
         // A initiates connection
         let connect_msg =
-            SignalingMessage::Connect(id_a.clone(), id_b.clone(), cert_hash_a.clone(), true);
+            SignalingMsg::Connect(id_a.clone(), id_b.clone(), cert_hash_a.clone(), true);
         sig_client_a.send(connect_msg).await?;
 
         // B receives Connect and creates Sock
