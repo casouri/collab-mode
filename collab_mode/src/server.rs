@@ -131,6 +131,28 @@ impl RemoteState {
     }
 }
 
+/// State for a signaling server connection.
+#[derive(PartialEq, Eq, Debug, Clone)]
+struct SignalingState {
+    /// Connection state.
+    state: ConnectionState,
+    /// Next reconnect should be attempted after this duration. We
+    /// use exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256. Max at 256.
+    next_reconnect_stride: u64,
+    /// Next reconnect attempt time.
+    next_reconnect_time: std::time::Instant,
+}
+
+impl SignalingState {
+    fn connecting() -> Self {
+        SignalingState {
+            state: ConnectionState::Connecting,
+            next_reconnect_stride: 1,
+            next_reconnect_time: std::time::Instant::now(),
+        }
+    }
+}
+
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server. Once set, this cannot change, because
@@ -155,9 +177,15 @@ pub struct Server {
     active_remotes: HashMap<ServerId, RemoteState>,
     /// Maps host id to site id.
     site_id_map: HashMap<ServerId, SiteId>,
-    /// Whether the server is currently accepting new connections on a
-    /// particular signaling server.
-    accepting: HashMap<String, ()>,
+    /// Active signaling server connections.
+    ///
+    /// This map serves a dual purpose:
+    /// 1. The presence of an address indicates we want to maintain a connection
+    ///    to that signaling server (for accepting connections or connecting to peers)
+    /// 2. The SignalingState tracks the actual connection state and reconnection backoff
+    ///
+    /// To stop maintaining a connection, remove the entry from this map.
+    active_signaling: HashMap<String, SignalingState>,
     /// Configuration manager for the server.
     config: ConfigManager,
     /// Key and certificate for the server.
@@ -166,9 +194,8 @@ pub struct Server {
     trusted_hosts: HashMap<ServerId, String>,
     /// Accept mode for incoming connections
     accept_mode: AcceptMode,
-    /// Map of signaling clients by signaling server address
-    signaling_clients: HashMap<String, crate::signaling::client_new::SignalingClient>,
-    /// Map of host IDs we're currently establishing connections with to their signaling server address
+    /// Map of host IDs we're currently establishing connections with
+    /// to their signaling server address
     pending_connections: Arc<Mutex<HashMap<ServerId, String>>>,
 }
 
@@ -427,12 +454,11 @@ impl Server {
             users: HashMap::new(),
             active_remotes: HashMap::new(),
             site_id_map: HashMap::new(),
-            accepting: HashMap::new(),
+            active_signaling: HashMap::new(),
             config,
             key_cert: Arc::new(key_cert),
             trusted_hosts,
             accept_mode,
-            signaling_clients: HashMap::new(),
             pending_connections: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok(server)
@@ -453,6 +479,12 @@ impl Server {
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
         let (signaling_msg_tx, mut signaling_msg_rx) =
             mpsc::channel::<(String, crate::signaling::SignalingMessage)>(16);
+
+        // Create SignalingChannel
+        let mut signaling_channel = crate::signaling::client_new::SignalingChannel::new(
+            signaling_msg_tx.clone(),
+            msg_tx.clone(),
+        );
 
         // Use the Server's test channel if provided, otherwise use WebChannel
         let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
@@ -480,7 +512,7 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, &*webchannel, &msg_tx, &signaling_msg_tx).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &*webchannel, &msg_tx, &mut signaling_channel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -490,7 +522,7 @@ impl Server {
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, webchannel.clone(), &msg_tx).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, webchannel.clone(), &msg_tx, &mut signaling_channel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -501,7 +533,7 @@ impl Server {
                 // Handle messages from signaling clients.
                 Some((signaling_addr, signaling_msg)) = signaling_msg_rx.recv() => {
                     let next = Next::new(&editor_tx, None, &*webchannel);
-                    let res = self.handle_signaling_msg(signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx).await;
+                    let res = self.handle_signaling_msg(signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx, &mut signaling_channel).await;
                     if let Err(err) = res {
                         tracing::error!("Failed to handle signaling message: {}", err);
                     }
@@ -509,6 +541,7 @@ impl Server {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
                     for (host, remote) in self.active_remotes.iter_mut() {
+                        // If FailedToConnect, don’t try to reconnect.
                         if remote.state != ConnectionState::Disconnected {
                             continue;
                         }
@@ -531,7 +564,49 @@ impl Server {
 
                     let next = Next::new(&editor_tx, None, &*webchannel);
                     for (host, remote) in need_connect {
-                        self.connect(&next, host.clone(), remote.signaling_addr, remote.transport_type, &msg_tx, &signaling_msg_tx).await;
+                        self.handle_connect(
+                            &next, host.clone(),
+                            remote.signaling_addr,
+                            remote.transport_type,
+                            &msg_tx,
+                            &mut signaling_channel).await;
+                    }
+
+                    // Handle signaling server reconnections (presence
+                    // in active_signaling means we want to maintain
+                    // connection).
+                    let mut need_rebind: Vec<String> = Vec::new();
+                    for (addr, state) in self.active_signaling.iter_mut() {
+                        // Unlike remote connection, even if first
+                        // attempt failed we still try to reconnect.
+                        if state.state == ConnectionState::Connected
+                           || state.state == ConnectionState::Connecting {
+                            continue;
+                        }
+                        if Instant::now() < state.next_reconnect_time {
+                            continue;
+                        }
+
+                        tracing::info!("Reconnecting to signaling server {}", addr);
+                        need_rebind.push(addr.clone());
+
+                        let stride = Duration::from_secs(state.next_reconnect_stride);
+                        state.next_reconnect_stride = std::cmp::min(
+                            state.next_reconnect_stride * 2,
+                            256,
+                        );
+                        state.next_reconnect_time = Instant::now() + stride;
+                        state.state = ConnectionState::Connecting;
+                    }
+
+                    for addr in need_rebind {
+                        let result = signaling_channel
+                            .bind(addr.clone(), self.host_id.clone(), self.key_cert.clone())
+                            .await;
+
+                        if let Err(e) = result {
+                            tracing::error!("Failed to reconnect to signaling server {}: {}", addr, e);
+                        }
                     }
 
                 }
@@ -629,7 +704,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &dyn MsgChannel,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
+        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
@@ -652,7 +727,7 @@ impl Server {
             lsp_server::Message::Notification(notif) => {
                 let next = Next::new(editor_tx, None, webchannel);
                 if let Err(err) = self
-                    .handle_editor_notification(&next, notif, msg_tx, signaling_msg_tx)
+                    .handle_editor_notification(&next, notif, msg_tx, signaling_channel)
                     .await
                 {
                     tracing::error!("Failed to handle editor notification: {}", err);
@@ -846,20 +921,15 @@ impl Server {
         next: &Next<'a>,
         notif: lsp_server::Notification,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
+        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
 
-                // Check if we already have a SignalingClient for this address
-                if self.signaling_clients.contains_key(&params.signaling_addr) {
-                    // Already accepting on this address
-                    return Ok(());
-                }
-
-                // Mark as accepting
-                self.accepting.insert(params.signaling_addr.clone(), ());
+                // Track signaling connection state (presence in map = maintain connection)
+                self.active_signaling
+                    .insert(params.signaling_addr.clone(), SignalingState::connecting());
 
                 // Notify editor that we're accepting
                 next.send_notif(
@@ -870,40 +940,39 @@ impl Server {
                 )
                 .await;
 
-                // Create or get SignalingClient
-                // FIX: Use imperative error handling
-                match self
-                    .get_or_create_signaling_client(&params.signaling_addr, &signaling_msg_tx)
-                    .await
-                {
-                    Ok(_client) => {
-                        // Successfully bound to signaling server
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to bind SignalingClient: {}", err);
-                        self.accepting.remove(&params.signaling_addr);
-                        next.send_notif(
-                            NotificationCode::ErrorResponse,
-                            ErrorResponseNote {
-                                code: ErrorCode::InternalError,
-                                file: None,
-                                message: format!("Failed to bind to signaling server: {}", err),
-                            },
-                        )
-                        .await;
-                    }
+                // Bind to signaling server
+                let result = signaling_channel
+                    .bind(
+                        params.signaling_addr.clone(),
+                        self.host_id.clone(),
+                        self.key_cert.clone(),
+                    )
+                    .await;
+
+                if let Err(err) = result {
+                    tracing::error!("Failed to bind SignalingClient: {}", err);
+                    self.active_signaling.remove(&params.signaling_addr);
+                    next.send_notif(
+                        NotificationCode::ErrorResponse,
+                        ErrorResponseNote {
+                            code: ErrorCode::InternalError,
+                            file: None,
+                            message: format!("Failed to bind to signaling server: {}", err),
+                        },
+                    )
+                    .await;
                 }
             }
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
                 if !self.remote_connected(&params.host_id) {
-                    self.connect(
+                    self.handle_connect(
                         next,
                         params.host_id,
                         params.signaling_addr,
                         params.transport_type,
                         msg_tx,
-                        &signaling_msg_tx,
+                        signaling_channel,
                     )
                     .await;
                 } else {
@@ -921,6 +990,22 @@ impl Server {
                 let params: SendInfoParams = serde_json::from_value(notif.params)?;
                 self.handle_send_info_from_editor(next, params).await?;
             }
+            "StopAccepting" => {
+                let params: StopAcceptingParams = serde_json::from_value(notif.params)?;
+
+                // Remove from active_signaling to stop maintaining connection
+                self.active_signaling.remove(&params.signaling_addr);
+
+                // Send AcceptStopped notification
+                next.send_notif(
+                    NotificationCode::AcceptStopped,
+                    serde_json::json!({
+                        "signalingAddr": params.signaling_addr,
+                        "reason": "Stopped accepting by user request",
+                    }),
+                )
+                .await;
+            }
 
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
@@ -937,6 +1022,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), &*webchannel);
@@ -945,7 +1031,20 @@ impl Server {
                 signaling_addr,
                 reason,
             } => {
-                self.accepting.remove(&signaling_addr);
+                // Check if we were accepting (Connected) before the error
+                let was_accepting = self
+                    .active_signaling
+                    .get(&signaling_addr)
+                    .map(|state| state.state == ConnectionState::Connected)
+                    .unwrap_or(false);
+
+                // Update state to Disconnected to trigger reconnection
+                if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
+                    state.state = ConnectionState::Disconnected;
+                    state.next_reconnect_stride = 1;
+                    state.next_reconnect_time = Instant::now();
+                }
+
                 next.send_notif(
                     NotificationCode::AcceptStopped,
                     serde_json::json!({
@@ -1297,12 +1396,9 @@ impl Server {
                     &next,
                     webchannel.clone(),
                     msg_tx,
+                    signaling_channel,
                 )
                 .await
-            }
-            Msg::SignalingErr(signaling_addr, signaling_err) => {
-                self.handle_signaling_err(signaling_addr, signaling_err, &next)
-                    .await
             }
             _ => {
                 let message = format!(
@@ -1320,45 +1416,16 @@ impl Server {
         }
     }
 
-    /// Get an existing SignalingClient for the given address, or create a new one.
-    ///
-    /// This method handles SignalingClient creation and message forwarding setup.
-    async fn get_or_create_signaling_client(
-        &mut self,
-        signaling_addr: &str,
-        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
-    ) -> anyhow::Result<crate::signaling::client_new::SignalingClient> {
-        // Check if client already exists.
-        if let Some(client) = self.signaling_clients.get(signaling_addr) {
-            return Ok(client.clone());
-        }
-
-        // Create new SignalingClient.
-        let client = crate::signaling::client_new::SignalingClient::bind(
-            signaling_addr.to_string(),
-            self.host_id.clone(),
-            self.key_cert.clone(),
-            signaling_msg_tx.clone(),
-        )
-        .await?;
-
-        // Store the client.
-        self.signaling_clients
-            .insert(signaling_addr.to_string(), client.clone());
-
-        Ok(client)
-    }
-
     // **** Handler functions
 
-    async fn connect<'a>(
+    async fn handle_connect<'a>(
         &mut self,
         next: &Next<'a>,
         host_id: ServerId,
         signaling_addr: String,
         _transport_type: webchannel::TransportType,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_msg_tx: &mpsc::Sender<(String, crate::signaling::SignalingMessage)>,
+        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) {
         if host_id == self.host_id {
             return;
@@ -1401,27 +1468,39 @@ impl Server {
             );
         }
 
-        // Get or create SignalingClient for this signaling address
-        let signaling_client = match self
-            .get_or_create_signaling_client(&signaling_addr, signaling_msg_tx)
-            .await
-        {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::error!("Failed to get/create SignalingClient: {}", e);
-                self.pending_connections.lock().unwrap().remove(&host_id);
-                next.send_notif(
-                    NotificationCode::ErrorResponse,
-                    ErrorResponseNote {
-                        code: ErrorCode::NetworkError,
-                        file: None,
-                        message: format!("Failed to connect to signaling server: {}", e),
-                    },
-                )
-                .await;
-                return;
+        // Validate that signaling server is connected
+        // (presence in active_signaling means we maintain the connection)
+        let signaling_state = self.active_signaling.get(&signaling_addr);
+        let error_message = match signaling_state {
+            None => Some(format!("Not bound to signaling server {}", signaling_addr)),
+            Some(state) if state.state == ConnectionState::Connected => None,
+            Some(state) if state.state == ConnectionState::Connecting => Some(format!(
+                "Still connecting to signaling server {}",
+                signaling_addr
+            )),
+            Some(state) if state.state == ConnectionState::Disconnected => {
+                Some(format!("Signaling server {} disconnected", signaling_addr))
             }
+            Some(state) if state.state == ConnectionState::FailedToConnect => {
+                Some(format!("Not bound to signaling server {}", signaling_addr))
+            }
+            _ => Some(format!("Signaling server {} not ready", signaling_addr)),
         };
+
+        if let Some(message) = error_message {
+            tracing::error!("{}", message);
+            self.pending_connections.lock().unwrap().remove(&host_id);
+            next.send_notif(
+                NotificationCode::ErrorResponse,
+                ErrorResponseNote {
+                    code: ErrorCode::NetworkError,
+                    file: None,
+                    message,
+                },
+            )
+            .await;
+            return;
+        }
 
         // Send Connect message to signaling server
         // SDP exchange will happen later via ice_connect_with_sock
@@ -1433,7 +1512,7 @@ impl Server {
             true,
         );
 
-        if let Err(e) = signaling_client.send(connect_msg).await {
+        if let Err(e) = signaling_channel.send(&signaling_addr, connect_msg).await {
             tracing::error!("Failed to send Connect message: {}", e);
             self.pending_connections.lock().unwrap().remove(&host_id);
             next.send_notif(
@@ -2582,8 +2661,13 @@ impl Server {
             });
         }
 
-        // Collect accepting signaling addresses.
-        let accepting: Vec<String> = self.accepting.keys().cloned().collect();
+        // Collect accepting signaling addresses (only Connected servers).
+        let accepting: Vec<String> = self
+            .active_signaling
+            .iter()
+            .filter(|(_addr, state)| state.state == ConnectionState::Connected)
+            .map(|(addr, _state)| addr.clone())
+            .collect();
 
         // Collect owned docs from self.docs.
         let mut live = Vec::new();
@@ -3291,12 +3375,17 @@ impl Server {
         next: &Next<'a>,
         webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) -> anyhow::Result<()> {
         use crate::signaling::SignalingMessage;
 
         match msg {
             SignalingMessage::Bound(_id) => {
-                // TODO: no-op for now, in the future send a message to editor.
+                // Update state to Connected
+                if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
+                    state.state = ConnectionState::Connected;
+                    tracing::info!("Successfully bound to signaling server {}", signaling_addr);
+                }
                 Ok(())
             }
 
@@ -3338,25 +3427,20 @@ impl Server {
                     .unwrap()
                     .insert(peer_id.clone(), signaling_addr.clone());
 
-                // Get the SignalingClient for this signaling server.
-                // If we receives a signaling message, we SHUOLD have
-                // a signaling client, so not using get_or_create
-                // here.
-                let signaling_client = match self.signaling_clients.get(&signaling_addr) {
-                    Some(client) => client.clone(),
-                    None => {
-                        tracing::error!("No SignalingClient for address {}", signaling_addr);
+                // Create a Sock for this peer connection. Sock
+                // handles sending receiving SDP and ICE candidate
+                // to/from the remote peer through signaling server.
+                let sock = match signaling_channel
+                    .create_sock(&signaling_addr, peer_id.clone(), peer_cert.clone())
+                    .await
+                {
+                    Ok(sock) => sock,
+                    Err(e) => {
+                        tracing::error!("Failed to create sock for peer {}: {}", peer_id, e);
                         self.pending_connections.lock().unwrap().remove(&peer_id);
                         return Ok(());
                     }
                 };
-
-                // Create a Sock for this peer connection. Sock
-                // handles sending receiving SDP and ICE candidate
-                // to/from the remote peer through signaling server.
-                let sock = signaling_client
-                    .create_sock(peer_id.clone(), peer_cert.clone())
-                    .await;
 
                 // Establish WebChannel connection using the sock.
                 let key_cert = self.key_cert.clone();
@@ -3365,7 +3449,6 @@ impl Server {
                 let pending_connections = self.pending_connections.clone();
                 let msg_tx_clone = msg_tx.clone();
                 let my_host_id = self.host_id.clone();
-                let signaling_client_clone = signaling_client.clone();
 
                 tokio::spawn(async move {
                     match webchannel_clone
@@ -3381,9 +3464,6 @@ impl Server {
                             tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, e);
                             pending_connections.lock().unwrap().remove(&peer_id_clone);
 
-                            // Clean up Sock from SignalingClient
-                            signaling_client_clone.remove_sock(&peer_id_clone).await;
-
                             // Send FailedToConnect message to main loop
                             let web_msg = webchannel::Message {
                                 host: my_host_id,
@@ -3398,11 +3478,19 @@ impl Server {
                 Ok(())
             }
 
-            SignalingMessage::Error(_endpoint_id, message) => {
+            // For IdTaken and TimeUp, signaling server closes the
+            // connection so we don’t need to do anything here (The
+            // AcceptStopped handler will do the work). For
+            // IdNotFound, it’s not a fatal error so no need to do
+            // anything either.
+            SignalingMessage::IdTaken(_endpoint_id, message)
+            | SignalingMessage::IdNotFound(_endpoint_id, message)
+            | SignalingMessage::TimeUp(_endpoint_id, message) => {
                 // Send error to editor
                 next.send_notif(
                     NotificationCode::ErrorResponse,
                     ErrorResponseNote {
+                        // TODO: More appropriate error code.
                         code: ErrorCode::NetworkError,
                         file: None,
                         message: format!("Signaling error: {}", message),
@@ -3414,58 +3502,6 @@ impl Server {
 
             _ => {
                 // Other variants are no-op
-                Ok(())
-            }
-        }
-    }
-
-    /// Handle SignalingErr from signaling client.
-    async fn handle_signaling_err<'a>(
-        &mut self,
-        signaling_addr: String,
-        error: crate::signaling::SignalingError,
-        next: &Next<'a>,
-    ) -> anyhow::Result<()> {
-        use crate::signaling::SignalingError;
-
-        match error {
-            SignalingError::ConnectionBroke => {
-                // Remove SignalingClient from map
-                self.signaling_clients.remove(&signaling_addr);
-
-                // Remove from accepting map
-                self.accepting.remove(&signaling_addr);
-
-                // Send AcceptStopped notification
-                next.send_notif(
-                    NotificationCode::AcceptStopped,
-                    serde_json::json!({
-                        "signalingAddr": signaling_addr,
-                        "reason": "Connection to signaling server broke",
-                    }),
-                )
-                .await;
-
-                // Clear pending connections for this signaling server only
-                self.pending_connections
-                    .lock()
-                    .unwrap()
-                    .retain(|_peer_id, addr| addr != &signaling_addr);
-
-                Ok(())
-            }
-
-            SignalingError::OtherError(message) => {
-                // Send error notification to editor
-                next.send_notif(
-                    NotificationCode::ErrorResponse,
-                    ErrorResponseNote {
-                        code: ErrorCode::InternalError,
-                        file: None,
-                        message: format!("Signaling error: {}", message),
-                    },
-                )
-                .await;
                 Ok(())
             }
         }

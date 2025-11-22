@@ -125,6 +125,12 @@ pub struct AcceptConnectionParams {
     pub transport_type: TransportType,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopAcceptingParams {
+    pub signaling_addr: String,
+}
+
 // **** Update config (accept mode and trusted hosts)
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -464,8 +470,6 @@ pub enum Msg {
     // Signaling messages
     /// Message from signaling server. (signaling_addr, message)
     SignalingMsg(String, crate::signaling::SignalingMessage),
-    /// Error from signaling connection. (signaling_addr, error)
-    SignalingErr(String, crate::signaling::SignalingError),
 
     // Errors
     FailedToConnect(ServerId, String),

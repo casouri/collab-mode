@@ -107,7 +107,7 @@ impl Server {
         if id_taken {
             let _ = msg_tx
                 .send(
-                    SignalingMessage::Error(
+                    SignalingMessage::IdTaken(
                         id.clone(),
                         "ID already taken or key mismatch".to_string(),
                     )
@@ -121,7 +121,7 @@ impl Server {
         let mut endpoint_map = self.endpoint_map.write().await;
         if endpoint_map.contains_key(&id) {
             let _ = msg_tx
-                .send(SignalingMessage::Error(id.clone(), "ID already taken".to_string()).into())
+                .send(SignalingMessage::IdTaken(id.clone(), "ID already taken".to_string()).into())
                 .await;
             return Err(SignalingError::OtherError("ID already taken".to_string()));
         }
@@ -169,7 +169,7 @@ impl Server {
             }
             None => {
                 // Didn't find the endpoint with this id.
-                let resp = SignalingMessage::Error(
+                let resp = SignalingMessage::IdNotFound(
                     sender_id.clone(),
                     format!("No endpoint found for id: {}", receiver_id),
                 );
@@ -282,7 +282,7 @@ async fn handle_message(
                             SignalingMessage::SDP(sender_id.clone(), receiver_id.clone(), sdp);
                         their_info.msg_tx.send(msg.into()).await?;
                     } else {
-                        let msg = SignalingMessage::Error(
+                        let msg = SignalingMessage::IdNotFound(
                             sender_id.clone(),
                             format!("No endpoint found for id: {}", receiver_id),
                         );
@@ -305,7 +305,7 @@ async fn handle_message(
                         );
                         their_info.msg_tx.send(msg.into()).await?;
                     } else {
-                        let msg = SignalingMessage::Error(
+                        let msg = SignalingMessage::IdNotFound(
                             sender_id.clone(),
                             format!("No endpoint found for id: {}", receiver_id),
                         );
@@ -359,7 +359,7 @@ async fn send_receive_stream(
         tokio::select! {
             _ = time_rx.recv() => {
                 // Note: we don't know the endpoint_id here, so use empty string
-                let err_msg = SignalingMessage::Error(
+                let err_msg = SignalingMessage::TimeUp(
                     "".to_string(),
                     format!("Allocated time of {} hours is up", allocated_hrs)
                 );

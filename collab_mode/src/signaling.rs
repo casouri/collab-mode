@@ -78,8 +78,12 @@ pub enum SignalingMessage {
     SDP(EndpointId, EndpointId, SDP),
     /// Send candidate. (sender_id, receiver_id, sender_candidate).
     Candidate(EndpointId, EndpointId, ICECandidate),
-    /// Error message. (endpoint_id, error_description).
-    Error(EndpointId, String),
+    /// ID already taken error. (endpoint_id, error_description).
+    IdTaken(EndpointId, String),
+    /// ID not found error. (endpoint_id, error_description).
+    IdNotFound(EndpointId, String),
+    /// Time's up error. (endpoint_id, error_description).
+    TimeUp(EndpointId, String),
 }
 
 impl Into<tung::tungstenite::Message> for SignalingMessage {

@@ -16,6 +16,99 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite as tung;
 use tracing::Instrument;
 
+/// Manages multiple signaling clients, one per signaling server address.
+pub struct SignalingChannel {
+    /// Map of signaling clients by signaling server address
+    clients: Arc<Mutex<HashMap<String, SignalingClient>>>,
+    /// Channel to send signaling messages to Server
+    signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+    /// Channel to send internal messages to Server
+    msg_tx: mpsc::Sender<crate::webchannel::Message>,
+}
+
+impl SignalingChannel {
+    /// Create a new SignalingChannel.
+    pub fn new(
+        signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+        msg_tx: mpsc::Sender<crate::webchannel::Message>,
+    ) -> Self {
+        SignalingChannel {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            signaling_msg_tx,
+            msg_tx,
+        }
+    }
+
+    /// Bind to a signaling server address.
+    ///
+    /// Creates a new SignalingClient for the given address if one
+    /// doesn't exist. Doesn't block
+    pub async fn bind(
+        &mut self,
+        addr: String,
+        id: EndpointId,
+        key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()> {
+        if self.clients.lock().unwrap().contains_key(&addr) {
+            return Ok(());
+        }
+
+        // Create cleanup closure that removes client from the map
+        let clients_clone = self.clients.clone();
+        let addr_clone = addr.clone();
+        let cleanup = Box::new(move || {
+            clients_clone.lock().unwrap().remove(&addr_clone);
+        });
+
+        let client = SignalingClient::bind(
+            addr.clone(),
+            id,
+            key_cert,
+            self.signaling_msg_tx.clone(),
+            self.msg_tx.clone(),
+            Some(cleanup),
+        )
+        .await?;
+
+        self.clients.lock().unwrap().insert(addr, client);
+        Ok(())
+    }
+
+    /// Send a message to a signaling server.
+    pub async fn send(&self, signaling_addr: &str, msg: SignalingMessage) -> anyhow::Result<()> {
+        let client = {
+            let clients = self.clients.lock().unwrap();
+            clients
+                .get(signaling_addr)
+                .ok_or_else(|| anyhow!("No signaling client for address {}", signaling_addr))?
+                .clone()
+        };
+        client.send(msg).await
+    }
+
+    /// Create a Sock for communicating with a peer through a signaling server.
+    pub async fn create_sock(
+        &self,
+        signaling_addr: &str,
+        peer_id: EndpointId,
+        peer_cert: CertDerHash,
+    ) -> anyhow::Result<Sock> {
+        let client = {
+            let clients = self.clients.lock().unwrap();
+            clients
+                .get(signaling_addr)
+                .ok_or_else(|| anyhow!("No signaling client for address {}", signaling_addr))?
+                .clone()
+        };
+        Ok(client.create_sock(peer_id, peer_cert).await)
+    }
+
+    /// Remove a signaling client.
+    pub fn remove(&mut self, signaling_addr: &str) {
+        self.clients.lock().unwrap().remove(signaling_addr);
+    }
+}
+
 /// Main signaling client that manages connection to signaling server
 #[derive(Clone)]
 pub struct SignalingClient {
@@ -29,10 +122,14 @@ pub struct SignalingClient {
     msg_out_tx: mpsc::Sender<SignalingMessage>,
     /// Whether we're bound to signaling server
     bound: Arc<Mutex<bool>>,
-    /// Map of active peer connections (peer_id -> sock tx)
-    socks: Arc<Mutex<HashMap<EndpointId, SockTx>>>,
+    /// Map of active peer connections, when we receive SDP or
+    /// candidate for a peer from the main ws stream, use these tx to
+    /// send to the appropriate Sock.
+    sock_tx_map: Arc<Mutex<HashMap<EndpointId, SockTx>>>,
     /// Background task handle (wrapped in Arc for Clone)
     _task_handle: Arc<JoinHandle<()>>,
+    /// Shutdown signal sender - when dropped, signals task to exit
+    _shutdown_tx: mpsc::Sender<()>,
 }
 
 /// Transmission end of a Sock
@@ -61,9 +158,14 @@ impl SignalingClient {
         id: EndpointId,
         my_key_cert: ArcKeyCert,
         signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+        msg_tx: mpsc::Sender<crate::webchannel::Message>,
+        cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> anyhow::Result<Self> {
         // Create channels for outgoing messages.
         let (msg_out_tx, msg_out_rx) = mpsc::channel(16);
+
+        // Create shutdown channel.
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
         // Shared state.
         let bound = Arc::new(Mutex::new(false));
@@ -83,15 +185,19 @@ impl SignalingClient {
             signaling_addr = %addr
         );
 
+        let msg_tx_clone = msg_tx.clone();
         let task_handle = tokio::spawn(
             send_receive_stream(
                 addr_clone,
                 id_clone,
                 my_key_cert_clone,
                 signaling_msg_tx_clone,
+                msg_tx_clone,
                 msg_out_rx,
                 bound_clone,
                 socks_clone,
+                shutdown_rx,
+                cleanup,
             )
             .instrument(span),
         );
@@ -109,8 +215,9 @@ impl SignalingClient {
             _my_key_cert: my_key_cert,
             msg_out_tx,
             bound,
-            socks,
+            sock_tx_map: socks,
             _task_handle: Arc::new(task_handle),
+            _shutdown_tx: shutdown_tx,
         })
     }
 
@@ -132,7 +239,7 @@ impl SignalingClient {
 
         // Add to socks map.
         {
-            let mut socks = self.socks.lock().unwrap();
+            let mut socks = self.sock_tx_map.lock().unwrap();
             socks.insert(
                 peer_id.clone(),
                 SockTx {
@@ -159,7 +266,7 @@ impl SignalingClient {
 
     /// Remove a Sock from the map.
     pub async fn remove_sock(&self, peer_id: &str) {
-        self.socks.lock().unwrap().remove(peer_id);
+        self.sock_tx_map.lock().unwrap().remove(peer_id);
     }
 }
 
@@ -248,21 +355,27 @@ async fn send_receive_stream(
     id: EndpointId,
     _my_key_cert: ArcKeyCert,
     signaling_msg_tx: mpsc::Sender<(String, SignalingMessage)>,
+    msg_tx: mpsc::Sender<crate::webchannel::Message>,
     mut msg_out_rx: mpsc::Receiver<SignalingMessage>,
     bound: Arc<Mutex<bool>>,
     socks: Arc<Mutex<HashMap<EndpointId, SockTx>>>,
+    mut shutdown_rx: mpsc::Receiver<()>,
+    cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
 ) {
     // Connect to signaling server
     let stream_result = tung::connect_async(&addr).await;
     if let Err(e) = stream_result {
         tracing::error!("Failed to connect to signaling server {}: {}", addr, e);
-        // Send error as SignalingMessage::Error
-        let _ = signaling_msg_tx
-            .send((
-                addr.clone(),
-                SignalingMessage::Error(id.clone(), format!("Failed to connect: {}", e)),
-            ))
-            .await;
+        // Send AcceptStopped message
+        let web_msg = crate::webchannel::Message {
+            host: id.clone(),
+            body: crate::message::Msg::AcceptStopped {
+                signaling_addr: addr.clone(),
+                reason: format!("Failed to connect: {}", e),
+            },
+            req_id: None,
+        };
+        let _ = msg_tx.send(web_msg).await;
         return;
     }
 
@@ -292,37 +405,57 @@ async fn send_receive_stream(
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to parse signaling message: {}", e);
-                                    let _ = signaling_msg_tx.send((
-                                        addr.clone(),
-                                        SignalingMessage::Error(id.clone(), format!("Parse error: {}", e)),
-                                    )).await;
+                                    let web_msg = crate::webchannel::Message {
+                                        host: id.clone(),
+                                        body: crate::message::Msg::AcceptStopped {
+                                            signaling_addr: addr.clone(),
+                                            reason: format!("Parse error: {}", e),
+                                        },
+                                        req_id: None,
+                                    };
+                                    let _ = msg_tx.send(web_msg).await;
                                 }
                             }
                         }
                         Ok(tung::tungstenite::Message::Close(_)) => {
                             tracing::info!("Signaling server closed connection");
-                            let _ = signaling_msg_tx.send((
-                                addr.clone(),
-                                SignalingMessage::Error(id.clone(), "Connection closed".to_string()),
-                            )).await;
+                            let web_msg = crate::webchannel::Message {
+                                host: id.clone(),
+                                body: crate::message::Msg::AcceptStopped {
+                                    signaling_addr: addr.clone(),
+                                    reason: "Connection closed".to_string(),
+                                },
+                                req_id: None,
+                            };
+                            let _ = msg_tx.send(web_msg).await;
                             break;
                         }
                         Err(e) => {
                             tracing::error!("Websocket error: {}", e);
-                            let _ = signaling_msg_tx.send((
-                                addr.clone(),
-                                SignalingMessage::Error(id.clone(), format!("Websocket error: {}", e)),
-                            )).await;
+                            let web_msg = crate::webchannel::Message {
+                                host: id.clone(),
+                                body: crate::message::Msg::AcceptStopped {
+                                    signaling_addr: addr.clone(),
+                                    reason: format!("Websocket error: {}", e),
+                                },
+                                req_id: None,
+                            };
+                            let _ = msg_tx.send(web_msg).await;
                             break;
                         }
                         _ => {}
                     }
                 } else {
                     tracing::info!("Websocket stream closed");
-                    let _ = signaling_msg_tx.send((
-                        addr.clone(),
-                        SignalingMessage::Error(id.clone(), "Websocket stream closed".to_string()),
-                    )).await;
+                    let web_msg = crate::webchannel::Message {
+                        host: id.clone(),
+                        body: crate::message::Msg::AcceptStopped {
+                            signaling_addr: addr.clone(),
+                            reason: "Websocket stream closed".to_string(),
+                        },
+                        req_id: None,
+                    };
+                    let _ = msg_tx.send(web_msg).await;
                     break;
                 }
             }
@@ -333,10 +466,15 @@ async fn send_receive_stream(
                     let text = serde_json::to_string(&signaling_msg).unwrap();
                     if let Err(e) = ws_tx.send(tung::tungstenite::Message::Text(text)).await {
                         tracing::error!("Failed to send to websocket: {}", e);
-                        let _ = signaling_msg_tx.send((
-                            addr.clone(),
-                            SignalingMessage::Error(id.clone(), format!("Failed to send: {}", e)),
-                        )).await;
+                        let web_msg = crate::webchannel::Message {
+                            host: id.clone(),
+                            body: crate::message::Msg::AcceptStopped {
+                                signaling_addr: addr.clone(),
+                                reason: format!("Failed to send: {}", e),
+                            },
+                            req_id: None,
+                        };
+                        let _ = msg_tx.send(web_msg).await;
                         break;
                     }
                 } else {
@@ -344,11 +482,23 @@ async fn send_receive_stream(
                     break;
                 }
             }
+
+            // Shutdown signal
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Shutdown signal received, exiting cleanly");
+                break;
+            }
         }
     }
 
-    // Cleanup
+    // Cleanup: clear all socks to close peer connections
+    socks.lock().unwrap().clear();
     tracing::info!("send_receive_stream for {} exiting", addr);
+
+    // Call cleanup function if provided
+    if let Some(cleanup) = cleanup {
+        cleanup();
+    }
 }
 
 /// Handle an incoming signaling message and route it appropriately.
@@ -382,7 +532,9 @@ async fn handle_incoming_message(
             };
 
             if let Some(sdp_tx) = sock_tx {
-                let _ = sdp_tx.send(sdp.clone()).await;
+                if sdp_tx.send(sdp.clone()).await.is_err() {
+                    tracing::debug!("Failed to send SDP to peer {}", sender_id);
+                }
             } else {
                 tracing::debug!("Received SDP from unknown peer {}, dropping", sender_id);
             }
@@ -396,7 +548,9 @@ async fn handle_incoming_message(
             };
 
             if let Some(candidate_tx) = sock_tx {
-                let _ = candidate_tx.send(candidate.clone());
+                if candidate_tx.send(candidate.clone()).is_err() {
+                    tracing::debug!("Failed to send candidate to peer {}", sender_id);
+                }
             } else {
                 tracing::debug!(
                     "Received candidate from unknown peer {}, dropping",
@@ -405,7 +559,9 @@ async fn handle_incoming_message(
             }
         }
 
-        SignalingMessage::Error(_endpoint_id, _message) => {
+        SignalingMessage::IdTaken(_endpoint_id, _message)
+        | SignalingMessage::IdNotFound(_endpoint_id, _message)
+        | SignalingMessage::TimeUp(_endpoint_id, _message) => {
             // Forward error to Server
             let _ = signaling_msg_tx.send((addr.to_string(), msg)).await;
         }

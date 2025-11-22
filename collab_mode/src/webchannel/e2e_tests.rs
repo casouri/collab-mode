@@ -158,11 +158,14 @@ mod e2e_tests {
         mpsc::Receiver<(String, crate::signaling::SignalingMessage)>,
     )> {
         let (sig_tx, mut sig_rx) = mpsc::channel(10);
+        let (msg_tx, _msg_rx) = mpsc::channel(10);
         let client = crate::signaling::client_new::SignalingClient::bind(
             signaling_url,
             id.clone(),
             key_cert,
             sig_tx,
+            msg_tx,
+            None,
         )
         .await?;
 
