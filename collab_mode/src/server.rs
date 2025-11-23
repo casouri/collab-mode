@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -110,6 +110,9 @@ pub enum ConnectionState {
     Connected,
     // Trying to (re)connect.
     Connecting,
+    // Waiting for signaling server to connect before we can attempt
+    // connection to this remote.
+    Pending,
     // Connection was established but then broke. We try to reconnect
     // in this case.
     Disconnected,
@@ -137,6 +140,16 @@ impl RemoteState {
     fn connecting(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
         RemoteState {
             state: ConnectionState::Connecting,
+            next_reconnect_stride: 1,
+            signaling_addr,
+            transport_type,
+            next_reconnect_time: std::time::Instant::now(),
+        }
+    }
+
+    fn pending(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
+        RemoteState {
+            state: ConnectionState::Pending,
             next_reconnect_stride: 1,
             signaling_addr,
             transport_type,
@@ -209,9 +222,6 @@ pub struct Server {
     key_cert: Arc<KeyCert>,
     /// Trusted hosts with their certificate hashes
     trusted_hosts: HashMap<ServerId, String>,
-    /// Map of host IDs we're currently establishing connections with
-    /// to their signaling server address
-    pending_connections: Arc<Mutex<HashMap<ServerId, String>>>,
 }
 
 // *** Impl Doc
@@ -472,7 +482,6 @@ impl Server {
             config,
             key_cert: Arc::new(key_cert),
             trusted_hosts,
-            pending_connections: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok(server)
     }
@@ -576,7 +585,10 @@ impl Server {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
                     for (host, remote) in self.active_remotes.iter_mut() {
-                        // If FailedToConnect, don’t try to reconnect.
+                        // Only reconnect Disconnected remotes. Skip Pending
+                        // (waiting for signaling), Connecting (already trying),
+                        // Connected (already connected), and FailedToConnect
+                        // (won't retry).
                         if remote.state != ConnectionState::Disconnected {
                             continue;
                         }
@@ -599,7 +611,7 @@ impl Server {
 
                     let next = Next::new(&editor_tx, None, &*webchannel);
                     for (host, remote) in need_connect {
-                        self.handle_connect(
+                        self.try_connect_remote(
                             &next, host.clone(),
                             remote.signaling_addr,
                             remote.transport_type,
@@ -1010,7 +1022,7 @@ impl Server {
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
                 if !self.remote_connected(&params.host_id) {
-                    self.handle_connect(
+                    self.try_connect_remote(
                         next,
                         params.host_id,
                         params.signaling_addr,
@@ -1467,12 +1479,12 @@ impl Server {
 
     // **** Handler functions
 
-    async fn handle_connect<'a>(
+    async fn try_connect_remote<'a>(
         &mut self,
         next: &Next<'a>,
         host_id: ServerId,
         signaling_addr: String,
-        _transport_type: webchannel::TransportType,
+        transport_type: webchannel::TransportType,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) {
@@ -1480,24 +1492,20 @@ impl Server {
             return;
         }
 
-        // Check if we're already connecting to avoid duplicates
-        if self
-            .pending_connections
-            .lock()
-            .unwrap()
-            .contains_key(&host_id)
-        {
+        // Check if we're already connecting or pending to avoid duplicates.
+        let is_connecting_or_pending = self.active_remotes.get(&host_id).map_or(false, |r| {
+            matches!(
+                r.state,
+                ConnectionState::Connecting | ConnectionState::Pending
+            )
+        });
+        if is_connecting_or_pending {
             tracing::info!(
-                "Already connecting to {}, skipping duplicate request",
+                "Already connecting/pending to {}, skipping duplicate request",
                 host_id
             );
             return;
         }
-
-        // Don’t set pending_connections here, we check
-        // pending_connections again when receiving Connect message,
-        // and set the flag to true there, where we actually starts
-        // establishing connection.
 
         next.send_notif(
             NotificationCode::Connecting,
@@ -1507,48 +1515,73 @@ impl Server {
         )
         .await;
 
-        // If there's an existing remote, keep the reconnect time/stride.
+        // Check if signaling server is connected
+        let signaling_state = self.active_signaling.get(&signaling_addr);
+        let signaling_ready = matches!(
+            signaling_state,
+            Some(state) if state.state == ConnectionState::Connected
+        );
+
+        if !signaling_ready {
+            // Signaling server not ready. Set remote to Pending state and
+            // ensure we're connecting to the signaling server.
+            tracing::info!(
+                "Signaling server {} not ready, setting remote {} to Pending",
+                signaling_addr,
+                host_id
+            );
+
+            // Set remote state to Pending
+            if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+                remote.state = ConnectionState::Pending;
+            } else {
+                self.active_remotes.insert(
+                    host_id.clone(),
+                    RemoteState::pending(signaling_addr.clone(), transport_type.clone()),
+                );
+            }
+
+            // If signaling server is not being tracked or failed, trigger
+            // connection by sending AcceptConnection notification to self.
+            match signaling_state {
+                None
+                | Some(SignalingState {
+                    state: ConnectionState::FailedToConnect,
+                    ..
+                }) => {
+                    tracing::info!(
+                        "Triggering connection to signaling server {}",
+                        signaling_addr
+                    );
+                    let notif = lsp_server::Notification {
+                        method: "AcceptConnection".to_string(),
+                        params: serde_json::json!({
+                            "signalingAddr": signaling_addr,
+                            "transportType": transport_type,
+                        }),
+                    };
+                    let _ = next
+                        .editor_tx
+                        .send(lsp_server::Message::Notification(notif))
+                        .await;
+                }
+                _ => {
+                    // Signaling server is already Connecting or Disconnected,
+                    // reconnection will be handled by timer loop
+                }
+            }
+
+            return;
+        }
+
+        // Signaling server is ready, set remote to Connecting
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
             remote.state = ConnectionState::Connecting;
         } else {
             self.active_remotes.insert(
                 host_id.clone(),
-                RemoteState::connecting(signaling_addr.clone(), webchannel::TransportType::SCTP),
+                RemoteState::connecting(signaling_addr.clone(), transport_type),
             );
-        }
-
-        // Validate that signaling server is connected
-        // (presence in active_signaling means we maintain the connection)
-        let signaling_state = self.active_signaling.get(&signaling_addr);
-        let error_message = match signaling_state {
-            None => Some(format!("Not bound to signaling server {}", signaling_addr)),
-            Some(state) if state.state == ConnectionState::Connected => None,
-            Some(state) if state.state == ConnectionState::Connecting => Some(format!(
-                "Still connecting to signaling server {}",
-                signaling_addr
-            )),
-            Some(state) if state.state == ConnectionState::Disconnected => {
-                Some(format!("Signaling server {} disconnected", signaling_addr))
-            }
-            Some(state) if state.state == ConnectionState::FailedToConnect => {
-                Some(format!("Not bound to signaling server {}", signaling_addr))
-            }
-            _ => Some(format!("Signaling server {} not ready", signaling_addr)),
-        };
-
-        if let Some(message) = error_message {
-            tracing::error!("{}", message);
-            self.pending_connections.lock().unwrap().remove(&host_id);
-            next.send_notif(
-                NotificationCode::ErrorResponse,
-                ErrorResponseNote {
-                    code: ErrorCode::NetworkError,
-                    file: None,
-                    message,
-                },
-            )
-            .await;
-            return;
         }
 
         // Send Connect message to signaling server
@@ -1563,13 +1596,20 @@ impl Server {
 
         if let Err(e) = signaling_channel.send(&signaling_addr, connect_msg).await {
             tracing::error!("Failed to send Connect message: {}", e);
-            self.pending_connections.lock().unwrap().remove(&host_id);
+
+            // Update remote state to FailedToConnect
+            if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+                remote.state = ConnectionState::FailedToConnect;
+                remote.next_reconnect_stride = 1;
+                remote.next_reconnect_time = Instant::now();
+            }
+
+            // Notify editor
             next.send_notif(
-                NotificationCode::ErrorResponse,
-                ErrorResponseNote {
-                    code: ErrorCode::NetworkError,
-                    file: None,
-                    message: format!("Failed to send Connect message: {}", e),
+                NotificationCode::ConnectionBroke,
+                ConnectionBrokeNote {
+                    host_id,
+                    reason: format!("Failed to send Connect message: {}", e),
                 },
             )
             .await;
@@ -3429,6 +3469,34 @@ impl Server {
                     state.state = ConnectionState::Connected;
                     tracing::info!("Successfully bound to signaling server {}", signaling_addr);
                 }
+
+                // Retry all pending connections waiting for this signaling server
+                let mut pending_remotes: Vec<(String, RemoteState)> = Vec::new();
+                for (host_id, remote) in self.active_remotes.iter() {
+                    if remote.state == ConnectionState::Pending
+                        && remote.signaling_addr == signaling_addr
+                    {
+                        tracing::info!(
+                            "Retrying pending connection to {} via {}",
+                            host_id,
+                            signaling_addr
+                        );
+                        pending_remotes.push((host_id.clone(), remote.clone()));
+                    }
+                }
+
+                for (host_id, remote) in pending_remotes {
+                    self.try_connect_remote(
+                        next,
+                        host_id,
+                        remote.signaling_addr,
+                        remote.transport_type,
+                        msg_tx,
+                        signaling_channel,
+                    )
+                    .await;
+                }
+
                 Ok(())
             }
 
@@ -3436,13 +3504,11 @@ impl Server {
                 tracing::info!("Received Connect message from {}", peer_id);
 
                 // Check if we're already connecting to this peer.
-                if webchannel.is_connected(&peer_id)
-                    || self
-                        .pending_connections
-                        .lock()
-                        .unwrap()
-                        .contains_key(&peer_id)
-                {
+                let is_connecting = self
+                    .active_remotes
+                    .get(&peer_id)
+                    .map_or(false, |r| matches!(r.state, ConnectionState::Connecting));
+                if webchannel.is_connected(&peer_id) || is_connecting {
                     tracing::info!(
                         "Already connecting/connected to {}, ignoring duplicate connection request",
                         peer_id
@@ -3464,11 +3530,18 @@ impl Server {
                     return Ok(());
                 }
 
-                // Mark as pending to prevent duplicate connection attempts.
-                self.pending_connections
-                    .lock()
-                    .unwrap()
-                    .insert(peer_id.clone(), signaling_addr.clone());
+                // Mark as connecting to prevent duplicate connection attempts.
+                if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
+                    remote.state = ConnectionState::Connecting;
+                } else {
+                    self.active_remotes.insert(
+                        peer_id.clone(),
+                        RemoteState::connecting(
+                            signaling_addr.clone(),
+                            webchannel::TransportType::SCTP,
+                        ),
+                    );
+                }
 
                 // Create a Sock for this peer connection. Sock
                 // handles sending receiving SDP and ICE candidate
@@ -3480,7 +3553,6 @@ impl Server {
                     Ok(sock) => sock,
                     Err(e) => {
                         tracing::error!("Failed to create sock for peer {}: {}", peer_id, e);
-                        self.pending_connections.lock().unwrap().remove(&peer_id);
                         return Ok(());
                     }
                 };
@@ -3489,7 +3561,6 @@ impl Server {
                 let key_cert = self.key_cert.clone();
                 let webchannel_clone = webchannel.clone();
                 let peer_id_clone = peer_id.clone();
-                let pending_connections = self.pending_connections.clone();
                 let msg_tx_clone = msg_tx.clone();
                 let my_host_id = self.host_id.clone();
 
@@ -3500,12 +3571,9 @@ impl Server {
                     {
                         Ok(()) => {
                             tracing::info!("Successfully connected to peer {}", peer_id_clone);
-                            // Remove from pending after successful connection
-                            pending_connections.lock().unwrap().remove(&peer_id_clone);
                         }
                         Err(e) => {
                             tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, e);
-                            pending_connections.lock().unwrap().remove(&peer_id_clone);
 
                             // Send FailedToConnect message to main loop
                             let web_msg = webchannel::Message {
