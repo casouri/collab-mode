@@ -33,7 +33,7 @@ async fn test_open_file_basic() {
         .unwrap();
 
     // Request to open a file.
-    let (file_desc, site_id, content) = setup
+    let (file_desc, _site_id, content) = setup
         .hub
         .editor
         .open_file(serde_json::json!({
@@ -47,7 +47,6 @@ async fn test_open_file_basic() {
     // Verify response.
     assert_eq!(content, "Hello from test.txt");
     assert!(file_desc.is_object());
-    assert!(site_id >= 0);
 
     setup.cleanup();
 }

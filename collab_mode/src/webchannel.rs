@@ -57,8 +57,6 @@ pub trait MsgChannel: Send + Sync {
         msg: Msg,
     ) -> anyhow::Result<()>;
 
-    fn is_connected(&self, remote_hostid: &ServerId) -> bool;
-
     /// Connect to a peer using a Sock from SignalingClient.
     ///
     /// For WebChannel: sock parameter is required (unwrapped).
@@ -113,10 +111,6 @@ impl WebChannel {
 
     pub fn hostid(&self) -> ServerId {
         self.my_hostid.clone()
-    }
-
-    pub fn is_connected(&self, remote_hostid: &ServerId) -> bool {
-        self.assoc_tx.lock().unwrap().contains_key(remote_hostid)
     }
 
     /// Connect using an existing Sock from SignalingClient.
@@ -401,10 +395,6 @@ impl MsgChannel for WebChannel {
         msg: Msg,
     ) -> anyhow::Result<()> {
         self.send(recipient, req_id, msg).await
-    }
-
-    fn is_connected(&self, remote_hostid: &ServerId) -> bool {
-        self.is_connected(remote_hostid)
     }
 
     async fn connect(
@@ -922,10 +912,6 @@ pub struct TestWebChannel {
 
 #[async_trait]
 impl MsgChannel for TestWebChannel {
-    fn is_connected(&self, _remote_hostid: &ServerId) -> bool {
-        true
-    }
-
     async fn send(
         &self,
         recipient: &ServerId,

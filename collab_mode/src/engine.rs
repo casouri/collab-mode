@@ -2038,7 +2038,6 @@ mod tests {
     #[test]
     fn undo() {
         let site_id = 1;
-        let doc_id = 1;
         let mut client_engine = ClientEngine::new(site_id, 1, 0);
         // op1: original edit.
         let op1 = make_editor_fatop(
