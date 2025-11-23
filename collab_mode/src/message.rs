@@ -457,19 +457,10 @@ pub enum Msg {
     Info(Info),
     InfoFromClient(Info),
     InfoFromServer(Info),
-    // Signaling addr, reason
-    AcceptStopped {
-        signaling_addr: String,
-        reason: String,
-    },
 
     // Misc
     IceProgress(ServerId, String),
     Hey(HeyMessage),
-
-    // Signaling messages
-    /// Message from signaling server. (signaling_addr, message)
-    SignalingMsg(String, crate::signaling::SignalingMsg),
 
     // Errors
     FailedToConnect(ServerId, String),

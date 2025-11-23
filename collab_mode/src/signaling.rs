@@ -91,3 +91,16 @@ impl Into<tung::tungstenite::Message> for SignalingMsg {
         tung::tungstenite::Message::Text(serde_json::to_string(&self).unwrap())
     }
 }
+
+/// Error indicating that accepting connections has stopped.
+/// Contains the reason for stopping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptStopped(pub String);
+
+/// Message from signaling channel. Contains either a successful
+/// signaling message or an error indicating connection stopped.
+#[derive(Debug, Clone)]
+pub struct SignalingMessage {
+    pub signaling_addr: String,
+    pub msg: Result<SignalingMsg, AcceptStopped>,
+}

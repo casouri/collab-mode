@@ -478,13 +478,11 @@ impl Server {
 
         let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
         let (signaling_msg_tx, mut signaling_msg_rx) =
-            mpsc::channel::<(String, crate::signaling::SignalingMsg)>(16);
+            mpsc::channel::<crate::signaling::SignalingMessage>(16);
 
         // Create SignalingChannel
-        let mut signaling_channel = crate::signaling::client_new::SignalingChannel::new(
-            signaling_msg_tx.clone(),
-            msg_tx.clone(),
-        );
+        let mut signaling_channel =
+            crate::signaling::client_new::SignalingChannel::new(signaling_msg_tx.clone());
 
         // Use the Server's test channel if provided, otherwise use WebChannel
         let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
@@ -522,7 +520,7 @@ impl Server {
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, webchannel.clone(), &msg_tx, &mut signaling_channel).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, webchannel.clone()).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -531,11 +529,35 @@ impl Server {
                     }
                 },
                 // Handle messages from signaling clients.
-                Some((signaling_addr, signaling_msg)) = signaling_msg_rx.recv() => {
+                Some(signaling_message) = signaling_msg_rx.recv() => {
                     let next = Next::new(&editor_tx, None, &*webchannel);
-                    let res = self.handle_signaling_msg(signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx, &mut signaling_channel).await;
-                    if let Err(err) = res {
-                        tracing::error!("Failed to handle signaling message: {}", err);
+                    match signaling_message.msg {
+                        Ok(signaling_msg) => {
+                            let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx, &mut signaling_channel).await;
+                            if let Err(err) = res {
+                                tracing::error!("Failed to handle signaling message: {}", err);
+                            }
+                        }
+                        Err(accept_stopped) => {
+                            let signaling_addr = signaling_message.signaling_addr;
+                            let reason = accept_stopped.0;
+
+                            // Update state to Disconnected to trigger reconnection
+                            if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
+                                state.state = ConnectionState::Disconnected;
+                                state.next_reconnect_stride = 1;
+                                state.next_reconnect_time = Instant::now();
+                            }
+
+                            next.send_notif(
+                                NotificationCode::AcceptStopped,
+                                serde_json::json!({
+                                    "signalingAddr": signaling_addr,
+                                    "reason": reason,
+                                }),
+                            )
+                            .await;
+                        }
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
@@ -1021,40 +1043,10 @@ impl Server {
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: Arc<dyn MsgChannel>,
-        msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), &*webchannel);
         match msg.body {
-            Msg::AcceptStopped {
-                signaling_addr,
-                reason,
-            } => {
-                // Check if we were accepting (Connected) before the error
-                let was_accepting = self
-                    .active_signaling
-                    .get(&signaling_addr)
-                    .map(|state| state.state == ConnectionState::Connected)
-                    .unwrap_or(false);
-
-                // Update state to Disconnected to trigger reconnection
-                if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                    state.state = ConnectionState::Disconnected;
-                    state.next_reconnect_stride = 1;
-                    state.next_reconnect_time = Instant::now();
-                }
-
-                next.send_notif(
-                    NotificationCode::AcceptStopped,
-                    serde_json::json!({
-                        "signalingAddr": signaling_addr,
-                        "reason": reason,
-                    }),
-                )
-                .await;
-                Ok(())
-            }
             Msg::IceProgress(remote_hostid, progress) => {
                 next.send_notif(
                     NotificationCode::ConnectionProgress,
@@ -1388,17 +1380,6 @@ impl Server {
                 };
                 next.send_notif(NotificationCode::ErrorResponse, msg).await;
                 Ok(())
-            }
-            Msg::SignalingMsg(signaling_addr, signaling_msg) => {
-                self.handle_signaling_msg(
-                    signaling_addr,
-                    signaling_msg,
-                    &next,
-                    webchannel.clone(),
-                    msg_tx,
-                    signaling_channel,
-                )
-                .await
             }
             _ => {
                 let message = format!(
