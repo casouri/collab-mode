@@ -491,8 +491,11 @@ impl Server {
         editor_tx: mpsc::Sender<lsp_server::Message>,
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
         test_channel_factory: Option<Arc<webchannel::TestWebChannelFactory>>,
+        test_signaling_factory: Option<
+            Arc<crate::signaling::client_new::TestSignalingChannelFactory>,
+        >,
     ) -> anyhow::Result<()> {
-        // webrtc-dtls uses the ring feature of rustls, so there’s an
+        // webrtc-dtls uses the ring feature of rustls, so there's an
         // ambiguity of which provider to use. Here we just set the
         // default provider to ring explicitly.
         // REF: https://github.com/rustls/rustls/issues/1938
@@ -502,9 +505,15 @@ impl Server {
         let (signaling_msg_tx, mut signaling_msg_rx) =
             mpsc::channel::<crate::signaling::SignalingMessage>(16);
 
-        // Create SignalingChannel
-        let mut signaling_channel =
-            crate::signaling::client_new::SignalingChannel::new(signaling_msg_tx.clone());
+        // Create SignalingChannel (test or real based on factory)
+        let mut signaling_channel: Box<dyn crate::signaling::client_new::SignalingChannelTrait> =
+            if let Some(factory) = test_signaling_factory {
+                Box::new(factory.get_channel(signaling_msg_tx.clone()))
+            } else {
+                Box::new(crate::signaling::client_new::SignalingChannel::new(
+                    signaling_msg_tx.clone(),
+                ))
+            };
 
         // Use the Server's test channel if provided, otherwise use WebChannel
         let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
@@ -532,7 +541,7 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, &*webchannel, &msg_tx, &mut signaling_channel).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &*webchannel, &msg_tx, &mut *signaling_channel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -555,7 +564,7 @@ impl Server {
                     let next = Next::new(&editor_tx, None, &*webchannel);
                     match signaling_message.msg {
                         Ok(signaling_msg) => {
-                            let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx, &mut signaling_channel).await;
+                            let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx, &mut *signaling_channel).await;
                             if let Err(err) = res {
                                 tracing::error!("Failed to handle signaling message: {}", err);
                             }
@@ -616,7 +625,7 @@ impl Server {
                             remote.signaling_addr,
                             remote.transport_type,
                             &msg_tx,
-                            &mut signaling_channel).await;
+                            &mut *signaling_channel).await;
                     }
 
                     // Handle signaling server reconnections (presence
@@ -760,7 +769,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &dyn MsgChannel,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
@@ -977,7 +986,7 @@ impl Server {
         next: &Next<'a>,
         notif: lsp_server::Notification,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
@@ -1486,7 +1495,7 @@ impl Server {
         signaling_addr: String,
         transport_type: webchannel::TransportType,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
         if host_id == self.host_id {
             return;
@@ -3458,7 +3467,7 @@ impl Server {
         next: &Next<'a>,
         webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &mut crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
         use crate::signaling::SignalingMsg;
 

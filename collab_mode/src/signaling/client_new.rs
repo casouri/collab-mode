@@ -8,6 +8,7 @@ use crate::config_man::ArcKeyCert;
 use crate::signaling::{CertDerHash, EndpointId, ICECandidate, SignalingMsg, SDP};
 use anyhow::anyhow;
 use anyhow::Context;
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,33 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite as tung;
 use tracing::Instrument;
+
+/// Trait for signaling channel operations. Provides async methods for
+/// binding, sending, and creating socks.
+#[async_trait]
+pub trait SignalingChannelTrait: Send + Sync {
+    /// Bind to a signaling server address.
+    async fn bind(
+        &mut self,
+        addr: String,
+        id: EndpointId,
+        key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()>;
+
+    /// Send a message to a signaling server.
+    async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()>;
+
+    /// Create a Sock for communicating with a peer through a signaling server.
+    async fn create_sock(
+        &self,
+        signaling_addr: &str,
+        peer_id: EndpointId,
+        peer_cert: CertDerHash,
+    ) -> anyhow::Result<Sock>;
+
+    /// Remove a signaling client.
+    fn remove(&mut self, signaling_addr: &str);
+}
 
 /// Manages multiple signaling clients, one per signaling server address.
 pub struct SignalingChannel {
@@ -99,6 +127,35 @@ impl SignalingChannel {
     /// Remove a signaling client.
     pub fn remove(&mut self, signaling_addr: &str) {
         self.clients.lock().unwrap().remove(signaling_addr);
+    }
+}
+
+#[async_trait]
+impl SignalingChannelTrait for SignalingChannel {
+    async fn bind(
+        &mut self,
+        addr: String,
+        id: EndpointId,
+        key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()> {
+        self.bind(addr, id, key_cert).await
+    }
+
+    async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
+        self.send(signaling_addr, msg).await
+    }
+
+    async fn create_sock(
+        &self,
+        signaling_addr: &str,
+        peer_id: EndpointId,
+        peer_cert: CertDerHash,
+    ) -> anyhow::Result<Sock> {
+        self.create_sock(signaling_addr, peer_id, peer_cert).await
+    }
+
+    fn remove(&mut self, signaling_addr: &str) {
+        self.remove(signaling_addr);
     }
 }
 
@@ -552,4 +609,313 @@ async fn handle_incoming_message(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Test infrastructure
+// ============================================================================
+
+/// State for a single endpoint in the test factory
+struct TestEndpointState {
+    /// Channel to send signaling messages to Server
+    signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
+    /// Map of active peer socks for routing SDP and candidates
+    sock_tx_map: HashMap<EndpointId, SockTx>,
+}
+
+/// Internal state for the test signaling factory
+struct TestFactoryState {
+    /// Map of (signaling_addr, endpoint_id) -> endpoint state
+    endpoints: HashMap<(String, EndpointId), TestEndpointState>,
+}
+
+/// Factory for creating test signaling channels with in-memory message passing
+pub struct TestSignalingChannelFactory {
+    state: Arc<Mutex<TestFactoryState>>,
+}
+
+impl TestSignalingChannelFactory {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(TestFactoryState {
+                endpoints: HashMap::new(),
+            })),
+        }
+    }
+
+    /// Create a new test signaling channel for an endpoint
+    pub fn get_channel(
+        self: &Arc<Self>,
+        signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
+    ) -> TestSignalingChannel {
+        TestSignalingChannel {
+            signaling_msg_tx,
+            factory: self.clone(),
+        }
+    }
+
+    /// Route a Connect message from sender to receiver
+    fn route_connect(
+        &self,
+        signaling_addr: &str,
+        sender_id: &EndpointId,
+        receiver_id: &EndpointId,
+        sender_cert: &CertDerHash,
+        initiator: bool,
+    ) -> anyhow::Result<()> {
+        let state = self.state.lock().unwrap();
+        let key = (signaling_addr.to_string(), receiver_id.clone());
+
+        if let Some(endpoint_state) = state.endpoints.get(&key) {
+            let msg = SignalingMsg::Connect(
+                sender_id.clone(),
+                receiver_id.clone(),
+                sender_cert.clone(),
+                initiator,
+            );
+            let signaling_message = crate::signaling::SignalingMessage {
+                signaling_addr: signaling_addr.to_string(),
+                msg: Ok(msg),
+            };
+
+            // Send asynchronously - don't block on the result
+            let tx = endpoint_state.signaling_msg_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(signaling_message).await;
+            });
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Receiver {} not bound to signaling addr {}",
+                receiver_id,
+                signaling_addr
+            ))
+        }
+    }
+
+    /// Route SDP from sender to receiver
+    fn route_sdp(
+        &self,
+        signaling_addr: &str,
+        sender_id: &EndpointId,
+        receiver_id: &EndpointId,
+        sdp: SDP,
+    ) -> anyhow::Result<()> {
+        let state = self.state.lock().unwrap();
+        let key = (signaling_addr.to_string(), receiver_id.clone());
+
+        if let Some(endpoint_state) = state.endpoints.get(&key) {
+            if let Some(sock_tx) = endpoint_state.sock_tx_map.get(sender_id) {
+                let tx = sock_tx.sdp_tx.clone();
+                // Send asynchronously
+                tokio::spawn(async move {
+                    let _ = tx.send(sdp).await;
+                });
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "Sock for peer {} not found in receiver {}",
+                    sender_id,
+                    receiver_id
+                ))
+            }
+        } else {
+            Err(anyhow!(
+                "Receiver {} not bound to signaling addr {}",
+                receiver_id,
+                signaling_addr
+            ))
+        }
+    }
+
+    /// Route candidate from sender to receiver
+    fn route_candidate(
+        &self,
+        signaling_addr: &str,
+        sender_id: &EndpointId,
+        receiver_id: &EndpointId,
+        candidate: ICECandidate,
+    ) -> anyhow::Result<()> {
+        let state = self.state.lock().unwrap();
+        let key = (signaling_addr.to_string(), receiver_id.clone());
+
+        if let Some(endpoint_state) = state.endpoints.get(&key) {
+            if let Some(sock_tx) = endpoint_state.sock_tx_map.get(sender_id) {
+                let tx = sock_tx.candidate_tx.clone();
+                // Send asynchronously - unbounded channel, won't block
+                let _ = tx.send(candidate);
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "Sock for peer {} not found in receiver {}",
+                    sender_id,
+                    receiver_id
+                ))
+            }
+        } else {
+            Err(anyhow!(
+                "Receiver {} not bound to signaling addr {}",
+                receiver_id,
+                signaling_addr
+            ))
+        }
+    }
+}
+
+/// Test signaling channel that uses in-memory message passing
+pub struct TestSignalingChannel {
+    signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
+    factory: Arc<TestSignalingChannelFactory>,
+}
+
+#[async_trait]
+impl SignalingChannelTrait for TestSignalingChannel {
+    async fn bind(
+        &mut self,
+        addr: String,
+        id: EndpointId,
+        _key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()> {
+        // Register this endpoint with the factory
+        {
+            let mut state = self.factory.state.lock().unwrap();
+            state.endpoints.insert(
+                (addr.clone(), id.clone()),
+                TestEndpointState {
+                    signaling_msg_tx: self.signaling_msg_tx.clone(),
+                    sock_tx_map: HashMap::new(),
+                },
+            );
+        }
+
+        // Immediately send Bound message
+        let msg = SignalingMsg::Bound(id.clone());
+        let signaling_message = crate::signaling::SignalingMessage {
+            signaling_addr: addr,
+            msg: Ok(msg),
+        };
+        self.signaling_msg_tx
+            .send(signaling_message)
+            .await
+            .context("Failed to send Bound message")?;
+
+        Ok(())
+    }
+
+    async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
+        // Route the message based on type
+        match msg {
+            SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator) => {
+                self.factory.route_connect(
+                    signaling_addr,
+                    &sender_id,
+                    &receiver_id,
+                    &sender_cert,
+                    initiator,
+                )?;
+            }
+            SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
+                self.factory
+                    .route_sdp(signaling_addr, &sender_id, &receiver_id, sdp)?;
+            }
+            SignalingMsg::Candidate(sender_id, receiver_id, candidate) => {
+                self.factory.route_candidate(
+                    signaling_addr,
+                    &sender_id,
+                    &receiver_id,
+                    candidate,
+                )?;
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+
+    async fn create_sock(
+        &self,
+        signaling_addr: &str,
+        peer_id: EndpointId,
+        peer_cert: CertDerHash,
+    ) -> anyhow::Result<Sock> {
+        // Get my_id from the factory state
+        let my_id = {
+            let state = self.factory.state.lock().unwrap();
+            // Find my endpoint ID by looking for entries with this signaling_addr
+            // and signaling_msg_tx
+            state
+                .endpoints
+                .iter()
+                .find(|((addr, _id), endpoint_state)| {
+                    addr == signaling_addr
+                        && Arc::ptr_eq(
+                            &Arc::new(endpoint_state.signaling_msg_tx.clone()),
+                            &Arc::new(self.signaling_msg_tx.clone()),
+                        )
+                })
+                .map(|((_, id), _)| id.clone())
+                .ok_or_else(|| anyhow!("Not bound to signaling addr {}", signaling_addr))?
+        };
+
+        // Create channels for SDP and candidates
+        let (sdp_tx, sdp_rx) = mpsc::channel(1);
+        let (candidate_tx, candidate_rx) = mpsc::unbounded_channel();
+
+        // Create msg_out channel to route messages through factory
+        let (msg_out_tx, mut msg_out_rx) = mpsc::channel::<SignalingMsg>(16);
+
+        // Register the sock in factory state
+        {
+            let mut state = self.factory.state.lock().unwrap();
+            let key = (signaling_addr.to_string(), my_id.clone());
+            if let Some(endpoint_state) = state.endpoints.get_mut(&key) {
+                endpoint_state.sock_tx_map.insert(
+                    peer_id.clone(),
+                    SockTx {
+                        sdp_tx,
+                        candidate_tx,
+                    },
+                );
+            } else {
+                return Err(anyhow!("Not bound to signaling addr {}", signaling_addr));
+            }
+        }
+
+        // Spawn task to route outgoing messages from this sock through factory
+        let factory = self.factory.clone();
+        let signaling_addr_clone = signaling_addr.to_string();
+        tokio::spawn(async move {
+            while let Some(msg) = msg_out_rx.recv().await {
+                match msg {
+                    SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
+                        let _ =
+                            factory.route_sdp(&signaling_addr_clone, &sender_id, &receiver_id, sdp);
+                    }
+                    SignalingMsg::Candidate(sender_id, receiver_id, candidate) => {
+                        let _ = factory.route_candidate(
+                            &signaling_addr_clone,
+                            &sender_id,
+                            &receiver_id,
+                            candidate,
+                        );
+                    }
+                    _ => {
+                        tracing::warn!("Unexpected message from sock: {:?}", msg);
+                    }
+                }
+            }
+        });
+
+        Ok(Sock {
+            my_id,
+            peer_id,
+            peer_cert,
+            sdp_rx,
+            msg_out_tx,
+            candidate_rx,
+        })
+    }
+
+    fn remove(&mut self, _signaling_addr: &str) {
+        // No-op as requested
+    }
 }
