@@ -119,18 +119,18 @@ mod e2e_tests {
 
     /// Wait for Bound message from signaling server
     async fn wait_for_bound(
-        sig_rx: &mut mpsc::Receiver<(String, crate::signaling::SignalingMsg)>,
+        sig_rx: &mut mpsc::Receiver<crate::signaling::SignalingMessage>,
         expected_id: &str,
     ) {
         use crate::signaling::SignalingMsg;
-        let (_addr, msg) = timeout(Duration::from_secs(2), sig_rx.recv())
+        let signaling_message = timeout(Duration::from_secs(2), sig_rx.recv())
             .await
             .expect("Timeout waiting for Bound message")
             .expect("Expected Bound message");
-        if let SignalingMsg::Bound(id) = msg {
+        if let Ok(SignalingMsg::Bound(id)) = signaling_message.msg {
             assert_eq!(id, expected_id, "Bound ID mismatch");
         } else {
-            panic!("Expected Bound message, got {:?}", msg);
+            panic!("Expected Bound message, got {:?}", signaling_message.msg);
         }
     }
 
@@ -155,16 +155,14 @@ mod e2e_tests {
         signaling_url: String,
     ) -> anyhow::Result<(
         crate::signaling::client_new::SignalingClient,
-        mpsc::Receiver<(String, crate::signaling::SignalingMsg)>,
+        mpsc::Receiver<crate::signaling::SignalingMessage>,
     )> {
         let (sig_tx, mut sig_rx) = mpsc::channel(10);
-        let (msg_tx, _msg_rx) = mpsc::channel(10);
         let client = crate::signaling::client_new::SignalingClient::bind(
             signaling_url,
             id.clone(),
             key_cert,
             sig_tx,
-            msg_tx,
             None,
         )
         .await?;
@@ -177,7 +175,7 @@ mod e2e_tests {
 
     /// Wait for Connect message and create Sock
     async fn wait_for_connect_and_create_sock(
-        sig_rx: &mut mpsc::Receiver<(String, crate::signaling::SignalingMsg)>,
+        sig_rx: &mut mpsc::Receiver<crate::signaling::SignalingMessage>,
         sig_client: &crate::signaling::client_new::SignalingClient,
         my_id: String,
         my_cert_hash: String,
@@ -185,12 +183,14 @@ mod e2e_tests {
     ) -> anyhow::Result<crate::signaling::client_new::Sock> {
         use crate::signaling::SignalingMsg;
 
-        let (_addr, msg) = timeout(Duration::from_secs(5), sig_rx.recv())
+        let signaling_message = timeout(Duration::from_secs(5), sig_rx.recv())
             .await
             .map_err(|_| anyhow::anyhow!("Timeout waiting for Connect message"))?
             .ok_or(anyhow::anyhow!("Channel closed"))?;
 
-        if let SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator) = msg {
+        if let Ok(SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator)) =
+            signaling_message.msg
+        {
             assert_eq!(receiver_id, my_id, "Connect receiver ID mismatch");
             if let Some(expected) = expected_peer_id {
                 assert_eq!(sender_id, expected, "Connect sender ID mismatch");
@@ -208,7 +208,10 @@ mod e2e_tests {
             let sock = sig_client.create_sock(sender_id, sender_cert).await;
             Ok(sock)
         } else {
-            Err(anyhow::anyhow!("Expected Connect message, got {:?}", msg))
+            Err(anyhow::anyhow!(
+                "Expected Connect message, got {:?}",
+                signaling_message.msg
+            ))
         }
     }
 

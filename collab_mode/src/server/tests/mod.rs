@@ -852,4 +852,5 @@ mod send_info;
 mod send_ops;
 mod share_file;
 mod shared_file_ops;
+mod signaling_tests;
 mod undo;

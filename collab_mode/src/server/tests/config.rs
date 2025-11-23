@@ -127,7 +127,7 @@ async fn test_server_run_config_projects_expansion() {
     // Run server in background task.
     let server_task = tokio::spawn(async move {
         server
-            .run(server_to_editor_tx, editor_to_server_rx, None)
+            .run(server_to_editor_tx, editor_to_server_rx, None, None)
             .await
     });
 

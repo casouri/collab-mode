@@ -651,6 +651,7 @@ impl TestSignalingChannelFactory {
         TestSignalingChannel {
             signaling_msg_tx,
             factory: self.clone(),
+            bound_endpoints: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -766,6 +767,8 @@ impl TestSignalingChannelFactory {
 pub struct TestSignalingChannel {
     signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
     factory: Arc<TestSignalingChannelFactory>,
+    /// Tracks bound endpoints: (signaling_addr, endpoint_id)
+    bound_endpoints: Arc<Mutex<Vec<(String, EndpointId)>>>,
 }
 
 #[async_trait]
@@ -786,6 +789,12 @@ impl SignalingChannelTrait for TestSignalingChannel {
                     sock_tx_map: HashMap::new(),
                 },
             );
+        }
+
+        // Track this binding in our local state
+        {
+            let mut endpoints = self.bound_endpoints.lock().unwrap();
+            endpoints.push((addr.clone(), id.clone()));
         }
 
         // Immediately send Bound message
@@ -837,22 +846,13 @@ impl SignalingChannelTrait for TestSignalingChannel {
         peer_id: EndpointId,
         peer_cert: CertDerHash,
     ) -> anyhow::Result<Sock> {
-        // Get my_id from the factory state
+        // Get my_id from our bound endpoints
         let my_id = {
-            let state = self.factory.state.lock().unwrap();
-            // Find my endpoint ID by looking for entries with this signaling_addr
-            // and signaling_msg_tx
-            state
-                .endpoints
+            let endpoints = self.bound_endpoints.lock().unwrap();
+            endpoints
                 .iter()
-                .find(|((addr, _id), endpoint_state)| {
-                    addr == signaling_addr
-                        && Arc::ptr_eq(
-                            &Arc::new(endpoint_state.signaling_msg_tx.clone()),
-                            &Arc::new(self.signaling_msg_tx.clone()),
-                        )
-                })
-                .map(|((_, id), _)| id.clone())
+                .find(|(addr, _id)| addr == signaling_addr)
+                .map(|(_addr, id)| id.clone())
                 .ok_or_else(|| anyhow!("Not bound to signaling addr {}", signaling_addr))?
         };
 
