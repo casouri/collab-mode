@@ -3512,12 +3512,12 @@ impl Server {
             SignalingMsg::Connect(peer_id, _my_id, peer_cert, _initiator) => {
                 tracing::info!("Received Connect message from {}", peer_id);
 
-                // Check if we're already connecting to this peer.
-                let is_connecting = self
+                // Check if we're already connecting or connected to this peer.
+                let is_connecting_or_connected = self
                     .active_remotes
                     .get(&peer_id)
-                    .map_or(false, |r| matches!(r.state, ConnectionState::Connecting));
-                if webchannel.is_connected(&peer_id) || is_connecting {
+                    .map_or(false, |r| matches!(r.state, ConnectionState::Connecting | ConnectionState::Connected));
+                if is_connecting_or_connected {
                     tracing::info!(
                         "Already connecting/connected to {}, ignoring duplicate connection request",
                         peer_id

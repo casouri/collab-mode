@@ -8,6 +8,7 @@ pub use super::*;
 use crate::config_man::{ConfigManager, Permission};
 use crate::message::{SendOpsResp, UndoResp};
 use crate::signaling;
+use crate::signaling::client_new::TestSignalingChannelFactory;
 use crate::webchannel::{TestWebChannel, TestWebChannelFactory, TravelTime};
 use rand::Rng;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -645,11 +646,13 @@ pub async fn setup_hub_and_spoke_servers(
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
 
     let factory_arc = factory.inner();
+    let signaling_factory = Arc::new(TestSignalingChannelFactory::new());
     let hub_handle = {
         let factory_arc = factory_arc.clone();
+        let signaling_factory = signaling_factory.clone();
         tokio::spawn(async move {
             if let Err(e) = hub_server
-                .run(hub_tx, hub_rx, Some(factory_arc), None)
+                .run(hub_tx, hub_rx, Some(factory_arc), Some(signaling_factory))
                 .await
             {
                 tracing::error!("Hub server error: {}", e);
@@ -672,6 +675,17 @@ pub async fn setup_hub_and_spoke_servers(
 
     let _ = hub_editor
         .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
+        .await?;
+
+    // Set accept mode to All for testing (allows connections without certificate trust).
+    hub_editor
+        .send_notification(
+            "SetAcceptMode",
+            serde_json::json!({
+                "signalingAddr": "test",
+                "acceptMode": "All",
+            }),
+        )
         .await?;
 
     // Create and connect spoke servers.
@@ -700,15 +714,43 @@ pub async fn setup_hub_and_spoke_servers(
 
         let spoke_handle = {
             let factory_arc = factory_arc.clone();
+            let signaling_factory = signaling_factory.clone();
             tokio::spawn(async move {
                 if let Err(e) = spoke_server
-                    .run(spoke_tx, spoke_rx, Some(factory_arc), None)
+                    .run(spoke_tx, spoke_rx, Some(factory_arc), Some(signaling_factory))
                     .await
                 {
                     tracing::error!("Spoke server {} error: {}", i + 1, e);
                 }
             })
         };
+
+        // Spoke binds to signaling server first.
+        tracing::info!("Spoke server {} binding to signaling server", spoke_id);
+        spoke_editor
+            .send_notification(
+                "AcceptConnection",
+                serde_json::json!({
+                    "signalingAddr": "test",
+                    "transportType": "SCTP",
+                }),
+            )
+            .await?;
+
+        let _ = spoke_editor
+            .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
+            .await?;
+
+        // Set accept mode to All for testing (allows connections without certificate trust).
+        spoke_editor
+            .send_notification(
+                "SetAcceptMode",
+                serde_json::json!({
+                    "signalingAddr": "test",
+                    "acceptMode": "All",
+                }),
+            )
+            .await?;
 
         // Spoke connects to hub.
         tracing::info!("Spoke server {} connecting to hub {}", spoke_id, hub_id);

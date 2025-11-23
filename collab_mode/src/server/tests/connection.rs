@@ -24,12 +24,14 @@ async fn test_accept_connect() {
     let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
 
     let factory_arc = factory.inner();
+    let signaling_factory = Arc::new(TestSignalingChannelFactory::new());
 
     let server1_handle = {
         let factory_arc = factory_arc.clone();
+        let signaling_factory = signaling_factory.clone();
         tokio::spawn(async move {
             if let Err(e) = server1
-                .run(server_tx1, server_rx1, Some(factory_arc), None)
+                .run(server_tx1, server_rx1, Some(factory_arc), Some(signaling_factory))
                 .await
             {
                 tracing::error!("Server1 error: {}", e);
@@ -39,9 +41,10 @@ async fn test_accept_connect() {
 
     let server2_handle = {
         let factory_arc = factory_arc.clone();
+        let signaling_factory = signaling_factory.clone();
         tokio::spawn(async move {
             if let Err(e) = server2
-                .run(server_tx2, server_rx2, Some(factory_arc), None)
+                .run(server_tx2, server_rx2, Some(factory_arc), Some(signaling_factory))
                 .await
             {
                 tracing::error!("Server2 error: {}", e);
@@ -69,6 +72,51 @@ async fn test_accept_connect() {
         accepting_params.is_ok(),
         "Should receive AcceptingConnection notification"
     );
+
+    // Set accept mode to All for testing.
+    mock_editor1
+        .send_notification(
+            "SetAcceptMode",
+            serde_json::json!({
+                "signalingAddr": "test",
+                "acceptMode": "All",
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Server2 also needs to bind to signaling server.
+    tracing::info!("Server2 binding to signaling server");
+    mock_editor2
+        .send_notification(
+            "AcceptConnection",
+            serde_json::json!({
+                "signalingAddr": "test",
+                "transportType": "SCTP",
+            }),
+        )
+        .await
+        .unwrap();
+
+    let accepting_params2 = mock_editor2
+        .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
+        .await;
+    assert!(
+        accepting_params2.is_ok(),
+        "Server2 should receive AcceptingConnection notification"
+    );
+
+    // Set accept mode to All for testing.
+    mock_editor2
+        .send_notification(
+            "SetAcceptMode",
+            serde_json::json!({
+                "signalingAddr": "test",
+                "acceptMode": "All",
+            }),
+        )
+        .await
+        .unwrap();
 
     tracing::info!("Server2 connecting to Server1");
     mock_editor2
