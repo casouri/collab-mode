@@ -69,9 +69,7 @@ async fn test_send_info_local_file() {
         .unwrap();
     assert_eq!(notification["file"], spoke_file_desc);
 
-    let info_str = notification["info"].as_str().unwrap();
-    let info_value: serde_json::Value = serde_json::from_str(info_str).unwrap();
-    assert_eq!(info_value, info_data);
+    assert_eq!(notification["info"], info_data);
 
     setup.cleanup();
 }
@@ -164,9 +162,7 @@ async fn test_send_info_remote_file() {
         .unwrap();
     assert_eq!(notification["file"], spoke2_file_desc);
 
-    let info_str = notification["info"].as_str().unwrap();
-    let info_value: serde_json::Value = serde_json::from_str(info_str).unwrap();
-    assert_eq!(info_value, info_data);
+    assert_eq!(notification["info"], info_data);
 
     setup.cleanup();
 }
@@ -242,9 +238,7 @@ async fn test_send_info_multiple_subscribers() {
 
         assert_eq!(notification["file"], spoke_files[i]);
 
-        let info_str = notification["info"].as_str().unwrap();
-        let info_value: serde_json::Value = serde_json::from_str(info_str).unwrap();
-        assert_eq!(info_value, info_data);
+        assert_eq!(notification["info"], info_data);
     }
 
     setup.cleanup();
