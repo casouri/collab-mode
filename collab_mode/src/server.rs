@@ -45,7 +45,7 @@ impl PathId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum AcceptMode {
     /// Accept all hosts, even those not in the trusted hosts list.
     All,
@@ -155,6 +155,8 @@ struct SignalingState {
     next_reconnect_stride: u64,
     /// Next reconnect attempt time.
     next_reconnect_time: std::time::Instant,
+    /// Accept mode for incoming connections.
+    accept_mode: AcceptMode,
 }
 
 impl SignalingState {
@@ -163,6 +165,7 @@ impl SignalingState {
             state: ConnectionState::Connecting,
             next_reconnect_stride: 1,
             next_reconnect_time: std::time::Instant::now(),
+            accept_mode: AcceptMode::TrustedOnly,
         }
     }
 }
@@ -206,8 +209,6 @@ pub struct Server {
     key_cert: Arc<KeyCert>,
     /// Trusted hosts with their certificate hashes
     trusted_hosts: HashMap<ServerId, String>,
-    /// Accept mode for incoming connections
-    accept_mode: AcceptMode,
     /// Map of host IDs we're currently establishing connections with
     /// to their signaling server address
     pending_connections: Arc<Mutex<HashMap<ServerId, String>>>,
@@ -452,10 +453,9 @@ impl Server {
     pub fn new(host_id: ServerId, config: ConfigManager) -> anyhow::Result<Self> {
         let key_cert = config.get_key_and_cert(host_id.clone())?;
 
-        // Get config values for trusted_hosts and accept_mode
+        // Get config values for trusted_hosts
         let current_config = config.config();
         let trusted_hosts = current_config.trusted_hosts;
-        let accept_mode = AcceptMode::TrustedOnly;
 
         let server = Server {
             host_id,
@@ -472,7 +472,6 @@ impl Server {
             config,
             key_cert: Arc::new(key_cert),
             trusted_hosts,
-            accept_mode,
             pending_connections: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok(server)
@@ -699,9 +698,18 @@ impl Server {
     }
 
     /// Check if a certificate hash is trusted based on the configured trusted hosts.
-    pub fn is_cert_trusted(&mut self, cert_hash: &str, remote_hostid: &str) -> bool {
-        // Check accept mode first
-        let accept_mode = self.accept_mode;
+    pub fn is_cert_trusted(
+        &mut self,
+        cert_hash: &str,
+        remote_hostid: &str,
+        signaling_addr: &str,
+    ) -> bool {
+        // Get accept mode from signaling state
+        let accept_mode = self
+            .active_signaling
+            .get(signaling_addr)
+            .map(|state| state.accept_mode)
+            .unwrap_or(AcceptMode::TrustedOnly);
 
         let is_trusted = if matches!(accept_mode, AcceptMode::All) {
             tracing::info!(
@@ -1041,6 +1049,52 @@ impl Server {
                     }),
                 )
                 .await;
+            }
+            "SetAcceptMode" => {
+                let params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
+
+                // Set the accept mode.
+                let old_mode = if let Some(signaling_state) =
+                    self.active_signaling.get_mut(&params.signaling_addr)
+                {
+                    let old_mode = signaling_state.accept_mode;
+                    signaling_state.accept_mode = params.accept_mode;
+                    Some(old_mode)
+                } else {
+                    None
+                };
+
+                // If mode changed, send notification.
+                if old_mode.is_some() && old_mode != Some(params.accept_mode) {
+                    next.send_notif(
+                        NotificationCode::AcceptModeChanged,
+                        AcceptModeChangedNote {
+                            signaling_addr: params.signaling_addr.clone(),
+                            accept_mode: params.accept_mode,
+                        },
+                    )
+                    .await;
+
+                    // If mode is All, spawn background task to revert after 3 minutes.
+                    if matches!(params.accept_mode, AcceptMode::All) {
+                        let signaling_addr = params.signaling_addr.clone();
+                        let editor_tx = next.editor_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(180)).await;
+                            // Send SetAcceptMode notification to revert to TrustedOnly.
+                            let notif = lsp_server::Notification {
+                                method: "SetAcceptMode".to_string(),
+                                params: serde_json::json!({
+                                    "signalingAddr": signaling_addr,
+                                    "acceptMode": AcceptMode::TrustedOnly,
+                                }),
+                            };
+                            let _ = editor_tx
+                                .send(lsp_server::Message::Notification(notif))
+                                .await;
+                        });
+                    }
+                }
             }
 
             _ => {
@@ -3397,7 +3451,7 @@ impl Server {
                 }
 
                 // Check if the certificate is trusted.
-                if !self.is_cert_trusted(&peer_cert, &peer_id) {
+                if !self.is_cert_trusted(&peer_cert, &peer_id, &signaling_addr) {
                     let msg = ErrorResponseNote {
                         code: ErrorCode::PermissionDenied,
                         file: None,

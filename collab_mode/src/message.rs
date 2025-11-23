@@ -22,6 +22,7 @@ pub enum NotificationCode {
     FileDeleted,         // A file/directory was deleted.
     FileClosed,          // A file is closed.
     InfoReceived,        // Info received from remote for a file.
+    AcceptModeChanged,   // Accept mode changed for a signaling server.
 
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
@@ -101,6 +102,13 @@ pub struct FileClosedNote {
     pub file: EditorFileDesc,
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptModeChangedNote {
+    pub signaling_addr: String,
+    pub accept_mode: server::AcceptMode,
+}
+
 // *** Requests and responses
 
 // **** Init
@@ -124,6 +132,13 @@ pub struct AcceptConnectionParams {
 #[serde(rename_all = "camelCase")]
 pub struct StopAcceptingParams {
     pub signaling_addr: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAcceptModeParams {
+    pub signaling_addr: String,
+    pub accept_mode: server::AcceptMode,
 }
 
 // **** Update config (accept mode and trusted hosts)
