@@ -336,7 +336,7 @@ async fn send_receive_stream(
     // TCP sockets aren’t free, close the connection after 12h.
     let (time_tx, mut time_rx) = mpsc::channel(1);
     let timer_span = tracing::info_span!("Timer thread for auto-closing the connection");
-    let allocated_hrs = 12u16;
+    let allocated_hrs = 6u16;
     tokio::spawn(
         async move {
             let allocated_time = allocated_hrs * 3600;
