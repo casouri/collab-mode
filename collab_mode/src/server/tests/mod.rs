@@ -717,7 +717,12 @@ pub async fn setup_hub_and_spoke_servers(
             let signaling_factory = signaling_factory.clone();
             tokio::spawn(async move {
                 if let Err(e) = spoke_server
-                    .run(spoke_tx, spoke_rx, Some(factory_arc), Some(signaling_factory))
+                    .run(
+                        spoke_tx,
+                        spoke_rx,
+                        Some(factory_arc),
+                        Some(signaling_factory),
+                    )
                     .await
                 {
                     tracing::error!("Spoke server {} error: {}", i + 1, e);

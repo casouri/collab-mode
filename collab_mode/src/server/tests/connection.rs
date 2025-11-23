@@ -31,7 +31,12 @@ async fn test_accept_connect() {
         let signaling_factory = signaling_factory.clone();
         tokio::spawn(async move {
             if let Err(e) = server1
-                .run(server_tx1, server_rx1, Some(factory_arc), Some(signaling_factory))
+                .run(
+                    server_tx1,
+                    server_rx1,
+                    Some(factory_arc),
+                    Some(signaling_factory),
+                )
                 .await
             {
                 tracing::error!("Server1 error: {}", e);
@@ -44,7 +49,12 @@ async fn test_accept_connect() {
         let signaling_factory = signaling_factory.clone();
         tokio::spawn(async move {
             if let Err(e) = server2
-                .run(server_tx2, server_rx2, Some(factory_arc), Some(signaling_factory))
+                .run(
+                    server_tx2,
+                    server_rx2,
+                    Some(factory_arc),
+                    Some(signaling_factory),
+                )
                 .await
             {
                 tracing::error!("Server2 error: {}", e);

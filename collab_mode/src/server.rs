@@ -3513,10 +3513,13 @@ impl Server {
                 tracing::info!("Received Connect message from {}", peer_id);
 
                 // Check if we're already connecting or connected to this peer.
-                let is_connecting_or_connected = self
-                    .active_remotes
-                    .get(&peer_id)
-                    .map_or(false, |r| matches!(r.state, ConnectionState::Connecting | ConnectionState::Connected));
+                let is_connecting_or_connected =
+                    self.active_remotes.get(&peer_id).map_or(false, |r| {
+                        matches!(
+                            r.state,
+                            ConnectionState::Connecting | ConnectionState::Connected
+                        )
+                    });
                 if is_connecting_or_connected {
                     tracing::info!(
                         "Already connecting/connected to {}, ignoring duplicate connection request",
