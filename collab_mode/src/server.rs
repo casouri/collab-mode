@@ -625,7 +625,8 @@ impl Server {
                             remote.signaling_addr,
                             remote.transport_type,
                             &msg_tx,
-                            &mut *signaling_channel).await;
+                            &mut *signaling_channel,
+                            false).await;
                     }
 
                     // Handle signaling server reconnections (presence
@@ -1038,6 +1039,7 @@ impl Server {
                         params.transport_type,
                         msg_tx,
                         signaling_channel,
+                        false,
                     )
                     .await;
                 } else {
@@ -1488,6 +1490,15 @@ impl Server {
 
     // **** Handler functions
 
+    /// Try connect to remote. This can be called from multiple
+    /// places: when we receive a connection messge from signaling
+    /// server, when we try to reconnect a disconnected remote, when
+    /// we receive a bound message from signaling server and tries to
+    /// start connecting all pending connections waiting for the
+    /// signaling server. Normally we skip the connection attempt if
+    /// the connection is in Connecting or Pending state. But for the
+    /// third case, we want to ignore the Pending state because ofc
+    /// it’s in Pending case.
     async fn try_connect_remote<'a>(
         &mut self,
         next: &Next<'a>,
@@ -1496,19 +1507,18 @@ impl Server {
         transport_type: webchannel::TransportType,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+        connect_when_pending: bool,
     ) {
         if host_id == self.host_id {
             return;
         }
 
         // Check if we're already connecting or pending to avoid duplicates.
-        let is_connecting_or_pending = self.active_remotes.get(&host_id).map_or(false, |r| {
-            matches!(
-                r.state,
-                ConnectionState::Connecting | ConnectionState::Pending
-            )
+        let should_skip = self.active_remotes.get(&host_id).map_or(false, |r| {
+            matches!(r.state, ConnectionState::Connecting)
+                || (matches!(r.state, ConnectionState::Pending) && !connect_when_pending)
         });
-        if is_connecting_or_pending {
+        if should_skip {
             tracing::info!(
                 "Already connecting/pending to {}, skipping duplicate request",
                 host_id
@@ -3479,14 +3489,14 @@ impl Server {
                     tracing::info!("Successfully bound to signaling server {}", signaling_addr);
                 }
 
-                // Retry all pending connections waiting for this signaling server
+                // Start all pending connections waiting for this signaling server.
                 let mut pending_remotes: Vec<(String, RemoteState)> = Vec::new();
                 for (host_id, remote) in self.active_remotes.iter() {
                     if remote.state == ConnectionState::Pending
                         && remote.signaling_addr == signaling_addr
                     {
                         tracing::info!(
-                            "Retrying pending connection to {} via {}",
+                            "Start pending connection to {} via {}",
                             host_id,
                             signaling_addr
                         );
@@ -3502,6 +3512,9 @@ impl Server {
                         remote.transport_type,
                         msg_tx,
                         signaling_channel,
+                        true, // Right now the remote is in pending
+                              // state, make sure we don’t skip
+                              // connection because of that!
                     )
                     .await;
                 }
