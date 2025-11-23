@@ -1,9 +1,4 @@
-use crate::{
-    config_man::{AcceptMode, ConfigProject},
-    server,
-    types::*,
-    webchannel::TransportType,
-};
+use crate::{config_man::ConfigProject, server, types::*, webchannel::TransportType};
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -136,8 +131,6 @@ pub struct StopAcceptingParams {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateConfigParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub accept_mode: Option<AcceptMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add_trusted_hosts: Option<HashMap<ServerId, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

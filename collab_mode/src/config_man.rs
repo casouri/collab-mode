@@ -78,20 +78,6 @@ pub struct ConfigProject {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-pub enum AcceptMode {
-    /// Accept all hosts, even those not in the trusted hosts list.
-    All,
-    /// Accept only hosts in the trusted hosts list.
-    TrustedOnly,
-}
-
-impl Default for AcceptMode {
-    fn default() -> Self {
-        AcceptMode::All
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[non_exhaustive]
 pub struct Permission {
@@ -119,8 +105,6 @@ pub struct Config {
     // to know which hash belongs to which peer.
     #[serde(default = "HashMap::new")]
     pub trusted_hosts: HashMap<ServerId, String>,
-    #[serde(default = "AcceptMode::default")]
-    pub accept_mode: AcceptMode,
     // The host id of this server. User can put it in the config if
     // they run the server in headless mode and not connect an editor
     // to it.
@@ -134,7 +118,6 @@ impl Default for Config {
         Config {
             projects: Vec::new(),
             trusted_hosts: HashMap::new(),
-            accept_mode: AcceptMode::default(),
             host_id: None,
             permission: HashMap::new(),
         }

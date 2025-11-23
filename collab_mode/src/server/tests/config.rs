@@ -83,7 +83,7 @@ async fn test_declare_projects_relative_path_error() {
 #[tokio::test]
 async fn test_server_run_config_projects_expansion() {
     // Projects from config should be expanded when server starts.
-    use crate::config_man::{AcceptMode, Config, ConfigManager, ConfigProject};
+    use crate::config_man::{Config, ConfigManager, ConfigProject};
     use std::collections::HashMap;
 
     super::init_test_tracing();
@@ -108,7 +108,6 @@ async fn test_server_run_config_projects_expansion() {
             },
         ],
         trusted_hosts: HashMap::new(),
-        accept_mode: AcceptMode::All,
         host_id: Some("test-server".to_string()),
         permission: HashMap::new(),
     };

@@ -1,4 +1,4 @@
-use crate::config_man::{AcceptMode, ConfigManager, ConfigProject};
+use crate::config_man::{ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, ServerEngine};
 use crate::error::CollabError;
 use crate::message::{self, *};
@@ -42,6 +42,20 @@ impl PathId {
             PathId::Buffer(..) => false,
             _ => true,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub enum AcceptMode {
+    /// Accept all hosts, even those not in the trusted hosts list.
+    All,
+    /// Accept only hosts in the trusted hosts list.
+    TrustedOnly,
+}
+
+impl Default for AcceptMode {
+    fn default() -> Self {
+        AcceptMode::TrustedOnly
     }
 }
 
@@ -441,7 +455,7 @@ impl Server {
         // Get config values for trusted_hosts and accept_mode
         let current_config = config.config();
         let trusted_hosts = current_config.trusted_hosts;
-        let accept_mode = current_config.accept_mode;
+        let accept_mode = AcceptMode::TrustedOnly;
 
         let server = Server {
             host_id,
@@ -3284,12 +3298,6 @@ impl Server {
     ) -> anyhow::Result<()> {
         // Get current config
         let mut config = self.config.config();
-
-        // Update accept_mode if provided
-        if let Some(mode) = params.accept_mode {
-            config.accept_mode = mode;
-            self.accept_mode = mode;
-        }
 
         // Add trusted hosts if provided
         if let Some(hosts_to_add) = params.add_trusted_hosts {
