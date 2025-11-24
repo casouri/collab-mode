@@ -42,6 +42,10 @@
 The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
   :type '(list string))
 
+(defcustom collab-accept-connection-on-startup t
+  "Whether to start accepting remote connection on start-up."
+  :type 'boolean)
+
 ;; Generated with seaborn.color_palette("colorblind").as_hex()
 (defcustom collab-cursor-colors
   '( "#0173b2" "#de8f05" "#029e73" "#d55e00" "#cc78bc" "#ca9161"
@@ -1042,6 +1046,13 @@ Return nil if there’s no parent."
 
           (setq collab--my-host-id (plist-get resp :hostId))
 
+          (when (and collab-accept-connection-on-startup
+                     (nth 1 collab-local-host-config))
+            (jsonrpc-notify conn 'AcceptConnection
+                            `( :signalingAddr ,(nth 1 collab-local-host-config)
+                               :transportType "SCTP"
+                               :mode "TrustedOnly")))
+
           (when collab--jsonrpc-connection
             (jsonrpc-shutdown collab--jsonrpc-connection))
           (setq collab--jsonrpc-connection conn)))))
@@ -1130,9 +1141,16 @@ If we receive a ServerError notification, just display a warning."
                         (lambda ()
                           (collab--connection-state-req)))
        (collab--hub-rerender)))
-    ('AcceptingConnection
-     ;; Don’t need to do anything.
-     )
+    ((or 'AcceptingConnection 'AcceptModeChanged)
+     (collab--msg-event 'success
+                        (pcase method
+                          ('AcceptingConnection "Now accepting remote connections")
+                          ('AcceptModeChanged "Accept mode changed")))
+     ;; Refresh accept state.
+     (collab--refetch 'ConnectionState
+                      (lambda ()
+                        (collab--connection-state-req)))
+     (collab--hub-rerender))
     ('ConnectionProgress
      (collab--msg-event 'default
                         (format "Connection to %s: %s"
@@ -1382,12 +1400,13 @@ Return (:siteId SITE-ID :content CONTENT)."
                      `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
-(defun collab--accept-connection-notif (signaling-addr)
-  "Accept connections on SIGNALING-ADDR."
+(defun collab--accept-connection-notif (signaling-addr mode)
+  "Accept connections on SIGNALING-ADDR with MODE."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'AcceptConnection
                     `( :signalingAddr ,signaling-addr
-                       :transportType "SCTP"))))
+                       :transportType "SCTP"
+                       :mode ,mode))))
 
 (defun collab--connect-notif (host-id signaling-addr)
   "Connect to HOST-ID on SIGNALING-ADDR."
@@ -1647,14 +1666,16 @@ If no such section is found, do nothing."
               (throw 'done nil))))))))
 
 (defun collab--insert-file
-    (file-desc filename directoryp &optional display-name)
+    (file-desc filename directoryp &optional display-name face)
   "Insert FILE-DESC with FILENAME.
 
 Insert as a directory if DIRECTORYP non-nil. If DISPLAY-NAME non-nil,
-use that as the display name."
+use that as the display name.
+
+If FACE given, use it for the inserted file."
   (let ((beg (point)))
     (insert (propertize (or display-name filename)
-                        'face (if directoryp 'dired-directory nil)))
+                        'face (or face (if directoryp 'dired-directory nil))))
     (add-text-properties
      beg (point) `( collab-file-desc ,file-desc
                     collab-filename ,filename
@@ -1675,7 +1696,7 @@ shouldn’t end with a newline."
          (files (seq-map #'identity (plist-get resp :files))))
     ;; 1. Insert host line.
     (insert (propertize (if (equal host collab--my-host-id)
-                            "Your files"
+                            "My files"
                           (collab--prettify-host-id host))
                         'face 'collab-host
                         'collab-host-line t))
@@ -1697,7 +1718,7 @@ shouldn’t end with a newline."
                               (name (plist-get entry :filename))
                               (directoryp (not (eq (plist-get entry :isDirectory)
                                                    :json-false))))
-                         (collab--insert-file file-desc name directoryp)
+                         (collab--insert-file file-desc name directoryp nil 'default)
                          (insert "\n")))))
       ;; Not connected. Getting files async or can’t get files.
       (_ (insert (propertize "...\n" 'face 'shadow))))
@@ -1799,14 +1820,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
          (connected (plist-get
                      (gethash 'Connected collab--cached-responses)
                      :data))
-         (accepting (seq-find (lambda (addr)
-                                (equal addr collab-default-signaling-server))
-                              (plist-get conn-state-data :accepting)))
-         ;; If any we’re accepting all remote on any signaling server.
-         (accepting-all (seq-some (lambda (entry)
-                                    (equal (plist-get entry :mode)
-                                           "All"))
-                                  accepting))
+         (accepting (plist-get conn-state-data :accepting))
          (hosts (mapcar #'car (collab--host-alist)))
          (current-message (gethash 'CurrentMessage collab--cached-responses)))
     ;; 1. Insert headers.
@@ -1816,20 +1830,25 @@ Also insert ‘collab--current-message’ if it’s non-nil."
               (propertize "DOWN" 'face 'error))
             "\n")
     (insert (format "Connection type: %s\n" collab-connection-type))
-    (insert "Accepting remote peer connections: "
-            (if accepting
-                (concat (propertize "YES" 'face 'success)
-                        (if accepting-all
-                            (propertize " (accept anyone)"
-                                        'face 'warn)
-                          (propertize " (trusted only)"
-                                      'face 'success)))
-              (propertize "NO" 'face 'shadow))
+
+    ;; 1.5
+    (insert (propertize (if accepting
+                            "\nAccepting remote connections"
+                          (substitute-command-keys
+                           "Not accepting remote connections (press \\[collab--accept-connection] to accept)"))
+                        'face 'bold)
             "\n")
     (when accepting
-      (insert (format "Your address: %s/%s\n"
-                      collab-default-signaling-server
-                      (or collab--my-host-id "???"))))
+      (seq-doseq (entry accepting)
+        (insert (format "AT %s/%s\t"
+                        (plist-get entry :addr)
+                        (propertize (or collab--my-host-id "???") 'face 'italic))
+                (propertize "YES " 'face 'success)
+                (if (equal (plist-get entry :mode) "All")
+                    (propertize "(accepts anyone)"
+                                'face 'warning)
+                  (propertize "(known remote only)"
+                              'face 'success)))))
     (insert "\n\n")
 
     ;; 2. Insert notice message, if any.
@@ -1872,7 +1891,7 @@ Let’s create one, here’s how!\n\n\n"))
 PRESS \\[collab-list-docs] TO SHOW ALL DOCS
 PRESS \\[collab-share] TO SHARE A FILE/PROJECT
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
-PRESS \\[collab--accept-connection] TO ACCEPT REMOTE CONNECTIONS (for 180s)\n"))
+PRESS \\[collab--accept-connection] TO ACCEPT CONNECTIONS FROM ANY REMOTE\n"))
     (insert "\n\n")
 
     ;; 6. Events.
@@ -2416,8 +2435,8 @@ Disconnect for remote doc, close for owned doc."
   (interactive)
   (let ((signaling-addr (nth 1 collab-local-host-config)))
     (collab--catch-error "can’t accept connection "
-      (collab--accept-connection-notif signaling-addr))
-    (collab--msg-event 'success "Accepting remote connections")
+      (collab--accept-connection-notif signaling-addr "All"))
+    (collab--msg-event 'success "Attempting to start accepting remote connections")
     (collab--refetch 'ConnectionState
                      (lambda ()
                        (collab--connection-state-req)))

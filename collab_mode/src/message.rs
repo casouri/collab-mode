@@ -22,12 +22,12 @@ pub enum NotificationCode {
     ConnectionProgress,  // Editor should show connection progress.
     AcceptingConnection, // Editor should show that we’re accepting connections.
     AcceptStopped,       // Editor should show that we’re not accepting connections anymore.
+    AcceptModeChanged,   // Accept mode changed for a signaling server.
     Connected,           // Editor should mark the remote as connected.
     FileMoved,           // A file moved, editor should update it accordingly.
     FileDeleted,         // A file/directory was deleted.
     FileClosed,          // A file is closed.
     InfoReceived,        // Info received from remote for a file.
-    AcceptModeChanged,   // Accept mode changed for a signaling server.
 
     UnimportantError, // Editor should log it but not display it.
     InternalError,    // Error that user should see, display it.
@@ -110,9 +110,11 @@ pub struct FileClosedNote {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptModeChangedNote {
-    pub signaling_addr: String,
-    pub accept_mode: server::AcceptMode,
+    pub addr: String,
+    pub mode: server::AcceptMode,
 }
+
+pub type AcceptingConnectionNote = AcceptModeChangedNote;
 
 // *** Requests and responses
 
@@ -131,6 +133,8 @@ pub struct InitResp {
 pub struct AcceptConnectionParams {
     pub signaling_addr: String,
     pub transport_type: TransportType,
+    #[serde(default)] // Default to trusted-only.
+    pub mode: AcceptMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -142,8 +146,8 @@ pub struct StopAcceptingParams {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetAcceptModeParams {
-    pub signaling_addr: String,
-    pub accept_mode: server::AcceptMode,
+    pub addr: String,
+    pub mode: server::AcceptMode,
 }
 
 // **** Update config (accept mode and trusted hosts)
@@ -498,6 +502,12 @@ pub enum Msg {
         code: ErrorCode,
         file: Option<FileDesc>,
         message: String,
+    },
+    // Internal message to change accept mode, sent from the server to
+    // itself (e.g., for timed revert).
+    SetAcceptModeInternal {
+        addr: String,
+        mode: server::AcceptMode,
     },
 }
 

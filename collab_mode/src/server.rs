@@ -173,12 +173,12 @@ struct SignalingState {
 }
 
 impl SignalingState {
-    fn connecting() -> Self {
+    fn connecting(mode: AcceptMode) -> Self {
         SignalingState {
             state: ConnectionState::Connecting,
             next_reconnect_stride: 1,
             next_reconnect_time: std::time::Instant::now(),
-            accept_mode: AcceptMode::TrustedOnly,
+            accept_mode: mode,
         }
     }
 }
@@ -541,7 +541,7 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, &*webchannel, &msg_tx, &mut *signaling_channel).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, webchannel.clone(), &msg_tx, &mut *signaling_channel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -768,7 +768,7 @@ impl Server {
         &mut self,
         msg: lsp_server::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &dyn MsgChannel,
+        webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
@@ -776,7 +776,7 @@ impl Server {
         match msg {
             lsp_server::Message::Request(req) => {
                 let req_id = req.id.clone();
-                let next = Next::new(editor_tx, Some(req_id), webchannel);
+                let next = Next::new(editor_tx, Some(req_id), &*webchannel);
                 if let Err(err) = self.handle_editor_request(req, &next).await {
                     tracing::error!("Uncaught error when handling editor request: {}", err);
                     // Errors that reach this level are internal error.
@@ -791,9 +791,16 @@ impl Server {
             }
             lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
-                let next = Next::new(editor_tx, None, webchannel);
+                let webchannel_clone = webchannel.clone();
+                let next = Next::new(editor_tx, None, &*webchannel);
                 if let Err(err) = self
-                    .handle_editor_notification(&next, notif, msg_tx, signaling_channel)
+                    .handle_editor_notification(
+                        &next,
+                        notif,
+                        msg_tx,
+                        signaling_channel,
+                        webchannel_clone,
+                    )
                     .await
                 {
                     tracing::error!("Failed to handle editor notification: {}", err);
@@ -988,25 +995,47 @@ impl Server {
         notif: lsp_server::Notification,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+        webchannel: Arc<dyn MsgChannel>,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
 
-                // Track signaling connection state (presence in map = maintain connection)
-                self.active_signaling
-                    .insert(params.signaling_addr.clone(), SignalingState::connecting());
+                // If already accepting, skip.
+                if let Some(state) = self.active_signaling.get_mut(&params.signaling_addr) {
+                    // But make sure to update accept mode.
+                    state.accept_mode = params.mode;
 
-                // Notify editor that we're accepting
-                next.send_notif(
-                    NotificationCode::AcceptingConnection,
-                    serde_json::json!({
-                        "signaling_addr": params.signaling_addr,
-                    }),
-                )
-                .await;
+                    // If mode is All, spawn background task to revert after
+                    // 3 minutes.
+                    if matches!(params.mode, AcceptMode::All) {
+                        Self::revert_back_to_trusted_only_in_3min(
+                            params.signaling_addr.clone(),
+                            self.host_id.clone(),
+                            webchannel.clone(),
+                        );
+                    }
 
-                // Bind to signaling server
+                    if matches!(state.state, ConnectionState::Connected) {
+                        next.send_notif(
+                            NotificationCode::AcceptingConnection,
+                            serde_json::json!({
+                                "signaling_addr": params.signaling_addr,
+                            }),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+
+                // Track signaling connection state (in the map =
+                // maintain connection). Override any existing state.
+                self.active_signaling.insert(
+                    params.signaling_addr.clone(),
+                    SignalingState::connecting(params.mode),
+                );
+
+                // Bind to signaling server.
                 let result = signaling_channel
                     .bind(
                         params.signaling_addr.clone(),
@@ -1027,6 +1056,16 @@ impl Server {
                         },
                     )
                     .await;
+                } else {
+                    // If mode is All, spawn background task to revert after
+                    // 3 minutes.
+                    if matches!(params.mode, AcceptMode::All) {
+                        Self::revert_back_to_trusted_only_in_3min(
+                            params.signaling_addr.clone(),
+                            self.host_id.clone(),
+                            webchannel.clone(),
+                        );
+                    }
                 }
             }
             "Connect" => {
@@ -1075,49 +1114,8 @@ impl Server {
             }
             "SetAcceptMode" => {
                 let params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
-
-                // Set the accept mode.
-                let old_mode = if let Some(signaling_state) =
-                    self.active_signaling.get_mut(&params.signaling_addr)
-                {
-                    let old_mode = signaling_state.accept_mode;
-                    signaling_state.accept_mode = params.accept_mode;
-                    Some(old_mode)
-                } else {
-                    None
-                };
-
-                // If mode changed, send notification.
-                if old_mode.is_some() && old_mode != Some(params.accept_mode) {
-                    next.send_notif(
-                        NotificationCode::AcceptModeChanged,
-                        AcceptModeChangedNote {
-                            signaling_addr: params.signaling_addr.clone(),
-                            accept_mode: params.accept_mode,
-                        },
-                    )
-                    .await;
-
-                    // If mode is All, spawn background task to revert after 3 minutes.
-                    if matches!(params.accept_mode, AcceptMode::All) {
-                        let signaling_addr = params.signaling_addr.clone();
-                        let editor_tx = next.editor_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(180)).await;
-                            // Send SetAcceptMode notification to revert to TrustedOnly.
-                            let notif = lsp_server::Notification {
-                                method: "SetAcceptMode".to_string(),
-                                params: serde_json::json!({
-                                    "signalingAddr": signaling_addr,
-                                    "acceptMode": AcceptMode::TrustedOnly,
-                                }),
-                            };
-                            let _ = editor_tx
-                                .send(lsp_server::Message::Notification(notif))
-                                .await;
-                        });
-                    }
-                }
+                self.handle_set_accept_mode(next, params.addr, params.mode, webchannel.clone())
+                    .await?;
             }
 
             _ => {
@@ -1128,6 +1126,72 @@ impl Server {
         Ok(())
     }
 
+    // Handle setting accept mode, used by both editor notifications and
+    // internal messages.
+    async fn handle_set_accept_mode(
+        &mut self,
+        next: &Next<'_>,
+        addr: String,
+        mode: AcceptMode,
+        webchannel: Arc<dyn MsgChannel>,
+    ) -> anyhow::Result<()> {
+        // Set the accept mode.
+        let old_mode = if let Some(signaling_state) = self.active_signaling.get_mut(&addr) {
+            let old_mode = signaling_state.accept_mode;
+            signaling_state.accept_mode = mode;
+            Some(old_mode)
+        } else {
+            None
+        };
+
+        // If mode changed, send notification.
+        if old_mode.is_some() && old_mode != Some(mode) {
+            next.send_notif(
+                NotificationCode::AcceptModeChanged,
+                AcceptModeChangedNote {
+                    addr: addr.clone(),
+                    mode,
+                },
+            )
+            .await;
+
+            // If mode is All, spawn background task to revert after 3
+            // minutes.
+            if matches!(mode, AcceptMode::All) {
+                Self::revert_back_to_trusted_only_in_3min(
+                    addr.clone(),
+                    self.host_id.clone(),
+                    webchannel,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // Spawn a background task to revert accept mode to TrustedOnly after 3
+    // minutes.
+    fn revert_back_to_trusted_only_in_3min(
+        signaling_addr: String,
+        host_id: ServerId,
+        webchannel: Arc<dyn MsgChannel>,
+    ) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(180)).await;
+            // Send SetAcceptModeInternal message to ourselves via
+            // webchannel.
+            let _ = webchannel
+                .send(
+                    &host_id,
+                    None,
+                    Msg::SetAcceptModeInternal {
+                        addr: signaling_addr,
+                        mode: AcceptMode::TrustedOnly,
+                    },
+                )
+                .await;
+        });
+    }
+
     #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
     async fn handle_remote_message(
         &mut self,
@@ -1136,6 +1200,7 @@ impl Server {
         webchannel: Arc<dyn MsgChannel>,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
+        let webchannel_clone = webchannel.clone();
         let next = Next::new(editor_tx, msg.req_id.clone(), &*webchannel);
         match msg.body {
             Msg::IceProgress(remote_hostid, progress) => {
@@ -1471,6 +1536,18 @@ impl Server {
                 };
                 next.send_notif(NotificationCode::ErrorResponse, msg).await;
                 Ok(())
+            }
+            Msg::SetAcceptModeInternal { addr, mode } => {
+                // Verify sender is ourselves - only process if sent from self.
+                if msg.host != self.host_id {
+                    tracing::warn!(
+                        "Ignoring SetAcceptModeInternal from non-self host {}",
+                        msg.host
+                    );
+                    return Ok(());
+                }
+                self.handle_set_accept_mode(&next, addr, mode, webchannel_clone)
+                    .await
             }
             _ => {
                 let message = format!(
@@ -3487,9 +3564,11 @@ impl Server {
         match msg {
             SignalingMsg::Bound(_id) => {
                 // Update state to Connected
+                let mut mode = AcceptMode::TrustedOnly;
                 if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
                     state.state = ConnectionState::Connected;
                     tracing::info!("Successfully bound to signaling server {}", signaling_addr);
+                    mode = state.accept_mode;
                 }
 
                 // Start all pending connections waiting for this signaling server.
@@ -3521,6 +3600,16 @@ impl Server {
                     )
                     .await;
                 }
+
+                // Notify editor that we’re accepting.
+                next.send_notif(
+                    NotificationCode::AcceptingConnection,
+                    AcceptingConnectionNote {
+                        addr: signaling_addr.clone(),
+                        mode,
+                    },
+                )
+                .await;
 
                 Ok(())
             }
