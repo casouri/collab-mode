@@ -1532,7 +1532,9 @@ impl Server {
                 Ok(())
             }
             Msg::SetAcceptModeInternal { addr, mode } => {
-                // Verify sender is ourselves - only process if sent from self.
+                // Only process the request if it’s sent from ourself.
+                // The host is set by us when receiving the request,
+                // so no worry about remote forging it.
                 if msg.host != self.host_id {
                     tracing::warn!(
                         "Ignoring SetAcceptModeInternal from non-self host {}",
