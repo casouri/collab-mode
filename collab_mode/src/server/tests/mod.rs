@@ -669,23 +669,13 @@ pub async fn setup_hub_and_spoke_servers(
                 "hostId": hub_id.clone(),
                 "signalingAddr": "test",
                 "transportType": "SCTP",
+                "mode": "All",
             }),
         )
         .await?;
 
     let _ = hub_editor
         .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
-        .await?;
-
-    // Set accept mode to All for testing (allows connections without certificate trust).
-    hub_editor
-        .send_notification(
-            "SetAcceptMode",
-            serde_json::json!({
-                "signalingAddr": "test",
-                "acceptMode": "All",
-            }),
-        )
         .await?;
 
     // Create and connect spoke servers.
@@ -738,23 +728,13 @@ pub async fn setup_hub_and_spoke_servers(
                 serde_json::json!({
                     "signalingAddr": "test",
                     "transportType": "SCTP",
+                    "mode": "All",
                 }),
             )
             .await?;
 
         let _ = spoke_editor
             .wait_for_notification(&NotificationCode::AcceptingConnection.to_string(), 5)
-            .await?;
-
-        // Set accept mode to All for testing (allows connections without certificate trust).
-        spoke_editor
-            .send_notification(
-                "SetAcceptMode",
-                serde_json::json!({
-                    "signalingAddr": "test",
-                    "acceptMode": "All",
-                }),
-            )
             .await?;
 
         // Spoke connects to hub.

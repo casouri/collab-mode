@@ -3,7 +3,7 @@ use crate::engine::{ClientEngine, ServerEngine};
 use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, WebChannel};
+use crate::webchannel::{self, MsgChannel, MsgChannelImpl, WebChannel};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -515,11 +515,15 @@ impl Server {
                 ))
             };
 
-        // Use the Server's test channel if provided, otherwise use WebChannel
-        let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
-            Arc::new(factory.get_channel(self.host_id.clone(), msg_tx.clone()))
+        // Use the Server's test channel if provided, otherwise use
+        // WebChannel. We use a concret enum rather than a dyn Trait
+        // like signaling channel because I need to clone the
+        // webchannel at places, and I don’t want to use dyn_clone,
+        // too complicated.
+        let webchannel: MsgChannelImpl = if let Some(factory) = test_channel_factory {
+            MsgChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx.clone()))
         } else {
-            Arc::new(WebChannel::new(self.host_id.clone(), msg_tx.clone()))
+            MsgChannelImpl::Web(WebChannel::new(self.host_id.clone(), msg_tx.clone()))
         };
 
         // Add initial projects
@@ -541,7 +545,7 @@ impl Server {
             tokio::select! {
                 // Handle messages from the editor.
                 Some(msg) = editor_rx.recv() => {
-                    let res = self.handle_editor_message(msg, &editor_tx, webchannel.clone(), &msg_tx, &mut *signaling_channel).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx, &mut *signaling_channel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -551,7 +555,7 @@ impl Server {
                 },
                 // Handle messages from remote peers.
                 Some(web_msg) = msg_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, webchannel.clone()).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -561,10 +565,10 @@ impl Server {
                 },
                 // Handle messages from signaling clients.
                 Some(signaling_message) = signaling_msg_rx.recv() => {
-                    let next = Next::new(&editor_tx, None, &*webchannel);
+                    let next = Next::new(&editor_tx, None, &webchannel);
                     match signaling_message.msg {
                         Ok(signaling_msg) => {
-                            let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, webchannel.clone(), &msg_tx, &mut *signaling_channel).await;
+                            let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, &msg_tx, &mut *signaling_channel).await;
                             if let Err(err) = res {
                                 tracing::error!("Failed to handle signaling message: {}", err);
                             }
@@ -618,7 +622,7 @@ impl Server {
                         remote.next_reconnect_time = Instant::now() + stride;
                     }
 
-                    let next = Next::new(&editor_tx, None, &*webchannel);
+                    let next = Next::new(&editor_tx, None, &webchannel);
                     for (host, remote) in need_connect {
                         self.try_connect_remote(
                             &next, host.clone(),
@@ -768,7 +772,7 @@ impl Server {
         &mut self,
         msg: lsp_server::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: Arc<dyn MsgChannel>,
+        webchannel: &MsgChannelImpl,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
@@ -776,7 +780,7 @@ impl Server {
         match msg {
             lsp_server::Message::Request(req) => {
                 let req_id = req.id.clone();
-                let next = Next::new(editor_tx, Some(req_id), &*webchannel);
+                let next = Next::new(editor_tx, Some(req_id), &webchannel);
                 if let Err(err) = self.handle_editor_request(req, &next).await {
                     tracing::error!("Uncaught error when handling editor request: {}", err);
                     // Errors that reach this level are internal error.
@@ -791,16 +795,9 @@ impl Server {
             }
             lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
-                let webchannel_clone = webchannel.clone();
-                let next = Next::new(editor_tx, None, &*webchannel);
+                let next = Next::new(editor_tx, None, &webchannel);
                 if let Err(err) = self
-                    .handle_editor_notification(
-                        &next,
-                        notif,
-                        msg_tx,
-                        signaling_channel,
-                        webchannel_clone,
-                    )
+                    .handle_editor_notification(&next, notif, msg_tx, signaling_channel)
                     .await
                 {
                     tracing::error!("Failed to handle editor notification: {}", err);
@@ -995,7 +992,6 @@ impl Server {
         notif: lsp_server::Notification,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
-        webchannel: Arc<dyn MsgChannel>,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
@@ -1012,7 +1008,7 @@ impl Server {
                         Self::revert_back_to_trusted_only_in_3min(
                             params.signaling_addr.clone(),
                             self.host_id.clone(),
-                            webchannel.clone(),
+                            next.webchannel.clone(),
                         );
                     }
 
@@ -1063,7 +1059,7 @@ impl Server {
                         Self::revert_back_to_trusted_only_in_3min(
                             params.signaling_addr.clone(),
                             self.host_id.clone(),
-                            webchannel.clone(),
+                            next.webchannel.clone(),
                         );
                     }
                 }
@@ -1114,7 +1110,7 @@ impl Server {
             }
             "SetAcceptMode" => {
                 let params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
-                self.handle_set_accept_mode(next, params.addr, params.mode, webchannel.clone())
+                self.handle_set_accept_mode(next, params.addr, params.mode)
                     .await?;
             }
 
@@ -1133,7 +1129,6 @@ impl Server {
         next: &Next<'_>,
         addr: String,
         mode: AcceptMode,
-        webchannel: Arc<dyn MsgChannel>,
     ) -> anyhow::Result<()> {
         // Set the accept mode.
         let old_mode = if let Some(signaling_state) = self.active_signaling.get_mut(&addr) {
@@ -1161,7 +1156,7 @@ impl Server {
                 Self::revert_back_to_trusted_only_in_3min(
                     addr.clone(),
                     self.host_id.clone(),
-                    webchannel,
+                    next.webchannel.clone(),
                 );
             }
         }
@@ -1173,7 +1168,7 @@ impl Server {
     fn revert_back_to_trusted_only_in_3min(
         signaling_addr: String,
         host_id: ServerId,
-        webchannel: Arc<dyn MsgChannel>,
+        webchannel: MsgChannelImpl,
     ) {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(180)).await;
@@ -1197,11 +1192,10 @@ impl Server {
         &mut self,
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: Arc<dyn MsgChannel>,
+        webchannel: &MsgChannelImpl,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
-        let webchannel_clone = webchannel.clone();
-        let next = Next::new(editor_tx, msg.req_id.clone(), &*webchannel);
+        let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
             Msg::IceProgress(remote_hostid, progress) => {
                 next.send_notif(
@@ -1546,8 +1540,7 @@ impl Server {
                     );
                     return Ok(());
                 }
-                self.handle_set_accept_mode(&next, addr, mode, webchannel_clone)
-                    .await
+                self.handle_set_accept_mode(&next, addr, mode).await
             }
             _ => {
                 let message = format!(
@@ -3555,7 +3548,6 @@ impl Server {
         signaling_addr: String,
         msg: crate::signaling::SignalingMsg,
         next: &Next<'a>,
-        webchannel: Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
@@ -3676,7 +3668,7 @@ impl Server {
 
                 // Establish WebChannel connection using the sock.
                 let key_cert = self.key_cert.clone();
-                let webchannel_clone = webchannel.clone();
+                let webchannel_clone = next.webchannel.clone();
                 let peer_id_clone = peer_id.clone();
                 let msg_tx_clone = msg_tx.clone();
                 let my_host_id = self.host_id.clone();
@@ -3741,14 +3733,14 @@ impl Server {
 struct Next<'a> {
     editor_tx: &'a mpsc::Sender<lsp_server::Message>,
     req_id: Option<lsp_server::RequestId>,
-    webchannel: &'a dyn MsgChannel,
+    pub webchannel: &'a MsgChannelImpl,
 }
 
 impl<'a> Next<'a> {
     fn new(
         editor_tx: &'a mpsc::Sender<lsp_server::Message>,
         req_id: Option<lsp_server::RequestId>,
-        webchannel: &'a dyn MsgChannel,
+        webchannel: &'a MsgChannelImpl,
     ) -> Self {
         Next {
             editor_tx,
@@ -3814,7 +3806,7 @@ async fn send_response(
 
 /// Send a message to a remote host via WebChannel with error logging.
 async fn send_to_remote(
-    webchannel: &dyn MsgChannel,
+    webchannel: &MsgChannelImpl,
     host_id: &ServerId,
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,

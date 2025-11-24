@@ -74,6 +74,58 @@ pub trait MsgChannel: Send + Sync {
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()>;
 }
 
+/// Concrete implementation of MsgChannel that can be either a WebChannel
+/// or a TestWebChannel. This enum allows us to avoid dynamic dispatch
+/// and enables cloning.
+#[derive(Clone)]
+pub enum MsgChannelImpl {
+    Web(WebChannel),
+    Test(TestWebChannel),
+}
+
+impl MsgChannelImpl {
+    pub fn hostid(&self) -> ServerId {
+        match self {
+            MsgChannelImpl::Web(web) => web.hostid(),
+            MsgChannelImpl::Test(test) => test.hostid(),
+        }
+    }
+}
+
+#[async_trait]
+impl MsgChannel for MsgChannelImpl {
+    async fn send(
+        &self,
+        recipient: &ServerId,
+        req_id: Option<RequestId>,
+        msg: Msg,
+    ) -> anyhow::Result<()> {
+        match self {
+            MsgChannelImpl::Web(web) => web.send(recipient, req_id, msg).await,
+            MsgChannelImpl::Test(test) => test.send(recipient, req_id, msg).await,
+        }
+    }
+
+    async fn connect(
+        &self,
+        remote_hostid: ServerId,
+        sock: Option<crate::signaling::client_new::Sock>,
+        my_key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()> {
+        match self {
+            MsgChannelImpl::Web(web) => web.connect(remote_hostid, sock, my_key_cert).await,
+            MsgChannelImpl::Test(test) => test.connect(remote_hostid, sock, my_key_cert).await,
+        }
+    }
+
+    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
+        match self {
+            MsgChannelImpl::Web(web) => web.broadcast(req_id, msg).await,
+            MsgChannelImpl::Test(test) => test.broadcast(req_id, msg).await,
+        }
+    }
+}
+
 /// Types of transport. currently only SCTP, we might add webrtc
 /// later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -908,6 +960,12 @@ impl TestWebChannelFactory {
 pub struct TestWebChannel {
     my_hostid: ServerId,
     factory: Arc<TestWebChannelFactory>,
+}
+
+impl TestWebChannel {
+    pub fn hostid(&self) -> ServerId {
+        self.my_hostid.clone()
+    }
 }
 
 #[async_trait]

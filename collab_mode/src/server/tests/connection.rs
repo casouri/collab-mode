@@ -70,6 +70,7 @@ async fn test_accept_connect() {
                 "hostId": id1.clone(),
                 "signalingAddr": "test",
                 "transportType": "SCTP",
+                "mode": "All",
             }),
         )
         .await
@@ -83,18 +84,6 @@ async fn test_accept_connect() {
         "Should receive AcceptingConnection notification"
     );
 
-    // Set accept mode to All for testing.
-    mock_editor1
-        .send_notification(
-            "SetAcceptMode",
-            serde_json::json!({
-                "signalingAddr": "test",
-                "acceptMode": "All",
-            }),
-        )
-        .await
-        .unwrap();
-
     // Server2 also needs to bind to signaling server.
     tracing::info!("Server2 binding to signaling server");
     mock_editor2
@@ -103,6 +92,7 @@ async fn test_accept_connect() {
             serde_json::json!({
                 "signalingAddr": "test",
                 "transportType": "SCTP",
+                "mode": "All",
             }),
         )
         .await
@@ -115,18 +105,6 @@ async fn test_accept_connect() {
         accepting_params2.is_ok(),
         "Server2 should receive AcceptingConnection notification"
     );
-
-    // Set accept mode to All for testing.
-    mock_editor2
-        .send_notification(
-            "SetAcceptMode",
-            serde_json::json!({
-                "signalingAddr": "test",
-                "acceptMode": "All",
-            }),
-        )
-        .await
-        .unwrap();
 
     tracing::info!("Server2 connecting to Server1");
     mock_editor2
