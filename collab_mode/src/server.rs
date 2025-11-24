@@ -2770,11 +2770,14 @@ impl Server {
         }
 
         // Collect accepting signaling addresses (only Connected servers).
-        let accepting: Vec<String> = self
+        let accepting: Vec<AcceptingEntry> = self
             .active_signaling
             .iter()
             .filter(|(_addr, state)| state.state == ConnectionState::Connected)
-            .map(|(addr, _state)| addr.clone())
+            .map(|(addr, state)| AcceptingEntry {
+                addr: addr.clone(),
+                mode: state.accept_mode,
+            })
             .collect();
 
         // Collect owned docs from self.docs.

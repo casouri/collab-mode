@@ -1,4 +1,9 @@
-use crate::{config_man::ConfigProject, server, types::*, webchannel::TransportType};
+use crate::{
+    config_man::ConfigProject,
+    server::{self, AcceptMode},
+    types::*,
+    webchannel::TransportType,
+};
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -378,12 +383,19 @@ pub struct ConnectedDocEntry {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AcceptingEntry {
+    pub addr: String,
+    pub mode: AcceptMode,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionStateResp {
     /// Connected remotes.
     pub connections: Vec<ConnectionStateEntry>,
-    /// Signal addresses that we're accepting connection on. Usually
-    /// just one.
-    pub accepting: Vec<String>,
+    /// Signal addresses that we're accepting connection on and the
+    /// accept mode for it.
+    pub accepting: Vec<AcceptingEntry>,
     /// Live documents hosted by this server.
     pub live: Vec<LiveDocEntry>,
     /// Connected documents from remote servers.

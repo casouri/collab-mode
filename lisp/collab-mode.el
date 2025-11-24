@@ -1802,6 +1802,11 @@ Also insert ‘collab--current-message’ if it’s non-nil."
          (accepting (seq-find (lambda (addr)
                                 (equal addr collab-default-signaling-server))
                               (plist-get conn-state-data :accepting)))
+         ;; If any we’re accepting all remote on any signaling server.
+         (accepting-all (seq-some (lambda (entry)
+                                    (equal (plist-get entry :mode)
+                                           "All"))
+                                  accepting))
          (hosts (mapcar #'car (collab--host-alist)))
          (current-message (gethash 'CurrentMessage collab--cached-responses)))
     ;; 1. Insert headers.
@@ -1813,7 +1818,12 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (insert (format "Connection type: %s\n" collab-connection-type))
     (insert "Accepting remote peer connections: "
             (if accepting
-                (propertize "YES" 'face 'success)
+                (concat (propertize "YES" 'face 'success)
+                        (if accepting-all
+                            (propertize " (accept anyone)"
+                                        'face 'warn)
+                          (propertize " (trusted only)"
+                                      'face 'success)))
               (propertize "NO" 'face 'shadow))
             "\n")
     (when accepting
