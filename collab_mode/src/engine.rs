@@ -983,6 +983,7 @@ impl InternalDoc {
     /// Convert internal `op` from internal pos to editor pos, and
     /// apply it to the internal_doc.
     fn convert_internal_op_and_apply(&mut self, op: Op) -> EditInstruction {
+        tracing::debug!(?op, ranges = ?self.ranges, "convert_internal_op_and_apply: input");
         let site = op.site();
         let mut cursor = self.get_cursor(&site);
         let instr = match op {
@@ -1034,6 +1035,7 @@ impl InternalDoc {
             }
         };
         self.check_cursor_positions();
+        tracing::debug!(?instr, "convert_internal_op_and_apply: output");
 
         instr
     }
@@ -1576,12 +1578,22 @@ impl ClientEngine {
             if self.gh.local.len() == 0 {
                 return Err(EngineError::OpMissing(op.clone()));
             }
-            let local_op = self.gh.local.remove(0);
+            let mut local_op = self.gh.local.remove(0);
             if local_op.site() != op.site() || local_op.site_seq != op.site_seq {
                 return Err(EngineError::OpMismatch(op.clone(), local_op.clone()));
             }
             self.current_seq = seq;
-            self.gh.global.push(op);
+            // Use the local_op's content but assign the global seq
+            // from the received op. The received op is the one
+            // transformed against server’s global history and is for
+            // other sites.
+            tracing::debug!(
+                ?local_op,
+                ?op,
+                "process_remote_op: moving local op to global"
+            );
+            local_op.seq = op.seq;
+            self.gh.global.push(local_op);
             Ok(None)
         } else {
             // We received an op generated at another site, transform
@@ -1646,6 +1658,12 @@ impl ClientEngine {
     /// [FatOp] (seq, site_seq, etc) are dummy values, only `site` is
     /// accurate and useful.
     fn generate_undo_op_1(&mut self, redo: bool) -> Vec<FatOp> {
+        tracing::debug!(
+            ?self.gh.undo_queue,
+            ?self.gh.global,
+            ?self.gh.local,
+            "generate_undo_op_1: history state"
+        );
         let mut idxidx;
         if redo {
             if self.gh.undo_tip.is_none() {
@@ -1688,11 +1706,24 @@ impl ClientEngine {
             }
             prev_group_seq = Some(op.group_seq);
 
+            let original_op = op.clone();
             op.inverse();
+            let inverted_op = op.clone();
             let seq = self.gh.undo_queue[idxidx];
             let mut transform_base = self.gh.all_ops_after(seq);
+            let ops_after = transform_base.clone();
             transform_base.extend_from_slice(&ops[..]);
             op.batch_transform(&transform_base);
+            tracing::debug!(
+                ?idxidx,
+                seq,
+                ?original_op,
+                ?inverted_op,
+                ops_after_len = ops_after.len(),
+                prev_undo_ops_len = ops.len(),
+                ?op,
+                "generate_undo_op_1: generated undo op"
+            );
             ops.push(op);
 
             if redo {

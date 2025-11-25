@@ -215,6 +215,8 @@ pub enum TranscriptCommand {
     Undo { editor: usize },
     Redo { editor: usize },
     Send { editor: usize },
+    BeginGroup { editor: usize },
+    EndGroup { editor: usize },
     Check,
 }
 
@@ -305,6 +307,16 @@ pub fn parse_transcript(
                         editor: editor_num - 1,
                     });
                 }
+                "BEGIN_GROUP" => {
+                    commands.push(TranscriptCommand::BeginGroup {
+                        editor: editor_num - 1,
+                    });
+                }
+                "END_GROUP" => {
+                    commands.push(TranscriptCommand::EndGroup {
+                        editor: editor_num - 1,
+                    });
+                }
                 _ => {
                     return Err(anyhow::anyhow!("Unknown command: {}", cmd));
                 }
@@ -325,7 +337,9 @@ pub fn get_editor_count(commands: &[TranscriptCommand]) -> usize {
             | TranscriptCommand::Delete { editor, .. }
             | TranscriptCommand::Undo { editor }
             | TranscriptCommand::Redo { editor }
-            | TranscriptCommand::Send { editor } => *editor,
+            | TranscriptCommand::Send { editor }
+            | TranscriptCommand::BeginGroup { editor }
+            | TranscriptCommand::EndGroup { editor } => *editor,
             TranscriptCommand::Check => continue,
         };
         max_editor = max_editor.max(editor);
@@ -543,6 +557,7 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
         let mut spoke_files = Vec::new();
         let mut spoke_site_ids = Vec::new();
         let mut group_seq_counters: Vec<u32> = vec![1; num_editors];
+        let mut in_group: Vec<bool> = vec![false; num_editors];  // Track if editor is in a group
         let mut spoke_ops_counts: Vec<usize> = vec![0; num_editors];  // Track ops applied by each editor
         let mut spoke_global_seqs: Vec<GlobalSeq> = vec![0; num_editors];  // Track last_global_seq from server
         let mut spoke_pending_counts: Vec<usize> = vec![0; num_editors];  // Track pending_local_ops from server
@@ -579,7 +594,9 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                     // Update the groupSeq in the op
                     op.group_seq = group_seq;
                     spoke_pending_ops[*editor].push(serde_json::to_value(&op).unwrap());
-                    group_seq_counters[*editor] += 1;
+                    if !in_group[*editor] {
+                        group_seq_counters[*editor] += 1;
+                    }
                 }
                 TranscriptCommand::Delete { editor, count } => {
                     let group_seq = group_seq_counters[*editor];
@@ -587,7 +604,9 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         // Update the groupSeq in the op
                         op.group_seq = group_seq;
                         spoke_pending_ops[*editor].push(serde_json::to_value(&op).unwrap());
-                        group_seq_counters[*editor] += 1;
+                        if !in_group[*editor] {
+                            group_seq_counters[*editor] += 1;
+                        }
                     }
                 }
                 TranscriptCommand::Undo { editor } => {
@@ -788,6 +807,13 @@ pub async fn run_transcript_test(transcript_path: &str) -> anyhow::Result<()> {
                         &group_seq_counters
                     );
 
+                }
+                TranscriptCommand::BeginGroup { editor } => {
+                    in_group[*editor] = true;
+                }
+                TranscriptCommand::EndGroup { editor } => {
+                    in_group[*editor] = false;
+                    group_seq_counters[*editor] += 1;
                 }
                 TranscriptCommand::Check => {
                     // First round: Send all pending ops for all editors

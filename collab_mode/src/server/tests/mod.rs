@@ -667,7 +667,7 @@ pub async fn setup_hub_and_spoke_servers(
             "AcceptConnection",
             serde_json::json!({
                 "hostId": hub_id.clone(),
-                "signalingAddr": "test",
+                "addr": "test",
                 "transportType": "SCTP",
                 "mode": "All",
             }),
@@ -726,7 +726,7 @@ pub async fn setup_hub_and_spoke_servers(
             .send_notification(
                 "AcceptConnection",
                 serde_json::json!({
-                    "signalingAddr": "test",
+                    "addr": "test",
                     "transportType": "SCTP",
                     "mode": "All",
                 }),

@@ -339,8 +339,10 @@ impl Doc {
 // *** Impl RemoteDoc
 
 impl RemoteDoc {
-    /// Apply an EditInstruction to the buffer.
-    pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) -> anyhow::Result<()> {
+    /// Apply an EditInstruction to the buffer without checking engine/buffer sync.
+    /// Use `verify_buffer_engine_sync` after applying all instructions from a
+    /// single editor operation.
+    fn apply_edit_instruction_unchecked(&mut self, instruction: &EditInstruction) {
         match instruction {
             EditInstruction::Ins { edits } => {
                 for edit in edits.iter().rev() {
@@ -368,8 +370,10 @@ impl RemoteDoc {
                 }
             }
         }
+    }
 
-        // Verify that engine's editor_len matches the actual buffer length
+    /// Verify that engine's editor_len matches the actual buffer length.
+    fn verify_buffer_engine_sync(&self) -> anyhow::Result<()> {
         let engine_len = self.engine.editor_len();
         let buffer_len = self.buffer.len() as u64;
         if engine_len != buffer_len {
@@ -379,8 +383,13 @@ impl RemoteDoc {
             ))
             .into());
         }
-
         Ok(())
+    }
+
+    /// Apply an EditInstruction to the buffer and verify sync.
+    pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) -> anyhow::Result<()> {
+        self.apply_edit_instruction_unchecked(instruction);
+        self.verify_buffer_engine_sync()
     }
 }
 
@@ -2725,10 +2734,14 @@ impl Server {
                 remote_doc.next_site_seq += 1;
 
                 let instructions = remote_doc.engine.process_local_op(editor_op, site_seq)?;
-                // Apply each processed op to the buffer
+                // Apply each processed instruction to the buffer without checking,
+                // then verify sync once after all instructions from this editor op.
+                // This is needed because Undo/Redo generate multiple instructions
+                // that need to be applied as a batch.
                 for instr in instructions {
-                    remote_doc.apply_edit_instruction(&instr)?;
+                    remote_doc.apply_edit_instruction_unchecked(&instr);
                 }
+                remote_doc.verify_buffer_engine_sync()?;
             }
             Ok(())
         };
