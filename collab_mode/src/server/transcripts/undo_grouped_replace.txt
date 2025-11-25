@@ -1,0 +1,38 @@
+Name: Undo grouped replace operations
+
+# Insert initial text: "AbcAbcAbcAbc" (positions 0-11)
+E1 INSERT AbcAbcAbcAbc
+E1 SEND
+
+# Ensure E2 has received E1's content before proceeding
+===CHECK===
+
+# Group 1: Replace first A at position 0 with a (single operation, separate group)
+# E2's cursor is at 12 after receiving E1's content. Move to pos 1 to delete backward at pos 0.
+# MOVE -11 goes from 12 to 1
+E2 MOVE -11
+E2 DELETE 1
+E2 INSERT a
+E2 SEND
+
+# Group 2: Replace remaining 3 A's with a (grouped operations)
+# E2 cursor is now at 1, A's are at positions 3, 6, 9
+# Need to go to positions 4, 7, 10 to delete backward
+E2 BEGIN_GROUP
+E2 MOVE 3
+E2 DELETE 1
+E2 INSERT a
+E2 MOVE 3
+E2 DELETE 1
+E2 INSERT a
+E2 MOVE 3
+E2 DELETE 1
+E2 INSERT a
+E2 END_GROUP
+E2 SEND
+
+# Undo group 2 - this should restore to "abcAbcAbcAbc"
+E2 UNDO
+E2 SEND
+
+===CHECK===
