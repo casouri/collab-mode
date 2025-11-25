@@ -420,14 +420,13 @@ If MARK non-nil, show active region."
   "Send cursor position if current buffer is in collab mode."
   (when (and collab-monitored-mode collab--file)
     (let ((file-key (collab--encode-filename collab--file)))
-      (when (null (gethash file-key collab--sync-cursor-timer-table))
-        (collab--catch-error "can’t send cursor position to remote"
-          (collab--send-info-req
-           collab--file
-           (if (region-active-p)
-               `( :type "common.pos" :point ,(point)
-                  :mark ,(mark))
-             `(:type "common.pos" :point ,(point)))))))))
+      (collab--catch-error "can’t send cursor position to remote"
+        (collab--send-info-req
+         collab--file
+         (if (region-active-p)
+             `( :type "common.pos" :point ,(point)
+                :mark ,(mark))
+           `(:type "common.pos" :point ,(point))))))))
 
 ;;; Global state
 
@@ -1049,7 +1048,7 @@ Return nil if there’s no parent."
           (when (and collab-accept-connection-on-startup
                      (nth 1 collab-local-host-config))
             (jsonrpc-notify conn 'AcceptConnection
-                            `( :signalingAddr ,(nth 1 collab-local-host-config)
+                            `( :addr ,(nth 1 collab-local-host-config)
                                :transportType "SCTP"
                                :mode "TrustedOnly")))
 
@@ -1404,7 +1403,7 @@ Return (:siteId SITE-ID :content CONTENT)."
   "Accept connections on SIGNALING-ADDR with MODE."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'AcceptConnection
-                    `( :signalingAddr ,signaling-addr
+                    `( :addr ,signaling-addr
                        :transportType "SCTP"
                        :mode ,mode))))
 

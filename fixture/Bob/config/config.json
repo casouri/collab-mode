@@ -5,8 +5,9 @@
       "path": "~/p/collab-mode/fixture/Bob/shared1"
     }
   ],
-  "trusted_hosts": {},
-  "accept_mode": "All",
+  "trusted_hosts": {
+    "alice": "6F:CB:81:68:BC:B9:1D:21:6C:74:78:33:D6:BB:35:45:76:03:C4:1B:3F:17:16:6C:6A:19:29:60:3B:08:00:37"
+  },
   "host_id": "bob",
   "permission": {}
 }

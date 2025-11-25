@@ -131,16 +131,15 @@ pub struct InitResp {
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
-    pub signaling_addr: String,
+    pub addr: String,
     pub transport_type: TransportType,
-    #[serde(default)] // Default to trusted-only.
-    pub mode: AcceptMode,
+    pub mode: Option<AcceptMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StopAcceptingParams {
-    pub signaling_addr: String,
+    pub addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

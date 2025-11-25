@@ -104,21 +104,33 @@ struct RemoteDoc {
     buffer: GapBuffer<char>,
 }
 
+/// Connection state for remote host.
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum ConnectionState {
-    // Connected and well.
+    /// Connected and well.
     Connected,
-    // Trying to (re)connect.
-    Connecting,
-    // Waiting for signaling server to connect before we can attempt
-    // connection to this remote.
+    /// Trying to (re)connect. Sent Connect message to remote.
+    ConnectingStage1,
+    /// Sent Connect message remote and received Connect message from remote.
+    ConnectingStage2,
+    /// Waiting for signaling server to connect before we can attempt
+    /// connection to this remote.
     Pending,
-    // Connection was established but then broke. We try to reconnect
-    // in this case.
+    /// Connection was established but then broke. We try to reconnect
+    /// in this case.
     Disconnected,
-    // Connection was never established. We don't try to reconnect in
-    // this case.
+    /// Connection was never established. We don't try to reconnect in
+    /// this case.
     FailedToConnect,
+}
+
+/// Connection state for signaling server connection.
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum SignalingConnectionState {
+    Bound,
+    Binding,
+    Disconnected,
+    FailedToBind,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -139,7 +151,7 @@ struct RemoteState {
 impl RemoteState {
     fn connecting(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
         RemoteState {
-            state: ConnectionState::Connecting,
+            state: ConnectionState::ConnectingStage1,
             next_reconnect_stride: 1,
             signaling_addr,
             transport_type,
@@ -162,7 +174,7 @@ impl RemoteState {
 #[derive(PartialEq, Eq, Debug, Clone)]
 struct SignalingState {
     /// Connection state.
-    state: ConnectionState,
+    state: SignalingConnectionState,
     /// Next reconnect should be attempted after this duration. We
     /// use exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256. Max at 256.
     next_reconnect_stride: u64,
@@ -175,7 +187,7 @@ struct SignalingState {
 impl SignalingState {
     fn connecting(mode: AcceptMode) -> Self {
         SignalingState {
-            state: ConnectionState::Connecting,
+            state: SignalingConnectionState::Binding,
             next_reconnect_stride: 1,
             next_reconnect_time: std::time::Instant::now(),
             accept_mode: mode,
@@ -579,7 +591,7 @@ impl Server {
 
                             // Update state to Disconnected to trigger reconnection
                             if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                                state.state = ConnectionState::Disconnected;
+                                state.state = SignalingConnectionState::Disconnected;
                                 state.next_reconnect_stride = 1;
                                 state.next_reconnect_time = Instant::now();
                             }
@@ -629,8 +641,7 @@ impl Server {
                             remote.signaling_addr,
                             remote.transport_type,
                             &msg_tx,
-                            &mut *signaling_channel,
-                            false).await;
+                            &mut *signaling_channel).await;
                     }
 
                     // Handle signaling server reconnections (presence
@@ -640,8 +651,8 @@ impl Server {
                     for (addr, state) in self.active_signaling.iter_mut() {
                         // Unlike remote connection, even if first
                         // attempt failed we still try to reconnect.
-                        if state.state == ConnectionState::Connected
-                           || state.state == ConnectionState::Connecting {
+                        if state.state == SignalingConnectionState::Bound
+                           || state.state == SignalingConnectionState::Binding {
                             continue;
                         }
                         if Instant::now() < state.next_reconnect_time {
@@ -657,7 +668,7 @@ impl Server {
                             256,
                         );
                         state.next_reconnect_time = Instant::now() + stride;
-                        state.state = ConnectionState::Connecting;
+                        state.state = SignalingConnectionState::Binding;
                     }
 
                     for addr in need_rebind {
@@ -998,25 +1009,27 @@ impl Server {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
 
                 // If already accepting, skip.
-                if let Some(state) = self.active_signaling.get_mut(&params.signaling_addr) {
+                if let Some(state) = self.active_signaling.get_mut(&params.addr) {
                     // But make sure to update accept mode.
-                    state.accept_mode = params.mode;
+                    if let Some(mode) = params.mode {
+                        state.accept_mode = mode;
+                    }
 
                     // If mode is All, spawn background task to revert after
                     // 3 minutes.
-                    if matches!(params.mode, AcceptMode::All) {
+                    if matches!(params.mode, Some(AcceptMode::All)) {
                         Self::revert_back_to_trusted_only_in_3min(
-                            params.signaling_addr.clone(),
+                            params.addr.clone(),
                             self.host_id.clone(),
                             next.webchannel.clone(),
                         );
                     }
 
-                    if matches!(state.state, ConnectionState::Connected) {
+                    if matches!(state.state, SignalingConnectionState::Bound) {
                         next.send_notif(
                             NotificationCode::AcceptingConnection,
                             serde_json::json!({
-                                "signaling_addr": params.signaling_addr,
+                                "signaling_addr": params.addr,
                             }),
                         )
                         .await;
@@ -1026,15 +1039,20 @@ impl Server {
 
                 // Track signaling connection state (in the map =
                 // maintain connection). Override any existing state.
+                let existing_mode = self
+                    .active_signaling
+                    .get(&params.addr)
+                    .map(|s| s.accept_mode)
+                    .unwrap_or(AcceptMode::TrustedOnly);
                 self.active_signaling.insert(
-                    params.signaling_addr.clone(),
-                    SignalingState::connecting(params.mode),
+                    params.addr.clone(),
+                    SignalingState::connecting(params.mode.unwrap_or(existing_mode)),
                 );
 
                 // Bind to signaling server.
                 let result = signaling_channel
                     .bind(
-                        params.signaling_addr.clone(),
+                        params.addr.clone(),
                         self.host_id.clone(),
                         self.key_cert.clone(),
                     )
@@ -1042,7 +1060,7 @@ impl Server {
 
                 if let Err(err) = result {
                     tracing::error!("Failed to bind SignalingClient: {}", err);
-                    self.active_signaling.remove(&params.signaling_addr);
+                    self.active_signaling.remove(&params.addr);
                     next.send_notif(
                         NotificationCode::ErrorResponse,
                         ErrorResponseNote {
@@ -1055,9 +1073,9 @@ impl Server {
                 } else {
                     // If mode is All, spawn background task to revert after
                     // 3 minutes.
-                    if matches!(params.mode, AcceptMode::All) {
+                    if matches!(params.mode, Some(AcceptMode::All)) {
                         Self::revert_back_to_trusted_only_in_3min(
-                            params.signaling_addr.clone(),
+                            params.addr.clone(),
                             self.host_id.clone(),
                             next.webchannel.clone(),
                         );
@@ -1074,7 +1092,6 @@ impl Server {
                         params.transport_type,
                         msg_tx,
                         signaling_channel,
-                        false,
                     )
                     .await;
                 } else {
@@ -1096,13 +1113,13 @@ impl Server {
                 let params: StopAcceptingParams = serde_json::from_value(notif.params)?;
 
                 // Remove from active_signaling to stop maintaining connection
-                self.active_signaling.remove(&params.signaling_addr);
+                self.active_signaling.remove(&params.addr);
 
                 // Send AcceptStopped notification
                 next.send_notif(
                     NotificationCode::AcceptStopped,
                     serde_json::json!({
-                        "signalingAddr": params.signaling_addr,
+                        "signalingAddr": params.addr,
                         "reason": "Stopped accepting by user request",
                     }),
                 )
@@ -1562,15 +1579,6 @@ impl Server {
 
     // **** Handler functions
 
-    /// Try connect to remote. This can be called from multiple
-    /// places: when we receive a connection messge from signaling
-    /// server, when we try to reconnect a disconnected remote, when
-    /// we receive a bound message from signaling server and tries to
-    /// start connecting all pending connections waiting for the
-    /// signaling server. Normally we skip the connection attempt if
-    /// the connection is in Connecting or Pending state. But for the
-    /// third case, we want to ignore the Pending state because ofc
-    /// it’s in Pending case.
     async fn try_connect_remote<'a>(
         &mut self,
         next: &Next<'a>,
@@ -1579,25 +1587,15 @@ impl Server {
         transport_type: webchannel::TransportType,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
-        connect_when_pending: bool,
     ) {
         if host_id == self.host_id {
             return;
         }
 
-        // Check if we're already connecting or pending to avoid duplicates.
-        let should_skip = self.active_remotes.get(&host_id).map_or(false, |r| {
-            matches!(r.state, ConnectionState::Connecting)
-                || (matches!(r.state, ConnectionState::Pending) && !connect_when_pending)
-        });
-        if should_skip {
-            tracing::info!(
-                "Already connecting/pending to {}, skipping duplicate request",
-                host_id
-            );
-            return;
-        }
-
+        // We don’t check for ConnectionState::ConnectingStage1 in
+        // active_remotes here, our system is designed to work in
+        // spite of duplicate connect requests. We only check
+        // ConnectingStage2 in the Connect message handler.
         next.send_notif(
             NotificationCode::Connecting,
             ConnectingNote {
@@ -1610,7 +1608,7 @@ impl Server {
         let signaling_state = self.active_signaling.get(&signaling_addr);
         let signaling_ready = matches!(
             signaling_state,
-            Some(state) if state.state == ConnectionState::Connected
+            Some(state) if state.state == SignalingConnectionState::Bound
         );
 
         if !signaling_ready {
@@ -1632,42 +1630,32 @@ impl Server {
                 );
             }
 
-            // If signaling server is not being tracked or failed, trigger
-            // connection by sending AcceptConnection notification to self.
-            match signaling_state {
-                None
-                | Some(SignalingState {
-                    state: ConnectionState::FailedToConnect,
-                    ..
-                }) => {
-                    tracing::info!(
-                        "Triggering connection to signaling server {}",
-                        signaling_addr
-                    );
-                    let notif = lsp_server::Notification {
-                        method: "AcceptConnection".to_string(),
-                        params: serde_json::json!({
-                            "signalingAddr": signaling_addr,
-                            "transportType": transport_type,
-                        }),
-                    };
-                    let _ = next
-                        .editor_tx
-                        .send(lsp_server::Message::Notification(notif))
-                        .await;
-                }
-                _ => {
-                    // Signaling server is already Connecting or Disconnected,
-                    // reconnection will be handled by timer loop
-                }
-            }
+            // If signaling server is not ready, trigger reconnection by
+            // sending AcceptConnection notification to self.
+            tracing::info!(
+                "Triggering connection to signaling server {}",
+                signaling_addr
+            );
+            let notif = lsp_server::Notification {
+                method: "AcceptConnection".to_string(),
+                params: serde_json::to_value(AcceptConnectionParams {
+                    addr: signaling_addr.clone(),
+                    transport_type: webchannel::TransportType::SCTP,
+                    mode: None,
+                })
+                .unwrap(),
+            };
+            let _ = next
+                .editor_tx
+                .send(lsp_server::Message::Notification(notif))
+                .await;
 
             return;
         }
 
         // Signaling server is ready, set remote to Connecting
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-            remote.state = ConnectionState::Connecting;
+            remote.state = ConnectionState::ConnectingStage1;
         } else {
             self.active_remotes.insert(
                 host_id.clone(),
@@ -2845,7 +2833,7 @@ impl Server {
         let accepting: Vec<AcceptingEntry> = self
             .active_signaling
             .iter()
-            .filter(|(_addr, state)| state.state == ConnectionState::Connected)
+            .filter(|(_addr, state)| state.state == SignalingConnectionState::Bound)
             .map(|(addr, state)| AcceptingEntry {
                 addr: addr.clone(),
                 mode: state.accept_mode,
@@ -3560,7 +3548,7 @@ impl Server {
                 // Update state to Connected
                 let mut mode = AcceptMode::TrustedOnly;
                 if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                    state.state = ConnectionState::Connected;
+                    state.state = SignalingConnectionState::Bound;
                     tracing::info!("Successfully bound to signaling server {}", signaling_addr);
                     mode = state.accept_mode;
                 }
@@ -3588,9 +3576,6 @@ impl Server {
                         remote.transport_type,
                         msg_tx,
                         signaling_channel,
-                        true, // Right now the remote is in pending
-                              // state, make sure we don’t skip
-                              // connection because of that!
                     )
                     .await;
                 }
@@ -3608,7 +3593,7 @@ impl Server {
                 Ok(())
             }
 
-            SignalingMsg::Connect(peer_id, _my_id, peer_cert, _initiator) => {
+            SignalingMsg::Connect(peer_id, _my_id, peer_cert, initiator) => {
                 tracing::info!("Received Connect message from {}", peer_id);
 
                 // Check if we're already connecting or connected to this peer.
@@ -3616,10 +3601,10 @@ impl Server {
                     self.active_remotes.get(&peer_id).map_or(false, |r| {
                         matches!(
                             r.state,
-                            ConnectionState::Connecting | ConnectionState::Connected
+                            ConnectionState::ConnectingStage2 | ConnectionState::Connected
                         )
                     });
-                if is_connecting_or_connected {
+                if is_connecting_or_connected && !initiator {
                     tracing::info!(
                         "Already connecting/connected to {}, ignoring duplicate connection request",
                         peer_id
@@ -3643,7 +3628,7 @@ impl Server {
 
                 // Mark as connecting to prevent duplicate connection attempts.
                 if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                    remote.state = ConnectionState::Connecting;
+                    remote.state = ConnectionState::ConnectingStage2;
                 } else {
                     self.active_remotes.insert(
                         peer_id.clone(),
@@ -3652,6 +3637,42 @@ impl Server {
                             webchannel::TransportType::SCTP,
                         ),
                     );
+                }
+
+                // If the remote initiated the connection, reply with
+                // a connect message.
+                if initiator {
+                    let my_cert = self.key_cert.cert_der_hash();
+                    let connect_msg = crate::signaling::SignalingMsg::Connect(
+                        self.host_id.clone(),
+                        peer_id.clone(),
+                        my_cert,
+                        false,
+                    );
+
+                    // FIXME: This is the same code as in
+                    // try_connect_remote. Make it DRY.
+                    let res = signaling_channel.send(&signaling_addr, connect_msg).await;
+                    if let Err(err) = res {
+                        tracing::error!("Failed to send Connect message: {}", err);
+
+                        // Update remote state to FailedToConnect
+                        if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
+                            remote.state = ConnectionState::FailedToConnect;
+                            remote.next_reconnect_stride = 1;
+                            remote.next_reconnect_time = Instant::now();
+                        }
+
+                        // Notify editor
+                        next.send_notif(
+                            NotificationCode::ConnectionBroke,
+                            ConnectionBrokeNote {
+                                host_id: peer_id.clone(),
+                                reason: format!("Failed to send Connect message: {}", err),
+                            },
+                        )
+                        .await;
+                    }
                 }
 
                 // Create a Sock for this peer connection. Sock
