@@ -619,17 +619,24 @@ impl Server {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
                     for (host, remote) in self.active_remotes.iter_mut() {
-                        // Only reconnect Disconnected remotes. Skip Pending
-                        // (waiting for signaling), Connecting (already trying),
-                        // Connected (already connected), and FailedToConnect
-                        // (won't retry).
-                        if remote.state != ConnectionState::Disconnected {
+                        // Only reconnect Disconnected remotes. Skip
+                        // Pending (waiting for signaling),
+                        // ConnectingStage2 (already starting to
+                        // establish connection), Connected (already
+                        // connected), and FailedToConnect (won't
+                        // retry). Regarding ConnectingStage1:
+                        // basically, unless we received a reply
+                        // connection message, keep sending connect
+                        // request to remote.  TODO: Add a Refused state?
+                        if !matches!(remote.state,
+                            ConnectionState::Disconnected
+                            | ConnectionState::ConnectingStage1) {
                             continue;
                         }
                         if Instant::now() < remote.next_reconnect_time {
                             continue;
                         }
-                        tracing::info!("Reconnecting to remote {}", host);
+                        tracing::info!("Attempting reconnection with remote {}", host);
                         send_notification(&editor_tx, NotificationCode::Connecting, ConnectingNote {
                             host_id: host.clone(),
 
