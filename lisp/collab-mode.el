@@ -25,6 +25,7 @@
 (require 'rmc)
 (require 'icons)
 (require 'pulse)
+(require 'rainbow-mode) ; For ‘rainbow-x-color-luminance’.
 
 ;;; Custom options
 
@@ -387,10 +388,12 @@ If MARK non-nil, show active region."
       (let* ((idx (mod (collab--host-idx host-id)
                        (length collab-cursor-colors)))
              (color (nth idx collab-cursor-colors))
+             (foreground (if (> 0.5 (rainbow-x-color-luminance color))
+                             "white" "black"))
              (region-color (collab--blend-color
                             (face-attribute 'default :background)
                             color 0.2))
-             (face `(:background ,color))
+             (face `(:background ,color :foreground ,foreground))
              (region-face `(:background ,region-color))
              (ov (or (alist-get host-id collab--cursor-ov-alist nil nil #'equal)
                      (let ((ov (make-overlay (min (1+ pos) (point-max))
@@ -415,10 +418,13 @@ If MARK non-nil, show active region."
           (overlay-put ov 'after-string nil))))))
 
 (defvar collab-monitored-mode)
+(defvar collab--prev-sent-cursor-pos)
 
 (defun collab--send-cursor-pos ()
   "Send cursor position if current buffer is in collab mode."
-  (when (and collab-monitored-mode collab--file)
+  (when (and collab-monitored-mode
+             collab--file
+             (not (eq collab--prev-sent-cursor-pos (point))))
     (let ((file-key (collab--encode-filename collab--file)))
       (collab--catch-error "can’t send cursor position to remote"
         (collab--send-info-req
@@ -426,7 +432,8 @@ If MARK non-nil, show active region."
          (if (region-active-p)
              `( :type "common.pos" :point ,(point)
                 :mark ,(mark))
-           `(:type "common.pos" :point ,(point))))))))
+           `(:type "common.pos" :point ,(point))))
+        (setq collab--prev-sent-cursor-pos (point))))))
 
 ;;; Global state
 
@@ -525,6 +532,12 @@ listed files.")
 (defvar-local collab--default-directory nil
   "Default directory for ‘collab-find-file’.
 Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file.")
+
+(defvar-local collab--prev-sent-cursor-pos nil
+  "The last position sent-out to server.
+
+If current position differs from this one, send a cursor position
+message.")
 
 ;;; Edit tracking
 ;;
@@ -720,7 +733,8 @@ Insertsion and deletion all counts toward the length."
           (setq collab--pending-ops nil)
           (funcall collab--send-ops-fn ops))
       (when (numberp collab--group-seq)
-        (cl-incf collab--group-seq)))))
+        (cl-incf collab--group-seq))))
+  (setq collab--prev-sent-cursor-pos (point)))
 
 ;; https://stackoverflow.com/questions/6590889
 ;; TODO: Support for overwrite-mode, abbrev-mode, auto-fill.
