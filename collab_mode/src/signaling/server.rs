@@ -114,7 +114,9 @@ impl Server {
         let id_taken = {
             let key_store = self.key_store.lock().unwrap();
             if let Some(saved_key) = key_store.get_key_for(&id)? {
-                tracing::info!(saved_key, key, "key mismatch");
+                if (saved_key != key) {
+                    tracing::info!(saved_key, key, "key mismatch");
+                }
                 saved_key != key
             } else {
                 key_store.set_key_for(&id, &key)?;
@@ -172,11 +174,18 @@ impl Server {
         match endpoint_info {
             Some(endpoint_info) => {
                 // Notify connection listener.
-                let connect_req =
-                    SignalingMsg::Connect(sender_id.clone(), receiver_id, sender_key, initiator);
-                // If connection broke, we just return from
-                // handle_connection, no need for error handling here.
+                let connect_req = SignalingMsg::Connect(
+                    sender_id.clone(),
+                    receiver_id.clone(),
+                    sender_key,
+                    initiator,
+                );
                 let _ = endpoint_info.msg_tx.send(connect_req.into()).await;
+                tracing::info!(
+                    "Sent Connect message to {} on behave of {}",
+                    receiver_id,
+                    sender_id
+                );
                 Ok(())
             }
             None => {
@@ -185,14 +194,9 @@ impl Server {
                     sender_id.clone(),
                     format!("No endpoint found for id: {}", receiver_id),
                 );
-                // If connection broke, we just return from
-                // handle_connection, no need for error handling here.
                 let _ = resp_tx.send(resp.into()).await;
-                let _ = resp_tx.send(Message::Close(None)).await;
-                Err(SignalingError::OtherError(format!(
-                    "No endpoint for id: {}",
-                    receiver_id
-                )))
+                tracing::info!("No endpoint for id: {}", receiver_id);
+                Ok(())
             }
         }
     }
@@ -340,7 +344,7 @@ async fn handle_message(
                 }
                 _ => {
                     let resp = resp_unsupported(
-                            "You should only send Bind, Connect, or Candidate message to the signal server",
+                        "You should only send Bind, Connect, SDP, or Candidate message to the signal server",
                         );
                     resp_tx.send(resp).await?;
                 }
