@@ -2,6 +2,7 @@ use crate::config_man::{ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, ServerEngine};
 use crate::error::CollabError;
 use crate::message::{self, *};
+use crate::signaling::SignalingMsg;
 use crate::types::*;
 use crate::webchannel::{self, MsgChannel, MsgChannelImpl, WebChannel};
 use anyhow::{anyhow, Context};
@@ -1622,10 +1623,11 @@ impl Server {
 
         // Check if signaling server is connected
         let signaling_state = self.active_signaling.get(&signaling_addr);
-        let signaling_ready = matches!(
-            signaling_state,
-            Some(state) if state.state == SignalingConnectionState::Bound
-        );
+        let signaling_ready = if let Some(state) = signaling_state {
+            state.state == SignalingConnectionState::Bound
+        } else {
+            false
+        };
 
         if !signaling_ready {
             // Signaling server not ready. Set remote to Pending state and
@@ -1636,7 +1638,7 @@ impl Server {
                 host_id
             );
 
-            // Set remote state to Pending
+            // Set remote state to Pending.
             if let Some(remote) = self.active_remotes.get_mut(&host_id) {
                 remote.state = ConnectionState::Pending;
             } else {
@@ -3561,8 +3563,6 @@ impl Server {
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
-        use crate::signaling::SignalingMsg;
-
         match msg {
             SignalingMsg::Bound(_id) => {
                 // Update state to Connected
