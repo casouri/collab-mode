@@ -114,7 +114,7 @@ impl Server {
         let id_taken = {
             let key_store = self.key_store.lock().unwrap();
             if let Some(saved_key) = key_store.get_key_for(&id)? {
-                if (saved_key != key) {
+                if saved_key != key {
                     tracing::info!(saved_key, key, "key mismatch");
                 }
                 saved_key != key
