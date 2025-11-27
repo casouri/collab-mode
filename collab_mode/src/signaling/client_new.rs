@@ -427,6 +427,7 @@ async fn send_receive_stream(
     let (stream, _) = stream_result.unwrap();
     let (mut ws_tx, mut ws_rx) = stream.split();
 
+    let mut termination_reason = "".to_string();
     loop {
         tokio::select! {
             // Receive from websocket
@@ -450,41 +451,26 @@ async fn send_receive_stream(
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to parse signaling message: {}", e);
-                                    let signaling_message = crate::signaling::SignalingMessage {
-                                        signaling_addr: addr.clone(),
-                                        msg: Err(crate::signaling::AcceptStopped(format!("Parse error: {}", e))),
-                                    };
-                                    let _ = signaling_msg_tx.send(signaling_message).await;
+                                    termination_reason = format!("Parse error: {}", e);
+                                    break;
                                 }
                             }
                         }
                         Ok(tung::tungstenite::Message::Close(_)) => {
                             tracing::info!("Signaling server closed connection");
-                            let signaling_message = crate::signaling::SignalingMessage {
-                                signaling_addr: addr.clone(),
-                                msg: Err(crate::signaling::AcceptStopped("Connection closed".to_string())),
-                            };
-                            let _ = signaling_msg_tx.send(signaling_message).await;
+                            termination_reason = "Signaling server closed connection".to_string();
                             break;
                         }
                         Err(e) => {
                             tracing::error!("Websocket error: {}", e);
-                            let signaling_message = crate::signaling::SignalingMessage {
-                                signaling_addr: addr.clone(),
-                                msg: Err(crate::signaling::AcceptStopped(format!("Websocket error: {}", e))),
-                            };
-                            let _ = signaling_msg_tx.send(signaling_message).await;
+                            termination_reason = format!("Websocket error: {}", e);
                             break;
                         }
                         _ => {}
                     }
                 } else {
                     tracing::info!("Websocket stream closed");
-                    let signaling_message = crate::signaling::SignalingMessage {
-                        signaling_addr: addr.clone(),
-                        msg: Err(crate::signaling::AcceptStopped("Websocket stream closed".to_string())),
-                    };
-                    let _ = signaling_msg_tx.send(signaling_message).await;
+                    termination_reason = "Websocket stream closed".to_string();
                     break;
                 }
             }
@@ -495,15 +481,12 @@ async fn send_receive_stream(
                     let text = serde_json::to_string(&signaling_msg).unwrap();
                     if let Err(e) = ws_tx.send(tung::tungstenite::Message::Text(text)).await {
                         tracing::error!("Failed to send to websocket: {}", e);
-                        let signaling_message = crate::signaling::SignalingMessage {
-                            signaling_addr: addr.clone(),
-                            msg: Err(crate::signaling::AcceptStopped(format!("Failed to send: {}", e))),
-                        };
-                        let _ = signaling_msg_tx.send(signaling_message).await;
+                        termination_reason = format!("Send error: {}", e);
                         break;
                     }
                 } else {
                     tracing::info!("Outgoing message channel closed, shutting down");
+                    termination_reason = "Outgoing message channel closed".to_string();
                     break;
                 }
             }
@@ -524,6 +507,12 @@ async fn send_receive_stream(
     if let Some(cleanup) = cleanup {
         cleanup();
     }
+
+    let signaling_message = crate::signaling::SignalingMessage {
+        signaling_addr: addr.clone(),
+        msg: Err(crate::signaling::AcceptStopped(termination_reason)),
+    };
+    let _ = signaling_msg_tx.send(signaling_message).await;
 }
 
 /// Handle an incoming signaling message and route it appropriately.
