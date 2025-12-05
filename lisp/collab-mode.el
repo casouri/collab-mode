@@ -1242,6 +1242,8 @@ If we receive a ServerError notification, just display a warning."
      (collab--msg-event 'info (plist-get params :message) 'no-message))
     ('InternalError
      (collab--msg-event 'error (plist-get params :message)))
+    ('NetworkError
+     (collab--msg-event 'error (plist-get params :message)))
     ('ErrorResponse
      (let* ((file (plist-get params :file))
             (filename (and file (collab--encode-filename file)))
@@ -1679,15 +1681,17 @@ If no such section is found, do nothing."
               (throw 'done nil))))))))
 
 (defun collab--insert-file
-    (file-desc filename directoryp &optional display-name face)
+    (file-desc filename directoryp &optional display-name face prefix)
   "Insert FILE-DESC with FILENAME.
 
 Insert as a directory if DIRECTORYP non-nil. If DISPLAY-NAME non-nil,
 use that as the display name.
 
-If FACE given, use it for the inserted file."
+If FACE given, use it for the inserted file. If PREFIX given, prefix
+each file with it."
   (let ((beg (point)))
-    (insert (propertize (or display-name filename)
+    (insert (or prefix "")
+            (propertize (or display-name filename)
                         'face (or face (if directoryp 'dired-directory nil))))
     (add-text-properties
      beg (point) `( collab-file-desc ,file-desc
@@ -1731,7 +1735,8 @@ shouldn’t end with a newline."
                               (name (plist-get entry :filename))
                               (directoryp (not (eq (plist-get entry :isDirectory)
                                                    :json-false))))
-                         (collab--insert-file file-desc name directoryp nil 'default)
+                         (collab--insert-file
+                          file-desc name directoryp nil 'default " ")
                          (insert "\n")))))
       ;; Not connected. Getting files async or can’t get files.
       (_ (insert (propertize "...\n" 'face 'shadow))))
@@ -1833,7 +1838,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
          (connected (plist-get
                      (gethash 'Connected collab--cached-responses)
                      :data))
-         (accepting (plist-get conn-state-data :accepting))
+         (accepting (> (seq-length (plist-get conn-state-data :accepting)) 0))
          (hosts (mapcar #'car (collab--host-alist)))
          (current-message (gethash 'CurrentMessage collab--cached-responses)))
     ;; 1. Insert headers.
@@ -1845,13 +1850,12 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (insert (format "Connection type: %s\n" collab-connection-type))
 
     ;; 1.5
-    (insert (propertize (if accepting
-                            "\nAccepting remote connections"
-                          (substitute-command-keys
-                           "Not accepting remote connections (press \\[collab--accept-connection] to accept)"))
-                        'face 'bold)
+    (insert (if accepting
+                (propertize "\nAccepting remote connections" 'face 'bold)
+              (substitute-command-keys
+               "Not accepting remote connections (press \\[collab--accept-connection] to accept)"))
             "\n")
-    (when accepting
+    (when (> (seq-length accepting) 0)
       (seq-doseq (entry accepting)
         (insert (format "AT %s/%s\t"
                         (plist-get entry :addr)
@@ -1911,7 +1915,7 @@ PRESS \\[collab--accept-connection] TO ACCEPT CONNECTIONS FROM ANY REMOTE\n"))
     (when collab--events
       (insert "Recent events:\n\n")
       (dolist (event collab--events)
-        (insert event "\n\n"))
+        (insert event "\n"))
       (insert "\n"))))
 
 (defun collab--hub-refetch ()
