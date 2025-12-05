@@ -13,7 +13,6 @@ use futures_util::{SinkExt, StreamExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -44,14 +43,13 @@ pub async fn run_signaling_server(addr: &str, db_path: &Path) -> anyhow::Result<
         let _ = tokio::spawn(
             async move {
                 let mut endpoint_id = None;
-                let conn_id = server.next_connection_id();
-                let res = handle_connection(&server, stream, &mut endpoint_id, conn_id).await;
+                let res = handle_connection(&server, stream, &mut endpoint_id).await;
                 // Only remove if we have both endpoint_id and connection_id,
                 // and the connection_id still matches (i.e., endpoint hasn't
                 // been re-bound by a new connection).
                 tracing::info!(?endpoint_id);
                 if let Some(id) = endpoint_id {
-                    server.remove_endpoint(&id, conn_id).await;
+                    server.remove_endpoint(&id).await;
                 }
                 {
                     let map = server.endpoint_map.read().await;
@@ -75,9 +73,6 @@ struct EndpointInfo {
     /// Connection request and client candidate are sent to this
     /// channel.
     msg_tx: mpsc::Sender<Message>,
-    /// Unique identifier for this connection. Used to prevent stale
-    /// cleanup tasks from removing re-bound endpoints.
-    connection_id: u64,
 }
 
 /// Signaling server.
@@ -86,8 +81,6 @@ struct Server {
     /// Maps collab server id to their SDP.
     endpoint_map: Arc<RwLock<HashMap<EndpointId, EndpointInfo>>>,
     key_store: Arc<Mutex<PubKeyStore>>,
-    /// Counter for generating unique connection IDs.
-    next_connection_id: Arc<AtomicU64>,
 }
 
 impl Server {
@@ -95,13 +88,7 @@ impl Server {
         Server {
             endpoint_map: Arc::new(RwLock::new(HashMap::new())),
             key_store: Arc::new(Mutex::new(key_store)),
-            next_connection_id: Arc::new(AtomicU64::new(1)),
         }
-    }
-
-    /// Generate a unique connection ID.
-    fn next_connection_id(&self) -> u64 {
-        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Bind a collab server to `id`. Return error if some endpoint
@@ -112,9 +99,8 @@ impl Server {
         id: EndpointId,
         key: CertDerHash,
         msg_tx: mpsc::Sender<Message>,
-        connection_id: u64,
     ) -> SignalingResult<()> {
-        tracing::info!(id, key, connection_id, "Handle req: bind()");
+        tracing::info!(id, key, "Handle req: bind()");
         // First check pub key.
         let id_taken = {
             let key_store = self.key_store.lock().unwrap();
@@ -142,21 +128,19 @@ impl Server {
                 "ID already taken (key mismatch)".to_string(),
             ));
         }
-        // Then check current connection, as long as we hold the lock
-        // on endpoint_map, no one can slip in and add an id before we
-        // do.
-        let mut endpoint_map = self.endpoint_map.write().await;
-        if endpoint_map.contains_key(&id) {
+
+        // Try to insert connection to endpoint map, if there’s
+        // already a connection using that id, fail.
+        let server_info = EndpointInfo {
+            msg_tx: msg_tx.clone(),
+        };
+        let success = self.insert_endpoint(id.clone(), server_info).await;
+        if !success {
             let _ = msg_tx
                 .send(SignalingMsg::IdTaken(id.clone(), "ID already taken".to_string()).into())
                 .await;
             return Err(SignalingError::OtherError("ID already taken".to_string()));
         }
-        let server_info = EndpointInfo {
-            msg_tx: msg_tx.clone(),
-            connection_id,
-        };
-        endpoint_map.insert(id.clone(), server_info);
 
         let _ = msg_tx.send(SignalingMsg::Bound(id.clone()).into()).await;
         Ok(())
@@ -209,16 +193,24 @@ impl Server {
         }
     }
 
+    /// Insert `id=info` into the endpoint map. Return false if `id`
+    /// is taken in the map, return true if inserted successfully.
+    async fn insert_endpoint(&self, id: EndpointId, info: EndpointInfo) -> bool {
+        let mut map = self.endpoint_map.write().await;
+        if map.contains_key(&id) {
+            return false;
+        } else {
+            map.insert(id, info);
+            return true;
+        }
+    }
+
     /// Remove binding for endpoint with `id`, but only if the
     /// connection_id matches. This prevents stale cleanup tasks from
     /// removing re-bound endpoints.
-    async fn remove_endpoint(&self, id: &EndpointId, connection_id: u64) {
+    async fn remove_endpoint(&self, id: &EndpointId) {
         let mut endpoint_map = self.endpoint_map.write().await;
-        if let Some(info) = endpoint_map.get(id) {
-            if info.connection_id == connection_id {
-                endpoint_map.remove(id);
-            }
-        }
+        endpoint_map.remove(id);
     }
 
     /// Get the server info for the server with `id`.
@@ -239,7 +231,6 @@ async fn handle_connection(
     server: &Server,
     stream: TcpStream,
     endpoint_id: &mut Option<EndpointId>,
-    conn_id: u64,
 ) -> anyhow::Result<()> {
     let stream = tung::accept_async(stream).await?;
 
@@ -249,7 +240,7 @@ async fn handle_connection(
     let _ = tokio::spawn(send_receive_stream(stream, req_tx, resp_rx));
 
     while let Some(msg) = req_rx.recv().await {
-        let res = handle_message(msg, server, &resp_tx, endpoint_id, conn_id).await;
+        let res = handle_message(msg, server, &resp_tx, endpoint_id).await;
         if res.is_err() {
             let _ = resp_tx.send(Message::Close(None)).await;
         }
@@ -264,7 +255,6 @@ async fn handle_message(
     server: &Server,
     resp_tx: &mpsc::Sender<Message>,
     endpoint_id: &mut Option<EndpointId>,
-    conn_id: u64,
 ) -> anyhow::Result<()> {
     let msg = msg?;
     if let Ok(txt) = &msg.to_text() {
@@ -278,7 +268,7 @@ async fn handle_message(
             match msg {
                 SignalingMsg::Bind(id, key) => {
                     server
-                        .bind_endpoint(id.clone(), key.clone(), resp_tx.clone(), conn_id)
+                        .bind_endpoint(id.clone(), key.clone(), resp_tx.clone())
                         .await?;
                     *endpoint_id = Some(id);
                 }
@@ -287,12 +277,7 @@ async fn handle_message(
 
                     if endpoint_id.is_none() {
                         server
-                            .bind_endpoint(
-                                sender_id.clone(),
-                                sender_key.clone(),
-                                resp_tx.clone(),
-                                conn_id,
-                            )
+                            .bind_endpoint(sender_id.clone(), sender_key.clone(), resp_tx.clone())
                             .await?;
                         *endpoint_id = Some(sender_id.clone());
                     }
