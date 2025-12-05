@@ -49,8 +49,13 @@ pub async fn run_signaling_server(addr: &str, db_path: &Path) -> anyhow::Result<
                 // Only remove if we have both endpoint_id and connection_id,
                 // and the connection_id still matches (i.e., endpoint hasn't
                 // been re-bound by a new connection).
+                tracing::info!(?endpoint_id);
                 if let Some(id) = endpoint_id {
                     server.remove_endpoint(&id, conn_id).await;
+                }
+                {
+                    let map = server.endpoint_map.read().await;
+                    tracing::info!(?map);
                 }
                 if let Err(err) = res {
                     tracing::info!(
@@ -128,15 +133,18 @@ impl Server {
                 .send(
                     SignalingMsg::IdTaken(
                         id.clone(),
-                        "ID already taken or key mismatch".to_string(),
+                        "ID already taken (key mismatch)".to_string(),
                     )
                     .into(),
                 )
                 .await;
+            return Err(SignalingError::OtherError(
+                "ID already taken (key mismatch)".to_string(),
+            ));
         }
         // Then check current connection, as long as we hold the lock
         // on endpoint_map, no one can slip in and add an id before we
-        // does.
+        // do.
         let mut endpoint_map = self.endpoint_map.write().await;
         if endpoint_map.contains_key(&id) {
             let _ = msg_tx
