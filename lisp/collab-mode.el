@@ -1838,7 +1838,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
          (connected (plist-get
                      (gethash 'Connected collab--cached-responses)
                      :data))
-         (accepting (> (seq-length (plist-get conn-state-data :accepting)) 0))
+         (accepting (plist-get conn-state-data :accepting))
          (hosts (mapcar #'car (collab--host-alist)))
          (current-message (gethash 'CurrentMessage collab--cached-responses)))
     ;; 1. Insert headers.
@@ -1850,7 +1850,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (insert (format "Connection type: %s\n" collab-connection-type))
 
     ;; 1.5
-    (insert (if accepting
+    (insert (if (> (seq-length accepting) 0)
                 (propertize "\nAccepting remote connections" 'face 'bold)
               (substitute-command-keys
                "Not accepting remote connections (press \\[collab--accept-connection] to accept)"))
