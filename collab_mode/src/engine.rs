@@ -1347,6 +1347,11 @@ impl ServerEngine {
     pub fn editor_len(&self) -> u64 {
         self.internal_doc.editor_len()
     }
+
+    /// Return the internal document.
+    pub fn internal_doc(&self) -> &InternalDoc {
+        &self.internal_doc
+    }
 }
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
@@ -1375,12 +1380,12 @@ type EngineResult<T> = Result<T, EngineError>;
 
 impl ClientEngine {
     /// `site` is the site id of local site, `base_seq` is the
-    /// starting global seq number, `init_len` is the length of the
-    /// starting document.
-    pub fn new(site: SiteId, base_seq: GlobalSeq, init_len: u64) -> ClientEngine {
+    /// starting global seq number, `internal_doc` is the internal
+    /// document state.
+    pub fn new(site: SiteId, base_seq: GlobalSeq, internal_doc: InternalDoc) -> ClientEngine {
         ClientEngine {
             gh: GlobalHistory::new(),
-            internal_doc: InternalDoc::new(init_len),
+            internal_doc,
             site,
             current_seq: base_seq,
             current_site_seq: 0,
@@ -1855,8 +1860,8 @@ mod tests {
 
         let site_a = 1;
         let site_b = 2;
-        let mut client_a = ClientEngine::new(site_a.clone(), 0, 4);
-        let mut client_b = ClientEngine::new(site_b.clone(), 0, 4);
+        let mut client_a = ClientEngine::new(site_a.clone(), 0, InternalDoc::new(4));
+        let mut client_b = ClientEngine::new(site_b.clone(), 0, InternalDoc::new(4));
 
         let mut server = ServerEngine::new(0);
 
@@ -1957,9 +1962,9 @@ mod tests {
         let site_a = 1;
         let site_b = 2;
         let site_c = 3;
-        let mut client_a = ClientEngine::new(site_a.clone(), 0, 3);
-        let mut client_b = ClientEngine::new(site_b.clone(), 0, 3);
-        let mut client_c = ClientEngine::new(site_c.clone(), 0, 3);
+        let mut client_a = ClientEngine::new(site_a.clone(), 0, InternalDoc::new(3));
+        let mut client_b = ClientEngine::new(site_b.clone(), 0, InternalDoc::new(3));
+        let mut client_c = ClientEngine::new(site_c.clone(), 0, InternalDoc::new(3));
 
         let mut server = ServerEngine::new(0);
 
@@ -2063,7 +2068,7 @@ mod tests {
     #[test]
     fn undo() {
         let site_id = 1;
-        let mut client_engine = ClientEngine::new(site_id, 1, 0);
+        let mut client_engine = ClientEngine::new(site_id, 1, InternalDoc::new(0));
         // op1: original edit.
         let op1 = make_editor_fatop(
             EditorOp::Ins {

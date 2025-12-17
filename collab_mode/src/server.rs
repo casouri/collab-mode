@@ -1,5 +1,5 @@
 use crate::config_man::{ConfigManager, ConfigProject};
-use crate::engine::{ClientEngine, ServerEngine};
+use crate::engine::{ClientEngine, InternalDoc, ServerEngine};
 use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::signaling::SignalingMsg;
@@ -2125,11 +2125,11 @@ impl Server {
                     next_site_seq: 1,
                     meta: JsonMap::new(),
                     remote_op_buffer: Vec::new(),
-                    // Use the current gseq from the doc’s engine.
+                    // Use the current gseq and internal_doc from the doc's engine.
                     engine: ClientEngine::new(
                         self.site_id,
                         doc.engine.current_seq(),
-                        content.chars().count() as u64,
+                        doc.engine.internal_doc().clone(),
                     ),
                     buffer,
                 };
@@ -2216,6 +2216,7 @@ impl Server {
 
                         let snapshot = NewSnapshot {
                             content: doc.buffer.iter().collect(),
+                            internal_doc: doc.engine.internal_doc().clone(),
                             name: doc.name.clone(),
                             seq: doc.engine.current_seq(),
                             site_id,
@@ -2268,8 +2269,10 @@ impl Server {
                 self.docs.insert(doc_id, doc);
 
                 // Send snapshot
+                let content_len = content.chars().count() as u64;
                 let snapshot = NewSnapshot {
                     content,
+                    internal_doc: InternalDoc::new(content_len),
                     name: filename,
                     seq: 0,
                     site_id,
@@ -2323,11 +2326,7 @@ impl Server {
             next_site_seq: 1,
             meta: serde_json::Map::new(),
             remote_op_buffer: Vec::new(),
-            engine: ClientEngine::new(
-                snapshot.site_id,
-                snapshot.seq,
-                snapshot.content.chars().count() as u64,
-            ),
+            engine: ClientEngine::new(snapshot.site_id, snapshot.seq, snapshot.internal_doc),
             buffer,
         };
 
@@ -2995,7 +2994,11 @@ impl Server {
             next_site_seq: 1,
             meta: params.meta,
             remote_op_buffer: Vec::new(),
-            engine: ClientEngine::new(self.site_id, 0, params.content.chars().count() as u64),
+            engine: ClientEngine::new(
+                self.site_id,
+                0,
+                InternalDoc::new(params.content.chars().count() as u64),
+            ),
             buffer,
         };
         let editor_file_desc = EditorFileDesc::new(file_desc, self.host_id.clone());

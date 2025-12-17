@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use crate::config_man::{ArcKeyCert, KeyCert};
-pub use crate::engine::ContextOps;
+pub use crate::engine::{ContextOps, InternalDoc};
 pub use crate::op::{
     replace_whitespace_char, DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId,
 };
@@ -238,6 +238,12 @@ pub struct EditorLeanOp {
 pub struct NewSnapshot {
     /// The file content.
     pub content: String,
+    /// The internal document state (includes tombstones). This is
+    /// necessary because if A shares a file, deletes a big portion of
+    /// it, B requests that (redacted) file, creates a fresh internal
+    /// doc for it, then A undo the delete, the op’s range will
+    /// overflow B’s internal doc.
+    pub internal_doc: InternalDoc,
     /// File name of the doc.
     pub name: String,
     /// Sequence number of the last op.
@@ -265,6 +271,7 @@ impl std::fmt::Debug for NewSnapshot {
 
         f.debug_struct("NewSnapshot")
             .field("content", &content_str)
+            .field("internal_doc", &self.internal_doc)
             .field("name", &self.name)
             .field("seq", &self.seq)
             .field("site_id", &self.site_id)
