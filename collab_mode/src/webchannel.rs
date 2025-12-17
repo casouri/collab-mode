@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_ice::state::ConnectionState;
@@ -30,6 +31,13 @@ use webrtc_util::Conn;
 
 const STREAM_ID_CLIENT_INIT: u16 = 1; // Client uses odd stream IDs: 1, 3, 5, ...
 const STREAM_ID_SERVER_INIT: u16 = 2; // Server uses even stream IDs: 2, 4, 6, ...
+
+// Only this condition needs special handling.
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+pub enum WebChannelError {
+    #[error("Connection to {0} already exists")]
+    ConnectionExists(ServerId),
+}
 
 /// Determine which side uses odd stream IDs based on host ID ordering.
 ///
@@ -81,15 +89,6 @@ pub trait MsgChannel: Send + Sync {
 pub enum MsgChannelImpl {
     Web(WebChannel),
     Test(TestWebChannel),
-}
-
-impl MsgChannelImpl {
-    pub fn hostid(&self) -> ServerId {
-        match self {
-            MsgChannelImpl::Web(web) => web.hostid(),
-            MsgChannelImpl::Test(test) => test.hostid(),
-        }
-    }
 }
 
 #[async_trait]
@@ -361,10 +360,9 @@ impl WebChannel {
         {
             let mut map = self.assoc_tx.lock().unwrap();
             if map.get(remote_hostid).is_some() {
-                return Err(anyhow!(
-                    "There’s an existing connection to {}",
-                    remote_hostid
-                ));
+                return Err(anyhow!(WebChannelError::ConnectionExists(
+                    remote_hostid.clone()
+                )));
             }
             map.insert(remote_hostid.clone(), tx);
         }

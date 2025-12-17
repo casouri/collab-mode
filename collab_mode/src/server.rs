@@ -4,7 +4,7 @@ use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::signaling::SignalingMsg;
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, MsgChannelImpl, WebChannel};
+use crate::webchannel::{self, MsgChannel, MsgChannelImpl, WebChannel, WebChannelError};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -1025,11 +1025,20 @@ impl Server {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
 
+                tracing::info!(
+                    "AcceptConnection: addr={}, active_remotes={:?}, active_signaling={:?}",
+                    params.addr,
+                    self.active_remotes,
+                    self.active_signaling
+                );
+
                 // If already accepting, skip.
                 if let Some(state) = self.active_signaling.get_mut(&params.addr) {
-                    // But make sure to update accept mode.
+                    // But make sure to update accept mode and reset
+                    // reconnect time.
                     if let Some(mode) = params.mode {
                         state.accept_mode = mode;
+                        state.next_reconnect_stride = 1;
                     }
 
                     // If mode is All, spawn background task to revert after
@@ -1075,6 +1084,7 @@ impl Server {
                     )
                     .await;
 
+                // Error handling.
                 if let Err(err) = result {
                     tracing::error!("Failed to bind SignalingClient: {}", err);
                     self.active_signaling.remove(&params.addr);
@@ -1087,16 +1097,15 @@ impl Server {
                         },
                     )
                     .await;
-                } else {
-                    // If mode is All, spawn background task to revert after
-                    // 3 minutes.
-                    if matches!(params.mode, Some(AcceptMode::All)) {
-                        Self::revert_back_to_trusted_only_in_3min(
-                            params.addr.clone(),
-                            self.host_id.clone(),
-                            next.webchannel.clone(),
-                        );
-                    }
+                }
+                // If mode is All, spawn background task to revert after
+                // 3 minutes.
+                if matches!(params.mode, Some(AcceptMode::All)) {
+                    Self::revert_back_to_trusted_only_in_3min(
+                        params.addr.clone(),
+                        self.host_id.clone(),
+                        next.webchannel.clone(),
+                    );
                 }
             }
             "Connect" => {
@@ -3563,6 +3572,7 @@ impl Server {
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
+        tracing::info!("From signaling server: {:?}", &msg);
         match msg {
             SignalingMsg::Bound(_id) => {
                 // Update state to Connected
@@ -3614,9 +3624,8 @@ impl Server {
             }
 
             SignalingMsg::Connect(peer_id, _my_id, peer_cert, initiator) => {
-                tracing::info!("Received Connect message from {}", peer_id);
-
                 // Check if we're already connecting or connected to this peer.
+                dbg!(&self.active_remotes);
                 let is_connecting_or_connected =
                     self.active_remotes.get(&peer_id).map_or(false, |r| {
                         matches!(
@@ -3624,6 +3633,11 @@ impl Server {
                             ConnectionState::ConnectingStage2 | ConnectionState::Connected
                         )
                     });
+                tracing::info!(
+                    "Received Connect message from {}, is_connecting_or_connected={}",
+                    peer_id,
+                    is_connecting_or_connected
+                );
                 if is_connecting_or_connected && !initiator {
                     tracing::info!(
                         "Already connecting/connected to {}, ignoring duplicate connection request",
@@ -3724,14 +3738,29 @@ impl Server {
                         Ok(()) => {
                             tracing::info!("Successfully connected to peer {}", peer_id_clone);
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, e);
-
-                            // Send FailedToConnect message to main loop
-                            let web_msg = webchannel::Message {
-                                host: my_host_id,
-                                body: Msg::FailedToConnect(peer_id_clone.clone(), e.to_string()),
-                                req_id: None,
+                        Err(err) => {
+                            tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, err);
+                            let web_msg = if let Some(WebChannelError::ConnectionExists(peer_id)) =
+                                err.downcast_ref()
+                            {
+                                webchannel::Message {
+                                    host: my_host_id,
+                                    body: Msg::IceProgress(
+                                        peer_id.to_string(),
+                                        "Already connected".to_string(),
+                                    ),
+                                    req_id: None,
+                                }
+                            } else {
+                                // Send FailedToConnect message to main loop
+                                webchannel::Message {
+                                    host: my_host_id,
+                                    body: Msg::FailedToConnect(
+                                        peer_id_clone.clone(),
+                                        err.to_string(),
+                                    ),
+                                    req_id: None,
+                                }
                             };
                             let _ = msg_tx_clone.send(web_msg).await;
                         }
