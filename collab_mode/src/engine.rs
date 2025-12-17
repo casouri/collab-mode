@@ -192,7 +192,8 @@ impl RangeIterator {
         &ranges[self.range_idx]
     }
 
-    /// Move to the left by one, return the currently range.
+    /// Move to the left by one, return the currently range. Caller
+    /// must make sure this doesn’t overflow.
     fn move_left<'a>(&mut self, ranges: &'a [Range]) -> &'a Range {
         self.range_idx -= 1;
         let range = &ranges[self.range_idx];
@@ -206,7 +207,8 @@ impl RangeIterator {
         range
     }
 
-    /// Move to the right by one, return the current range.
+    /// Move to the right by one, return the current range. Caller
+    /// must make sure this doesn’t overflow.
     fn move_right<'a>(&mut self, ranges: &'a [Range]) -> &'a Range {
         self.range_idx += 1;
         let range = &ranges[self.range_idx];
@@ -283,7 +285,7 @@ impl InternalDoc {
     }
 
     /// Return the total length of the editor document. Note that this
-    /// function doesn’t use any optimization and goes through every
+    /// function doesn't use any optimization and goes through every
     /// range front-to-back.
     fn editor_len(&self) -> u64 {
         let mut len = 0;
@@ -293,6 +295,11 @@ impl InternalDoc {
             }
         }
         len
+    }
+
+    /// Return the total internal length (live + dead ranges).
+    fn internal_len(&self) -> u64 {
+        self.ranges.iter().map(|r| r.len()).sum()
     }
 
     /// Return a copy of the cursor for `site`.
@@ -499,6 +506,14 @@ impl InternalDoc {
         let marked_range_initial_beg = pos;
         let marked_range_initial_end = pos + len;
 
+        debug_assert!(
+            marked_range_initial_end <= self.internal_len(),
+            "Marked range [{}, {}) exceeds internal document length {}",
+            marked_range_initial_beg,
+            marked_range_initial_end,
+            self.internal_len()
+        );
+
         let mut iter = RangeIterator::new(&self.ranges, cursor);
         let mut range = iter.range(&self.ranges);
         let mut final_ranges = vec![];
@@ -677,6 +692,14 @@ impl InternalDoc {
     fn apply_mark_live(&mut self, pos: u64, mut len: u64, cursor: &mut Cursor) {
         let marked_range_initial_beg = pos;
         let marked_range_initial_end = pos + len;
+
+        debug_assert!(
+            marked_range_initial_end <= self.internal_len(),
+            "Marked range [{}, {}) exceeds internal document length {}",
+            marked_range_initial_beg,
+            marked_range_initial_end,
+            self.internal_len()
+        );
 
         let mut iter = RangeIterator::new(&self.ranges, cursor);
         let mut range = iter.range(&self.ranges);
