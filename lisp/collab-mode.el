@@ -539,6 +539,11 @@ Stored as HOST/TYPE/PATH where TYPE is ‘p’ for project or ‘f’ for file."
 If current position differs from this one, send a cursor position
 message.")
 
+(defvar-local collab--auto-undo-count 0
+  "Number of consecutive auto-undos in current sequence.
+When an undo returns empty edits due to transformation, we automatically
+try another undo. This tracks how many we've done.")
+
 ;;; Edit tracking
 ;;
 ;; Op := INS | DEL
@@ -1540,6 +1545,18 @@ collab process; return nil if we didn’t get any ops."
         ;; Return the largest global seq received from collab process.
         last-seq))))
 
+(defun collab--undo-instructions-empty-p (instructions)
+  "Return t if all edits in INSTRUCTIONS have empty content.
+INSTRUCTIONS is a vector of EditInstruction plists."
+  (seq-every-p
+   (lambda (instr)
+     (let ((edits (plist-get instr :edits)))
+       (seq-every-p
+        (lambda (edit)
+          (equal (plist-get edit :content) ""))
+        edits)))
+   instructions))
+
 (defun collab--undo (&optional redo)
   "Undo the most recent local edit.
 If REDO is non-nil, redo the most recent undo instead."
@@ -1560,15 +1577,30 @@ If REDO is non-nil, redo the most recent undo instead."
                 (context (plist-get resp :context)))
           (if (eq (length instructions) 0)
               (message "No more operations to %s" (if redo "redo" "undo"))
-            ;; Only ‘seq-map’ can map over vector. TODO: if the op is
-            ;; identify, undo one more step.
+            ;; Only 'seq-map' can map over vector.
             (seq-map (lambda (instr)
                        (collab--apply-edit-instruction instr t))
                      instructions)
             (collab--send-ops
              `[( :op (:kind ,(if redo "Redo" "Undo") :context ,context)
                  :groupSeq ,collab--group-seq)]
-             t))
+             t)
+            ;; Check if the edits are empty (due to transformation).
+            (if (collab--undo-instructions-empty-p instructions)
+                (if (< collab--auto-undo-count 5)
+                    (progn
+                      (message (format "The %s op is empty due to transformation, going one step further"
+                                       (if redo "redo" "undo")))
+                      (setq collab--auto-undo-count (1+ collab--auto-undo-count))
+                      (run-with-timer 0 nil #'collab--undo redo))
+                  ;; Hit the limit, show message and reset.
+                  (message "The last %d %s were all empty due to transformation, stopping auto-retry here, but feel free to %s again"
+                           collab--auto-undo-count
+                           (if redo "redo" "undo")
+                           (if redo "redo" "undo"))
+                  (setq collab--auto-undo-count 0))
+              ;; Edits are not empty, reset counter.
+              (setq collab--auto-undo-count 0)))
         (user-error "No more operations to %s"
                     (if redo "redo" "undo"))))))
 
