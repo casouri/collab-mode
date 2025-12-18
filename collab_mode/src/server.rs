@@ -3930,51 +3930,62 @@ fn expand_project_paths(projects: &mut Vec<ConfigProject>) -> anyhow::Result<()>
 }
 
 // *** Printing messages
+//
+// Mostly ai-generated. Could be improved, but I don’t want to spend
+// too much time on this.
 
 /// Convert lsp_server::Request to a human-readable string
 pub fn request_to_string(req: &lsp_server::Request) -> String {
-    format!(
-        "Req {} {} {}",
-        &req.id,
-        req.method,
+    let params_str = if req.method == "SendOps" {
+        // Use Debug which truncates op content.
+        serde_json::from_value::<SendOpsParams>(req.params.clone())
+            .map(|p| format!("{:?}", p))
+            .unwrap_or_else(|_| "?".to_string())
+    } else {
         serde_json::to_string(&req.params).unwrap_or_else(|_| "?".to_string())
-    )
+    };
+    format!("Req {} {} {}", &req.id, req.method, params_str)
 }
 
 /// Convert lsp_server::Response to a human-readable string
 pub fn response_to_string(resp: &lsp_server::Response) -> String {
-    let result_str = if let Some(ref result) = resp.result {
-        // Check if this is an OpenFileResp by looking for content and siteId fields
-        if let Some(obj) = result.as_object() {
-            if obj.contains_key("content") && obj.contains_key("siteId") {
-                // This is an OpenFileResp, truncate the content field
-                let mut truncated = obj.clone();
-                if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                    let truncated_content = if content.len() > 50 {
-                        format!("{}...", &content[..50])
-                    } else {
-                        content.to_string()
-                    };
-                    truncated.insert("content".to_string(), serde_json::json!(truncated_content));
-                }
-                serde_json::to_string(&truncated).unwrap_or_else(|_| "?".to_string())
-            } else {
-                serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
-            }
-        } else {
-            serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
-        }
-    } else {
-        "null".to_string()
-    };
-
-    let error_str = if let Some(ref error) = resp.error {
-        format!(" Error({}: {})", error.code, error.message)
-    } else {
-        "".to_string()
-    };
-
+    let result_str = result_to_string(&resp.result);
+    let error_str = resp
+        .error
+        .as_ref()
+        .map(|e| format!(" Error({}: {})", e.code, e.message))
+        .unwrap_or_default();
     format!("Resp {} {}{}", &resp.id, result_str, error_str)
+}
+
+fn result_to_string(result: &Option<serde_json::Value>) -> String {
+    // Return null for None.
+    let result = match result {
+        Some(r) => r,
+        None => return "null".to_string(),
+    };
+    // Return JSON serialization for non-object.
+    let obj = match result.as_object() {
+        Some(o) => o,
+        None => return serde_json::to_string(result).unwrap_or_else(|_| "?".to_string()),
+    };
+    // Object:
+    // OpenFileResp: truncate the content field.
+    if obj.contains_key("content") && obj.contains_key("siteId") {
+        let mut truncated = obj.clone();
+        if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+            truncated.insert("content".to_string(), truncate_for_log(content, 50).into());
+        }
+        return serde_json::to_string(&truncated).unwrap_or_else(|_| "?".to_string());
+    }
+    // SendOpsResp: use Debug which truncates op content.
+    if obj.contains_key("ops") && obj.contains_key("lastGlobalSeq") {
+        return serde_json::from_value::<SendOpsResp>(result.clone())
+            .map(|r| format!("{:?}", r))
+            .unwrap_or_else(|_| "?".to_string());
+    }
+    // Any other object.
+    serde_json::to_string(result).unwrap_or_else(|_| "?".to_string())
 }
 
 /// Convert lsp_server::Notification to a human-readable string
@@ -3997,31 +4008,14 @@ pub fn message_to_string(msg: &lsp_server::Message) -> String {
 
 /// Convert webchannel::Message to a human-readable string, truncating large content fields
 pub fn remote_message_to_string(msg: &webchannel::Message) -> String {
-    use message::Msg;
-    let body_str = match &msg.body {
-        Msg::Snapshot(snapshot) => {
-            let truncated_content = if snapshot.content.len() > 50 {
-                format!("{}...", &snapshot.content[..50])
-            } else {
-                snapshot.content.clone()
-            };
-            format!(
-                "Snapshot(NewSnapshot {{ content: \"{}\", name: \"{}\", seq: {}, site_id: {:?}, file_desc: {:?} }})",
-                truncated_content, snapshot.name, snapshot.seq, snapshot.site_id, snapshot.file_desc
-            )
-        }
-        other => format!("{:?}", other),
-    };
-
-    let req_id_str = if let Some(ref req_id) = msg.req_id {
-        format!(" req_id: {:?}", req_id)
-    } else {
-        String::new()
-    };
-
+    let req_id_str = msg
+        .req_id
+        .as_ref()
+        .map(|id| format!(" req_id: {:?}", id))
+        .unwrap_or_default();
     format!(
-        "Message {{ host: {}, body: {}{} }}",
-        msg.host, body_str, req_id_str
+        "Message {{ host: {}, body: {:?}{} }}",
+        msg.host, msg.body, req_id_str
     )
 }
 

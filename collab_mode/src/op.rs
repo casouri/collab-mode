@@ -1,6 +1,7 @@
 //! This module defines OT operations and various types. [Op] is the
 //! one we actually use, [SimpleOp] was used for prototyping.
 
+use crate::types::truncate_for_log;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -162,20 +163,19 @@ impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::Ins((pos, content), _) => {
-                let content = replace_whitespace_char(content.to_string());
-                write!(f, "ins({pos}, {content})")
+                write!(f, "ins({}, {})", pos, truncate_for_log(content, 30))
             }
             Op::Mark(ops, live, _) => {
                 let mut out = String::new();
-                if ops.len() == 0 {
+                if ops.is_empty() {
                     out += "[]";
                 }
                 for op in ops {
-                    let content = replace_whitespace_char(op.1.clone());
+                    let content = truncate_for_log(&op.1, 30);
                     if *live {
-                        out += format!("mark_live({}, {}) ", op.0, content).as_str();
+                        out += &format!("mark_live({}, {}) ", op.0, content);
                     } else {
-                        out += format!("mark_dead({}, {}) ", op.0, content).as_str();
+                        out += &format!("mark_dead({}, {}) ", op.0, content);
                     }
                 }
                 write!(f, "{}", out)
@@ -188,17 +188,16 @@ impl std::fmt::Debug for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::Ins((pos, content), _) => {
-                let content = content.to_string();
-                write!(f, "ins({pos}, {:?})", content)
+                write!(f, "ins({}, {})", pos, truncate_for_log(content, 30))
             }
             Op::Mark(ops, live, _) => {
                 let mut out = String::new();
                 for op in ops {
-                    let content = replace_whitespace_char(op.1.clone());
+                    let content = truncate_for_log(&op.1, 30);
                     if *live {
-                        out += format!("mark_live({}, {}) ", op.0, content).as_str();
+                        out += &format!("mark_live({}, {}) ", op.0, content);
                     } else {
-                        out += format!("mark_dead({}, {}) ", op.0, content).as_str();
+                        out += &format!("mark_dead({}, {}) ", op.0, content);
                     }
                 }
                 write!(f, "{}", out)

@@ -11,6 +11,23 @@ pub use crate::op::{
     replace_whitespace_char, DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId,
 };
 
+/// Truncate string for logging: show head…tail (N chars) if too long.
+pub fn truncate_for_log(s: &str, max_len: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_len {
+        replace_whitespace_char(s.to_string())
+    } else {
+        let head: String = chars[..10].iter().collect();
+        let tail: String = chars[chars.len() - 10..].iter().collect();
+        format!(
+            "{}...{} ({} chars)",
+            replace_whitespace_char(head),
+            replace_whitespace_char(tail),
+            chars.len()
+        )
+    }
+}
+
 pub type ServerId = String;
 #[allow(dead_code)]
 pub const SERVER_ID_SELF: &str = "self";
@@ -59,12 +76,25 @@ impl std::fmt::Debug for EditorOp {
             Self::Undo { context } => write!(f, "undo({context})"),
             Self::Redo { context } => write!(f, "redo({context})"),
             Self::Ins { pos, content } => {
-                let content = replace_whitespace_char(content.to_string());
-                write!(f, "ins({pos}, {content})")
+                write!(f, "ins({}, {})", pos, truncate_for_log(content, 30))
             }
             Self::Del { pos, content } => {
-                let content = replace_whitespace_char(content.to_string());
-                write!(f, "del({pos}, {content})")
+                write!(f, "del({}, {})", pos, truncate_for_log(content, 30))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for EditorOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undo { context } => write!(f, "undo({context})"),
+            Self::Redo { context } => write!(f, "redo({context})"),
+            Self::Ins { pos, content } => {
+                write!(f, "ins({}, {})", pos, truncate_for_log(content, 30))
+            }
+            Self::Del { pos, content } => {
+                write!(f, "del({}, {})", pos, truncate_for_log(content, 30))
             }
         }
     }
@@ -193,10 +223,30 @@ impl EditorOp {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub struct Edit {
     pub pos: u64,
     pub content: String,
+}
+
+impl std::fmt::Debug for Edit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Edit")
+            .field("pos", &self.pos)
+            .field("content", &truncate_for_log(&self.content, 30))
+            .finish()
+    }
+}
+
+impl std::fmt::Display for Edit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "edit({}, {})",
+            self.pos,
+            truncate_for_log(&self.content, 30)
+        )
+    }
 }
 
 /// The segments inside each op are to be applied in the same time, so
