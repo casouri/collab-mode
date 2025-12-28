@@ -1207,9 +1207,8 @@ If we receive a ServerError notification, just display a warning."
             (err (string-join
                   (list (format "Connection to %s broke"
                                 (collab--prettify-host-id host-id))
-                        reason
-                        (or message ""))
-                  ", ")))
+                        (if reason (concat ", " reason) "")
+                        (if message (concat ", " message) "")))))
        (collab--msg-event 'error err)
        (when (buffer-live-p (collab--hub-buffer))
          (collab--hub-render))))
