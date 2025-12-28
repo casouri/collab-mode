@@ -195,7 +195,9 @@ impl WebChannel {
         let peer_id_clone = peer_id.clone();
         let as_server = stream_id_init(&hostid_clone, &peer_id) == 1;
 
-        // Spawn a thread that sends ICE progress to editor
+        // Spawn a thread that sends ICE progress to editor. If some
+        // thing goes wrong in the following steps, progress_rx.recv
+        // will error and this thread will exit.
         tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
                 tracing::info!("ICE progress: {progress}");

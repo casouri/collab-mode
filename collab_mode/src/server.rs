@@ -111,7 +111,8 @@ pub enum ConnectionState {
     /// Connected and well.
     Connected,
     /// Trying to (re)connect. Sent Connect message to remote.
-    ConnectingStage1,
+    /// u64 is unix epoch seconds. Instant isn't serializable.
+    ConnectingStage1(u64),
     /// Sent Connect message remote and received Connect message from remote.
     ConnectingStage2,
     /// Waiting for signaling server to connect before we can attempt
@@ -134,6 +135,14 @@ pub enum SignalingConnectionState {
     FailedToBind,
 }
 
+/// Get current unix epoch in seconds.
+fn unix_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 #[derive(PartialEq, Eq, Debug, Clone)]
 struct RemoteState {
     /// Connections state.
@@ -152,7 +161,7 @@ struct RemoteState {
 impl RemoteState {
     fn connecting(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
         RemoteState {
-            state: ConnectionState::ConnectingStage1,
+            state: ConnectionState::ConnectingStage1(unix_epoch_secs()),
             next_reconnect_stride: 1,
             signaling_addr,
             transport_type,
@@ -617,7 +626,34 @@ impl Server {
                         }
                     }
                 },
+                // Reconnection handler.
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    // Check for connection timeouts.
+                    let now = unix_epoch_secs();
+                    for (host, remote) in self.active_remotes.iter_mut() {
+                        let timeout = match remote.state {
+                            ConnectionState::ConnectingStage1(started) if now - started > 10 => {
+                                Some("Connection timed out in Stage1")
+                            }
+                            _ => None,
+                        };
+                        if let Some(reason) = timeout {
+                            tracing::warn!("Connection to {} timed out", host);
+                            remote.state = ConnectionState::FailedToConnect;
+                            remote.next_reconnect_stride = 1;
+                            remote.next_reconnect_time = Instant::now();
+                            send_notification(
+                                &editor_tx,
+                                NotificationCode::ConnectionBroke,
+                                ConnectionBrokeNote {
+                                    host_id: host.clone(),
+                                    reason: reason.to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
                     let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
                     for (host, remote) in self.active_remotes.iter_mut() {
                         // Only reconnect Disconnected remotes. Skip
@@ -631,7 +667,7 @@ impl Server {
                         // request to remote.  TODO: Add a Refused state?
                         if !matches!(remote.state,
                             ConnectionState::Disconnected
-                            | ConnectionState::ConnectingStage1) {
+                            | ConnectionState::ConnectingStage1(_)) {
                             continue;
                         }
                         if Instant::now() < remote.next_reconnect_time {
@@ -1682,7 +1718,7 @@ impl Server {
 
         // Signaling server is ready, set remote to Connecting
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-            remote.state = ConnectionState::ConnectingStage1;
+            remote.state = ConnectionState::ConnectingStage1(unix_epoch_secs());
         } else {
             self.active_remotes.insert(
                 host_id.clone(),

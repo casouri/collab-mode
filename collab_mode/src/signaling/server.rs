@@ -13,6 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -44,9 +45,6 @@ pub async fn run_signaling_server(addr: &str, db_path: &Path) -> anyhow::Result<
             async move {
                 let mut endpoint_id = None;
                 let res = handle_connection(&server, stream, &mut endpoint_id).await;
-                // Only remove if we have both endpoint_id and connection_id,
-                // and the connection_id still matches (i.e., endpoint hasn't
-                // been re-bound by a new connection).
                 tracing::info!(?endpoint_id);
                 if let Some(id) = endpoint_id {
                     server.remove_endpoint(&id).await;
@@ -205,9 +203,7 @@ impl Server {
         }
     }
 
-    /// Remove binding for endpoint with `id`, but only if the
-    /// connection_id matches. This prevents stale cleanup tasks from
-    /// removing re-bound endpoints.
+    /// Remove binding for endpoint with `id`.
     async fn remove_endpoint(&self, id: &EndpointId) {
         let mut endpoint_map = self.endpoint_map.write().await;
         endpoint_map.remove(id);
@@ -225,8 +221,7 @@ impl Server {
 
 /// Handle a connection from a collab server or client. If the
 /// connected endpoint is a collab server and requested to bind,
-/// `endpoint_id` is set to the allocated id, and `connection_id` is
-/// set to the unique connection ID for cleanup.
+/// `endpoint_id` is set to the allocated id.
 async fn handle_connection(
     server: &Server,
     stream: TcpStream,
@@ -237,10 +232,22 @@ async fn handle_connection(
     let (req_tx, mut req_rx) = mpsc::channel(1);
     let (resp_tx, resp_rx) = mpsc::channel(1);
 
-    let _ = tokio::spawn(send_receive_stream(stream, req_tx, resp_rx));
+    // Track last ping time for inactivity detection
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let last_ping = Arc::new(AtomicU64::new(now));
+
+    let _ = tokio::spawn(send_receive_stream(
+        stream,
+        req_tx,
+        resp_rx,
+        last_ping.clone(),
+    ));
 
     while let Some(msg) = req_rx.recv().await {
-        let res = handle_message(msg, server, &resp_tx, endpoint_id).await;
+        let res = handle_message(msg, server, &resp_tx, endpoint_id, &last_ping).await;
         if res.is_err() {
             let _ = resp_tx.send(Message::Close(None)).await;
         }
@@ -255,6 +262,7 @@ async fn handle_message(
     server: &Server,
     resp_tx: &mpsc::Sender<Message>,
     endpoint_id: &mut Option<EndpointId>,
+    last_ping: &Arc<AtomicU64>,
 ) -> anyhow::Result<()> {
     let msg = msg?;
     if let Ok(txt) = &msg.to_text() {
@@ -335,9 +343,17 @@ async fn handle_message(
                         resp_tx.send(msg.into()).await?;
                     }
                 }
+                SignalingMsg::Ping => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    last_ping.store(now, Ordering::Relaxed);
+                    tracing::debug!("Received ping, updated last_ping");
+                }
                 _ => {
                     let resp = resp_unsupported(
-                        "You should only send Bind, Connect, SDP, or Candidate message to the signal server",
+                        "You should only send Bind, Connect, SDP, Candidate, or Ping message to the signal server",
                         );
                     resp_tx.send(resp).await?;
                 }
@@ -362,37 +378,30 @@ async fn send_receive_stream(
     mut stream: WebSocketStream<TcpStream>,
     req_tx: mpsc::Sender<Result<Message, tung::tungstenite::Error>>,
     mut resp_rx: mpsc::Receiver<Message>,
+    last_ping: Arc<AtomicU64>,
 ) {
-    // TCP sockets aren’t free, close the connection after 12h.
-    let (time_tx, mut time_rx) = mpsc::channel(1);
-    let timer_span = tracing::info_span!("Timer thread for auto-closing the connection");
-    let allocated_hrs = 6u16;
-    tokio::spawn(
-        async move {
-            let allocated_time = allocated_hrs * 3600;
-            time::sleep(Duration::from_secs(allocated_time as u64)).await;
-            tracing::info!(allocated_time, "Time’s up");
-            let _ = time_tx.send(()).await;
-            return;
-        }
-        .instrument(timer_span),
-    );
+    // Check inactivity every 1 minute.
+    let mut check_interval = time::interval(Duration::from_secs(60));
+    check_interval.tick().await; // Skip immediate first tick
+
+    const INACTIVE_TIMEOUT_SECS: u64 = 600; // 10 minutes
 
     loop {
         tokio::select! {
-            _ = time_rx.recv() => {
-                // Note: we don't know the endpoint_id here, so use empty string
-                let err_msg = SignalingMsg::TimeUp(
-                    "".to_string(),
-                    format!("Allocated time of {} hours is up", allocated_hrs)
-                );
-                let _ = stream.send(err_msg.into()).await;
-                tracing::debug!("Sent time's up message to client");
-                stream.send(Message::Close(Some(CloseFrame {
-                    code: CloseCode::Policy,
-                    reason: Cow::Owned("Time's up".to_string())
-                }))).await.unwrap();
-                return;
+            _ = check_interval.tick() => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let last = last_ping.load(Ordering::Relaxed);
+                if now - last > INACTIVE_TIMEOUT_SECS {
+                    let msg = SignalingMsg::Inactive(
+                        "No ping received in 10 minutes".to_string()
+                    );
+                    let _ = stream.send(msg.into()).await;
+                    tracing::info!("Closing connection due to inactivity");
+                    return;
+                }
             }
             msg = stream.next() => {
                 if let Some(msg) = msg {

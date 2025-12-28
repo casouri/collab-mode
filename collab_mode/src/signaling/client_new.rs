@@ -427,9 +427,25 @@ async fn send_receive_stream(
     let (stream, _) = stream_result.unwrap();
     let (mut ws_tx, mut ws_rx) = stream.split();
 
+    // Ping interval for keepalive (9 min, before server's 10 min timeout)
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(540));
+    ping_interval.tick().await; // Skip immediate first tick
+
     let mut termination_reason = "".to_string();
     loop {
         tokio::select! {
+            // Send ping to keep connection alive
+            _ = ping_interval.tick() => {
+                let ping_msg = SignalingMsg::Ping;
+                let text = serde_json::to_string(&ping_msg).unwrap();
+                if let Err(e) = ws_tx.send(tung::tungstenite::Message::Text(text)).await {
+                    termination_reason = format!("Failed to send ping: {}", e);
+                    tracing::error!("{}", termination_reason);
+                    break;
+                }
+                tracing::debug!("Sent ping to signaling server");
+            }
+
             // Receive from websocket
             msg = ws_rx.next() => {
                 if let Some(msg_result) = msg {

@@ -84,6 +84,10 @@ pub enum SignalingMsg {
     IdNotFound(EndpointId, String),
     /// Time's up error. (endpoint_id, error_description).
     TimeUp(EndpointId, String),
+    /// Client sends this to keep connection alive.
+    Ping,
+    /// Server sends this when client has been inactive too long.
+    Inactive(String),
 }
 
 impl Into<tung::tungstenite::Message> for SignalingMsg {
