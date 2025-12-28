@@ -68,7 +68,7 @@ async fn test_accept_connect() {
             "AcceptConnection",
             serde_json::json!({
                 "hostId": id1.clone(),
-                "signalingAddr": "test",
+                "addr": "test",
                 "transportType": "SCTP",
                 "mode": "All",
             }),
@@ -90,7 +90,7 @@ async fn test_accept_connect() {
         .send_notification(
             "AcceptConnection",
             serde_json::json!({
-                "signalingAddr": "test",
+                "addr": "test",
                 "transportType": "SCTP",
                 "mode": "All",
             }),
