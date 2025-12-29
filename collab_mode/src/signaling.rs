@@ -82,6 +82,8 @@ pub enum SignalingMsg {
     IdTaken(EndpointId, String),
     /// ID not found error. (endpoint_id, error_description).
     IdNotFound(EndpointId, String),
+    /// Connection rejected by the receiver. (endpoint_id, error_description).
+    Rejected(EndpointId, String),
     /// Client sends this to keep connection alive.
     Ping,
     /// Server sends this when client has been inactive too long.

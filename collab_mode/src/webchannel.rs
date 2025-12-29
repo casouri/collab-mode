@@ -475,6 +475,8 @@ async fn verify_dtls_cert(cert: CertDerHash, conn: &DTLSConn) -> anyhow::Result<
         return Err(anyhow!("Remote host provided empty certificate"));
     }
     let provided_cert_hash = hash_der(&certs[0]);
+    // This is an error rather than failed permission check, so handle
+    // it as any other error.
     if provided_cert_hash != cert {
         return Err(anyhow!("Certificate hash mismatch, cert from signaling server = {cert}, cert provided by DTLS = {provided_cert_hash}"));
     }

@@ -3762,6 +3762,14 @@ impl Server {
                         ),
                     };
                     next.send_notif(NotificationCode::ErrorResponse, msg).await;
+                    let reject_msg = SignalingMsg::Rejected(
+                        self.host_id.clone(),
+                        "Provided certificate not in my trusted list".to_string(),
+                    );
+                    let _ = signaling_channel.send(&signaling_addr, reject_msg).await;
+                    if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
+                        remote.mark_failed();
+                    }
                     return Ok(());
                 }
 
@@ -3821,33 +3829,53 @@ impl Server {
                         }
                         Err(err) => {
                             tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, err);
-                            let web_msg = if let Some(WebChannelError::ConnectionExists(peer_id)) =
-                                err.downcast_ref()
-                            {
-                                webchannel::Message {
-                                    host: my_host_id,
-                                    body: Msg::IceProgress(
-                                        peer_id.to_string(),
-                                        "Already connected".to_string(),
-                                    ),
-                                    req_id: None,
+                            let condition: Option<&WebChannelError> = err.downcast_ref();
+                            match condition {
+                                Some(WebChannelError::ConnectionExists(peer_id)) => {
+                                    let msg = webchannel::Message {
+                                        host: my_host_id,
+                                        body: Msg::IceProgress(
+                                            peer_id.to_string(),
+                                            "Already connected".to_string(),
+                                        ),
+                                        req_id: None,
+                                    };
+                                    let _ = msg_tx_clone.send(msg).await;
                                 }
-                            } else {
-                                // Send FailedToConnect message to main loop
-                                webchannel::Message {
-                                    host: my_host_id,
-                                    body: Msg::FailedToConnect(
-                                        peer_id_clone.clone(),
-                                        err.to_string(),
-                                    ),
-                                    req_id: None,
+                                _ => {
+                                    // Send FailedToConnect message to main loop
+                                    let msg = webchannel::Message {
+                                        host: my_host_id,
+                                        body: Msg::FailedToConnect(
+                                            peer_id_clone.clone(),
+                                            err.to_string(),
+                                        ),
+                                        req_id: None,
+                                    };
+                                    let _ = msg_tx_clone.send(msg).await;
                                 }
-                            };
-                            let _ = msg_tx_clone.send(web_msg).await;
+                            }
                         }
                     }
                 });
 
+                Ok(())
+            }
+
+            // Our connect message is rejected by remote_id. Reasons
+            // can be invalid certificate, etc. Mark the connection as
+            // failed so we don’t retry.
+            SignalingMsg::Rejected(remote_id, message) => {
+                if let Some(remote) = self.active_remotes.get_mut(&remote_id) {
+                    remote.mark_failed();
+                }
+                let msg = ErrorResponseNote {
+                    code: ErrorCode::NetworkError,
+                    file: None,
+                    message: format!("Connection to {} rejected: {}", remote_id, message),
+                };
+                next.send_notif(NotificationCode::FailedToConnect, msg)
+                    .await;
                 Ok(())
             }
 

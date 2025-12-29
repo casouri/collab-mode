@@ -598,7 +598,8 @@ async fn handle_incoming_message(
         }
 
         SignalingMsg::IdTaken(_endpoint_id, _message)
-        | SignalingMsg::IdNotFound(_endpoint_id, _message) => {
+        | SignalingMsg::IdNotFound(_endpoint_id, _message)
+        | SignalingMsg::Rejected(_endpoint_id, _message) => {
             // Forward the error to Server.
             let signaling_message = crate::signaling::SignalingMessage {
                 signaling_addr: addr.to_string(),
