@@ -82,8 +82,6 @@ pub enum SignalingMsg {
     IdTaken(EndpointId, String),
     /// ID not found error. (endpoint_id, error_description).
     IdNotFound(EndpointId, String),
-    /// Time's up error. (endpoint_id, error_description).
-    TimeUp(EndpointId, String),
     /// Client sends this to keep connection alive.
     Ping,
     /// Server sends this when client has been inactive too long.

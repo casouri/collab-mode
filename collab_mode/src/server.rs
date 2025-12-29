@@ -3851,14 +3851,12 @@ impl Server {
                 Ok(())
             }
 
-            // For IdTaken and TimeUp, signaling server closes the
-            // connection so we don’t need to do anything here (The
-            // AcceptStopped handler will do the work). For
-            // IdNotFound, it’s not a fatal error so no need to do
-            // anything either.
+            // For IdTaken, signaling server closes the connection so
+            // we don’t need to do anything here (The AcceptStopped
+            // handler will do the work). For IdNotFound, it’s not a
+            // fatal error so no need to do anything either.
             SignalingMsg::IdTaken(_endpoint_id, message)
-            | SignalingMsg::IdNotFound(_endpoint_id, message)
-            | SignalingMsg::TimeUp(_endpoint_id, message) => {
+            | SignalingMsg::IdNotFound(_endpoint_id, message) => {
                 // Send error to editor
                 next.send_notif(
                     NotificationCode::ErrorResponse,
