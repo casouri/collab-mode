@@ -1728,19 +1728,36 @@ impl Server {
 
         // Send Connect message to signaling server
         // SDP exchange will happen later via ice_connect_with_sock
+        self.send_connect_message(next, host_id, &signaling_addr, signaling_channel)
+            .await;
+
+        // The connection will continue in handle_signaling_msg when we receive
+        // the peer's Connect response message.
+    }
+
+    /// Helper function for sending connect message to signaling
+    /// server plus cleaning up if failed to send (set remote state
+    /// and send notification to editor).
+    async fn send_connect_message<'a>(
+        &mut self,
+        next: &Next<'a>,
+        peer_id: ServerId,
+        signaling_addr: &str,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
         let my_cert = self.key_cert.cert_der_hash();
         let connect_msg = crate::signaling::SignalingMsg::Connect(
             self.host_id.clone(),
-            host_id.clone(),
+            peer_id.clone(),
             my_cert,
-            true,
+            false,
         );
-
-        if let Err(e) = signaling_channel.send(&signaling_addr, connect_msg).await {
-            tracing::error!("Failed to send Connect message: {}", e);
+        let res = signaling_channel.send(signaling_addr, connect_msg).await;
+        if let Err(err) = res {
+            tracing::error!("Failed to send Connect message: {}", err);
 
             // Update remote state to FailedToConnect
-            if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+            if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
                 remote.state = ConnectionState::FailedToConnect;
                 remote.next_reconnect_stride = 1;
                 remote.next_reconnect_time = Instant::now();
@@ -1750,15 +1767,12 @@ impl Server {
             next.send_notif(
                 NotificationCode::ConnectionBroke,
                 ConnectionBrokeNote {
-                    host_id,
-                    reason: format!("Failed to send Connect message: {}", e),
+                    host_id: peer_id.clone(),
+                    reason: format!("Failed to send Connect message: {}", err),
                 },
             )
             .await;
         }
-
-        // The connection will continue in handle_signaling_msg when we receive
-        // the peer's Connect response message.
     }
 
     // If host_id is not us, delegate to remote, if it’s us, handle
@@ -3715,37 +3729,13 @@ impl Server {
                 // If the remote initiated the connection, reply with
                 // a connect message.
                 if initiator {
-                    let my_cert = self.key_cert.cert_der_hash();
-                    let connect_msg = crate::signaling::SignalingMsg::Connect(
-                        self.host_id.clone(),
+                    self.send_connect_message(
+                        next,
                         peer_id.clone(),
-                        my_cert,
-                        false,
-                    );
-
-                    // FIXME: This is the same code as in
-                    // try_connect_remote. Make it DRY.
-                    let res = signaling_channel.send(&signaling_addr, connect_msg).await;
-                    if let Err(err) = res {
-                        tracing::error!("Failed to send Connect message: {}", err);
-
-                        // Update remote state to FailedToConnect
-                        if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                            remote.state = ConnectionState::FailedToConnect;
-                            remote.next_reconnect_stride = 1;
-                            remote.next_reconnect_time = Instant::now();
-                        }
-
-                        // Notify editor
-                        next.send_notif(
-                            NotificationCode::ConnectionBroke,
-                            ConnectionBrokeNote {
-                                host_id: peer_id.clone(),
-                                reason: format!("Failed to send Connect message: {}", err),
-                            },
-                        )
-                        .await;
-                    }
+                        &signaling_addr,
+                        signaling_channel,
+                    )
+                    .await;
                 }
 
                 // Create a Sock for this peer connection. Sock
