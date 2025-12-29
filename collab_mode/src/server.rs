@@ -143,6 +143,8 @@ fn unix_epoch_secs() -> u64 {
         .as_secs()
 }
 
+const MAX_RECONNECT_STRIDE_SECS: u64 = 256;
+
 #[derive(PartialEq, Eq, Debug, Clone)]
 struct RemoteState {
     /// Connections state.
@@ -178,6 +180,52 @@ impl RemoteState {
             next_reconnect_time: std::time::Instant::now(),
         }
     }
+
+    /// Reset reconnection backoff to initial state (stride=1, time=now).
+    fn reset_backoff(&mut self) {
+        self.next_reconnect_stride = 1;
+        self.next_reconnect_time = Instant::now();
+    }
+
+    /// Mark connection as failed. Won't auto-reconnect.
+    fn mark_failed(&mut self) {
+        self.state = ConnectionState::FailedToConnect;
+        self.reset_backoff();
+    }
+
+    /// Mark connection as disconnected. Will auto-reconnect.
+    fn mark_disconnected(&mut self) {
+        self.state = ConnectionState::Disconnected;
+        self.reset_backoff();
+    }
+
+    /// Mark connection as successfully connected.
+    fn mark_connected(&mut self) {
+        self.state = ConnectionState::Connected;
+    }
+
+    /// Mark as connecting stage 1 (sent connect request to remote).
+    fn mark_connecting(&mut self) {
+        self.state = ConnectionState::ConnectingStage1(unix_epoch_secs());
+    }
+
+    /// Mark as connecting stage 2 (received connect response from remote).
+    fn mark_connecting_stage2(&mut self) {
+        self.state = ConnectionState::ConnectingStage2;
+    }
+
+    /// Mark as pending (waiting for signaling server to be ready).
+    fn mark_pending(&mut self) {
+        self.state = ConnectionState::Pending;
+    }
+
+    /// Advance exponential backoff for next reconnection attempt.
+    fn advance_backoff(&mut self) {
+        let stride = Duration::from_secs(self.next_reconnect_stride);
+        self.next_reconnect_time = Instant::now() + stride;
+        self.next_reconnect_stride =
+            std::cmp::min(self.next_reconnect_stride * 2, MAX_RECONNECT_STRIDE_SECS);
+    }
 }
 
 /// State for a signaling server connection.
@@ -202,6 +250,31 @@ impl SignalingState {
             next_reconnect_time: std::time::Instant::now(),
             accept_mode: mode,
         }
+    }
+
+    /// Reset reconnection backoff to initial state (stride=1, time=now).
+    fn reset_backoff(&mut self) {
+        self.next_reconnect_stride = 1;
+        self.next_reconnect_time = Instant::now();
+    }
+
+    /// Mark signaling connection as successfully bound.
+    fn mark_bound(&mut self) {
+        self.state = SignalingConnectionState::Bound;
+    }
+
+    /// Mark signaling connection as disconnected. Will auto-reconnect.
+    fn mark_disconnected(&mut self) {
+        self.state = SignalingConnectionState::Disconnected;
+        self.reset_backoff();
+    }
+
+    /// Advance exponential backoff for next reconnection attempt.
+    fn advance_backoff(&mut self) {
+        let stride = Duration::from_secs(self.next_reconnect_stride);
+        self.next_reconnect_time = Instant::now() + stride;
+        self.next_reconnect_stride =
+            std::cmp::min(self.next_reconnect_stride * 2, MAX_RECONNECT_STRIDE_SECS);
     }
 }
 
@@ -610,9 +683,7 @@ impl Server {
 
                             // Update state to Disconnected to trigger reconnection
                             if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                                state.state = SignalingConnectionState::Disconnected;
-                                state.next_reconnect_stride = 1;
-                                state.next_reconnect_time = Instant::now();
+                                state.mark_disconnected();
                             }
 
                             next.send_notif(
@@ -639,9 +710,7 @@ impl Server {
                         };
                         if let Some(reason) = timeout {
                             tracing::warn!("Connection to {} timed out", host);
-                            remote.state = ConnectionState::FailedToConnect;
-                            remote.next_reconnect_stride = 1;
-                            remote.next_reconnect_time = Instant::now();
+                            remote.mark_failed();
                             send_notification(
                                 &editor_tx,
                                 NotificationCode::ConnectionBroke,
@@ -679,12 +748,7 @@ impl Server {
 
                         }).await;
                         need_connect.push((host.clone(), remote.clone()));
-                        let stride = Duration::from_secs(remote.next_reconnect_stride);
-                        remote.next_reconnect_stride = std::cmp::min(
-                                remote.next_reconnect_stride * 2,
-                                256,
-                        );
-                        remote.next_reconnect_time = Instant::now() + stride;
+                        remote.advance_backoff();
                     }
 
                     let next = Next::new(&editor_tx, None, &webchannel);
@@ -714,13 +778,7 @@ impl Server {
 
                         tracing::info!("Reconnecting to signaling server {}", addr);
                         need_rebind.push(addr.clone());
-
-                        let stride = Duration::from_secs(state.next_reconnect_stride);
-                        state.next_reconnect_stride = std::cmp::min(
-                            state.next_reconnect_stride * 2,
-                            256,
-                        );
-                        state.next_reconnect_time = Instant::now() + stride;
+                        state.advance_backoff();
                         state.state = SignalingConnectionState::Binding;
                     }
 
@@ -1074,7 +1132,7 @@ impl Server {
                     // reconnect time.
                     if let Some(mode) = params.mode {
                         state.accept_mode = mode;
-                        state.next_reconnect_stride = 1;
+                        state.reset_backoff();
                     }
 
                     // If mode is All, spawn background task to revert after
@@ -1289,9 +1347,7 @@ impl Server {
             }
             Msg::FailedToConnect(host_id, reason) => {
                 if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                    remote.state = ConnectionState::FailedToConnect;
-                    remote.next_reconnect_stride = 1;
-                    remote.next_reconnect_time = Instant::now();
+                    remote.mark_failed();
                 }
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
@@ -1302,9 +1358,7 @@ impl Server {
             }
             Msg::ConnectionBroke(host_id) => {
                 if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                    remote.state = ConnectionState::Disconnected;
-                    remote.next_reconnect_stride = 1;
-                    remote.next_reconnect_time = Instant::now();
+                    remote.mark_disconnected();
                 }
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
@@ -1318,7 +1372,7 @@ impl Server {
             }
             Msg::Hey(hey_msg) => {
                 if let Some(remote) = self.active_remotes.get_mut(&msg.host) {
-                    remote.state = ConnectionState::Connected;
+                    remote.mark_connected();
                 }
                 next.send_notif(
                     NotificationCode::Connected,
@@ -1685,7 +1739,7 @@ impl Server {
 
             // Set remote state to Pending.
             if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                remote.state = ConnectionState::Pending;
+                remote.mark_pending();
             } else {
                 self.active_remotes.insert(
                     host_id.clone(),
@@ -1718,7 +1772,7 @@ impl Server {
 
         // Signaling server is ready, set remote to Connecting
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-            remote.state = ConnectionState::ConnectingStage1(unix_epoch_secs());
+            remote.mark_connecting();
         } else {
             self.active_remotes.insert(
                 host_id.clone(),
@@ -1758,9 +1812,7 @@ impl Server {
 
             // Update remote state to FailedToConnect
             if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                remote.state = ConnectionState::FailedToConnect;
-                remote.next_reconnect_stride = 1;
-                remote.next_reconnect_time = Instant::now();
+                remote.mark_failed();
             }
 
             // Notify editor
@@ -3631,7 +3683,7 @@ impl Server {
                 // Update state to Connected
                 let mut mode = AcceptMode::TrustedOnly;
                 if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                    state.state = SignalingConnectionState::Bound;
+                    state.mark_bound();
                     tracing::info!("Successfully bound to signaling server {}", signaling_addr);
                     mode = state.accept_mode;
                 }
@@ -3715,7 +3767,7 @@ impl Server {
 
                 // Mark as connecting to prevent duplicate connection attempts.
                 if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                    remote.state = ConnectionState::ConnectingStage2;
+                    remote.mark_connecting_stage2();
                 } else {
                     self.active_remotes.insert(
                         peer_id.clone(),
