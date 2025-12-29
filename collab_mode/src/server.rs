@@ -3680,185 +3680,27 @@ impl Server {
         tracing::info!("From signaling server: {:?}", &msg);
         match msg {
             SignalingMsg::Bound(_id) => {
-                // Update state to Connected
-                let mut mode = AcceptMode::TrustedOnly;
-                if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                    state.mark_bound();
-                    tracing::info!("Successfully bound to signaling server {}", signaling_addr);
-                    mode = state.accept_mode;
-                }
-
-                // Start all pending connections waiting for this signaling server.
-                let mut pending_remotes: Vec<(String, RemoteState)> = Vec::new();
-                for (host_id, remote) in self.active_remotes.iter() {
-                    if remote.state == ConnectionState::Pending
-                        && remote.signaling_addr == signaling_addr
-                    {
-                        tracing::info!(
-                            "Start pending connection to {} via {}",
-                            host_id,
-                            signaling_addr
-                        );
-                        pending_remotes.push((host_id.clone(), remote.clone()));
-                    }
-                }
-
-                for (host_id, remote) in pending_remotes {
-                    self.try_connect_remote(
-                        next,
-                        host_id,
-                        remote.signaling_addr,
-                        remote.transport_type,
-                        msg_tx,
-                        signaling_channel,
-                    )
-                    .await;
-                }
-
-                // Notify editor that we’re accepting.
-                next.send_notif(
-                    NotificationCode::AcceptingConnection,
-                    AcceptingConnectionNote {
-                        addr: signaling_addr.clone(),
-                        mode,
-                    },
+                self.handle_signaling_bound_msg(
+                    signaling_addr,
+                    next,
+                    msg_tx,
+                    signaling_channel,
                 )
                 .await;
-
                 Ok(())
             }
 
             SignalingMsg::Connect(peer_id, _my_id, peer_cert, initiator) => {
-                // Check if we're already connecting or connected to this peer.
-                dbg!(&self.active_remotes);
-                let is_connecting_or_connected =
-                    self.active_remotes.get(&peer_id).map_or(false, |r| {
-                        matches!(
-                            r.state,
-                            ConnectionState::ConnectingStage2 | ConnectionState::Connected
-                        )
-                    });
-                tracing::info!(
-                    "Received Connect message from {}, is_connecting_or_connected={}",
+                self.handle_signaling_connect_msg(
+                    signaling_addr,
                     peer_id,
-                    is_connecting_or_connected
-                );
-                if is_connecting_or_connected && !initiator {
-                    tracing::info!(
-                        "Already connecting/connected to {}, ignoring duplicate connection request",
-                        peer_id
-                    );
-                    return Ok(());
-                }
-
-                // Check if the certificate is trusted.
-                if !self.is_cert_trusted(&peer_cert, &peer_id, &signaling_addr) {
-                    let msg = ErrorResponseNote {
-                        code: ErrorCode::PermissionDenied,
-                        file: None,
-                        message: format!(
-                            "Refusing connection from {}: certificate not trusted",
-                            peer_id
-                        ),
-                    };
-                    next.send_notif(NotificationCode::ErrorResponse, msg).await;
-                    let reject_msg = SignalingMsg::Rejected(
-                        self.host_id.clone(),
-                        "Provided certificate not in my trusted list".to_string(),
-                    );
-                    let _ = signaling_channel.send(&signaling_addr, reject_msg).await;
-                    if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                        remote.mark_failed();
-                    }
-                    return Ok(());
-                }
-
-                // Mark as connecting to prevent duplicate connection attempts.
-                if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                    remote.mark_connecting_stage2();
-                } else {
-                    self.active_remotes.insert(
-                        peer_id.clone(),
-                        RemoteState::connecting(
-                            signaling_addr.clone(),
-                            webchannel::TransportType::SCTP,
-                        ),
-                    );
-                }
-
-                // If the remote initiated the connection, reply with
-                // a connect message.
-                if initiator {
-                    self.send_connect_message(
-                        next,
-                        peer_id.clone(),
-                        &signaling_addr,
-                        signaling_channel,
-                    )
-                    .await;
-                }
-
-                // Create a Sock for this peer connection. Sock
-                // handles sending receiving SDP and ICE candidate
-                // to/from the remote peer through signaling server.
-                let sock = match signaling_channel
-                    .create_sock(&signaling_addr, peer_id.clone(), peer_cert.clone())
-                    .await
-                {
-                    Ok(sock) => sock,
-                    Err(e) => {
-                        tracing::error!("Failed to create sock for peer {}: {}", peer_id, e);
-                        return Ok(());
-                    }
-                };
-
-                // Establish WebChannel connection using the sock.
-                let key_cert = self.key_cert.clone();
-                let webchannel_clone = next.webchannel.clone();
-                let peer_id_clone = peer_id.clone();
-                let msg_tx_clone = msg_tx.clone();
-                let my_host_id = self.host_id.clone();
-
-                tokio::spawn(async move {
-                    match webchannel_clone
-                        .connect(peer_id_clone.clone(), Some(sock), key_cert)
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::info!("Successfully connected to peer {}", peer_id_clone);
-                        }
-                        Err(err) => {
-                            tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, err);
-                            let condition: Option<&WebChannelError> = err.downcast_ref();
-                            match condition {
-                                Some(WebChannelError::ConnectionExists(peer_id)) => {
-                                    let msg = webchannel::Message {
-                                        host: my_host_id,
-                                        body: Msg::IceProgress(
-                                            peer_id.to_string(),
-                                            "Already connected".to_string(),
-                                        ),
-                                        req_id: None,
-                                    };
-                                    let _ = msg_tx_clone.send(msg).await;
-                                }
-                                _ => {
-                                    // Send FailedToConnect message to main loop
-                                    let msg = webchannel::Message {
-                                        host: my_host_id,
-                                        body: Msg::FailedToConnect(
-                                            peer_id_clone.clone(),
-                                            err.to_string(),
-                                        ),
-                                        req_id: None,
-                                    };
-                                    let _ = msg_tx_clone.send(msg).await;
-                                }
-                            }
-                        }
-                    }
-                });
-
+                    peer_cert,
+                    initiator,
+                    next,
+                    msg_tx,
+                    signaling_channel,
+                )
+                .await;
                 Ok(())
             }
 
@@ -3904,6 +3746,188 @@ impl Server {
                 Ok(())
             }
         }
+    }
+
+    /// Handle SignalingMsg::Bound message.
+    async fn handle_signaling_bound_msg<'a>(
+        &mut self,
+        signaling_addr: String,
+        next: &Next<'a>,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
+        // Update state to Connected
+        let mut mode = AcceptMode::TrustedOnly;
+        if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
+            state.mark_bound();
+            tracing::info!("Successfully bound to signaling server {}", signaling_addr);
+            mode = state.accept_mode;
+        }
+
+        // Start all pending connections waiting for this signaling server.
+        let mut pending_remotes: Vec<(String, RemoteState)> = Vec::new();
+        for (host_id, remote) in self.active_remotes.iter() {
+            if remote.state == ConnectionState::Pending && remote.signaling_addr == signaling_addr {
+                tracing::info!(
+                    "Start pending connection to {} via {}",
+                    host_id,
+                    signaling_addr
+                );
+                pending_remotes.push((host_id.clone(), remote.clone()));
+            }
+        }
+
+        for (host_id, remote) in pending_remotes {
+            self.try_connect_remote(
+                next,
+                host_id,
+                remote.signaling_addr,
+                remote.transport_type,
+                msg_tx,
+                signaling_channel,
+            )
+            .await;
+        }
+
+        // Notify editor that we’re accepting.
+        next.send_notif(
+            NotificationCode::AcceptingConnection,
+            AcceptingConnectionNote {
+                addr: signaling_addr.clone(),
+                mode,
+            },
+        )
+        .await;
+    }
+
+    /// Handle SignalingMsg::Connect message.
+    async fn handle_signaling_connect_msg<'a>(
+        &mut self,
+        signaling_addr: String,
+        peer_id: ServerId,
+        peer_cert: String,
+        initiator: bool,
+        next: &Next<'a>,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
+        // Check if we're already connecting or connected to this peer.
+        dbg!(&self.active_remotes);
+        let is_connecting_or_connected = self.active_remotes.get(&peer_id).map_or(false, |r| {
+            matches!(
+                r.state,
+                ConnectionState::ConnectingStage2 | ConnectionState::Connected
+            )
+        });
+        tracing::info!(
+            "Received Connect message from {}, is_connecting_or_connected={}",
+            peer_id,
+            is_connecting_or_connected
+        );
+        if is_connecting_or_connected && !initiator {
+            tracing::info!(
+                "Already connecting/connected to {}, ignoring duplicate connection request",
+                peer_id
+            );
+            return;
+        }
+
+        // Check if the certificate is trusted.
+        if !self.is_cert_trusted(&peer_cert, &peer_id, &signaling_addr) {
+            let msg = ErrorResponseNote {
+                code: ErrorCode::PermissionDenied,
+                file: None,
+                message: format!(
+                    "Refusing connection from {}: certificate not trusted",
+                    peer_id
+                ),
+            };
+            next.send_notif(NotificationCode::ErrorResponse, msg).await;
+            let reject_msg = SignalingMsg::Rejected(
+                self.host_id.clone(),
+                "Provided certificate not in my trusted list".to_string(),
+            );
+            let _ = signaling_channel.send(&signaling_addr, reject_msg).await;
+            if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
+                remote.mark_failed();
+            }
+            return;
+        }
+
+        // Mark as connecting to prevent duplicate connection attempts.
+        if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
+            remote.mark_connecting_stage2();
+        } else {
+            self.active_remotes.insert(
+                peer_id.clone(),
+                RemoteState::connecting(signaling_addr.clone(), webchannel::TransportType::SCTP),
+            );
+        }
+
+        // If the remote initiated the connection, reply with
+        // a connect message.
+        if initiator {
+            self.send_connect_message(next, peer_id.clone(), &signaling_addr, signaling_channel)
+                .await;
+        }
+
+        // Create a Sock for this peer connection. Sock
+        // handles sending receiving SDP and ICE candidate
+        // to/from the remote peer through signaling server.
+        let sock = match signaling_channel
+            .create_sock(&signaling_addr, peer_id.clone(), peer_cert.clone())
+            .await
+        {
+            Ok(sock) => sock,
+            Err(e) => {
+                tracing::error!("Failed to create sock for peer {}: {}", peer_id, e);
+                return;
+            }
+        };
+
+        // Establish WebChannel connection using the sock.
+        let key_cert = self.key_cert.clone();
+        let webchannel_clone = next.webchannel.clone();
+        let peer_id_clone = peer_id.clone();
+        let msg_tx_clone = msg_tx.clone();
+        let my_host_id = self.host_id.clone();
+
+        tokio::spawn(async move {
+            match webchannel_clone
+                .connect(peer_id_clone.clone(), Some(sock), key_cert)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!("Successfully connected to peer {}", peer_id_clone);
+                }
+                Err(err) => {
+                    tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, err);
+                    let condition: Option<&WebChannelError> = err.downcast_ref();
+                    match condition {
+                        Some(WebChannelError::ConnectionExists(peer_id)) => {
+                            let msg = webchannel::Message {
+                                host: my_host_id,
+                                body: Msg::IceProgress(
+                                    peer_id.to_string(),
+                                    "Already connected".to_string(),
+                                ),
+                                req_id: None,
+                            };
+                            let _ = msg_tx_clone.send(msg).await;
+                        }
+                        _ => {
+                            // Send FailedToConnect message to main loop
+                            let msg = webchannel::Message {
+                                host: my_host_id,
+                                body: Msg::FailedToConnect(peer_id_clone.clone(), err.to_string()),
+                                req_id: None,
+                            };
+                            let _ = msg_tx_clone.send(msg).await;
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
