@@ -1118,89 +1118,8 @@ impl Server {
         match notif.method.as_str() {
             "AcceptConnection" => {
                 let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
-
-                tracing::info!(
-                    "AcceptConnection: addr={}, active_remotes={:?}, active_signaling={:?}",
-                    params.addr,
-                    self.active_remotes,
-                    self.active_signaling
-                );
-
-                // If already accepting, skip.
-                if let Some(state) = self.active_signaling.get_mut(&params.addr) {
-                    // But make sure to update accept mode and reset
-                    // reconnect time.
-                    if let Some(mode) = params.mode {
-                        state.accept_mode = mode;
-                        state.reset_backoff();
-                    }
-
-                    // If mode is All, spawn background task to revert after
-                    // 3 minutes.
-                    if matches!(params.mode, Some(AcceptMode::All)) {
-                        Self::revert_back_to_trusted_only_in_3min(
-                            params.addr.clone(),
-                            self.host_id.clone(),
-                            next.webchannel.clone(),
-                        );
-                    }
-
-                    if matches!(state.state, SignalingConnectionState::Bound) {
-                        next.send_notif(
-                            NotificationCode::AcceptingConnection,
-                            serde_json::json!({
-                                "signaling_addr": params.addr,
-                            }),
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-
-                // Track signaling connection state (in the map =
-                // maintain connection). Override any existing state.
-                let existing_mode = self
-                    .active_signaling
-                    .get(&params.addr)
-                    .map(|s| s.accept_mode)
-                    .unwrap_or(AcceptMode::TrustedOnly);
-                self.active_signaling.insert(
-                    params.addr.clone(),
-                    SignalingState::connecting(params.mode.unwrap_or(existing_mode)),
-                );
-
-                // Bind to signaling server.
-                let result = signaling_channel
-                    .bind(
-                        params.addr.clone(),
-                        self.host_id.clone(),
-                        self.key_cert.clone(),
-                    )
+                self.handle_accept_connection(next, params, signaling_channel)
                     .await;
-
-                // Error handling.
-                if let Err(err) = result {
-                    tracing::error!("Failed to bind SignalingClient: {}", err);
-                    self.active_signaling.remove(&params.addr);
-                    next.send_notif(
-                        NotificationCode::ErrorResponse,
-                        ErrorResponseNote {
-                            code: ErrorCode::InternalError,
-                            file: None,
-                            message: format!("Failed to bind to signaling server: {}", err),
-                        },
-                    )
-                    .await;
-                }
-                // If mode is All, spawn background task to revert after
-                // 3 minutes.
-                if matches!(params.mode, Some(AcceptMode::All)) {
-                    Self::revert_back_to_trusted_only_in_3min(
-                        params.addr.clone(),
-                        self.host_id.clone(),
-                        next.webchannel.clone(),
-                    );
-                }
             }
             "Connect" => {
                 let params: ConnectParams = serde_json::from_value(notif.params)?;
@@ -3680,13 +3599,8 @@ impl Server {
         tracing::info!("From signaling server: {:?}", &msg);
         match msg {
             SignalingMsg::Bound(_id) => {
-                self.handle_signaling_bound_msg(
-                    signaling_addr,
-                    next,
-                    msg_tx,
-                    signaling_channel,
-                )
-                .await;
+                self.handle_signaling_bound_msg(signaling_addr, next, msg_tx, signaling_channel)
+                    .await;
                 Ok(())
             }
 
@@ -3928,6 +3842,97 @@ impl Server {
                 }
             }
         });
+    }
+
+    /// Handle AcceptConnection notification from editor.
+    async fn handle_accept_connection<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: AcceptConnectionParams,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
+        tracing::info!(
+            "AcceptConnection: addr={}, active_remotes={:?}, active_signaling={:?}",
+            params.addr,
+            self.active_remotes,
+            self.active_signaling
+        );
+
+        // If already accepting, skip.
+        if let Some(state) = self.active_signaling.get_mut(&params.addr) {
+            // But make sure to update accept mode and reset
+            // reconnect time.
+            if let Some(mode) = params.mode {
+                state.accept_mode = mode;
+                state.reset_backoff();
+            }
+
+            // If mode is All, spawn background task to revert after
+            // 3 minutes.
+            if matches!(params.mode, Some(AcceptMode::All)) {
+                Self::revert_back_to_trusted_only_in_3min(
+                    params.addr.clone(),
+                    self.host_id.clone(),
+                    next.webchannel.clone(),
+                );
+            }
+
+            if matches!(state.state, SignalingConnectionState::Bound) {
+                next.send_notif(
+                    NotificationCode::AcceptingConnection,
+                    serde_json::json!({
+                        "signaling_addr": params.addr,
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+
+        // Track signaling connection state (in the map =
+        // maintain connection). Override any existing state.
+        let existing_mode = self
+            .active_signaling
+            .get(&params.addr)
+            .map(|s| s.accept_mode)
+            .unwrap_or(AcceptMode::TrustedOnly);
+        self.active_signaling.insert(
+            params.addr.clone(),
+            SignalingState::connecting(params.mode.unwrap_or(existing_mode)),
+        );
+
+        // Bind to signaling server.
+        let result = signaling_channel
+            .bind(
+                params.addr.clone(),
+                self.host_id.clone(),
+                self.key_cert.clone(),
+            )
+            .await;
+
+        // Error handling.
+        if let Err(err) = result {
+            tracing::error!("Failed to bind SignalingClient: {}", err);
+            self.active_signaling.remove(&params.addr);
+            next.send_notif(
+                NotificationCode::ErrorResponse,
+                ErrorResponseNote {
+                    code: ErrorCode::InternalError,
+                    file: None,
+                    message: format!("Failed to bind to signaling server: {}", err),
+                },
+            )
+            .await;
+        }
+        // If mode is All, spawn background task to revert after
+        // 3 minutes.
+        if matches!(params.mode, Some(AcceptMode::All)) {
+            Self::revert_back_to_trusted_only_in_3min(
+                params.addr.clone(),
+                self.host_id.clone(),
+                next.webchannel.clone(),
+            );
+        }
     }
 }
 
