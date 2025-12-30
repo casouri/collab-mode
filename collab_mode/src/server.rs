@@ -1,3 +1,18 @@
+//! Main body of the collab server.
+//!
+//! Uses [`webchannel`] for communicating with remote servers, and
+//! [`signaling::client_new`] for communicating with the signaling server.
+//!
+//! The main entry point is [`Server::run`], which runs in a loop and calls:
+//! - [`Server::handle_editor_message`] for messages from the editor
+//! - [`Server::handle_remote_message`] for messages from remote peers
+//! - [`Server::handle_signaling_msg`] for messages from the signaling server
+//!
+//! Each handler function dispatches to specific message handlers. The server
+//! mostly runs in one synchronous command loop. Long async processes (like
+//! establishing connections) are split into several messages and their
+//! corresponding handlers.
+
 use crate::config_man::{ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, InternalDoc, ServerEngine};
 use crate::error::CollabError;
