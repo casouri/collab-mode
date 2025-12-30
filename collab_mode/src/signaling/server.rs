@@ -398,8 +398,9 @@ async fn send_receive_stream(
                     let msg = SignalingMsg::Inactive(
                         "No ping received in 10 minutes".to_string()
                     );
-                    let _ = stream.send(msg.into()).await;
                     tracing::info!("Closing connection due to inactivity");
+                    let _ = stream.send(msg.into()).await;
+                    let _ = stream.close(None).await;
                     return;
                 }
             }
