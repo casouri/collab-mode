@@ -699,99 +699,7 @@ impl Server {
                 },
                 // Reconnection handler.
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                    // Check for connection timeouts.
-                    let now = unix_epoch_secs();
-                    for (host, remote) in self.active_remotes.iter_mut() {
-                        let timeout = match remote.state {
-                            ConnectionState::ConnectingStage1(started) if now - started > 10 => {
-                                Some("Connection timed out in Stage1")
-                            }
-                            _ => None,
-                        };
-                        if let Some(reason) = timeout {
-                            tracing::warn!("Connection to {} timed out", host);
-                            remote.mark_failed();
-                            send_notification(
-                                &editor_tx,
-                                NotificationCode::ConnectionBroke,
-                                ConnectionBrokeNote {
-                                    host_id: host.clone(),
-                                    reason: reason.to_string(),
-                                },
-                            )
-                            .await;
-                        }
-                    }
-
-                    let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
-                    for (host, remote) in self.active_remotes.iter_mut() {
-                        // Only reconnect Disconnected remotes. Skip
-                        // Pending (waiting for signaling),
-                        // ConnectingStage2 (already starting to
-                        // establish connection), Connected (already
-                        // connected), and FailedToConnect (won't
-                        // retry). Regarding ConnectingStage1:
-                        // basically, unless we received a reply
-                        // connection message, keep sending connect
-                        // request to remote.  TODO: Add a Refused state?
-                        if !matches!(remote.state,
-                            ConnectionState::Disconnected
-                            | ConnectionState::ConnectingStage1(_)) {
-                            continue;
-                        }
-                        if Instant::now() < remote.next_reconnect_time {
-                            continue;
-                        }
-                        tracing::info!("Attempting reconnection with remote {}", host);
-                        send_notification(&editor_tx, NotificationCode::Connecting, ConnectingNote {
-                            host_id: host.clone(),
-
-                        }).await;
-                        need_connect.push((host.clone(), remote.clone()));
-                        remote.advance_backoff();
-                    }
-
-                    let next = Next::new(&editor_tx, None, &webchannel);
-                    for (host, remote) in need_connect {
-                        self.try_connect_remote(
-                            &next, host.clone(),
-                            remote.signaling_addr,
-                            remote.transport_type,
-                            &msg_tx,
-                            &mut *signaling_channel).await;
-                    }
-
-                    // Handle signaling server reconnections (presence
-                    // in active_signaling means we want to maintain
-                    // connection).
-                    let mut need_rebind: Vec<String> = Vec::new();
-                    for (addr, state) in self.active_signaling.iter_mut() {
-                        // Unlike remote connection, even if first
-                        // attempt failed we still try to reconnect.
-                        if state.state == SignalingConnectionState::Bound
-                           || state.state == SignalingConnectionState::Binding {
-                            continue;
-                        }
-                        if Instant::now() < state.next_reconnect_time {
-                            continue;
-                        }
-
-                        tracing::info!("Reconnecting to signaling server {}", addr);
-                        need_rebind.push(addr.clone());
-                        state.advance_backoff();
-                        state.state = SignalingConnectionState::Binding;
-                    }
-
-                    for addr in need_rebind {
-                        let result = signaling_channel
-                            .bind(addr.clone(), self.host_id.clone(), self.key_cert.clone())
-                            .await;
-
-                        if let Err(e) = result {
-                            tracing::error!("Failed to reconnect to signaling server {}: {}", addr, e);
-                        }
-                    }
-
+                    self.handle_reconnect_tick(&editor_tx, &msg_tx, &webchannel, &mut *signaling_channel).await;
                 }
             }
         }
@@ -887,6 +795,117 @@ impl Server {
         self.trusted_hosts
             .insert(remote_hostid.to_string(), cert_hash.to_string());
         is_trusted
+    }
+
+    /// Handle periodic reconnection tick (every 2 seconds).
+    async fn handle_reconnect_tick(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+        webchannel: &MsgChannelImpl,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
+        // Check for connection timeouts.
+        let now = unix_epoch_secs();
+        for (host, remote) in self.active_remotes.iter_mut() {
+            let timeout = match remote.state {
+                ConnectionState::ConnectingStage1(started) if now - started > 10 => {
+                    Some("Connection timed out in Stage1")
+                }
+                _ => None,
+            };
+            if let Some(reason) = timeout {
+                tracing::warn!("Connection to {} timed out", host);
+                remote.mark_failed();
+                send_notification(
+                    &editor_tx,
+                    NotificationCode::ConnectionBroke,
+                    ConnectionBrokeNote {
+                        host_id: host.clone(),
+                        reason: reason.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
+        for (host, remote) in self.active_remotes.iter_mut() {
+            // Only reconnect Disconnected remotes. Skip
+            // Pending (waiting for signaling),
+            // ConnectingStage2 (already starting to
+            // establish connection), Connected (already
+            // connected), and FailedToConnect (won't
+            // retry). Regarding ConnectingStage1:
+            // basically, unless we received a reply
+            // connection message, keep sending connect
+            // request to remote.  TODO: Add a Refused state?
+            if !matches!(
+                remote.state,
+                ConnectionState::Disconnected | ConnectionState::ConnectingStage1(_)
+            ) {
+                continue;
+            }
+            if Instant::now() < remote.next_reconnect_time {
+                continue;
+            }
+            tracing::info!("Attempting reconnection with remote {}", host);
+            send_notification(
+                &editor_tx,
+                NotificationCode::Connecting,
+                ConnectingNote {
+                    host_id: host.clone(),
+                },
+            )
+            .await;
+            need_connect.push((host.clone(), remote.clone()));
+            remote.advance_backoff();
+        }
+
+        let next = Next::new(&editor_tx, None, &webchannel);
+        for (host, remote) in need_connect {
+            self.try_connect_remote(
+                &next,
+                host.clone(),
+                remote.signaling_addr,
+                remote.transport_type,
+                &msg_tx,
+                &mut *signaling_channel,
+            )
+            .await;
+        }
+
+        // Handle signaling server reconnections (presence
+        // in active_signaling means we want to maintain
+        // connection).
+        let mut need_rebind: Vec<String> = Vec::new();
+        for (addr, state) in self.active_signaling.iter_mut() {
+            // Unlike remote connection, even if first
+            // attempt failed we still try to reconnect.
+            if state.state == SignalingConnectionState::Bound
+                || state.state == SignalingConnectionState::Binding
+            {
+                continue;
+            }
+            if Instant::now() < state.next_reconnect_time {
+                continue;
+            }
+
+            tracing::info!("Reconnecting to signaling server {}", addr);
+            need_rebind.push(addr.clone());
+            state.advance_backoff();
+            state.state = SignalingConnectionState::Binding;
+        }
+
+        for addr in need_rebind {
+            let result = signaling_channel
+                .bind(addr.clone(), self.host_id.clone(), self.key_cert.clone())
+                .await;
+
+            if let Err(e) = result {
+                tracing::error!("Failed to reconnect to signaling server {}: {}", addr, e);
+            }
+        }
     }
 
     #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
