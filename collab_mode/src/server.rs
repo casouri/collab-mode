@@ -145,7 +145,8 @@ pub enum ConnectionState {
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum SignalingConnectionState {
     Bound,
-    Binding,
+    /// u64 is unix epoch seconds. Instant isn't serializable.
+    Binding(u64),
     Disconnected,
     FailedToBind,
 }
@@ -260,7 +261,7 @@ struct SignalingState {
 impl SignalingState {
     fn connecting(mode: AcceptMode) -> Self {
         SignalingState {
-            state: SignalingConnectionState::Binding,
+            state: SignalingConnectionState::Binding(unix_epoch_secs()),
             next_reconnect_stride: 1,
             next_reconnect_time: std::time::Instant::now(),
             accept_mode: mode,
@@ -844,6 +845,21 @@ impl Server {
             }
         }
 
+        // Check for signaling binding timeouts.
+        let mut timed_out: Vec<String> = Vec::new();
+        for (addr, state) in self.active_signaling.iter_mut() {
+            if let SignalingConnectionState::Binding(started) = state.state {
+                if now - started > 10 {
+                    tracing::warn!("Signaling binding to {} timed out", addr);
+                    state.state = SignalingConnectionState::FailedToBind;
+                    timed_out.push(addr.clone());
+                }
+            }
+        }
+        for addr in timed_out {
+            signaling_channel.remove(&addr);
+        }
+
         let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
         for (host, remote) in self.active_remotes.iter_mut() {
             // Only reconnect Disconnected remotes. Skip
@@ -898,7 +914,7 @@ impl Server {
             // Unlike remote connection, even if first
             // attempt failed we still try to reconnect.
             if state.state == SignalingConnectionState::Bound
-                || state.state == SignalingConnectionState::Binding
+                || matches!(state.state, SignalingConnectionState::Binding(_))
             {
                 continue;
             }
@@ -909,7 +925,7 @@ impl Server {
             tracing::info!("Reconnecting to signaling server {}", addr);
             need_rebind.push(addr.clone());
             state.advance_backoff();
-            state.state = SignalingConnectionState::Binding;
+            state.state = SignalingConnectionState::Binding(unix_epoch_secs());
         }
 
         for addr in need_rebind {

@@ -159,7 +159,8 @@ impl SignalingChannelTrait for SignalingChannel {
     }
 }
 
-/// Main signaling client that manages connection to signaling server
+/// Main signaling client that manages connection to signaling server.
+/// It runs background tasks but will self-cleanup when dropped.
 #[derive(Clone)]
 pub struct SignalingClient {
     /// Signaling server address
@@ -234,6 +235,9 @@ impl SignalingClient {
             signaling_addr = %addr
         );
 
+        // When the client is dropped, the shutdown_tx will be
+        // dropped, and background task will terminate and call the
+        // cleanup function (if any).
         let task_handle = tokio::spawn(
             send_receive_stream(
                 addr_clone,
