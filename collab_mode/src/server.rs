@@ -3972,6 +3972,12 @@ impl Server {
 
 // *** Helper functions
 
+/// The [Next] object stores references to channels and have a borrow
+/// lifetime, but the channels don’t really have to be references
+/// since they are Send + Sync. I only made [Next] store references
+/// since most of the time a reference is enough and I need to create
+/// a new [Next] for each handler (because of the `req_id` depends on
+/// each message) and I don’t want to clone the channel every time.
 struct Next<'a> {
     editor_tx: &'a mpsc::Sender<lsp_server::Message>,
     req_id: Option<lsp_server::RequestId>,
