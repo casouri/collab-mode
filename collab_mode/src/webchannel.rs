@@ -610,7 +610,7 @@ async fn handle_outgoing_messages(
             .open_stream(stream_id, PayloadProtocolIdentifier::Binary)
             .await;
         if res.is_err() {
-            tracing::error!(
+            tracing::warn!(
                 "Failed to open stream #{}: {}",
                 stream_id,
                 res.err().unwrap()
@@ -624,7 +624,7 @@ async fn handle_outgoing_messages(
             Ok(data) => data.into_bytes(),
             Err(e) => {
                 // I don’t expect this to happen.
-                tracing::error!("Failed to serialize message: {}", e);
+                tracing::warn!("Failed to serialize message: {}", e);
                 let _ = msg_tx
                     .send(Message {
                         host: remote_hostid.clone(),
@@ -642,7 +642,7 @@ async fn handle_outgoing_messages(
         let len_bytes = (data.len() as u64).to_be_bytes();
         let len_bytes = bytes::Bytes::from(len_bytes.to_vec());
         if let Err(e) = stream.write(&len_bytes).await {
-            tracing::error!("Failed to write length prefix to stream: {}", e);
+            tracing::warn!("Failed to write length prefix to stream: {}", e);
             // Let setup_message_handling send the connection broke message.
             let _ = err_tx.send(()).await;
             let _ = stream.shutdown(std::net::Shutdown::Both).await;
@@ -656,7 +656,7 @@ async fn handle_outgoing_messages(
             let chunk = bytes::Bytes::from(data[offset..chunk_end].to_vec());
 
             if let Err(e) = stream.write(&chunk).await {
-                tracing::error!("Failed to write data chunk to stream: {}", e);
+                tracing::warn!("Failed to write data chunk to stream: {}", e);
                 // Let setup_message_handling send the connection broke message.
                 let _ = err_tx.send(()).await;
                 let _ = stream.shutdown(std::net::Shutdown::Both).await;
@@ -720,7 +720,7 @@ async fn handle_incoming_messages(
     // No need to use the shutdown method (graceful shutdown) since
     // something already went wrong.
     if let Err(e) = sctp_assoc.close().await {
-        tracing::error!(
+        tracing::warn!(
             "Failed to close SCTP association for {}: {}",
             remote_hostid,
             e
@@ -758,7 +758,7 @@ async fn read_from_stream(
         Err(err) => {
             // The only error stream.read might throw is
             // ErrShortBuffer. Which shouldn’t happen.
-            tracing::error!(
+            tracing::warn!(
                 "Failed to read from stream #{} from {}: {}",
                 stream.stream_identifier(),
                 remote_hostid,
@@ -807,7 +807,7 @@ async fn read_from_stream(
             Err(e) => {
                 // The only error stream.read might throw is
                 // ErrShortBuffer. Which shouldn’t happen.
-                tracing::error!(
+                tracing::warn!(
                     "Failed to read content from stream from {}: {}",
                     remote_hostid,
                     e
@@ -830,13 +830,13 @@ async fn read_from_stream(
     match serde_json::from_slice::<Message>(&full_buffer) {
         Ok(message) => {
             if let Err(e) = msg_tx.send(message).await {
-                tracing::error!("Failed to send message to channel: {}", e);
+                tracing::warn!("Failed to send message to channel: {}", e);
                 // No need to send error, the incoming_message handler
                 // will detect broken stream.
             }
         }
         Err(e) => {
-            tracing::error!(
+            tracing::warn!(
                 "Failed to deserialize message from {}: {}",
                 remote_hostid,
                 e
@@ -979,7 +979,7 @@ impl TestWebChannelFactory {
 
                 for msg in messages {
                     if let Err(e) = msg_tx.send(msg).await {
-                        tracing::error!("Channel broke for {}: {}", hostid, e);
+                        tracing::warn!("Channel broke for {}: {}", hostid, e);
                         break;
                     }
                 }

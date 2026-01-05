@@ -415,7 +415,7 @@ async fn send_receive_stream(
     // Connect to signaling server
     let stream_result = tung::connect_async(&addr).await;
     if let Err(e) = stream_result {
-        tracing::error!("Failed to connect to signaling server {}: {}", addr, e);
+        tracing::warn!("Failed to connect to signaling server {}: {}", addr, e);
         // Send AcceptStopped message
         let signaling_message = crate::signaling::SignalingMessage {
             signaling_addr: addr.clone(),
@@ -444,7 +444,7 @@ async fn send_receive_stream(
                 let text = serde_json::to_string(&ping_msg).unwrap();
                 if let Err(e) = ws_tx.send(tung::tungstenite::Message::Text(text)).await {
                     termination_reason = format!("Failed to send ping: {}", e);
-                    tracing::error!("{}", termination_reason);
+                    tracing::warn!("{}", termination_reason);
                     break;
                 }
                 tracing::debug!("Sent ping to signaling server");
@@ -470,7 +470,7 @@ async fn send_receive_stream(
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!("Failed to parse signaling message: {}", e);
+                                    tracing::warn!("Failed to parse signaling message: {}", e);
                                     termination_reason = format!("Parse error: {}", e);
                                     break;
                                 }
@@ -482,7 +482,7 @@ async fn send_receive_stream(
                             break;
                         }
                         Err(e) => {
-                            tracing::error!("Websocket error: {}", e);
+                            tracing::warn!("Websocket error: {}", e);
                             termination_reason = format!("Websocket error: {}", e);
                             break;
                         }
@@ -500,7 +500,7 @@ async fn send_receive_stream(
                 if let Some(signaling_msg) = msg {
                     let text = serde_json::to_string(&signaling_msg).unwrap();
                     if let Err(e) = ws_tx.send(tung::tungstenite::Message::Text(text)).await {
-                        tracing::error!("Failed to send to websocket: {}", e);
+                        tracing::warn!("Failed to send to websocket: {}", e);
                         termination_reason = format!("Send error: {}", e);
                         break;
                     }

@@ -388,7 +388,9 @@ impl Doc {
                         "LocalDoc applying Ins to gapbuf"
                     );
                     if pos as usize > gapbuf_len {
-                        tracing::error!(pos, gapbuf_len, "ERROR: pos > gapbuf_len before insert!");
+                        let msg = format!("Insertion pos > gapbuf_len, {pos} > {gapbuf_len}");
+                        tracing::warn!("{}", msg);
+                        return Err(anyhow!(CollabError::DocFatal(msg)));
                     }
                     self.buffer.insert_many(pos as usize, str.chars());
                 }
@@ -451,7 +453,10 @@ impl RemoteDoc {
     /// Apply an EditInstruction to the buffer without checking engine/buffer sync.
     /// Use `verify_buffer_engine_sync` after applying all instructions from a
     /// single editor operation.
-    fn apply_edit_instruction_unchecked(&mut self, instruction: &EditInstruction) {
+    fn apply_edit_instruction_unchecked(
+        &mut self,
+        instruction: &EditInstruction,
+    ) -> anyhow::Result<()> {
         match instruction {
             EditInstruction::Ins { edits } => {
                 for edit in edits.iter().rev() {
@@ -465,7 +470,9 @@ impl RemoteDoc {
                         "RemoteDoc applying Ins to gapbuf"
                     );
                     if pos as usize > gapbuf_len {
-                        tracing::error!(pos, gapbuf_len, "ERROR: pos > gapbuf_len before insert!");
+                        let msg = format!("Insertion pos > gapbuf_len, {pos} > {gapbuf_len}");
+                        tracing::warn!("{}", msg);
+                        return Err(anyhow!(CollabError::DocFatal(msg)));
                     }
                     self.buffer.insert_many(pos as usize, str.chars());
                 }
@@ -479,6 +486,7 @@ impl RemoteDoc {
                 }
             }
         }
+        Ok(())
     }
 
     /// Verify that engine's editor_len matches the actual buffer length.
@@ -680,7 +688,7 @@ impl Server {
                     // Most errors ar handled by sending error
                     // response to editor/remote.
                     if let Err(err) = res {
-                        tracing::error!("Failed to handle editor message: {}", err);
+                        tracing::warn!("Failed to handle editor message: {}", err);
                     }
                 },
                 // Handle messages from remote peers.
@@ -690,7 +698,7 @@ impl Server {
                     // Most errors ar handled by sending error
                     // response to editor/remote.
                     if let Err(err) = res {
-                        tracing::error!("Failed to handle remote message: {}", err);
+                        tracing::warn!("Failed to handle remote message: {}", err);
                     }
                 },
                 // Handle messages from signaling clients.
@@ -700,7 +708,7 @@ impl Server {
                         Ok(signaling_msg) => {
                             let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, &msg_tx, &mut *signaling_channel).await;
                             if let Err(err) = res {
-                                tracing::error!("Failed to handle signaling message: {}", err);
+                                tracing::warn!("Failed to handle signaling message: {}", err);
                             }
                         }
                         Err(accept_stopped) => {
@@ -948,7 +956,7 @@ impl Server {
                 .await;
 
             if let Err(e) = result {
-                tracing::error!("Failed to reconnect to signaling server {}: {}", addr, e);
+                tracing::warn!("Failed to reconnect to signaling server {}: {}", addr, e);
             }
         }
     }
@@ -986,7 +994,7 @@ impl Server {
                     .handle_editor_notification(&next, notif, msg_tx, signaling_channel)
                     .await
                 {
-                    tracing::error!("Failed to handle editor notification: {}", err);
+                    tracing::warn!("Failed to handle editor notification: {}", err);
                     let params = serde_json::json!({
                         "message": err.to_string(),
                     });
@@ -1665,7 +1673,7 @@ impl Server {
                     "Unrecognized message type from {}: {:?}",
                     msg.host, msg.body
                 );
-                tracing::error!(message);
+                tracing::warn!(message);
                 let msg = HostAndMessageNote {
                     host_id: msg.host,
                     message,
@@ -1791,7 +1799,7 @@ impl Server {
         );
         let res = signaling_channel.send(signaling_addr, connect_msg).await;
         if let Err(err) = res {
-            tracing::error!("Failed to send Connect message: {}", err);
+            tracing::warn!("Failed to send Connect message: {}", err);
 
             // Update remote state to FailedToConnect
             if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
@@ -2685,7 +2693,7 @@ impl Server {
             let gseq = remote_op.seq;
             // This shouldn’t ever happen.
             if gseq.is_none() {
-                tracing::error!("Received remote op without global seq: {:?}", &remote_op);
+                tracing::warn!("Received remote op without global seq: {:?}", &remote_op);
                 next.send_notif(
                     NotificationCode::ErrorResponse,
                     ErrorResponseNote {
@@ -2816,7 +2824,7 @@ impl Server {
         let remote_ops: Vec<FatOp> = remote_doc.remote_op_buffer.drain(..).collect();
 
         let handle_error = async |msg: String, remote_docs: &mut RemoteDocs| -> () {
-            tracing::error!(msg);
+            tracing::warn!(msg);
             let err = lsp_server::ResponseError {
                 code: ErrorCode::DocFatal as i32,
                 message: msg,
@@ -2841,7 +2849,7 @@ impl Server {
                 // This is needed because Undo/Redo generate multiple instructions
                 // that need to be applied as a batch.
                 for instr in instructions {
-                    remote_doc.apply_edit_instruction_unchecked(&instr);
+                    remote_doc.apply_edit_instruction_unchecked(&instr)?;
                 }
                 remote_doc.verify_buffer_engine_sync()?;
             }
@@ -3858,7 +3866,7 @@ impl Server {
         {
             Ok(sock) => sock,
             Err(e) => {
-                tracing::error!("Failed to create sock for peer {}: {}", peer_id, e);
+                tracing::warn!("Failed to create sock for peer {}: {}", peer_id, e);
                 return;
             }
         };
@@ -3879,7 +3887,7 @@ impl Server {
                     tracing::info!("Successfully connected to peer {}", peer_id_clone);
                 }
                 Err(err) => {
-                    tracing::error!("Failed to connect to peer {}: {}", peer_id_clone, err);
+                    tracing::warn!("Failed to connect to peer {}: {}", peer_id_clone, err);
                     let condition: Option<&WebChannelError> = err.downcast_ref();
                     match condition {
                         Some(WebChannelError::ConnectionExists(peer_id)) => {
@@ -3976,7 +3984,7 @@ impl Server {
 
         // Error handling.
         if let Err(err) = result {
-            tracing::error!("Failed to bind SignalingClient: {}", err);
+            tracing::warn!("Failed to bind SignalingClient: {}", err);
             self.active_signaling.remove(&params.addr);
             next.send_notif(
                 NotificationCode::ErrorResponse,
@@ -4058,7 +4066,7 @@ pub async fn send_notification<T: Display>(
         .send(lsp_server::Message::Notification(notif))
         .await
     {
-        tracing::error!("Failed to send notification to editor: {}", err);
+        tracing::warn!("Failed to send notification to editor: {}", err);
     }
 }
 
@@ -4078,7 +4086,7 @@ async fn send_response(
         .send(lsp_server::Message::Response(response))
         .await
     {
-        tracing::error!("Failed to send response to editor: {}", err);
+        tracing::warn!("Failed to send response to editor: {}", err);
     }
 }
 
@@ -4094,7 +4102,7 @@ async fn send_to_remote(
     // disconnect error is caught by the receiving end of each
     // connection, and it’ll send a ConnectionBroke message.
     if let Err(err) = webchannel.send(host_id, req_id, msg.clone()).await {
-        tracing::error!(
+        tracing::warn!(
             "Failed to send to remote host {}: {}, msg={:?}",
             host_id,
             err,

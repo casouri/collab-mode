@@ -136,7 +136,7 @@ fn ice_exchange_candidates_with_sock(
             tokio::spawn(async move {
                 let res = candidate_sender.send_candidate(candidate).await;
                 if let Err(err) = res {
-                    tracing::error!(?err, "Error sending ICE candidate");
+                    tracing::warn!(?err, "Error sending ICE candidate");
                 }
             });
         }

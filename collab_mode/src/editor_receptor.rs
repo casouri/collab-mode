@@ -86,6 +86,6 @@ fn main_loop(
     // All errors sent to err_rx are fatal errors.
     let err = err_rx.blocking_recv();
     if let Some(err) = err {
-        tracing::error!("Collab peer terminated due to error: {:#?}", err);
+        tracing::warn!("Collab peer terminated due to error: {:#?}", err);
     }
 }
