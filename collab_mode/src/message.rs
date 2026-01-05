@@ -1,5 +1,5 @@
 use crate::{
-    config_man::ConfigProject,
+    config_man::{ConfigProject, Permission},
     server::{self, AcceptMode},
     types::*,
     webchannel::TransportType,
@@ -149,15 +149,19 @@ pub struct SetAcceptModeParams {
     pub mode: server::AcceptMode,
 }
 
-// **** Update config (accept mode and trusted hosts)
+// **** Update config (trusted hosts and permissions)
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatableConfig {
+    pub trusted_hosts: HashMap<ServerId, String>,
+    pub permission: HashMap<ServerId, Permission>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateConfigParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub add_trusted_hosts: Option<HashMap<ServerId, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remove_trusted_hosts: Option<Vec<ServerId>>,
+    pub config: UpdatableConfig,
 }
 
 // **** Connect
@@ -405,6 +409,12 @@ pub struct ConnectionStateResp {
     pub connected: Vec<ConnectedDocEntry>,
     /// Local projects.
     pub projects: Vec<ConfigProject>,
+    /// Trusted hosts with their certificate hashes.
+    pub trusted_hosts: HashMap<ServerId, String>,
+    /// Permissions for each host.
+    pub permission: HashMap<ServerId, Permission>,
+    /// Our own certificate hash.
+    pub cert_hash: String,
 }
 
 // **** Etc

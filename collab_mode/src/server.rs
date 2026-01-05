@@ -1362,13 +1362,14 @@ impl Server {
                 Ok(())
             }
             Msg::Hey(hey_msg) => {
-                if let Some(remote) = self.active_remotes.get_mut(&msg.host) {
+                let host = msg.host;
+                if let Some(remote) = self.active_remotes.get_mut(&host) {
                     remote.mark_connected();
                 }
                 next.send_notif(
                     NotificationCode::Connected,
                     HostAndMessageNote {
-                        host_id: msg.host,
+                        host_id: host.clone(),
                         message: hey_msg.message,
                     },
                 )
@@ -1378,7 +1379,16 @@ impl Server {
                 // connection, try to save it.
                 let mut config = self.config.config();
                 config.trusted_hosts = self.trusted_hosts.clone();
-                let _ = self.config.replace_and_save(config);
+                let res = self.config.replace_and_save(config);
+
+                if let Err(err) = res {
+                    let msg = HostAndMessageNote {
+                        host_id: host.clone(),
+                        message: format!("Failed to save new trusted host to config file, {}", err),
+                    };
+                    next.send_notif(NotificationCode::UnimportantError, msg)
+                        .await;
+                }
                 Ok(())
             }
             Msg::ListFiles { dir } => {
@@ -2997,12 +3007,16 @@ impl Server {
             })
             .collect();
 
+        let config = self.config.config();
         let msg = message::ConnectionStateResp {
             connections,
             accepting,
             live,
             connected,
             projects,
+            trusted_hosts: config.trusted_hosts,
+            permission: config.permission,
+            cert_hash: self.key_cert.cert_der_hash(),
         };
         next.send_resp(msg, None).await;
     }
@@ -3599,30 +3613,14 @@ impl Server {
         &mut self,
         params: UpdateConfigParams,
     ) -> anyhow::Result<()> {
-        // Get current config
         let mut config = self.config.config();
 
-        // Add trusted hosts if provided
-        if let Some(hosts_to_add) = params.add_trusted_hosts {
-            for (host_id, cert_hash) in hosts_to_add {
-                config
-                    .trusted_hosts
-                    .insert(host_id.clone(), cert_hash.clone());
-                self.trusted_hosts.insert(host_id, cert_hash);
-            }
-        }
+        config.trusted_hosts = params.config.trusted_hosts.clone();
+        self.trusted_hosts = params.config.trusted_hosts;
 
-        // Remove trusted hosts if provided
-        if let Some(hosts_to_remove) = params.remove_trusted_hosts {
-            for host_id in hosts_to_remove {
-                config.trusted_hosts.remove(&host_id);
-                self.trusted_hosts.remove(&host_id);
-            }
-        }
+        config.permission = params.config.permission;
 
-        // Save the updated config to disk
         self.config.replace_and_save(config)?;
-
         Ok(())
     }
 
