@@ -83,7 +83,7 @@ pub trait MsgChannel: Send + Sync {
 
     /// Disconnect from a peer, or give up establishing connections.
     /// If the peer doesn’t exist, no error is signaled.
-    async fn disconnect(&self, peer: &ServerId);
+    fn disconnect(&self, peer: &ServerId);
 }
 
 /// Concrete implementation of MsgChannel that can be either a WebChannel
@@ -128,10 +128,10 @@ impl MsgChannel for MsgChannelImpl {
         }
     }
 
-    async fn disconnect(&self, peer: &ServerId) {
+    fn disconnect(&self, peer: &ServerId) {
         match self {
-            MsgChannelImpl::Web(web) => web.disconnect(peer).await,
-            MsgChannelImpl::Test(test) => test.disconnect(peer).await,
+            MsgChannelImpl::Web(web) => web.disconnect(peer),
+            MsgChannelImpl::Test(test) => test.disconnect(peer),
         }
     }
 }
@@ -490,7 +490,7 @@ impl MsgChannel for WebChannel {
         self.broadcast(req_id, msg).await
     }
 
-    async fn disconnect(&self, peer: &ServerId) {
+    fn disconnect(&self, peer: &ServerId) {
         let mut map = self.assoc_tx.lock().unwrap();
         map.remove(peer);
     }
@@ -1159,7 +1159,7 @@ impl MsgChannel for TestWebChannel {
         Ok(())
     }
 
-    async fn disconnect(&self, _peer: &ServerId) {
+    fn disconnect(&self, _peer: &ServerId) {
         // No-op for test channel
     }
 }

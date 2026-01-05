@@ -138,7 +138,8 @@ pub enum ConnectionState {
     /// u64 is unix epoch seconds. Instant isn't serializable.
     ConnectingStage1(u64),
     /// Sent Connect message remote and received Connect message from remote.
-    ConnectingStage2,
+    /// u64 is unix epoch seconds.
+    ConnectingStage2(u64),
     /// Waiting for signaling server to connect before we can attempt
     /// connection to this remote.
     Pending,
@@ -236,7 +237,7 @@ impl RemoteState {
 
     /// Mark as connecting stage 2 (received connect response from remote).
     fn mark_connecting_stage2(&mut self) {
-        self.state = ConnectionState::ConnectingStage2;
+        self.state = ConnectionState::ConnectingStage2(unix_epoch_secs());
     }
 
     /// Mark as pending (waiting for signaling server to be ready).
@@ -837,11 +838,15 @@ impl Server {
                 ConnectionState::ConnectingStage1(started) if now - started > 10 => {
                     Some("Connection timed out in Stage1")
                 }
+                ConnectionState::ConnectingStage2(started) if now - started > 30 => {
+                    Some("Connection timed out in Stage2")
+                }
                 _ => None,
             };
             if let Some(reason) = timeout {
                 tracing::warn!("Connection to {} timed out", host);
                 remote.mark_failed();
+                webchannel.disconnect(&host);
                 send_notification(
                     &editor_tx,
                     NotificationCode::ConnectionBroke,
@@ -3789,7 +3794,7 @@ impl Server {
         let is_connecting_or_connected = self.active_remotes.get(&peer_id).map_or(false, |r| {
             matches!(
                 r.state,
-                ConnectionState::ConnectingStage2 | ConnectionState::Connected
+                ConnectionState::ConnectingStage2(_) | ConnectionState::Connected
             )
         });
         tracing::info!(
