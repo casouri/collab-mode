@@ -1851,6 +1851,7 @@ list."
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
     (define-key map (kbd "H") #'collab-list-docs)
+    (define-key map (kbd ",") #'collab-config)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
@@ -1951,6 +1952,7 @@ Let’s create one, here’s how!\n\n\n"))
 PRESS \\[collab-list-docs] TO SHOW ALL DOCS
 PRESS \\[collab-share] TO SHARE A FILE/PROJECT
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
+PRESS \\[collab-config] TO SET TRUSTED HOSTS AND PERMISSION
 PRESS \\[collab--accept-connection] TO ACCEPT CONNECTIONS FROM ANY REMOTE\n"))
     (insert "\n\n")
 
