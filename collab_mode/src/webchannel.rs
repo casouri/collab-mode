@@ -80,6 +80,10 @@ pub trait MsgChannel: Send + Sync {
     #[allow(dead_code)]
     /// Broadcasts a message to all connected peers. Doesn't block.
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()>;
+
+    /// Disconnect from a peer, or give up establishing connections.
+    /// If the peer doesn’t exist, no error is signaled.
+    async fn disconnect(&self, peer: &ServerId);
 }
 
 /// Concrete implementation of MsgChannel that can be either a WebChannel
@@ -123,6 +127,13 @@ impl MsgChannel for MsgChannelImpl {
             MsgChannelImpl::Test(test) => test.broadcast(req_id, msg).await,
         }
     }
+
+    async fn disconnect(&self, peer: &ServerId) {
+        match self {
+            MsgChannelImpl::Web(web) => web.disconnect(peer).await,
+            MsgChannelImpl::Test(test) => test.disconnect(peer).await,
+        }
+    }
 }
 
 /// Types of transport. currently only SCTP, we might add webrtc
@@ -141,11 +152,16 @@ pub struct Message {
     pub req_id: Option<RequestId>,
 }
 
+struct RemoteChannels {
+    msg_tx: mpsc::Sender<Message>,
+    cancel_rx: mpsc::Receiver<()>,
+}
+
 #[derive(Clone)]
 pub struct WebChannel {
     my_hostid: ServerId,
     msg_tx: mpsc::Sender<Message>,
-    assoc_tx: Arc<Mutex<HashMap<ServerId, mpsc::Sender<Message>>>>,
+    assoc_tx: Arc<Mutex<HashMap<ServerId, RemoteChannels>>>,
     next_stream_id: Arc<AtomicU16>,
 }
 
@@ -282,7 +298,7 @@ impl WebChannel {
             .lock()
             .unwrap()
             .get(recipient)
-            .cloned()
+            .map(|channels| channels.msg_tx.clone())
             .ok_or_else(|| anyhow!("Not connected"))?;
 
         tx.send(message)
@@ -307,7 +323,7 @@ impl WebChannel {
             .lock()
             .unwrap()
             .iter()
-            .map(|(hostid, tx)| (hostid.clone(), tx.clone()))
+            .map(|(hostid, channels)| (hostid.clone(), channels.msg_tx.clone()))
             .collect();
 
         let mut results = Vec::new();
@@ -355,7 +371,7 @@ impl WebChannel {
     ) -> anyhow::Result<()> {
         // Create channel for outgoing messages
         let (tx, rx) = mpsc::channel(16);
-
+        let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
         let (err_tx, mut err_rx) = mpsc::channel::<()>(1);
 
         // Store the sender in the association map.
@@ -366,7 +382,11 @@ impl WebChannel {
                     remote_hostid.clone()
                 )));
             }
-            map.insert(remote_hostid.clone(), tx);
+            let channels = RemoteChannels {
+                msg_tx: tx,
+                cancel_rx,
+            };
+            map.insert(remote_hostid.clone(), channels);
         }
 
         // Initialize the stream ID counter to the initial value for this side.
@@ -404,7 +424,15 @@ impl WebChannel {
                     remote_hostid_clone.clone(),
                     stream_id_init,
                 ) => (),
-                _ = err_rx.recv() => (),
+                // When the cancel_rx in the map is dropped, this
+                // completes and we clean up.
+                _ = cancel_tx.closed() => {
+                    tracing::info!("Background task for {} exiting because: cancelled", remote_hostid_clone);
+                },
+                // When there’s an async error, we terminate and clean up.
+                _ = err_rx.recv() => {
+                    tracing::info!("Background task for {} exiting because: receives error", remote_hostid_clone);
+                },
                 // Why do we need a channel to know that connection broke?
                 // SCTP SHOULD have implemented heartbeat and return None
                 // with connection breaks, but doesn't. Which means when
@@ -460,6 +488,11 @@ impl MsgChannel for WebChannel {
 
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
         self.broadcast(req_id, msg).await
+    }
+
+    async fn disconnect(&self, peer: &ServerId) {
+        let mut map = self.assoc_tx.lock().unwrap();
+        map.remove(peer);
     }
 }
 
@@ -1124,6 +1157,10 @@ impl MsgChannel for TestWebChannel {
         }
 
         Ok(())
+    }
+
+    async fn disconnect(&self, _peer: &ServerId) {
+        // No-op for test channel
     }
 }
 

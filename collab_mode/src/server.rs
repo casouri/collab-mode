@@ -12,6 +12,15 @@
 //! mostly runs in one synchronous command loop. Long async processes (like
 //! establishing connections) are split into several messages and their
 //! corresponding handlers.
+//!
+//! Everything in the main loop is sync and SHOULD NOT block. I tried
+//! a more async setup where each doc has its own loop and messages
+//! are dispatched to each doc, etc. That’s too messy and hard to
+//! reason about what’s going on.
+//!
+//! The reconnect tick handler handles reconnect and timeout for
+//! connections. But there’s no timeout handling for editor requests,
+//! editor will handle timeout on their end.
 
 use crate::config_man::{ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, InternalDoc, ServerEngine};
