@@ -1435,6 +1435,18 @@ Return (:siteId SITE-ID :content CONTENT)."
                        :signalingAddr ,signaling-addr
                        :transportType "SCTP"))))
 
+(defun collab--update-config-req (trusted-hosts permissions)
+  "Send UpdateConfig request.
+TRUSTED-HOSTS is a hash table mapping host-id to cert-hash.
+PERMISSIONS is a hash table mapping host-id to permission hash tables."
+  (let ((conn (collab--connect-process))
+        (config (make-hash-table :test #'equal)))
+    (puthash "trustedHosts" trusted-hosts config)
+    (puthash "permission" permissions config)
+    (jsonrpc-request conn 'UpdateConfig
+                     `(:config ,config)
+                     :timeout collab-rpc-timeout)))
+
 ;; FIXME
 (defun collab--print-history-req (file-desc debug)
   "Print debugging history for FILE-DESC.
@@ -2745,6 +2757,139 @@ detailed history."
     ;;     (ignore choice)
     ;;     (message "TODO download binary")))
     ))
+
+;;; Config editing
+
+(defvar collab-config-mode-syntax-table
+  (let ((st (make-syntax-table)))
+    (modify-syntax-entry ?\; "<" st)
+    (modify-syntax-entry ?\n ">" st)
+    st)
+  "Syntax table for `collab-config-mode'.")
+
+(defvar collab-config-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'collab-config-submit)
+    (define-key map (kbd "C-c C-k") #'collab-config-abort)
+    map)
+  "Keymap for `collab-config-mode'.")
+
+(defvar collab-config-mode-font-lock-keywords
+  '((";.*" . font-lock-comment-face)
+    ("\\[\\([WCDwcd]*\\)\\]" 1 font-lock-keyword-face)
+    ("(\\([^)]+\\))" 1 font-lock-string-face))
+  "Font-lock keywords for `collab-config-mode'.")
+
+(define-derived-mode collab-config-mode fundamental-mode "Collab Config"
+  "Mode for editing collab trusted hosts and permissions."
+  :syntax-table collab-config-mode-syntax-table
+  (setq-local comment-start ";; ")
+  (setq-local font-lock-defaults '(collab-config-mode-font-lock-keywords)))
+
+(defun collab--permission-to-string (perm)
+  "Convert PERM plist to string like \"WCD\"."
+  (concat (if (eq (plist-get perm :write) t) "W" "")
+          (if (eq (plist-get perm :create) t) "C" "")
+          (if (eq (plist-get perm :delete) t) "D" "")))
+
+(defun collab--string-to-permission (str)
+  "Convert permission STR like \"WCD\" to hash table for JSON serialization."
+  (let ((ht (make-hash-table :test #'equal)))
+    (puthash "write" (if (string-match-p "W" str) t :json-false) ht)
+    (puthash "create" (if (string-match-p "C" str) t :json-false) ht)
+    (puthash "delete" (if (string-match-p "D" str) t :json-false) ht)
+    ht))
+
+(defun collab-config ()
+  "Open buffer for editing trusted hosts and permissions."
+  (interactive)
+  (let ((buf (get-buffer-create "*collab trusted hosts*")))
+    (pop-to-buffer buf)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (collab-config-mode)
+      ;; Insert instructions.
+      (insert (substitute-command-keys
+               ";; Edit trusted hosts and their permission in this buffer, and
+;; type \\[collab-config-submit] to submit, or type \\[collab-config-abort] to cancel
+;; Each line is made of <host-id> [ <permission> ] ( <cert-hash> )
+;; <permission> can be any combination of `W', `C', and `D'
+;; `W': write, `C': create, `D': delete, empty means read-only.\n\n"))
+      ;; Fetch current config.
+      (condition-case err
+          (let* ((resp (collab--connection-state-req))
+                 (trusted-hosts (plist-get resp :trustedHosts))
+                 (permissions (plist-get resp :permission)))
+            ;; Insert each trusted host.
+            (cl-loop for (key cert-hash) on trusted-hosts by #'cddr
+                     do (let* ((host-id (substring (symbol-name key) 1))
+                               (perm (plist-get permissions key))
+                               (perm-str (if perm
+                                             (collab--permission-to-string perm)
+                                           "")))
+                          (insert (format "%s[%s](%s)\n"
+                                          host-id perm-str cert-hash)))))
+        (error
+         (insert (format ";; Error fetching currently trusted hosts: %s\n" err)))))))
+
+(defun collab-config-abort ()
+  "Abort editing and kill the config buffer."
+  (interactive)
+  (kill-buffer))
+
+(defun collab-config-submit ()
+  "Parse the buffer and submit the config update."
+  (interactive)
+  (let ((trusted-hosts (make-hash-table :test #'equal))
+        (permissions (make-hash-table :test #'equal))
+        (errors nil)
+        (inhibit-read-only t))
+    ;; Remove any previous error overlays.
+    (remove-overlays (point-min) (point-max) 'collab-config-error t)
+    ;; Parse each line.
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties (pos-bol) (pos-eol))))
+          (cond
+           ;; Skip empty lines and comments.
+           ((string-match-p (rx bos (* space) eos) line))
+           ((string-match-p (rx bos (* space) ";") line))
+           ;; Parse data line: <host-id>[<permission>](<cert-hash>)
+           ((string-match (rx bos (* space)
+                              (group (+? nonl))
+                              (* space) "[" (* space)
+                              (group (* (any "WCDwcd")))
+                              (* space) "]" (* space)
+                              "(" (* space)
+                              (group (+? nonl))
+                              (* space) ")"
+                              (* space) eos)
+                          line)
+            (let ((host-id (string-trim (match-string 1 line)))
+                  (perm-str (upcase (match-string 2 line)))
+                  (cert-hash (string-trim (match-string 3 line))))
+              (puthash host-id cert-hash trusted-hosts)
+              (puthash host-id (collab--string-to-permission perm-str) permissions)))
+           ;; Invalid line.
+           (t
+            (push (point) errors)
+            (let ((ov (make-overlay (pos-eol) (pos-eol))))
+              (overlay-put ov 'after-string
+                           (propertize " <-- parse error: expected <host-id>[<permission>](<cert-hash>)"
+                                       'face 'error))
+              (overlay-put ov 'collab-config-error t)))))
+        (forward-line 1)))
+    ;; If errors, don't submit.
+    (when (not errors)
+      ;; Submit the config.
+      (condition-case err
+          (progn
+            (collab--update-config-req trusted-hosts permissions)
+            (kill-buffer)
+            (message (collab--fairy "Config updated!")))
+        (error
+         (message "Failed to update config: %s" err))))))
 
 (provide 'collab-mode)
 
