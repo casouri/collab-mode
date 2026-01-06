@@ -153,8 +153,11 @@ pub struct Message {
 }
 
 struct RemoteChannels {
+    /// Caller uses this tx to send outgoing messages to remotes.
     msg_tx: mpsc::Sender<Message>,
-    cancel_rx: mpsc::Receiver<()>,
+    /// This rx is dropped when this struct is dropped, causing the tx
+    /// to receive a message and stop the background task.
+    _cancel_rx: mpsc::Receiver<()>,
 }
 
 #[derive(Clone)]
@@ -384,7 +387,7 @@ impl WebChannel {
             }
             let channels = RemoteChannels {
                 msg_tx: tx,
-                cancel_rx,
+                _cancel_rx: cancel_rx,
             };
             map.insert(remote_hostid.clone(), channels);
         }

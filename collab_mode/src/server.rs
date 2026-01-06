@@ -505,7 +505,7 @@ impl RemoteDoc {
 
     /// Apply an EditInstruction to the buffer and verify sync.
     pub fn apply_edit_instruction(&mut self, instruction: &EditInstruction) -> anyhow::Result<()> {
-        self.apply_edit_instruction_unchecked(instruction);
+        self.apply_edit_instruction_unchecked(instruction)?;
         self.verify_buffer_engine_sync()
     }
 }
