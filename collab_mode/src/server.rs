@@ -1494,6 +1494,16 @@ impl Server {
                 source,
                 dest,
             } => {
+                // Check write permission.
+                if !self.config.write_allowed(&msg.host) {
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::PermissionDenied("Write permission denied".to_string()),
+                    )
+                    .await;
+                    return Ok(());
+                }
+
                 self.handle_move_file(&next, project, source, dest, msg.host.clone())
                     .await?;
                 Ok(())
@@ -1528,6 +1538,16 @@ impl Server {
                 Ok(())
             }
             Msg::SaveFile(doc_id) => {
+                // Check write permission.
+                if !self.config.write_allowed(&msg.host) {
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::PermissionDenied("Write permission denied".to_string()),
+                    )
+                    .await;
+                    return Ok(());
+                }
+
                 let res = self.save_file_to_disk(&doc_id).await;
                 let resp = if let Err(err) = res {
                     Msg::ErrorResp {
