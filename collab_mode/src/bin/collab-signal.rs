@@ -11,10 +11,14 @@ struct Cli {
 enum Commands {
     /// Run the signaling server
     Run {
-        /// Port running the server runs on.
-        #[arg(long)]
-        #[arg(default_value_t = 8822)]
+        /// Port the server runs on.
+        #[arg(long, default_value_t = 8822)]
         port: u16,
+
+        /// Persist client certificates to database. If false, only
+        /// check active connections for ID conflicts.
+        #[arg(long, default_value_t = false)]
+        persisted: bool,
     },
 }
 
@@ -23,15 +27,18 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("collab-signal");
-    let db_path = xdg_dirs.place_data_file("collab-signal.sqlite3")?;
-
     match &cli.command {
-        Some(Commands::Run { port }) => {
+        Some(Commands::Run { port, persisted }) => {
+            let db_path = if *persisted {
+                let xdg_dirs = xdg::BaseDirectories::with_prefix("collab-signal");
+                Some(xdg_dirs.place_data_file("collab-signal.sqlite3")?)
+            } else {
+                None
+            };
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(signaling::server::run_signaling_server(
                 &format!("0.0.0.0:{port}"),
-                &db_path,
+                db_path.as_deref(),
             ))?;
             Ok(())
         }

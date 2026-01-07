@@ -32,10 +32,14 @@ use super::key_store::{self, PubKeyStore};
 use super::{CertDerHash, SignalingError, SignalingResult};
 
 /// Run the signaling server on `addr`. Addr should be of the form
-/// "ip:port".
-pub async fn run_signaling_server(addr: &str, db_path: &Path) -> anyhow::Result<()> {
+/// "ip:port". If `db_path` is None, run in stateless mode (no cert
+/// persistence, only check active connections for ID conflicts).
+pub async fn run_signaling_server(addr: &str, db_path: Option<&Path>) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    let key_store = key_store::PubKeyStore::new(db_path)?;
+    let key_store = match db_path {
+        Some(path) => Some(key_store::PubKeyStore::new(path)?),
+        None => None,
+    };
     let server = Server::new(key_store);
     while let Ok((stream, client_addr)) = listener.accept().await {
         tracing::info!("Accepted a connection from {}", client_addr);
@@ -78,20 +82,22 @@ struct EndpointInfo {
 struct Server {
     /// Maps collab server id to their SDP.
     endpoint_map: Arc<RwLock<HashMap<EndpointId, EndpointInfo>>>,
-    key_store: Arc<Mutex<PubKeyStore>>,
+    /// Certificate store for persistent mode. None in stateless mode.
+    key_store: Option<Arc<Mutex<PubKeyStore>>>,
 }
 
 impl Server {
-    fn new(key_store: PubKeyStore) -> Server {
+    fn new(key_store: Option<PubKeyStore>) -> Server {
         Server {
             endpoint_map: Arc::new(RwLock::new(HashMap::new())),
-            key_store: Arc::new(Mutex::new(key_store)),
+            key_store: key_store.map(|ks| Arc::new(Mutex::new(ks))),
         }
     }
 
     /// Bind a collab server to `id`. Return error if some endpoint
-    /// is already connected with that id, or some endpoint has
-    /// connected with that id and the pub key doesn't match.
+    /// is already connected with that id, or (in persistent mode) if
+    /// some endpoint has connected with that id and the pub key
+    /// doesn't match.
     async fn bind_endpoint(
         &self,
         id: EndpointId,
@@ -99,35 +105,40 @@ impl Server {
         msg_tx: mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
         tracing::info!(id, key, "Handle req: bind()");
-        // First check pub key.
-        let id_taken = {
-            let key_store = self.key_store.lock().unwrap();
-            if let Some(saved_key) = key_store.get_key_for(&id)? {
-                if saved_key != key {
-                    tracing::info!(saved_key, key, "key mismatch");
-                }
-                saved_key != key
-            } else {
-                key_store.set_key_for(&id, &key)?;
-                false
-            }
-        };
-        if id_taken {
-            let _ = msg_tx
-                .send(
-                    SignalingMsg::IdTaken(
-                        id.clone(),
-                        "ID already taken (key mismatch)".to_string(),
-                    )
-                    .into(),
-                )
-                .await;
-            return Err(SignalingError::OtherError(
-                "ID already taken (key mismatch)".to_string(),
-            ));
-        }
 
-        // Try to insert connection to endpoint map, if there’s
+        // In persistent mode, check pub key against stored keys.
+        if let Some(key_store) = &self.key_store {
+            let id_taken = {
+                let key_store = key_store.lock().unwrap();
+                if let Some(saved_key) = key_store.get_key_for(&id)? {
+                    if saved_key != key {
+                        tracing::info!(saved_key, key, "key mismatch");
+                    }
+                    saved_key != key
+                } else {
+                    key_store.set_key_for(&id, &key)?;
+                    false
+                }
+            };
+            if id_taken {
+                let _ = msg_tx
+                    .send(
+                        SignalingMsg::IdTaken(
+                            id.clone(),
+                            "ID already taken (key mismatch)".to_string(),
+                        )
+                        .into(),
+                    )
+                    .await;
+                return Err(SignalingError::OtherError(
+                    "ID already taken (key mismatch)".to_string(),
+                ));
+            }
+        }
+        // In stateless mode, we skip cert verification and only check
+        // the endpoint_map below for active connection conflicts.
+
+        // Try to insert connection to endpoint map, if there's
         // already a connection using that id, fail.
         let server_info = EndpointInfo {
             msg_tx: msg_tx.clone(),
