@@ -741,22 +741,31 @@ Declares new projects to be managed by the server.
 
 ### Update config
 
-Updates server configuration for accept mode and trusted hosts.
+Updates server configuration for trusted hosts and permissions.
 
 **Request**
 ```json
 {
   "method": "UpdateConfig",
   "params": {
-    "acceptMode": "Auto", // Optional: "Auto", "Manual", or "Disabled"
-    "addTrustedHosts": { // Optional
-      "host1": "cert-hash-abc123",
-      "host2": "cert-hash-def456"
-    },
-    "removeTrustedHosts": ["host3", "host4"] // Optional
+    "config": {
+      "trustedHosts": {
+        "host1": "cert-hash-abc123",
+        "host2": "cert-hash-def456"
+      },
+      "permission": {
+        "host1": {"write": true, "create": true, "delete": false},
+        "host2": {"write": true, "create": false, "delete": false}
+      }
+    }
   }
 }
 ```
+
+**Permission object**
+- `write`: Allow remote to send operations to documents
+- `create`: Allow remote to create new files
+- `delete`: Allow remote to delete files
 
 **Response**
 ```json
@@ -764,22 +773,14 @@ Updates server configuration for accept mode and trusted hosts.
 ```
 
 **Flow**
-1. Editor sends UpdateConfig request
-2. Get current configuration
-3. If `acceptMode` provided:
-   - Update `config.accept_mode`
-   - Update shared Arc<Mutex<AcceptMode>>
-4. If `addTrustedHosts` provided:
-   - Add each host/cert pair to config.trusted_hosts
-   - Update shared Arc<Mutex<HashMap>>
-5. If `removeTrustedHosts` provided:
-   - Remove each host from config.trusted_hosts
-   - Update shared Arc<Mutex<HashMap>>
-6. Save updated configuration to disk
-7. Return empty response
+1. Editor sends UpdateConfig request with full config object
+2. Replace `config.trusted_hosts` with provided `trustedHosts`
+3. Replace `config.permission` with provided `permission`
+4. Save updated configuration to disk
+5. Return empty response
 
 **Errors**
-- None (configuration updates are best-effort)
+- `IoError`: If configuration save fails
 
 ## Asynchronous message flows
 
@@ -810,30 +811,36 @@ This buffering mechanism ensures ops arrive in order and are processed atomicall
 {
   "method": "AcceptConnection",
   "params": {
-    "signalingAddr": "wss://signaling.server/path",
-    "transportType": "WebRTC"
+    "addr": "wss://signaling.server/path",
+    "transportType": "WebRTC",
+    "mode": "TrustedOnly" // Optional: "All" or "TrustedOnly" (default)
   }
 }
 ```
 Starts accepting connections on the specified signaling server.
 
 **Accept connection flow**
-1. Editor sends AcceptConnection notification with signaling address and transport type
+1. Editor sends AcceptConnection notification with signaling address, transport type, and optional accept mode
 2. Server checks if already accepting on this signaling address:
-   - If yes: Ignores the request and returns
+   - If yes and already bound:
+     - Updates accept mode if provided
+     - Resets reconnect backoff
+     - If mode is `All`, spawns task to revert to `TrustedOnly` after 3 minutes
+     - Sends `AcceptingConnection` notification and returns
    - If no: Continues with accept process
-3. Server adds signaling address to `self.accepting` HashMap to track accepting state
-4. Server sends `AcceptingConnection` notification to editor immediately
-5. Server spawns background task to handle the accept loop:
-   - Calls `webchannel.accept()` to bind to signaling server
-   - Accepts incoming connections in a loop
-6. In the background task, if connection breaks for various reasons, send `Msg::AcceptStopped(signaling_addr, reason)` message to the server itself
+3. Server adds signaling address to `self.active_signaling` HashMap with `SignalingState`
+4. Server calls `signaling_channel.bind()` to bind to signaling server
+5. On successful bind, server sends `AcceptingConnection` notification to editor
+6. If mode is `All`, spawns background task to revert to `TrustedOnly` after 3 minutes
+7. If connection breaks for various reasons:
    - Connection to signaling server breaks
    - Allocated signaling time expires
    - Host ID is already taken on that server
-8. Server receives the AcceptStopped message and:
-   - Removes the signaling address from `self.accepting` HashMap
-   - Sends AcceptStopped notification to editor with failure reason
+8. Server removes the signaling address from `self.active_signaling` HashMap and sends AcceptStopped notification to editor
+
+**Accept mode**
+- `All`: Accept connections from any host (auto-reverts to `TrustedOnly` after 3 minutes)
+- `TrustedOnly`: Accept only connections from hosts in trusted_hosts (default)
 
 **Accepting connection notification**
 
@@ -841,7 +848,8 @@ Starts accepting connections on the specified signaling server.
 {
   "method": "AcceptingConnection",
   "params": {
-    "signaling_addr": "wss://signaling.server/path"
+    "addr": "wss://signaling.server/path",
+    "mode": "TrustedOnly"
   }
 }
 ```
@@ -854,6 +862,46 @@ Starts accepting connections on the specified signaling server.
   "params": {
     "signalingAddr": "wss://signaling.server/path",
     "reason": "Signaling server closed the connection"
+  }
+}
+```
+
+**Stop accepting**
+```json
+{
+  "method": "StopAccepting",
+  "params": {
+    "addr": "wss://signaling.server/path"
+  }
+}
+```
+Stops accepting connections on the specified signaling server. The server will:
+1. Remove the signaling address from `self.active_signaling`
+2. Send `AcceptStopped` notification with reason "Stopped accepting by user request"
+
+**Set accept mode**
+```json
+{
+  "method": "SetAcceptMode",
+  "params": {
+    "addr": "wss://signaling.server/path",
+    "mode": "All" // or "TrustedOnly"
+  }
+}
+```
+Changes the accept mode for an active signaling server connection. The server will:
+1. Update the accept mode in `active_signaling`
+2. Send `AcceptModeChanged` notification if mode changed
+3. If new mode is `All`, spawn task to revert to `TrustedOnly` after 3 minutes
+
+**Accept mode changed notification**
+
+```json
+{
+  "method": "AcceptModeChanged",
+  "params": {
+    "addr": "wss://signaling.server/path",
+    "mode": "All"
   }
 }
 ```
@@ -909,8 +957,14 @@ Returns the current connection states for all active remote servers.
     }
   ],
   "accepting": [
-    "wss://signaling.server/path1",
-    "wss://signaling.server/path2"
+    {
+      "addr": "wss://signaling.server/path1",
+      "mode": "TrustedOnly"
+    },
+    {
+      "addr": "wss://signaling.server/path2",
+      "mode": "All"
+    }
   ],
   "live": [
     {
@@ -933,7 +987,14 @@ Returns the current connection states for all active remote servers.
       "name": "project1",
       "path": "/absolute/path/to/project1"
     }
-  ]
+  ],
+  "trustedHosts": {
+    "remote-server-1": "cert-hash-abc123"
+  },
+  "permission": {
+    "remote-server-1": {"write": true, "create": true, "delete": false}
+  },
+  "certHash": "my-cert-hash-xyz789"
 }
 ```
 
@@ -943,32 +1004,44 @@ Returns the current connection states for all active remote servers.
 3. For each active remote, creates a ConnectionStateEntry with:
    - `hostId`: The remote server's ID
    - `state`: Current connection state (Connected/Connecting/Disconnected/Fatal)
-4. Server collects all signaling addresses where it's currently accepting connections from `self.accepting` HashMap
-5. Server iterates through all local documents in `self.docs`:
+4. Server collects all signaling addresses where it's currently accepting connections from `self.active_signaling` HashMap (only those with `Bound` state)
+5. For each accepting signaling address, creates AcceptingEntry with:
+   - `addr`: The signaling server address
+   - `mode`: The accept mode for this address (`All` or `TrustedOnly`)
+6. Server iterates through all local documents in `self.docs`:
    - Creates LiveDocEntry for each document with:
      - `file`: EditorFileDesc for the document
      - `subscribers`: List of remote servers subscribed to this document
      - `filename`: Human-readable name of the document
      - `meta`: Document metadata
      - `seq`: Current sequence number from the engine
-6. Server iterates through all remote documents in `self.remote_docs`:
+7. Server iterates through all remote documents in `self.remote_docs`:
    - Creates ConnectedDocEntry for each remote document with:
      - `file`: EditorFileDesc for the document
      - `filename`: Human-readable name of the document
      - `meta`: Document metadata
-7. Server collects all declared projects from configuration
-8. Returns ConnectionStateResp with:
+8. Server collects all declared projects from configuration
+9. Returns ConnectionStateResp with:
    - `connections`: Array of connection entries for active remote connections
-   - `accepting`: Array of signaling addresses where the server is accepting incoming connections
+   - `accepting`: Array of accepting entries with address and mode
    - `live`: Array of locally hosted documents that may have subscribers
    - `connected`: Array of remote documents this server has opened
    - `projects`: Array of declared projects with their names and absolute paths
+   - `trustedHosts`: Map of trusted host IDs to their certificate hashes
+   - `permission`: Map of host IDs to their permission settings
+   - `certHash`: This server's own certificate hash
 
 **State values**
 - `Connected`: Connection established and active
-- `Connecting`: Currently attempting to connect or reconnect
-- `Disconnected`: Connection lost, attempting to reconnect
-- `Fatal`: Connection permanently failed, not attempting reconnect
+- `ConnectingStage1`: Sent connect message to remote, waiting for response
+- `ConnectingStage2`: Received connect message from remote, establishing connection
+- `Pending`: Waiting for signaling server connection before attempting to connect
+- `Disconnected`: Connection was established but broke, will auto-reconnect
+- `FailedToConnect`: Connection was never established, won't auto-reconnect
+
+**Accept mode values**
+- `All`: Accept connections from any host
+- `TrustedOnly`: Accept only connections from hosts in trusted_hosts
 
 ### Send info
 
@@ -1029,6 +1102,87 @@ Sends metadata/information about a document to remote subscribers.
    - The sender exclusion logic ensures you don't receive your own info updates
 
 **Note**: SendInfo is a notification, not a request. No response is sent back to the editor.
+
+## Reconnect tick handler
+
+The server runs a periodic tick handler every 2 seconds that manages connection timeouts and automatic reconnection. This is the only place where timeouts are enforced—editor requests have no server-side timeout (the editor handles its own timeouts).
+
+### Connection timeouts
+
+The tick handler checks for stalled connections and times them out:
+
+**Remote connection timeouts**
+| State | Timeout | Action |
+|-------|---------|--------|
+| `ConnectingStage1` | 10 seconds | Mark as `FailedToConnect`, send `ConnectionBroke` notification |
+| `ConnectingStage2` | 30 seconds | Mark as `FailedToConnect`, send `ConnectionBroke` notification |
+
+**Signaling server timeouts**
+| State | Timeout | Action |
+|-------|---------|--------|
+| `Binding` | 10 seconds | Mark as `FailedToBind`, remove from signaling channel |
+
+### Automatic reconnection
+
+The tick handler attempts to reconnect disconnected connections using exponential backoff.
+
+**Remote reconnection**
+
+Reconnection is attempted for remotes in these states:
+- `Disconnected`: Connection was established but broke (will reconnect)
+- `ConnectingStage1`: Keep retrying until we get a response
+
+Reconnection is NOT attempted for:
+- `Pending`: Waiting for signaling server to be ready
+- `ConnectingStage2`: Already establishing connection
+- `Connected`: Already connected
+- `FailedToConnect`: Initial connection failed (won't retry)
+
+**Signaling server reconnection**
+
+Unlike remote connections, signaling servers always attempt reconnection even after initial failure. Reconnection is attempted for:
+- `Disconnected`: Connection broke
+- `FailedToBind`: Initial bind failed
+
+Reconnection is NOT attempted for:
+- `Bound`: Already connected
+- `Binding`: Currently attempting to bind
+
+### Exponential backoff
+
+Both remote and signaling reconnections use exponential backoff, first 1s then doubles each time, maxing out at 256 seconds.
+
+Backoff is reset when:
+- Connection succeeds (mark as connected/bound)
+- Connection is marked as disconnected (to allow quick first retry)
+
+### Reconnection flow
+
+```
+[ConnectingStage1]
+       │
+       ├─(10s timeout)→ [FailedToConnect]
+       │
+ (remote responds)
+       │
+       ↓
+[ConnectingStage2]
+       │
+       ├─(30s timeout)→ [FailedToConnect]
+       │
+ (connection established)
+       │
+       ↓
+  [Connected]
+```
+
+### Notifications during reconnection
+
+| Event | Notification |
+|-------|--------------|
+| Attempting reconnection | `Connecting` with `hostId` |
+| Connection timed out | `ConnectionBroke` with `hostId` and `reason` |
+| Connection established | `Connected` with `hostId` and `message` |
 
 ## Error handling
 
