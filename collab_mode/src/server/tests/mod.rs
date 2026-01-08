@@ -57,8 +57,9 @@ impl TestChannelFactory {
         &self,
         host_id: ServerId,
         msg_tx: mpsc::Sender<webchannel::Message>,
+        self_tx: mpsc::UnboundedSender<webchannel::Message>,
     ) -> TestWebChannel {
-        self.factory.get_channel(host_id, msg_tx)
+        self.factory.get_channel(host_id, msg_tx, self_tx)
     }
 
     pub fn inner(&self) -> Arc<TestWebChannelFactory> {
@@ -122,7 +123,7 @@ impl TestEnvironment {
         let signaling_task = tokio::spawn(async move {
             tracing::debug!("Signaling server task started");
             let result =
-                signaling::server::run_signaling_server(&addr_string, &db_path_clone).await;
+                signaling::server::run_signaling_server(&addr_string, Some(&db_path_clone)).await;
             if let Err(e) = result {
                 tracing::error!("Signaling server error: {}", e);
             }

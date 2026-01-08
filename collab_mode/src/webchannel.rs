@@ -152,6 +152,43 @@ pub struct Message {
     pub req_id: Option<RequestId>,
 }
 
+/// A receiver that combines a bounded channel for remote messages and
+/// an unbounded channel for self-messages. If we don’t use a separate
+/// loopback channel, sending a message to ourselves will block the
+/// main loop in server.rs. I don’t want to give remote messages a
+/// unbounded channel either. So two channels it is. Technically the
+/// loopback channel doesn’t need to be unbounded if we try_send to
+/// self, but in most cases unbounded channel should be fine.
+pub struct DualReceiver {
+    remote_rx: mpsc::Receiver<Message>,
+    loopback_rx: mpsc::UnboundedReceiver<Message>,
+}
+
+impl DualReceiver {
+    /// Create a new dual receiver. Returns the dual receiver, and the
+    /// remote and self-message tx.
+    pub fn new() -> (Self, mpsc::Sender<Message>, mpsc::UnboundedSender<Message>) {
+        let (remote_tx, remote_rx) = mpsc::channel::<Message>(1);
+        let (loopback_tx, loopback_rx) = mpsc::unbounded_channel::<Message>();
+        (
+            Self {
+                remote_rx,
+                loopback_rx,
+            },
+            remote_tx,
+            loopback_tx,
+        )
+    }
+
+    /// Receive from either channels.
+    pub async fn recv(&mut self) -> Option<Message> {
+        tokio::select! {
+            msg = self.remote_rx.recv() => msg,
+            msg = self.loopback_rx.recv() => msg,
+        }
+    }
+}
+
 struct RemoteChannels {
     /// Caller uses this tx to send outgoing messages to remotes.
     msg_tx: mpsc::Sender<Message>,
@@ -163,16 +200,22 @@ struct RemoteChannels {
 #[derive(Clone)]
 pub struct WebChannel {
     my_hostid: ServerId,
-    msg_tx: mpsc::Sender<Message>,
+    remote_msg_tx: mpsc::Sender<Message>,
+    loopback_tx: mpsc::UnboundedSender<Message>,
     assoc_tx: Arc<Mutex<HashMap<ServerId, RemoteChannels>>>,
     next_stream_id: Arc<AtomicU16>,
 }
 
 impl WebChannel {
-    pub fn new(my_hostid: ServerId, msg_tx: mpsc::Sender<Message>) -> Self {
+    pub fn new(
+        my_hostid: ServerId,
+        remote_msg_tx: mpsc::Sender<Message>,
+        loopback_tx: mpsc::UnboundedSender<Message>,
+    ) -> Self {
         Self {
             my_hostid,
-            msg_tx,
+            remote_msg_tx,
+            loopback_tx,
             assoc_tx: Arc::new(Mutex::new(HashMap::new())),
             // Will be set in setup_message_handling to 1 or 2.
             next_stream_id: Arc::new(AtomicU16::new(0)),
@@ -208,7 +251,7 @@ impl WebChannel {
         );
 
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
-        let msg_tx = self.msg_tx.clone();
+        let remote_msg_tx = self.remote_msg_tx.clone();
         let hostid = self.hostid();
         let hostid_clone = hostid.clone();
         let peer_id_clone = peer_id.clone();
@@ -220,7 +263,7 @@ impl WebChannel {
         tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
                 tracing::info!("ICE progress: {progress}");
-                let _ = msg_tx
+                let _ = remote_msg_tx
                     .send(Message {
                         host: hostid.clone(),
                         body: Msg::IceProgress(peer_id_clone.clone(), progress.to_string()),
@@ -284,15 +327,10 @@ impl WebChannel {
         };
 
         if recipient == &self.my_hostid {
-            // If recipient is ourself, send to our own message channel.
-            // Create a separate task to send it to avoid deadlock.
-            let msg_tx = self.msg_tx.clone();
-            tokio::spawn(async move {
-                let res = msg_tx.send(message).await;
-                if let Err(err) = res {
-                    tracing::error!("Failed to send message to ourselvs: {:?}", err);
-                }
-            });
+            // Send to self via the unbounded channel.
+            if let Err(err) = self.loopback_tx.send(message) {
+                tracing::error!("Failed to send message to ourselves: {:?}", err);
+            }
             return Ok(());
         }
 
@@ -400,7 +438,7 @@ impl WebChannel {
         let sctp_assoc_clone = sctp_assoc.clone();
         let next_stream_id = self.next_stream_id.clone();
         let remote_hostid_clone = remote_hostid.clone();
-        let msg_tx_clone = self.msg_tx.clone();
+        let msg_tx_clone = self.remote_msg_tx.clone();
 
         tokio::spawn(async move {
             handle_outgoing_messages(
@@ -415,7 +453,7 @@ impl WebChannel {
         });
 
         // Spawn task to handle incoming streams.
-        let msg_tx_clone = self.msg_tx.clone();
+        let msg_tx_clone = self.remote_msg_tx.clone();
         let remote_hostid_clone = remote_hostid.to_string();
         let assoc_tx_clone = self.assoc_tx.clone();
 
@@ -872,6 +910,7 @@ pub enum TravelTime {
 struct HostState {
     inbox: Vec<Message>,
     msg_tx: mpsc::Sender<Message>,
+    self_tx: mpsc::UnboundedSender<Message>,
     deliverable: bool,
 }
 
@@ -923,6 +962,7 @@ impl TestWebChannelFactory {
         self: &Arc<Self>,
         my_hostid: ServerId,
         msg_tx: mpsc::Sender<Message>,
+        self_tx: mpsc::UnboundedSender<Message>,
     ) -> TestWebChannel {
         let mut state = self.state.lock().unwrap();
         state.hosts.insert(
@@ -930,6 +970,7 @@ impl TestWebChannelFactory {
             HostState {
                 inbox: Vec::new(),
                 msg_tx,
+                self_tx,
                 deliverable: false,
             },
         );
@@ -1020,22 +1061,20 @@ impl MsgChannel for TestWebChannel {
             req_id,
         };
 
-        // Special case: if sending to ourselves, deliver directly to msg_tx
-        // to avoid deadlock when broadcasting during message processing
+        // Send to self via the unbounded channel.
         if recipient == &self.my_hostid {
-            let msg_tx = {
+            let self_tx = {
                 let state = self.factory.state.lock().unwrap();
                 let host_state = state
                     .hosts
                     .get(recipient)
                     .ok_or_else(|| anyhow!("Recipient {} not found", recipient))?;
-                host_state.msg_tx.clone()
+                host_state.self_tx.clone()
             };
 
-            return msg_tx
+            return self_tx
                 .send(message)
-                .await
-                .map_err(|_| anyhow!("Channel broke for {}", recipient));
+                .map_err(|_| anyhow!("Self channel closed for {}", recipient));
         }
 
         // Push to recipient's inbox
@@ -1182,12 +1221,14 @@ mod tests {
 
         let (tx1, _rx1) = mpsc::channel::<Message>(10);
         let (tx2, mut rx2) = mpsc::channel::<Message>(10);
+        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
+        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
         let id1 = create_test_id("host1");
         let id2 = create_test_id("host2");
 
-        let channel1 = factory.get_channel(id1.clone(), tx1);
-        let channel2 = factory.get_channel(id2.clone(), tx2);
+        let channel1 = factory.get_channel(id1.clone(), tx1, self_tx1);
+        let channel2 = factory.get_channel(id2.clone(), tx2, self_tx2);
 
         // Mark both as deliverable by connecting to each other
         channel1
@@ -1229,12 +1270,14 @@ mod tests {
 
         let (tx1, _rx1) = mpsc::channel::<Message>(10);
         let (tx2, mut rx2) = mpsc::channel::<Message>(10);
+        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
+        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
         let id1 = create_test_id("sender");
         let id2 = create_test_id("receiver");
 
-        let channel1 = factory.get_channel(id1.clone(), tx1);
-        let channel2 = factory.get_channel(id2.clone(), tx2);
+        let channel1 = factory.get_channel(id1.clone(), tx1, self_tx1);
+        let channel2 = factory.get_channel(id2.clone(), tx2, self_tx2);
 
         // Mark both as deliverable by connecting to each other
         channel1
@@ -1276,12 +1319,14 @@ mod tests {
 
         let (tx1, _rx1) = mpsc::channel::<Message>(10);
         let (tx2, _rx2) = mpsc::channel::<Message>(10);
+        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
+        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
         let id1 = create_test_id("sender");
         let id2 = create_test_id("receiver");
 
-        let channel1 = factory.get_channel(id1.clone(), tx1);
-        let _channel2 = factory.get_channel(id2.clone(), tx2);
+        let channel1 = factory.get_channel(id1.clone(), tx1, self_tx1);
+        let _channel2 = factory.get_channel(id2.clone(), tx2, self_tx2);
 
         // Don't connect - both channels are not deliverable
 
@@ -1298,14 +1343,17 @@ mod tests {
         let (tx_sender, _rx_sender) = mpsc::channel::<Message>(10);
         let (tx_recv1, mut rx_recv1) = mpsc::channel::<Message>(10);
         let (tx_recv2, mut rx_recv2) = mpsc::channel::<Message>(10);
+        let (self_tx_sender, _self_rx_sender) = mpsc::unbounded_channel::<Message>();
+        let (self_tx_recv1, _self_rx_recv1) = mpsc::unbounded_channel::<Message>();
+        let (self_tx_recv2, _self_rx_recv2) = mpsc::unbounded_channel::<Message>();
 
         let id_sender = create_test_id("sender");
         let id_recv1 = create_test_id("receiver1");
         let id_recv2 = create_test_id("receiver2");
 
-        let channel_sender = factory.get_channel(id_sender.clone(), tx_sender);
-        let channel_recv1 = factory.get_channel(id_recv1.clone(), tx_recv1);
-        let channel_recv2 = factory.get_channel(id_recv2.clone(), tx_recv2);
+        let channel_sender = factory.get_channel(id_sender.clone(), tx_sender, self_tx_sender);
+        let channel_recv1 = factory.get_channel(id_recv1.clone(), tx_recv1, self_tx_recv1);
+        let channel_recv2 = factory.get_channel(id_recv2.clone(), tx_recv2, self_tx_recv2);
 
         // Mark all as deliverable by connecting them
         channel_sender

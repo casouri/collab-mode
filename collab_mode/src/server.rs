@@ -639,7 +639,7 @@ impl Server {
         // REF: https://github.com/rustls/rustls/issues/1938
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let (msg_tx, mut msg_rx) = mpsc::channel::<webchannel::Message>(1);
+        let (mut dual_rx, msg_tx, self_tx) = webchannel::DualReceiver::new();
         let (signaling_msg_tx, mut signaling_msg_rx) =
             mpsc::channel::<crate::signaling::SignalingMessage>(16);
 
@@ -656,12 +656,20 @@ impl Server {
         // Use the Server's test channel if provided, otherwise use
         // WebChannel. We use a concret enum rather than a dyn Trait
         // like signaling channel because I need to clone the
-        // webchannel at places, and I don’t want to use dyn_clone,
+        // webchannel at places, and I don't want to use dyn_clone,
         // too complicated.
         let webchannel: MsgChannelImpl = if let Some(factory) = test_channel_factory {
-            MsgChannelImpl::Test(factory.get_channel(self.host_id.clone(), msg_tx.clone()))
+            MsgChannelImpl::Test(factory.get_channel(
+                self.host_id.clone(),
+                msg_tx.clone(),
+                self_tx.clone(),
+            ))
         } else {
-            MsgChannelImpl::Web(WebChannel::new(self.host_id.clone(), msg_tx.clone()))
+            MsgChannelImpl::Web(WebChannel::new(
+                self.host_id.clone(),
+                msg_tx.clone(),
+                self_tx.clone(),
+            ))
         };
 
         // Add initial projects
@@ -691,8 +699,8 @@ impl Server {
                         tracing::warn!("Failed to handle editor message: {}", err);
                     }
                 },
-                // Handle messages from remote peers.
-                Some(web_msg) = msg_rx.recv() => {
+                // Handle messages from remote peers and self.
+                Some(web_msg) = dual_rx.recv() => {
                     let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
