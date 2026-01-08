@@ -209,3 +209,130 @@ async fn test_server_opens_own_file_before_remote() {
 
     setup.cleanup();
 }
+
+#[tokio::test]
+async fn test_move_file_permission_denied() {
+    let factory = TestChannelFactory::new();
+
+    // Set up hub and spoke with write permission denied.
+    let mut setup = setup_hub_and_spoke_servers(
+        &factory,
+        1,
+        Some(vec![Permission {
+            write: false,
+            create: true,
+            delete: false,
+        }]),
+    )
+    .await
+    .unwrap();
+
+    // Declare a project on the hub.
+    let project_dir = super::create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+    setup
+        .hub
+        .editor
+        .declare_project(&project_path, "test-project")
+        .await
+        .unwrap();
+
+    // Try to move a file from spoke (should be denied).
+    let result = setup.spokes[0]
+        .editor
+        .request(
+            "MoveFile",
+            serde_json::json!({
+                "hostId": setup.hub.id.clone(),
+                "project": "test-project",
+                "oldPath": "test.txt",
+                "newPath": "renamed.txt",
+            }),
+        )
+        .await;
+
+    assert!(result.is_err());
+    if let Err(e) = result {
+        let error_str = e.to_string();
+        assert!(
+            error_str.contains("Permission")
+                || error_str.contains("permission")
+                || error_str.contains("denied"),
+            "Expected permission denied error, got: {}",
+            error_str
+        );
+    }
+
+    setup.cleanup();
+}
+
+#[tokio::test]
+async fn test_save_file_permission_denied() {
+    let factory = TestChannelFactory::new();
+
+    // Set up hub and spoke with write permission denied.
+    let mut setup = setup_hub_and_spoke_servers(
+        &factory,
+        1,
+        Some(vec![Permission {
+            write: false,
+            create: true,
+            delete: false,
+        }]),
+    )
+    .await
+    .unwrap();
+
+    // Declare a project on the hub.
+    let project_dir = super::create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+    setup
+        .hub
+        .editor
+        .declare_project(&project_path, "test-project")
+        .await
+        .unwrap();
+
+    // Open the file from spoke first (this should succeed since it's read-only open).
+    let file_desc = serde_json::json!({
+        "hostId": setup.hub.id.clone(),
+        "project": "test-project",
+        "file": "test.txt"
+    });
+    let _open_result = setup.spokes[0]
+        .editor
+        .request(
+            "OpenFile",
+            serde_json::json!({
+                "file": file_desc.clone(),
+                "mode": "open",
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Try to save the file from spoke (should be denied).
+    let result = setup.spokes[0]
+        .editor
+        .request(
+            "SaveFile",
+            serde_json::json!({
+                "file": file_desc,
+            }),
+        )
+        .await;
+
+    assert!(result.is_err());
+    if let Err(e) = result {
+        let error_str = e.to_string();
+        assert!(
+            error_str.contains("Permission")
+                || error_str.contains("permission")
+                || error_str.contains("denied"),
+            "Expected permission denied error, got: {}",
+            error_str
+        );
+    }
+
+    setup.cleanup();
+}

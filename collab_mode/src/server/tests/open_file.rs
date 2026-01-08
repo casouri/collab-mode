@@ -436,3 +436,61 @@ async fn test_open_binary_file_rejected() {
 
     setup.cleanup();
 }
+
+#[tokio::test]
+async fn test_create_file_permission_denied() {
+    let factory = TestChannelFactory::new();
+
+    // Set up hub and spoke with create permission denied.
+    let mut setup = setup_hub_and_spoke_servers(
+        &factory,
+        1,
+        Some(vec![Permission {
+            write: true,
+            create: false,
+            delete: false,
+        }]),
+    )
+    .await
+    .unwrap();
+
+    // Declare a project on the hub.
+    let project_dir = super::create_test_project().unwrap();
+    let project_path = project_dir.path().to_string_lossy().to_string();
+    setup
+        .hub
+        .editor
+        .declare_project(&project_path, "test-project")
+        .await
+        .unwrap();
+
+    // Try to create a new file from spoke (should be denied).
+    let result = setup.spokes[0]
+        .editor
+        .request(
+            "OpenFile",
+            serde_json::json!({
+                "file": {
+                    "hostId": setup.hub.id.clone(),
+                    "project": "test-project",
+                    "file": "newfile.txt"
+                },
+                "mode": "create",
+            }),
+        )
+        .await;
+
+    assert!(result.is_err());
+    if let Err(e) = result {
+        let error_str = e.to_string();
+        assert!(
+            error_str.contains("Permission")
+                || error_str.contains("permission")
+                || error_str.contains("denied"),
+            "Expected permission denied error, got: {}",
+            error_str
+        );
+    }
+
+    setup.cleanup();
+}
