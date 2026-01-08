@@ -86,56 +86,6 @@ pub trait MsgChannel: Send + Sync {
     fn disconnect(&self, peer: &ServerId);
 }
 
-/// Concrete implementation of MsgChannel that can be either a WebChannel
-/// or a TestWebChannel. This enum allows us to avoid dynamic dispatch
-/// and enables cloning.
-#[derive(Clone)]
-pub enum MsgChannelImpl {
-    Web(WebChannel),
-    Test(TestWebChannel),
-}
-
-#[async_trait]
-impl MsgChannel for MsgChannelImpl {
-    async fn send(
-        &self,
-        recipient: &ServerId,
-        req_id: Option<RequestId>,
-        msg: Msg,
-    ) -> anyhow::Result<()> {
-        match self {
-            MsgChannelImpl::Web(web) => web.send(recipient, req_id, msg).await,
-            MsgChannelImpl::Test(test) => test.send(recipient, req_id, msg).await,
-        }
-    }
-
-    async fn connect(
-        &self,
-        remote_hostid: ServerId,
-        sock: Option<crate::signaling::client_new::Sock>,
-        my_key_cert: ArcKeyCert,
-    ) -> anyhow::Result<()> {
-        match self {
-            MsgChannelImpl::Web(web) => web.connect(remote_hostid, sock, my_key_cert).await,
-            MsgChannelImpl::Test(test) => test.connect(remote_hostid, sock, my_key_cert).await,
-        }
-    }
-
-    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
-        match self {
-            MsgChannelImpl::Web(web) => web.broadcast(req_id, msg).await,
-            MsgChannelImpl::Test(test) => test.broadcast(req_id, msg).await,
-        }
-    }
-
-    fn disconnect(&self, peer: &ServerId) {
-        match self {
-            MsgChannelImpl::Web(web) => web.disconnect(peer),
-            MsgChannelImpl::Test(test) => test.disconnect(peer),
-        }
-    }
-}
-
 /// Types of transport. currently only SCTP, we might add webrtc
 /// later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

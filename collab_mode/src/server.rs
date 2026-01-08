@@ -28,7 +28,7 @@ use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::signaling::SignalingMsg;
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, MsgChannelImpl, WebChannel, WebChannelError};
+use crate::webchannel::{self, MsgChannel, WebChannel, WebChannelError};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -653,19 +653,11 @@ impl Server {
                 ))
             };
 
-        // Use the Server's test channel if provided, otherwise use
-        // WebChannel. We use a concret enum rather than a dyn Trait
-        // like signaling channel because I need to clone the
-        // webchannel at places, and I don't want to use dyn_clone,
-        // too complicated.
-        let webchannel: MsgChannelImpl = if let Some(factory) = test_channel_factory {
-            MsgChannelImpl::Test(factory.get_channel(
-                self.host_id.clone(),
-                msg_tx.clone(),
-                self_tx.clone(),
-            ))
+        // Use the Server's test channel if provided, otherwise use WebChannel.
+        let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
+            Arc::new(factory.get_channel(self.host_id.clone(), msg_tx.clone(), self_tx.clone()))
         } else {
-            MsgChannelImpl::Web(WebChannel::new(
+            Arc::new(WebChannel::new(
                 self.host_id.clone(),
                 msg_tx.clone(),
                 self_tx.clone(),
@@ -844,7 +836,7 @@ impl Server {
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        webchannel: &MsgChannelImpl,
+        webchannel: &Arc<dyn MsgChannel>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
         // Check for connection timeouts.
@@ -974,7 +966,7 @@ impl Server {
         &mut self,
         msg: lsp_server::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &MsgChannelImpl,
+        webchannel: &Arc<dyn MsgChannel>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
@@ -1304,7 +1296,7 @@ impl Server {
     fn revert_back_to_trusted_only_in_3min(
         signaling_addr: String,
         host_id: ServerId,
-        webchannel: MsgChannelImpl,
+        webchannel: Arc<dyn MsgChannel>,
     ) {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(180)).await;
@@ -1328,7 +1320,7 @@ impl Server {
         &mut self,
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        webchannel: &MsgChannelImpl,
+        webchannel: &Arc<dyn MsgChannel>,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
@@ -4045,14 +4037,14 @@ impl Server {
 struct Next<'a> {
     editor_tx: &'a mpsc::Sender<lsp_server::Message>,
     req_id: Option<lsp_server::RequestId>,
-    pub webchannel: &'a MsgChannelImpl,
+    pub webchannel: &'a Arc<dyn MsgChannel>,
 }
 
 impl<'a> Next<'a> {
     fn new(
         editor_tx: &'a mpsc::Sender<lsp_server::Message>,
         req_id: Option<lsp_server::RequestId>,
-        webchannel: &'a MsgChannelImpl,
+        webchannel: &'a Arc<dyn MsgChannel>,
     ) -> Self {
         Next {
             editor_tx,
@@ -4118,7 +4110,7 @@ async fn send_response(
 
 /// Send a message to a remote host via WebChannel with error logging.
 async fn send_to_remote(
-    webchannel: &MsgChannelImpl,
+    webchannel: &Arc<dyn MsgChannel>,
     host_id: &ServerId,
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,
