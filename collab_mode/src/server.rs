@@ -135,11 +135,12 @@ pub enum ConnectionState {
     /// Connected and well.
     Connected,
     /// Trying to (re)connect. Sent Connect message to remote.
-    /// u64 is unix epoch seconds. Instant isn't serializable.
-    ConnectingStage1(u64),
+    /// (unix_epoch_seconds, is_new_connection). is_new_connection is
+    /// true if this is a fresh connect, false if reconnecting.
+    ConnectingStage1(u64, bool),
     /// Sent Connect message remote and received Connect message from remote.
-    /// u64 is unix epoch seconds.
-    ConnectingStage2(u64),
+    /// (unix_epoch_seconds, is_new_connection).
+    ConnectingStage2(u64, bool),
     /// Waiting for signaling server to connect before we can attempt
     /// connection to this remote.
     Pending,
@@ -187,9 +188,13 @@ struct RemoteState {
 }
 
 impl RemoteState {
-    fn connecting(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
+    fn connecting(
+        signaling_addr: String,
+        transport_type: webchannel::TransportType,
+        is_new: bool,
+    ) -> Self {
         RemoteState {
-            state: ConnectionState::ConnectingStage1(unix_epoch_secs()),
+            state: ConnectionState::ConnectingStage1(unix_epoch_secs(), is_new),
             next_reconnect_stride: 1,
             signaling_addr,
             transport_type,
@@ -231,13 +236,17 @@ impl RemoteState {
     }
 
     /// Mark as connecting stage 1 (sent connect request to remote).
-    fn mark_connecting(&mut self) {
-        self.state = ConnectionState::ConnectingStage1(unix_epoch_secs());
+    /// `is_new` should be true for a newly attempted connection,
+    /// false if reconnecting.
+    fn mark_connecting(&mut self, is_new: bool) {
+        self.state = ConnectionState::ConnectingStage1(unix_epoch_secs(), is_new);
     }
 
-    /// Mark as connecting stage 2 (received connect response from remote).
-    fn mark_connecting_stage2(&mut self) {
-        self.state = ConnectionState::ConnectingStage2(unix_epoch_secs());
+    /// Mark as connecting stage 2 (received connect response from
+    /// remote). `is_new` should be true for a newly attempted
+    /// connection, false if reconnecting.
+    fn mark_connecting_stage2(&mut self, is_new: bool) {
+        self.state = ConnectionState::ConnectingStage2(unix_epoch_secs(), is_new);
     }
 
     /// Mark as pending (waiting for signaling server to be ready).
@@ -843,17 +852,21 @@ impl Server {
         let now = unix_epoch_secs();
         for (host, remote) in self.active_remotes.iter_mut() {
             let timeout = match remote.state {
-                ConnectionState::ConnectingStage1(started) if now - started > 10 => {
-                    Some("Connection timed out in Stage1")
+                ConnectionState::ConnectingStage1(started, is_new) if now - started > 10 => {
+                    Some(("Connection timed out in Stage1", is_new))
                 }
-                ConnectionState::ConnectingStage2(started) if now - started > 30 => {
-                    Some("Connection timed out in Stage2")
+                ConnectionState::ConnectingStage2(started, is_new) if now - started > 30 => {
+                    Some(("Connection timed out in Stage2", is_new))
                 }
                 _ => None,
             };
-            if let Some(reason) = timeout {
+            if let Some((reason, is_new)) = timeout {
                 tracing::warn!("Connection to {} timed out", host);
-                remote.mark_failed();
+                if is_new {
+                    remote.mark_failed();
+                } else {
+                    remote.mark_disconnected();
+                }
                 webchannel.disconnect(&host);
                 send_notification(
                     &editor_tx,
@@ -895,7 +908,7 @@ impl Server {
             // request to remote.  TODO: Add a Refused state?
             if !matches!(
                 remote.state,
-                ConnectionState::Disconnected | ConnectionState::ConnectingStage1(_)
+                ConnectionState::Disconnected | ConnectionState::ConnectingStage1(_, _)
             ) {
                 continue;
             }
@@ -924,6 +937,7 @@ impl Server {
                 remote.transport_type,
                 &msg_tx,
                 &mut *signaling_channel,
+                false, // Reconnecting, not new.
             )
             .await;
         }
@@ -1203,6 +1217,7 @@ impl Server {
                         params.transport_type,
                         msg_tx,
                         signaling_channel,
+                        true, // New connection requested by editor.
                     )
                     .await;
                 } else {
@@ -1724,6 +1739,7 @@ impl Server {
         transport_type: webchannel::TransportType,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+        is_new: bool,
     ) {
         if host_id == self.host_id {
             return;
@@ -1793,11 +1809,11 @@ impl Server {
 
         // Signaling server is ready, set remote to Connecting
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-            remote.mark_connecting();
+            remote.mark_connecting(is_new);
         } else {
             self.active_remotes.insert(
                 host_id.clone(),
-                RemoteState::connecting(signaling_addr.clone(), transport_type),
+                RemoteState::connecting(signaling_addr.clone(), transport_type, is_new),
             );
         }
 
@@ -3790,6 +3806,7 @@ impl Server {
                 remote.transport_type,
                 msg_tx,
                 signaling_channel,
+                true, // Pending remotes are always new connections.
             )
             .await;
         }
@@ -3821,7 +3838,7 @@ impl Server {
         let is_connecting_or_connected = self.active_remotes.get(&peer_id).map_or(false, |r| {
             matches!(
                 r.state,
-                ConnectionState::ConnectingStage2(_) | ConnectionState::Connected
+                ConnectionState::ConnectingStage2(_, _) | ConnectionState::Connected
             )
         });
         tracing::info!(
@@ -3859,13 +3876,23 @@ impl Server {
             return;
         }
 
-        // Mark as connecting to prevent duplicate connection attempts.
+        // Mark as connecting to prevent duplicate connection
+        // attempts. Preserve `is_new` flag when transitioning from
+        // Stage1 to Stage2.
         if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-            remote.mark_connecting_stage2();
+            let is_new = match remote.state {
+                ConnectionState::ConnectingStage1(_, new) => new,
+                _ => false, // Must be reconnection if in other states.
+            };
+            remote.mark_connecting_stage2(is_new);
         } else {
             self.active_remotes.insert(
                 peer_id.clone(),
-                RemoteState::connecting(signaling_addr.clone(), webchannel::TransportType::SCTP),
+                RemoteState::connecting(
+                    signaling_addr.clone(),
+                    webchannel::TransportType::SCTP,
+                    false, // Default to reconnect for new remote
+                ),
             );
         }
 
