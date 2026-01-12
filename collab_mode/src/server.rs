@@ -1803,7 +1803,7 @@ impl Server {
 
         // Send Connect message to signaling server
         // SDP exchange will happen later via ice_connect_with_sock
-        self.send_connect_message(next, host_id, &signaling_addr, signaling_channel)
+        self.send_connect_message(next, host_id, &signaling_addr, signaling_channel, true)
             .await;
 
         // The connection will continue in handle_signaling_msg when we receive
@@ -1819,13 +1819,14 @@ impl Server {
         peer_id: ServerId,
         signaling_addr: &str,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+        initiator: bool,
     ) {
         let my_cert = self.key_cert.cert_der_hash();
         let connect_msg = crate::signaling::SignalingMsg::Connect(
             self.host_id.clone(),
             peer_id.clone(),
             my_cert,
-            false,
+            initiator,
         );
         let res = signaling_channel.send(signaling_addr, connect_msg).await;
         if let Err(err) = res {
@@ -3871,8 +3872,14 @@ impl Server {
         // If the remote initiated the connection, reply with
         // a connect message.
         if initiator {
-            self.send_connect_message(next, peer_id.clone(), &signaling_addr, signaling_channel)
-                .await;
+            self.send_connect_message(
+                next,
+                peer_id.clone(),
+                &signaling_addr,
+                signaling_channel,
+                false,
+            )
+            .await;
         }
 
         // Create a Sock for this peer connection. Sock
