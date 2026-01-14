@@ -45,6 +45,13 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+// This is the only condition that needs special handling.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, fmt_derive::Display)]
 enum PathId {
     // Unique name of a buffer.
@@ -2123,6 +2130,7 @@ impl Server {
         project_id: &ProjectId,
         rel_path: &str,
         mode: OpenMode,
+        create_allowed: bool,
     ) -> anyhow::Result<(String, File, PathBuf)> {
         if project_id == RESERVED_BUFFERS_PROJECT {
             return Err(anyhow!("No existing doc {}", rel_path));
@@ -2140,9 +2148,19 @@ impl Server {
                 .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
             std::path::PathBuf::from(&project.root).join(rel_path)
         };
+
+        // Check if create is allowed when file doesn't exist.
+        if matches!(mode, OpenMode::Create) && !create_allowed && !full_path.exists() {
+            return Err(ServerError::PermissionDenied(format!(
+                "Creating file '{}' is not allowed",
+                full_path.display()
+            ))
+            .into());
+        }
+
         let mut open_options = std::fs::OpenOptions::new();
         open_options.read(true).write(true);
-        if matches!(mode, OpenMode::Create) {
+        if matches!(mode, OpenMode::Create) && create_allowed {
             open_options.create(true);
         }
 
@@ -2216,9 +2234,11 @@ impl Server {
             let (doc_id, doc) = if let Some(doc) = opened_doc {
                 doc
             } else {
-                // Not opened, read from disk and create doc.
+                // Not opened, read from disk and create doc. For open
+                // request from ourselves, always allow create.
+                let allow_create = true;
                 let res = self
-                    .open_file_from_disk(&file_desc.project, &file_desc.file, mode)
+                    .open_file_from_disk(&file_desc.project, &file_desc.file, mode, allow_create)
                     .await;
                 if let Err(err) = res {
                     let err = lsp_server::ResponseError {
@@ -2320,16 +2340,6 @@ impl Server {
         remote_host_id: ServerId,
         mode: OpenMode,
     ) -> anyhow::Result<()> {
-        // Check permission.
-        if mode == OpenMode::Create && !self.config.create_allowed(&remote_host_id) {
-            next.send_to_remote(
-                &remote_host_id,
-                Msg::PermissionDenied("Permission denied for creating file".to_string()),
-            )
-            .await;
-            return Ok(());
-        }
-
         let res = self.path_id_from_file_desc(&file_desc);
         if let Err(err) = res {
             next.send_to_remote(
@@ -2370,14 +2380,21 @@ impl Server {
                 }
 
                 // Not already open, read from disk.
-                let res = self.open_file_from_disk(project, file, mode).await;
+                let create_allowed = self.config.create_allowed(&remote_host_id);
+                let res = self
+                    .open_file_from_disk(project, file, mode, create_allowed)
+                    .await;
                 if let Err(err) = res {
+                    let code = match err.downcast_ref::<ServerError>() {
+                        Some(ServerError::PermissionDenied(_)) => ErrorCode::PermissionDenied,
+                        _ => ErrorCode::IoError,
+                    };
                     next.send_to_remote(
                         &remote_host_id,
                         Msg::ErrorResp {
-                            code: ErrorCode::IoError,
+                            code,
                             file: Some(file_desc.clone()),
-                            message: format!("File not found: {}", err),
+                            message: err.to_string(),
                         },
                     )
                     .await;
