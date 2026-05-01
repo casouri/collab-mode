@@ -966,6 +966,13 @@ impl Server {
             }
 
             tracing::info!("Reconnecting to signaling server {}", addr);
+            next.send_notif(
+                NotificationCode::ConnectionProgress,
+                serde_json::json!({
+                    "message": format!("Reconnecting to signaling server {}", addr),
+                }),
+            )
+            .await;
             need_rebind.push(addr.clone());
             state.advance_backoff();
             state.state = SignalingConnectionState::Binding(unix_epoch_secs());
