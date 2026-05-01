@@ -326,6 +326,7 @@ Return nil if no info for HOST-ID is found."
     (103 . DocFatal)
     (104 . PermissionDenied)
     (105 . IoError)
+    (106 . NetworkError)
     (113 . BadRequest)
     (114 . NotConnected))
   "An alist of JSONRPC error codes.")

@@ -6,6 +6,7 @@ use crate::{
 };
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::HashMap;
 
 // *** Notifications
@@ -34,7 +35,7 @@ pub enum NotificationCode {
     ErrorResponse,    // Async request error, comes with error code.
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
 #[non_exhaustive]
 #[repr(i32)]
 pub enum ErrorCode {
