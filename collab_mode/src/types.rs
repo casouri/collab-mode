@@ -11,6 +11,15 @@ pub use crate::op::{
     replace_whitespace_char, DocId, GlobalSeq, GroupSeq, LocalSeq, Op, OpKind, SiteId,
 };
 
+/// If `addr` has no URL scheme, prepend `wss://`. Existing schemes
+/// (`wss://`, `ws://`, `https://`, etc) are preserved.
+pub fn normalize_signaling_addr(addr: &str) -> String {
+    match addr.find("://") {
+        Some(idx) if idx > 0 => addr.to_string(),
+        _ => format!("wss://{}", addr),
+    }
+}
+
 /// Truncate string for logging: show head…tail (N chars) if too long.
 pub fn truncate_for_log(s: &str, max_len: usize) -> String {
     let chars: Vec<char> = s.chars().collect();

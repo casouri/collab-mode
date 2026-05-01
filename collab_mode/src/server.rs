@@ -1210,12 +1210,14 @@ impl Server {
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
-                let params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
+                let mut params: AcceptConnectionParams = serde_json::from_value(notif.params)?;
+                params.addr = normalize_signaling_addr(&params.addr);
                 self.handle_accept_connection(next, params, signaling_channel)
                     .await;
             }
             "Connect" => {
-                let params: ConnectParams = serde_json::from_value(notif.params)?;
+                let mut params: ConnectParams = serde_json::from_value(notif.params)?;
+                params.signaling_addr = normalize_signaling_addr(&params.signaling_addr);
                 if !self.remote_connected(&params.host_id) {
                     self.try_connect_remote(
                         next,
@@ -1243,7 +1245,8 @@ impl Server {
                 self.handle_send_info_from_editor(next, params).await?;
             }
             "StopAccepting" => {
-                let params: StopAcceptingParams = serde_json::from_value(notif.params)?;
+                let mut params: StopAcceptingParams = serde_json::from_value(notif.params)?;
+                params.addr = normalize_signaling_addr(&params.addr);
 
                 // Remove from active_signaling to stop maintaining connection
                 self.active_signaling.remove(&params.addr);
@@ -1259,7 +1262,8 @@ impl Server {
                 .await;
             }
             "SetAcceptMode" => {
-                let params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
+                let mut params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
+                params.addr = normalize_signaling_addr(&params.addr);
                 self.handle_set_accept_mode(next, params.addr, params.mode)
                     .await?;
             }
