@@ -410,8 +410,14 @@ async fn send_receive_stream(
                         "No ping received in 10 minutes".to_string()
                     );
                     tracing::info!("Closing connection due to inactivity");
-                    let _ = stream.send(msg.into()).await;
-                    let _ = stream.close(None).await;
+                    // Use a timeout because if the peer is
+                    // unreachable (e.g. laptop asleep), the close
+                    // handshake reads forever and would prevent
+                    // remove_endpoint from running.
+                    let _ = time::timeout(Duration::from_secs(5), async {
+                        let _ = stream.send(msg.into()).await;
+                        let _ = stream.close(None).await;
+                    }).await;
                     return;
                 }
             }
