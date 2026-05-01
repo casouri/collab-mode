@@ -102,7 +102,7 @@ to perform NAT traversal.")
 (defvar collab-command "~/p/collab/target/debug/collab"
   "Path to the collab process executable.")
 
-(defvar collab-default-signaling-server "wss://signal.collab-mode.org"
+(defvar collab-default-signaling-server "s.collab-mode.org"
   "Default signaling server’s address.
 
 Signaling server is for NAT-traversal and host authentication.")
@@ -338,17 +338,25 @@ Return nil if no info for HOST-ID is found."
   "Execute BODY, catch jsonrpc errors.
 If there’s an error, print “collab MSG: ERROR-DESCRIPTION”,
 and append the error to collab error buffer (*collab errors*).
+DocFatal errors disable ‘collab-monitored-mode’ and surface as a
+warning; other errors are signaled with ‘user-error’ and leave the
+mode intact.
 MSG should be something like “can’t do xxx”."
   (declare (indent 1) (debug (sexp &rest form)))
-  (let ((err (gensym)))
+  (let ((err (gensym))
+        (code (gensym)))
     `(condition-case ,err
          (progn
            ,@body)
        ((debug error)
-        (when collab-monitored-mode
-          (collab--disable))
-        (display-warning 'collab
-                         (format "collab %s: %s" ,msg ,err))))))
+        (let ((,code (alist-get 'jsonrpc-error-code (cdr-safe ,err))))
+          (if (eq (alist-get ,code collab--error-code-alist) 'DocFatal)
+              (progn
+                (when collab-monitored-mode
+                  (collab--disable))
+                (display-warning 'collab
+                                 (format "collab %s: %s" ,msg ,err)))
+            (user-error "collab %s: %s" ,msg ,err)))))))
 
 (defvar collab--jsonrpc-connection)
 (defvar collab--file)
