@@ -303,12 +303,12 @@ impl SignalingState {
     /// Mark signaling connection as successfully bound.
     fn mark_bound(&mut self) {
         self.state = SignalingConnectionState::Bound;
+        self.reset_backoff();
     }
 
     /// Mark signaling connection as disconnected. Will auto-reconnect.
     fn mark_disconnected(&mut self) {
         self.state = SignalingConnectionState::Disconnected;
-        self.reset_backoff();
     }
 
     /// Advance exponential backoff for next reconnection attempt.
