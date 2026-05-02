@@ -814,7 +814,7 @@ To prevent them from being invoked."
                 #'collab--warn-for-unsupported-undo)
     ;; Other commands
     (define-key map [remap save-buffer] #'collab-save-buffer)
-    (define-key map [remap find-file] #'collab-find-file)
+    ;; (define-key map [remap find-file] #'collab-find-file)
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
@@ -869,6 +869,15 @@ To prevent them from being invoked."
 
     (setq-local collab--my-site-id nil)))
 
+(defun collab--tramp-filename (file-desc)
+  "Return the /collab: Tramp filename for FILE-DESC."
+  (let ((host-id (plist-get file-desc :hostId))
+        (project (plist-get file-desc :project))
+        (file (plist-get file-desc :file)))
+    (if (equal file "")
+        (format "/collab:%s:/%s/" host-id project)
+      (format "/collab:%s:/%s/%s" host-id project file))))
+
 (defun collab--enable (file-desc my-site-id path)
   "Enable ‘collab-monitored-mode’ in the current buffer.
 FILE-DESC is associated with the current buffer.
@@ -879,6 +888,10 @@ PATH should be a string HOST/PROJECT/PATH returned by
   (setq collab--file file-desc)
   (setq collab--my-site-id my-site-id)
   (setq collab--default-directory (file-name-directory path))
+  (let* ((tramp-name (collab--tramp-filename file-desc))
+         (tramp-dir (or (file-name-directory tramp-name) tramp-name)))
+    (setq buffer-file-name tramp-name)
+    (setq default-directory tramp-dir))
   (puthash path collab--file collab--doc-id-table)
   (puthash (collab--encode-filename collab--file)
            (current-buffer)
@@ -1855,7 +1868,6 @@ list."
     (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "l") #'collab-share-link)
     (define-key map (kbd "g") #'collab--refresh)
-    (define-key map (kbd "f") #'collab-find-file)
     (define-key map (kbd "A") #'collab--accept-connection)
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
@@ -2017,13 +2029,14 @@ PRESS \\[collab--accept-connection] TO ACCEPT CONNECTIONS FROM ANY REMOTE\n"))
     (define-key map (kbd "x") #'collab--delete-doc)
     (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "g") #'collab--refresh)
-    (define-key map (kbd "f") #'collab-find-file)
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
     (define-key map (kbd "H") #'collab-hub)
 
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
+
+    (define-key map [remap find-file] #'collab-find-file)
     map)
   "Keymap for ‘collab-hub-mode’.")
 
