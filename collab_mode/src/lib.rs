@@ -8,6 +8,7 @@ mod ice;
 mod io_channel;
 mod message;
 mod op;
+mod poly_channel;
 pub mod server;
 pub mod signaling;
 mod ssh_channel;

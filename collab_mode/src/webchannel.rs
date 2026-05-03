@@ -261,17 +261,6 @@ impl WebChannel {
         )
         .await?;
 
-        self.send(
-            &peer_id,
-            None,
-            Msg::Hey(HeyMessage {
-                message: "Nice to meet ya".to_string(),
-                credentials: "".to_string(),
-                version: "v1.0.0".to_string(),
-            }),
-        )
-        .await?;
-
         Ok(())
     }
 
@@ -488,12 +477,8 @@ impl MsgChannel for WebChannel {
     ) -> anyhow::Result<()> {
         match transport {
             Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
-            Transport::Ssh { .. } => Err(anyhow!(
-                "WebChannel does not handle Ssh transports"
-            )),
-            Transport::Dummy => Err(anyhow!(
-                "WebChannel does not handle Dummy transport"
-            )),
+            Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
+            Transport::Dummy => Err(anyhow!("WebChannel does not handle Dummy transport")),
         }
     }
 

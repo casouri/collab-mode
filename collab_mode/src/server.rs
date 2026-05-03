@@ -669,13 +669,27 @@ impl Server {
                 ))
             };
 
-        // Use the Server's test channel if provided, otherwise use WebChannel.
+        // Use the Server's test channel if provided, otherwise use a
+        // PolyMsgChannel that chooses between WebChannel and
+        // SshMsgChannel.
         let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
             Arc::new(factory.get_channel(self.host_id.clone(), msg_tx.clone(), self_tx.clone()))
         } else {
-            Arc::new(WebChannel::new(
+            let web = Arc::new(WebChannel::new(
                 self.host_id.clone(),
                 msg_tx.clone(),
+                self_tx.clone(),
+            ));
+            let ssh = Arc::new(crate::ssh_channel::SshMsgChannel::new(
+                self.host_id.clone(),
+                msg_tx.clone(),
+                self_tx.clone(),
+                vec!["collab-mode".into(), "--envoy".into()],
+            ));
+            Arc::new(crate::poly_channel::PolyMsgChannel::new(
+                self.host_id.clone(),
+                web,
+                ssh,
                 self_tx.clone(),
             ))
         };
@@ -3960,11 +3974,27 @@ impl Server {
 
         tokio::spawn(async move {
             match webchannel_clone
-                .connect(peer_id_clone.clone(), webchannel::Transport::Sock(sock), key_cert)
+                .connect(
+                    peer_id_clone.clone(),
+                    webchannel::Transport::Sock(sock),
+                    key_cert,
+                )
                 .await
             {
                 Ok(()) => {
                     tracing::info!("Successfully connected to peer {}", peer_id_clone);
+                    // Send Hey to the peer; the existing handler at the
+                    // other end fires `mark_connected`. We do this here
+                    // (rather than inside the webchannel) so the SSH
+                    // transport gets the same handshake.
+                    let hey = Msg::Hey(message::HeyMessage {
+                        message: "Nice to meet ya".to_string(),
+                        credentials: "".to_string(),
+                        version: "v1.0.0".to_string(),
+                    });
+                    if let Err(err) = webchannel_clone.send(&peer_id_clone, None, hey).await {
+                        tracing::warn!("Failed to send Hey to {}: {}", peer_id_clone, err);
+                    }
                 }
                 Err(err) => {
                     tracing::warn!("Failed to connect to peer {}: {}", peer_id_clone, err);
