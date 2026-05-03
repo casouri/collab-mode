@@ -10,7 +10,7 @@
 use crate::config_man::ArcKeyCert;
 use crate::message::Msg;
 use crate::types::ServerId;
-use crate::webchannel::{Message, MsgChannel};
+use crate::webchannel::{Message, MsgChannel, Transport};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use lsp_server::RequestId;
@@ -129,8 +129,8 @@ impl MsgChannel for IoMsgChannel {
 
     async fn connect(
         &self,
-        _remote: ServerId,
-        _sock: Option<crate::signaling::client_new::Sock>,
+        _remote_id: ServerId,
+        _transport: Transport,
         _my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
         // IoMsgChannel never initiates; the connection is set up at

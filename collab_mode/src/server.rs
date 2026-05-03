@@ -3960,7 +3960,7 @@ impl Server {
 
         tokio::spawn(async move {
             match webchannel_clone
-                .connect(peer_id_clone.clone(), Some(sock), key_cert)
+                .connect(peer_id_clone.clone(), webchannel::Transport::Sock(sock), key_cert)
                 .await
             {
                 Ok(()) => {

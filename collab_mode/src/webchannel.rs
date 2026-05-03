@@ -53,6 +53,23 @@ fn stream_id_init(my_id: &str, peer_id: &str) -> u16 {
     }
 }
 
+/// Carries the transport-specific data needed to establish a connection
+/// to a peer. Each [`MsgChannel`] implementation handles the variants it
+/// supports and errors on the rest.
+pub enum Transport {
+    /// Connect via WebRTC (SCTP/DTLS/ICE) using a [`Sock`] from the
+    /// signaling client.
+    ///
+    /// [`Sock`]: crate::signaling::client_new::Sock
+    Sock(crate::signaling::client_new::Sock),
+    /// Connect by spawning ssh to `ssh_host` and using its stdio as the
+    /// data channel.
+    Ssh { ssh_host: String },
+    /// Placeholder used by tests where the channel implementation ignores
+    /// the transport entirely (e.g. `TestWebChannel`).
+    Dummy,
+}
+
 /// Trait for message channel operations. Provides async methods for
 /// sending, connecting, and broadcasting messages.
 #[async_trait]
@@ -65,15 +82,12 @@ pub trait MsgChannel: Send + Sync {
         msg: Msg,
     ) -> anyhow::Result<()>;
 
-    /// Connect to a peer using a Sock from SignalingClient.
-    ///
-    /// For WebChannel: sock parameter is required (unwrapped).
-    /// For TestWebChannel: sock is ignored (hosts assumed connected).
-    /// Stream ID parity determined by host ID ordering.
+    /// Connect to a peer using the given [`Transport`]. Each implementation
+    /// handles the variants it supports and returns an error for others.
     async fn connect(
         &self,
-        remote_hostid: ServerId,
-        sock: Option<crate::signaling::client_new::Sock>,
+        remote_id: ServerId,
+        transport: Transport,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()>;
 
@@ -181,13 +195,11 @@ impl WebChannel {
     /// This is the unified connection method that works for both
     /// initiating and accepting connections. Stream ID parity is
     /// determined by host ID ordering rather than initiator/acceptor roles.
-    pub async fn connect(
+    pub async fn connect_with_sock(
         &self,
-        _remote_hostid: ServerId,
-        sock: Option<crate::signaling::client_new::Sock>,
+        sock: crate::signaling::client_new::Sock,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
-        let sock = sock.expect("WebChannel::connect requires a Sock parameter");
         let peer_id = sock.id().to_string();
 
         // Determine stream ID parity based on host ID ordering
@@ -470,11 +482,19 @@ impl MsgChannel for WebChannel {
 
     async fn connect(
         &self,
-        remote_hostid: ServerId,
-        sock: Option<crate::signaling::client_new::Sock>,
+        _remote_id: ServerId,
+        transport: Transport,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
-        self.connect(remote_hostid, sock, my_key_cert).await
+        match transport {
+            Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
+            Transport::Ssh { .. } => Err(anyhow!(
+                "WebChannel does not handle Ssh transports"
+            )),
+            Transport::Dummy => Err(anyhow!(
+                "WebChannel does not handle Dummy transport"
+            )),
+        }
     }
 
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
@@ -1047,7 +1067,7 @@ impl MsgChannel for TestWebChannel {
     async fn connect(
         &self,
         remote_hostid: ServerId,
-        _sock: Option<crate::signaling::client_new::Sock>,
+        _transport: Transport,
         _my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
         // Mark both self and remote as deliverable
@@ -1184,7 +1204,7 @@ mod tests {
         channel1
             .connect(
                 id2.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("test1")),
             )
             .await
@@ -1192,7 +1212,7 @@ mod tests {
         channel2
             .connect(
                 id1.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("test2")),
             )
             .await
@@ -1233,7 +1253,7 @@ mod tests {
         channel1
             .connect(
                 id2.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("test1")),
             )
             .await
@@ -1241,7 +1261,7 @@ mod tests {
         channel2
             .connect(
                 id1.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("test2")),
             )
             .await
@@ -1309,7 +1329,7 @@ mod tests {
         channel_sender
             .connect(
                 id_recv1.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("sender")),
             )
             .await
@@ -1317,7 +1337,7 @@ mod tests {
         channel_recv1
             .connect(
                 id_sender.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("recv1")),
             )
             .await
@@ -1325,7 +1345,7 @@ mod tests {
         channel_sender
             .connect(
                 id_recv2.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("sender")),
             )
             .await
@@ -1333,7 +1353,7 @@ mod tests {
         channel_recv2
             .connect(
                 id_sender.clone(),
-                None,
+                Transport::Dummy,
                 Arc::new(crate::config_man::create_key_cert("recv2")),
             )
             .await

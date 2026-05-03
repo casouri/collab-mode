@@ -283,8 +283,8 @@ mod e2e_tests {
         let sock_b = sock_b_task.await.unwrap()?;
 
         // Both sides establish WebRTC connection concurrently
-        let connect_a = channel_a.connect(id_b.clone(), Some(sock_a), key_cert_a);
-        let connect_b = channel_b.connect(id_a.clone(), Some(sock_b), key_cert_b);
+        let connect_a = channel_a.connect(id_b.clone(), Transport::Sock(sock_a), key_cert_a);
+        let connect_b = channel_b.connect(id_a.clone(), Transport::Sock(sock_b), key_cert_b);
 
         let (res_a, res_b) = tokio::join!(connect_a, connect_b);
         res_a?;
