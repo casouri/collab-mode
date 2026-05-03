@@ -30,8 +30,8 @@ fn pair() -> (
     mpsc::Receiver<Message>,
 ) {
     let (a, b) = tokio::io::duplex(8192);
-    let (a_read, a_write) = tokio::io::split(a);
-    let (b_read, b_write) = tokio::io::split(b);
+    let rw_a = ReaderWriter::from_duplex(a);
+    let rw_b = ReaderWriter::from_duplex(b);
 
     let (tx_a, rx_a) = mpsc::channel::<Message>(16);
     let (tx_b, rx_b) = mpsc::channel::<Message>(16);
@@ -40,8 +40,8 @@ fn pair() -> (
     let (loopback_a, _) = mpsc::unbounded_channel::<Message>();
     let (loopback_b, _) = mpsc::unbounded_channel::<Message>();
 
-    let chan_a = IoMsgChannel::new("a".into(), "b".into(), a_read, a_write, tx_a, loopback_a);
-    let chan_b = IoMsgChannel::new("b".into(), "a".into(), b_read, b_write, tx_b, loopback_b);
+    let chan_a = IoMsgChannel::new("a".into(), "b".into(), rw_a, tx_a, loopback_a);
+    let chan_b = IoMsgChannel::new("b".into(), "a".into(), rw_b, tx_b, loopback_b);
     (chan_a, rx_a, chan_b, rx_b)
 }
 
@@ -122,21 +122,13 @@ async fn eof_emits_connection_broke() {
 async fn loopback_short_circuits() {
     // Single channel; send to own host id should land on loopback_tx, not
     // on the wire.
-    let (a, b) = tokio::io::duplex(8192);
-    let (a_read, a_write) = tokio::io::split(a);
-    let (_b_read, _b_write) = tokio::io::split(b);
+    let (a, _b) = tokio::io::duplex(8192);
+    let rw = ReaderWriter::from_duplex(a);
 
     let (remote_tx, mut remote_rx) = mpsc::channel::<Message>(16);
     let (loopback_tx, mut loopback_rx) = mpsc::unbounded_channel::<Message>();
 
-    let chan = IoMsgChannel::new(
-        "self".into(),
-        "peer".into(),
-        a_read,
-        a_write,
-        remote_tx,
-        loopback_tx,
-    );
+    let chan = IoMsgChannel::new("self".into(), "peer".into(), rw, remote_tx, loopback_tx);
 
     chan.send(&"self".into(), None, hey_msg()).await.unwrap();
 

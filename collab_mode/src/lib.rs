@@ -10,6 +10,7 @@ mod message;
 mod op;
 pub mod server;
 pub mod signaling;
+mod ssh_channel;
 mod types;
 mod webchannel;
 pub mod websocket_receptor;

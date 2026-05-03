@@ -14,9 +14,81 @@ use crate::webchannel::{Message, MsgChannel, Transport};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use lsp_server::RequestId;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
+
+/// A bidirectional byte-stream paired with a cleanup value that is
+/// dropped together with the stream. Implements both [`AsyncRead`]
+/// and [`AsyncWrite`].
+///
+/// Producers (eg, an SSH spawner) construct one with
+/// [`ReaderWriter::new`], stashing whatever they need to clean up —
+/// child process handles, ssh sessions, kill-on-drop guards — in the
+/// `cleanup` argument. When the `ReaderWriter` is dropped (or both
+/// halves of a `tokio::io::split` of it are dropped), the cleanup
+/// value drops.
+pub struct ReaderWriter {
+    reader: Box<dyn AsyncRead + Send + Unpin>,
+    writer: Box<dyn AsyncWrite + Send + Unpin>,
+    _cleanup: Box<dyn Send + Sync>,
+}
+
+impl ReaderWriter {
+    pub fn new<R, W, C>(reader: R, writer: W, cleanup: C) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+        C: Send + Sync + 'static,
+    {
+        Self {
+            reader: Box::new(reader),
+            writer: Box::new(writer),
+            _cleanup: Box::new(cleanup),
+        }
+    }
+
+    /// Convenience: wrap any single duplex stream (e.g.
+    /// `tokio::io::duplex`'s halves) as a `ReaderWriter` with no extra
+    /// cleanup.
+    pub fn from_duplex<S>(stream: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        let (r, w) = tokio::io::split(stream);
+        Self::new(r, w, ())
+    }
+}
+
+impl AsyncRead for ReaderWriter {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ReaderWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.writer).poll_shutdown(cx)
+    }
+}
 
 struct State {
     out_tx: Option<mpsc::Sender<Message>>,
@@ -25,6 +97,7 @@ struct State {
     cancel_rx: Option<mpsc::Receiver<()>>,
 }
 
+#[derive(Clone)]
 pub struct IoMsgChannel {
     my_hostid: ServerId,
     peer_id: ServerId,
@@ -33,21 +106,19 @@ pub struct IoMsgChannel {
 }
 
 impl IoMsgChannel {
-    /// Wrap a pre-connected reader/writer pair. Spawns inbound and outbound
-    /// framing tasks immediately. There is exactly one peer for the lifetime
-    /// of this channel.
-    pub fn new<R, W>(
+    /// Wrap a pre-connected [`ReaderWriter`]. Spawns inbound and outbound
+    /// framing tasks immediately. There is exactly one peer for the
+    /// lifetime of this channel. The `ReaderWriter`'s cleanup runs once
+    /// both spawned tasks have dropped their halves.
+    pub fn new(
         my_hostid: ServerId,
         peer_id: ServerId,
-        reader: R,
-        writer: W,
+        rw: ReaderWriter,
         remote_msg_tx: mpsc::Sender<Message>,
         loopback_tx: mpsc::UnboundedSender<Message>,
-    ) -> Self
-    where
-        R: AsyncRead + Unpin + Send + 'static,
-        W: AsyncWrite + Unpin + Send + 'static,
-    {
+    ) -> Self {
+        let (reader, writer) = tokio::io::split(rw);
+
         let (out_tx, out_rx) = mpsc::channel::<Message>(16);
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
 
