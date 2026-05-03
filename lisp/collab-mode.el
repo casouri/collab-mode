@@ -497,9 +497,6 @@ Each event is a string.")
 (defvar-local collab--file nil
   "FILE-DESC for the current buffer.")
 
-(defvar-local collab--accepting-connection nil
-  "If non-nil, our collab process is accepting remote connections.")
-
 (defvar-local collab--inhibit-hooks nil
   "When non-nil, before/after-change hooks don’t run.")
 
@@ -1442,12 +1439,20 @@ Return (:siteId SITE-ID :content CONTENT)."
                      :timeout collab-rpc-timeout)))
 
 (defun collab--accept-connection-notif (signaling-addr mode)
-  "Accept connections on SIGNALING-ADDR with MODE."
+  "Accept connections on SIGNALING-ADDR with MODE.
+MODE is a string (e.g. \"All\" or \"TrustedOnly\") or nil to let the
+collab process pick its default."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'AcceptConnection
                     `( :addr ,signaling-addr
                        :transportType "SCTP"
                        :mode ,mode))))
+
+(defun collab--stop-accepting-notif (signaling-addr)
+  "Tell the collab process to stop accepting on SIGNALING-ADDR."
+  (let ((conn (collab--connect-process)))
+    (jsonrpc-notify conn 'StopAccepting
+                    `(:addr ,signaling-addr))))
 
 (defun collab--connect-notif (host-id signaling-addr)
   "Connect to HOST-ID on SIGNALING-ADDR."
@@ -1868,7 +1873,7 @@ list."
     (define-key map (kbd "k") #'collab--disconnect-or-close)
     (define-key map (kbd "l") #'collab-share-link)
     (define-key map (kbd "g") #'collab--refresh)
-    (define-key map (kbd "A") #'collab--accept-connection)
+    (define-key map (kbd "A") #'collab--toggle-accept-connection)
     (define-key map (kbd "C") #'collab-connect)
     (define-key map (kbd "+") #'collab-share)
     (define-key map (kbd "H") #'collab-list-docs)
@@ -1918,7 +1923,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (insert (if (> (seq-length accepting) 0)
                 (propertize "\nAccepting remote connections" 'face 'bold)
               (substitute-command-keys
-               "Not accepting remote connections (press \\[collab--accept-connection] to accept)"))
+               "Not accepting remote connections (press \\[collab--toggle-accept-connection] to accept)"))
             "\n")
     (when (> (seq-length accepting) 0)
       (seq-doseq (entry accepting)
@@ -1974,7 +1979,7 @@ PRESS \\[collab-list-docs] TO SHOW ALL DOCS
 PRESS \\[collab-share] TO SHARE A FILE/PROJECT
 PRESS \\[collab-connect] TO CONNECT TO A REMOTE DOC
 PRESS \\[collab-config] TO SET TRUSTED HOSTS AND PERMISSION
-PRESS \\[collab--accept-connection] TO ACCEPT CONNECTIONS FROM ANY REMOTE\n"))
+PRESS \\[collab--toggle-accept-connection] TO TOGGLE ACCEPTING REMOTE CONNECTIONS\n"))
     (insert "\n\n")
 
     ;; 6. Events.
@@ -2514,16 +2519,33 @@ Disconnect for remote doc, close for owned doc."
       (collab--delete-file-req file-desc))
     (collab--refresh)))
 
-(defun collab--accept-connection ()
-  "Start accepting connections."
-  (interactive)
-  (let ((signaling-addr (nth 1 collab-local-host-config)))
-    (collab--catch-error "can’t accept connection "
-      (collab--accept-connection-notif signaling-addr "All"))
-    (collab--msg-event 'success "Attempting to start accepting remote connections")
+(defun collab--toggle-accept-connection (&optional all-mode)
+  "Toggle accepting remote connections.
+
+If currently accepting, stop.  Otherwise start accepting on the
+signaling address from ‘collab-local-host-config’.  With prefix arg
+ALL-MODE, accept anyone (mode \"All\"); without it, fall back to the
+collab process default (TrustedOnly)."
+  (interactive "P")
+  (let* ((signaling-addr (nth 1 collab-local-host-config))
+         (state (collab--connection-state-req))
+         (accepting (plist-get state :accepting))
+         (currently-accepting-p (> (seq-length accepting) 0)))
+    (collab--catch-error "can’t toggle accept connection "
+      (cond
+       (currently-accepting-p
+        (collab--stop-accepting-notif signaling-addr)
+        (collab--msg-event 'success
+                           "Stopping accepting remote connections"))
+       (t
+        (collab--accept-connection-notif signaling-addr
+                                         (when all-mode "All"))
+        (collab--msg-event
+         'success
+         (format "Attempting to start accepting (%s)"
+                 (if all-mode "All" "TrustedOnly"))))))
     (collab--refetch 'ConnectionState
-                     (lambda ()
-                       (collab--connection-state-req)))
+                     (lambda () (collab--connection-state-req)))
     (collab--hub-rerender)))
 
 ;;;###autoload
@@ -2559,7 +2581,7 @@ Uses ‘collab--default-directory’ as initial input."
 (defun collab--notify-newly-shared-doc (file-desc)
   "In collab hub, insert a notice of the newly shared doc or project (FILE-DESC)."
   (with-current-buffer (collab--hub-buffer)
-    (collab--accept-connection)
+    (collab--accept-connection-notif (nth 1 collab-local-host-config) nil)
     (let* ((link (format "%s%s" collab-default-signaling-server
                          (collab--encode-filename file-desc))))
       (puthash 'CurrentMessage
