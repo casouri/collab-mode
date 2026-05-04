@@ -745,8 +745,7 @@ pub async fn setup_hub_and_spoke_servers(
                 "Connect",
                 serde_json::json!({
                     "hostId": hub_id.clone(),
-                    "signalingAddr": "test",
-                    "transportType": "SCTP",
+                    "transportType": { "SCTP": { "signalingAddr": "test" } },
                 }),
             )
             .await?;

@@ -112,8 +112,7 @@ async fn test_accept_connect() {
             "Connect",
             serde_json::json!({
                 "hostId": id1.clone(),
-                "signalingAddr": "test",
-                "transportType": "SCTP",
+                "transportType": { "SCTP": { "signalingAddr": "test" } },
             }),
         )
         .await

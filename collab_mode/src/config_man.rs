@@ -72,6 +72,29 @@ pub fn create_key_cert(name: &str) -> KeyCert {
     KeyCert { key_der, cert_der }
 }
 
+/// Generate a fresh self-signed key/cert pair without saving to disk.
+/// Returns `(key_pem, cert_pem, cert_hash)`. Used for generating cert
+/// for both sides when connecting to a remote envoy.
+pub fn generate_temp_key_cert(uuid: &str) -> anyhow::Result<(String, String, CertDerHash)> {
+    let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let key_pem = key_pair.serialize_pem();
+    let params = rcgen::CertificateParams::new(vec![uuid.to_string()])?;
+    let cert = params.self_signed(&key_pair)?;
+    let cert_pem = cert.pem();
+    let cert_der = pem::parse(&cert_pem)?.into_contents();
+    let hash = hash_der(&cert_der);
+    Ok((key_pem, cert_pem, hash))
+}
+
+/// Reconstruct a [`KeyCert`] from PEM strings — the inverse of
+/// [`generate_temp_key_cert`]. Used by the envoy to load the
+/// identity it received in `Msg::EnvoyInit`.
+pub fn key_cert_from_pem(key_pem: &str, cert_pem: &str) -> anyhow::Result<KeyCert> {
+    let key_der = pem::parse(key_pem)?.into_contents();
+    let cert_der = pem::parse(cert_pem)?.into_contents();
+    Ok(KeyCert { key_der, cert_der })
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ConfigProject {
     pub name: String,

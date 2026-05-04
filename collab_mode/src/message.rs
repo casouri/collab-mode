@@ -2,7 +2,7 @@ use crate::{
     config_man::{ConfigProject, Permission},
     server::{self, AcceptMode},
     types::*,
-    webchannel::TransportType,
+    webchannel::TransportConfig,
 };
 use lsp_server::Message;
 use serde::{Deserialize, Serialize};
@@ -133,7 +133,6 @@ pub struct InitResp {
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
     pub addr: String,
-    pub transport_type: TransportType,
     pub mode: Option<AcceptMode>,
 }
 
@@ -171,8 +170,7 @@ pub struct UpdateConfigParams {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectParams {
     pub host_id: ServerId,
-    pub signaling_addr: String,
-    pub transport_type: TransportType,
+    pub transport_config: TransportConfig,
 }
 
 // **** ShareFile
@@ -495,6 +493,23 @@ pub enum Msg {
     // Misc
     IceProgress(ServerId, String),
     Hey(HeyMessage),
+
+    /// Sent from the host to an envoy as the first message on the SSH
+    /// stdio stream. Sets the envoy's id, the host's id, certs for
+    /// the envoy to use, host cert to trust, and the projects to
+    /// share.
+    EnvoyInit {
+        host_id: ServerId,
+        envoy_id: ServerId,
+        host_cert: crate::signaling::CertDerHash,
+        envoy_key_pem: String,
+        envoy_cert_pem: String,
+        projects: Vec<ConfigProject>,
+    },
+
+    /// Sent from envoy to host if anything goes wrong when handling
+    /// `EnvoyInit`. The envoy then exits.
+    EnvoyInitError(String),
 
     // Errors
     FailedToConnect(ServerId, String),

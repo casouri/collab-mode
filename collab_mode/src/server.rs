@@ -183,10 +183,8 @@ const MAX_RECONNECT_STRIDE_SECS: u64 = 256;
 struct RemoteState {
     /// Connections state.
     state: ConnectionState,
-    /// Signaling address used to connect to this remote.
-    signaling_addr: String,
-    /// Transport type used to connect to this remote.
-    transport_type: webchannel::TransportType,
+    /// Transport info used to connect to this remote.
+    transport_config: webchannel::TransportConfig,
     /// Next reconnect should be attempted aftert this duration. We
     /// use exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256. Max at 256.
     next_reconnect_stride: u64,
@@ -195,26 +193,20 @@ struct RemoteState {
 }
 
 impl RemoteState {
-    fn connecting(
-        signaling_addr: String,
-        transport_type: webchannel::TransportType,
-        is_new: bool,
-    ) -> Self {
+    fn connecting(transport_config: webchannel::TransportConfig, is_new: bool) -> Self {
         RemoteState {
             state: ConnectionState::ConnectingStage1(unix_epoch_secs(), is_new),
             next_reconnect_stride: 1,
-            signaling_addr,
-            transport_type,
+            transport_config,
             next_reconnect_time: std::time::Instant::now(),
         }
     }
 
-    fn pending(signaling_addr: String, transport_type: webchannel::TransportType) -> Self {
+    fn pending(transport_config: webchannel::TransportConfig) -> Self {
         RemoteState {
             state: ConnectionState::Pending,
             next_reconnect_stride: 1,
-            signaling_addr,
-            transport_type,
+            transport_config,
             next_reconnect_time: std::time::Instant::now(),
         }
     }
@@ -616,8 +608,18 @@ impl RemoteDocs {
 impl Server {
     pub fn new(host_id: ServerId, config: ConfigManager) -> anyhow::Result<Self> {
         let key_cert = config.get_key_and_cert(host_id.clone())?;
+        Self::new_with_keycert(host_id, config, Arc::new(key_cert))
+    }
 
-        // Get config values for trusted_hosts
+    /// Like [`Server::new`] but uses an externally-supplied
+    /// [`ArcKeyCert`] instead of loading from disk. The envoy uses
+    /// this to adopt the identity the remote host gave it in
+    /// `Msg::EnvoyInit`.
+    pub fn new_with_keycert(
+        host_id: ServerId,
+        config: ConfigManager,
+        key_cert: ArcKeyCert,
+    ) -> anyhow::Result<Self> {
         let current_config = config.config();
         let trusted_hosts = current_config.trusted_hosts;
 
@@ -634,10 +636,64 @@ impl Server {
             site_id_map: HashMap::new(),
             active_signaling: HashMap::new(),
             config,
-            key_cert: Arc::new(key_cert),
+            key_cert,
             trusted_hosts,
         };
         Ok(server)
+    }
+
+    /// Bootstrap server state for envoy mode from a parsed
+    /// `Msg::EnvoyInit` payload.
+    ///
+    /// - Registers the projects to share.
+    /// - Trusts the host's cert.
+    /// - Pre-populates `active_remotes[host_id]` so the existing
+    ///   `Hey` handler can flip it to `Connected` when the host's `Hey`
+    ///   arrives.
+    pub fn init_for_envoy(
+        &mut self,
+        host_id: ServerId,
+        host_cert: crate::signaling::CertDerHash,
+        mut projects: Vec<ConfigProject>,
+    ) -> anyhow::Result<()> {
+        // Reject reserved project names, same as in
+        // handle_declare_projects.
+        for proj in &projects {
+            if proj.name == RESERVED_BUFFERS_PROJECT || proj.name == RESERVED_FILES_PROJECT {
+                return Err(anyhow!("Project name {} is reserved", proj.name));
+            }
+        }
+
+        expand_project_paths(&mut projects)?;
+        for proj in projects {
+            self.projects.insert(
+                proj.name.clone(),
+                Project {
+                    name: proj.name,
+                    root: proj.path,
+                    meta: serde_json::Map::new(),
+                },
+            );
+        }
+
+        self.trusted_hosts.insert(host_id.clone(), host_cert);
+
+        // Pre-populate active_remotes in ConnectingStage2 so the
+        // existing Hey handler can mark it Connected.
+        self.active_remotes.insert(
+            host_id.clone(),
+            RemoteState {
+                state: ConnectionState::ConnectingStage2(unix_epoch_secs(), true),
+                transport_config: webchannel::TransportConfig::SshStdio {
+                    ssh_host: "N/A".into(),
+                    projects: Vec::new(),
+                },
+                next_reconnect_stride: 1,
+                next_reconnect_time: Instant::now(),
+            },
+        );
+
+        Ok(())
     }
 
     pub async fn run(
@@ -954,8 +1010,7 @@ impl Server {
             self.try_connect_remote(
                 &next,
                 host.clone(),
-                remote.signaling_addr,
-                remote.transport_type,
+                remote.transport_config,
                 &msg_tx,
                 &mut *signaling_channel,
                 false, // Reconnecting, not new.
@@ -1238,13 +1293,16 @@ impl Server {
             }
             "Connect" => {
                 let mut params: ConnectParams = serde_json::from_value(notif.params)?;
-                params.signaling_addr = normalize_signaling_addr(&params.signaling_addr);
+                if let webchannel::TransportConfig::SCTP { signaling_addr } =
+                    &mut params.transport_config
+                {
+                    *signaling_addr = normalize_signaling_addr(signaling_addr);
+                }
                 if !self.remote_connected(&params.host_id) {
                     self.try_connect_remote(
                         next,
                         params.host_id,
-                        params.signaling_addr,
-                        params.transport_type,
+                        params.transport_config,
                         msg_tx,
                         signaling_channel,
                         true, // New connection requested by editor.
@@ -1767,15 +1825,50 @@ impl Server {
         &mut self,
         next: &Next<'a>,
         host_id: ServerId,
-        signaling_addr: String,
-        transport_type: webchannel::TransportType,
-        _msg_tx: &mpsc::Sender<webchannel::Message>,
+        transport_config: webchannel::TransportConfig,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
         is_new: bool,
     ) {
         if host_id == self.host_id {
             return;
         }
+
+        // Dispatch to ssh transport.
+        if let webchannel::TransportConfig::SshStdio { ssh_host, projects } = &transport_config {
+            let ssh_host = ssh_host.clone();
+            let projects = projects.clone();
+            self.try_connect_remote_ssh(next, host_id, ssh_host, projects, msg_tx, is_new)
+                .await;
+            return;
+        }
+
+        // Dispatch to normal SCTP transport.
+        return self
+            .try_connect_remote_sctp(
+                next,
+                host_id,
+                transport_config,
+                msg_tx,
+                signaling_channel,
+                is_new,
+            )
+            .await;
+    }
+
+    async fn try_connect_remote_sctp<'a>(
+        &mut self,
+        next: &Next<'a>,
+        host_id: ServerId,
+        transport_config: webchannel::TransportConfig,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+        is_new: bool,
+    ) {
+        let signaling_addr = match &transport_config {
+            webchannel::TransportConfig::SCTP { signaling_addr } => signaling_addr.clone(),
+            webchannel::TransportConfig::SshStdio { .. } => unreachable!(),
+        };
 
         // We don’t check for ConnectionState::ConnectingStage1 in
         // active_remotes here, our system is designed to work in
@@ -1812,7 +1905,7 @@ impl Server {
             } else {
                 self.active_remotes.insert(
                     host_id.clone(),
-                    RemoteState::pending(signaling_addr.clone(), transport_type.clone()),
+                    RemoteState::pending(transport_config.clone()),
                 );
             }
 
@@ -1826,7 +1919,6 @@ impl Server {
                 method: "AcceptConnection".to_string(),
                 params: serde_json::to_value(AcceptConnectionParams {
                     addr: signaling_addr.clone(),
-                    transport_type: webchannel::TransportType::SCTP,
                     mode: None,
                 })
                 .unwrap(),
@@ -1845,7 +1937,7 @@ impl Server {
         } else {
             self.active_remotes.insert(
                 host_id.clone(),
-                RemoteState::connecting(signaling_addr.clone(), transport_type, is_new),
+                RemoteState::connecting(transport_config, is_new),
             );
         }
 
@@ -1856,6 +1948,126 @@ impl Server {
 
         // The connection will continue in handle_signaling_msg when we receive
         // the peer's Connect response message.
+    }
+
+    /// Connect to a remote envoy via ssh. Spawn `ssh ssh_host --
+    /// collab-mode --envoy`, send `Msg::EnvoyInit`, then `Msg::Hey`.
+    async fn try_connect_remote_ssh<'a>(
+        &mut self,
+        next: &Next<'a>,
+        host_id: ServerId,
+        ssh_host: String,
+        projects: Vec<crate::config_man::ConfigProject>,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+        is_new: bool,
+    ) {
+        // Skip if a connection attempt is already in flight or live.
+        if let Some(remote) = self.active_remotes.get(&host_id) {
+            if matches!(
+                remote.state,
+                ConnectionState::Connected
+                    | ConnectionState::ConnectingStage1(_, _)
+                    | ConnectionState::ConnectingStage2(_, _)
+            ) {
+                tracing::info!(
+                    "Skip connecting to {}, already in {:?}",
+                    host_id,
+                    remote.state
+                );
+                return;
+            }
+        }
+
+        next.send_notif(
+            NotificationCode::Connecting,
+            ConnectingNote {
+                host_id: host_id.clone(),
+            },
+        )
+        .await;
+
+        let transport_config = webchannel::TransportConfig::SshStdio {
+            ssh_host: ssh_host.clone(),
+            projects: projects.clone(),
+        };
+        if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+            remote.transport_config = transport_config.clone();
+            remote.mark_connecting(is_new);
+        } else {
+            self.active_remotes.insert(
+                host_id.clone(),
+                RemoteState::connecting(transport_config, is_new),
+            );
+        }
+
+        // Generate key+cert for the envoy to use, and trust it.
+        let (envoy_key_pem, envoy_cert_pem, envoy_cert_hash) =
+            match crate::config_man::generate_temp_key_cert(&host_id) {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!("Failed to generate cert for {}: {}", host_id, err);
+                    if let Some(remote) = self.active_remotes.get_mut(&host_id) {
+                        remote.mark_failed();
+                    }
+                    return;
+                }
+            };
+        self.trusted_hosts.insert(host_id.clone(), envoy_cert_hash);
+
+        let host_cert = self.key_cert.cert_der_hash();
+
+        let envoy_init = Msg::EnvoyInit {
+            host_id: self.host_id.clone(),
+            envoy_id: host_id.clone(),
+            host_cert,
+            envoy_key_pem,
+            envoy_cert_pem,
+            projects,
+        };
+
+        let webchannel = next.webchannel.clone();
+        let key_cert = self.key_cert.clone();
+        let peer = host_id.clone();
+        let my_host_id = self.host_id.clone();
+        let msg_tx = msg_tx.clone();
+
+        tokio::spawn(async move {
+            let res = async {
+                webchannel
+                    .connect(
+                        peer.clone(),
+                        webchannel::Transport::Ssh {
+                            ssh_host: ssh_host.clone(),
+                        },
+                        key_cert,
+                    )
+                    .await?;
+                webchannel.send(&peer, None, envoy_init).await?;
+                webchannel
+                    .send(
+                        &peer,
+                        None,
+                        Msg::Hey(message::HeyMessage {
+                            message: "Nice to meet ya".to_string(),
+                            credentials: "".to_string(),
+                            version: "v1.0.0".to_string(),
+                        }),
+                    )
+                    .await?;
+                anyhow::Ok(())
+            }
+            .await;
+
+            if let Err(err) = res {
+                tracing::warn!("SSH connect to {} failed: {}", peer, err);
+                let msg = webchannel::Message {
+                    host: my_host_id,
+                    body: Msg::FailedToConnect(peer, err.to_string()),
+                    req_id: None,
+                };
+                let _ = msg_tx.send(msg).await;
+            }
+        });
     }
 
     /// Helper function for sending connect message to signaling
@@ -3830,7 +4042,9 @@ impl Server {
         // Start all pending connections waiting for this signaling server.
         let mut pending_remotes: Vec<(String, RemoteState)> = Vec::new();
         for (host_id, remote) in self.active_remotes.iter() {
-            if remote.state == ConnectionState::Pending && remote.signaling_addr == signaling_addr {
+            if remote.state == ConnectionState::Pending
+                && remote.transport_config.signaling_addr() == Some(signaling_addr.as_str())
+            {
                 tracing::info!(
                     "Start pending connection to {} via {}",
                     host_id,
@@ -3844,8 +4058,7 @@ impl Server {
             self.try_connect_remote(
                 next,
                 host_id,
-                remote.signaling_addr,
-                remote.transport_type,
+                remote.transport_config,
                 msg_tx,
                 signaling_channel,
                 true, // Pending remotes are always new connections.
@@ -3931,8 +4144,9 @@ impl Server {
             self.active_remotes.insert(
                 peer_id.clone(),
                 RemoteState::connecting(
-                    signaling_addr.clone(),
-                    webchannel::TransportType::SCTP,
+                    webchannel::TransportConfig::SCTP {
+                        signaling_addr: signaling_addr.clone(),
+                    },
                     false, // Default to reconnect for new remote
                 ),
             );

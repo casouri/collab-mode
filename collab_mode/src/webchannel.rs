@@ -12,7 +12,11 @@
 //! ConnectionBroke message to the main message channel.
 
 use crate::message::{HeyMessage, Msg};
-use crate::{config_man::hash_der, signaling::CertDerHash, types::*};
+use crate::{
+    config_man::{hash_der, ConfigProject},
+    signaling::CertDerHash,
+    types::*,
+};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use lsp_server::RequestId;
@@ -100,11 +104,31 @@ pub trait MsgChannel: Send + Sync {
     fn disconnect(&self, peer: &ServerId);
 }
 
-/// Types of transport. currently only SCTP, we might add webrtc
-/// later.
+/// Types of transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransportType {
-    SCTP,
+#[serde(rename_all_fields = "camelCase")]
+pub enum TransportConfig {
+    /// Connect via ICE + SCTP through the signaling server at
+    /// `signaling_addr`.
+    SCTP { signaling_addr: String },
+    /// Connect by spawning ssh to `ssh_host` and using its stdio as the
+    /// data channel. `projects` is the set of projects the host wants
+    /// the envoy to expose; the envoy adopts these in `init_for_envoy`.
+    SshStdio {
+        ssh_host: String,
+        projects: Vec<ConfigProject>,
+    },
+}
+
+impl TransportConfig {
+    /// Returns the signaling address for SCTP transports, or `None` for
+    /// SSH (which doesn't use a signaling server).
+    pub fn signaling_addr(&self) -> Option<&str> {
+        match self {
+            TransportConfig::SCTP { signaling_addr } => Some(signaling_addr),
+            TransportConfig::SshStdio { .. } => None,
+        }
+    }
 }
 
 // We don’t have to split into three categories, but this should make
