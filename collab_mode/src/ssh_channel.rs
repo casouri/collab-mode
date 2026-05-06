@@ -24,8 +24,6 @@ pub struct SshMsgChannel {
     my_hostid: ServerId,
     remote_msg_tx: mpsc::Sender<Message>,
     loopback_tx: mpsc::UnboundedSender<Message>,
-    /// The command to run on the remote, e.g. `["collab-mode", "--envoy"]`.
-    remote_command: Vec<String>,
     peers: Arc<Mutex<HashMap<ServerId, IoMsgChannel>>>,
 }
 
@@ -34,17 +32,11 @@ impl SshMsgChannel {
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
         loopback_tx: mpsc::UnboundedSender<Message>,
-        remote_command: Vec<String>,
     ) -> Self {
-        assert!(
-            !remote_command.is_empty(),
-            "remote_command must have at least the program name"
-        );
         Self {
             my_hostid,
             remote_msg_tx,
             loopback_tx,
-            remote_command,
             peers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -87,8 +79,8 @@ impl MsgChannel for SshMsgChannel {
         transport: Transport,
         _my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
-        let ssh_host = match transport {
-            Transport::Ssh { ssh_host } => ssh_host,
+        let (ssh_host, command) = match transport {
+            Transport::Ssh { ssh_host, command } => (ssh_host, command),
             Transport::Sock(_) => {
                 return Err(anyhow!("SshMsgChannel does not handle Sock transports"))
             }
@@ -97,7 +89,7 @@ impl MsgChannel for SshMsgChannel {
             }
         };
 
-        let rw = ssh_reader_writer(&ssh_host, &self.remote_command)
+        let rw = ssh_reader_writer(&ssh_host, &command)
             .await
             .with_context(|| format!("Spawning ssh to {}", ssh_host))?;
 
@@ -132,8 +124,9 @@ impl MsgChannel for SshMsgChannel {
     }
 }
 
-/// Spawn ssh to `ssh_host` and run `remote_command`, returning a
-/// [`ReaderWriter`] over the child's stdio. Dropping the returned
+/// Spawn ssh to `ssh_host` and run `command`, returning a
+/// [`ReaderWriter`] over the child's stdio. `command` is split by
+/// whitespace into program + args. Dropping the returned
 /// `ReaderWriter` closes the ssh session and terminates the remote
 /// command.
 ///
@@ -144,14 +137,11 @@ impl MsgChannel for SshMsgChannel {
 ///
 /// Honors `~/.ssh/config`, ssh-agent, ProxyJump, etc. via the `openssh`
 /// crate.
-pub async fn ssh_reader_writer(
-    ssh_host: &str,
-    remote_command: &[String],
-) -> anyhow::Result<ReaderWriter> {
-    assert!(
-        !remote_command.is_empty(),
-        "remote_command must have at least the program name"
-    );
+pub async fn ssh_reader_writer(ssh_host: &str, command: &str) -> anyhow::Result<ReaderWriter> {
+    let command: Vec<String> = command.split_whitespace().map(String::from).collect();
+    if command.is_empty() {
+        return Err(anyhow!("command must not be empty"));
+    }
 
     // Spawn a background task that owns the `Session` and `RemoteChild`
     // (the child borrows the session) for their entire lifetime. The
@@ -162,7 +152,6 @@ pub async fn ssh_reader_writer(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let ssh_host_owned = ssh_host.to_string();
-    let command = remote_command.to_vec();
 
     tokio::spawn(async move {
         let session =
@@ -177,7 +166,8 @@ pub async fn ssh_reader_writer(
 
         let mut cmd = session.command(&command[0]);
         for arg in &command[1..] {
-            cmd.raw_arg(arg);
+            // .arg() shell-escapes each arg (vs raw_arg which does not).
+            cmd.arg(arg);
         }
         cmd.stdin(openssh::Stdio::piped())
             .stdout(openssh::Stdio::piped())

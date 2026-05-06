@@ -44,6 +44,38 @@ pub trait SignalingChannelTrait: Send + Sync {
     fn remove(&mut self, signaling_addr: &str);
 }
 
+/// Dummy signaling channel for envoy mode. In envoy mode we never use
+/// the signaling feature. Throw errors if actually used.
+/// safety net.
+pub struct NoopSignalingChannel;
+
+#[async_trait]
+impl SignalingChannelTrait for NoopSignalingChannel {
+    async fn bind(
+        &mut self,
+        _addr: String,
+        _id: EndpointId,
+        _key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()> {
+        Err(anyhow!("Envoy mode shouldn’t use signaling"))
+    }
+
+    async fn send(&self, _signaling_addr: &str, _msg: SignalingMsg) -> anyhow::Result<()> {
+        Err(anyhow!("envoy mode: signaling unused"))
+    }
+
+    async fn create_sock(
+        &self,
+        _signaling_addr: &str,
+        _peer_id: EndpointId,
+        _peer_cert: CertDerHash,
+    ) -> anyhow::Result<Sock> {
+        Err(anyhow!("Envoy mode shouldn’t use signaling"))
+    }
+
+    fn remove(&mut self, _signaling_addr: &str) {}
+}
+
 /// Manages multiple signaling clients, one per signaling server address.
 pub struct SignalingChannel {
     /// Map of signaling clients by signaling server address

@@ -52,6 +52,27 @@ pub enum ServerError {
     PermissionDenied(String),
 }
 
+/// Closure for the webchannel used by `Server`. [`Server::run`]
+/// passes tokio message channels (`msg_tx`, `self_tx`) and the
+/// closure should return the [`webchannel::MsgChannel`].
+pub type WebChannelFactory = Box<
+    dyn FnOnce(
+            mpsc::Sender<webchannel::Message>,
+            mpsc::UnboundedSender<webchannel::Message>,
+        ) -> Arc<dyn webchannel::MsgChannel>
+        + Send,
+>;
+
+/// Closure for the signaling channel used by the `Server`.
+/// [`Server::run`] passes `signaling_msg_tx` and the closure should
+/// return [`signaling::client_new::SignalingChannelTrait`].
+pub type SignalingChannelFactory = Box<
+    dyn FnOnce(
+            mpsc::Sender<crate::signaling::SignalingMessage>,
+        ) -> Box<dyn crate::signaling::client_new::SignalingChannelTrait>
+        + Send,
+>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, fmt_derive::Display)]
 enum PathId {
     // Unique name of a buffer.
@@ -678,14 +699,25 @@ impl Server {
 
         self.trusted_hosts.insert(host_id.clone(), host_cert);
 
-        // Pre-populate active_remotes in ConnectingStage2 so the
-        // existing Hey handler can mark it Connected.
+        // Trust the host that initiated us.
+        self.config.add_permission(
+            host_id.clone(),
+            crate::config_man::Permission {
+                write: true,
+                create: true,
+                delete: true,
+            },
+        );
+
+        // Populate active_remotes in ConnectingStage2 so the existing
+        // Hey handler can mark it Connected.
         self.active_remotes.insert(
             host_id.clone(),
             RemoteState {
                 state: ConnectionState::ConnectingStage2(unix_epoch_secs(), true),
                 transport_config: webchannel::TransportConfig::SshStdio {
                     ssh_host: "N/A".into(),
+                    command: "N/A".into(),
                     projects: Vec::new(),
                 },
                 next_reconnect_stride: 1,
@@ -700,10 +732,8 @@ impl Server {
         &mut self,
         editor_tx: mpsc::Sender<lsp_server::Message>,
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
-        test_channel_factory: Option<Arc<webchannel::TestWebChannelFactory>>,
-        test_signaling_factory: Option<
-            Arc<crate::signaling::client_new::TestSignalingChannelFactory>,
-        >,
+        webchannel_factory: WebChannelFactory,
+        signaling_channel_factory: SignalingChannelFactory,
     ) -> anyhow::Result<()> {
         // webrtc-dtls uses the ring feature of rustls, so there's an
         // ambiguity of which provider to use. Here we just set the
@@ -715,40 +745,8 @@ impl Server {
         let (signaling_msg_tx, mut signaling_msg_rx) =
             mpsc::channel::<crate::signaling::SignalingMessage>(16);
 
-        // Create SignalingChannel (test or real based on factory)
-        let mut signaling_channel: Box<dyn crate::signaling::client_new::SignalingChannelTrait> =
-            if let Some(factory) = test_signaling_factory {
-                Box::new(factory.get_channel(signaling_msg_tx.clone()))
-            } else {
-                Box::new(crate::signaling::client_new::SignalingChannel::new(
-                    signaling_msg_tx.clone(),
-                ))
-            };
-
-        // Use the Server's test channel if provided, otherwise use a
-        // PolyMsgChannel that chooses between WebChannel and
-        // SshMsgChannel.
-        let webchannel: Arc<dyn MsgChannel> = if let Some(factory) = test_channel_factory {
-            Arc::new(factory.get_channel(self.host_id.clone(), msg_tx.clone(), self_tx.clone()))
-        } else {
-            let web = Arc::new(WebChannel::new(
-                self.host_id.clone(),
-                msg_tx.clone(),
-                self_tx.clone(),
-            ));
-            let ssh = Arc::new(crate::ssh_channel::SshMsgChannel::new(
-                self.host_id.clone(),
-                msg_tx.clone(),
-                self_tx.clone(),
-                vec!["collab-mode".into(), "--envoy".into()],
-            ));
-            Arc::new(crate::poly_channel::PolyMsgChannel::new(
-                self.host_id.clone(),
-                web,
-                ssh,
-                self_tx.clone(),
-            ))
-        };
+        let mut signaling_channel = signaling_channel_factory(signaling_msg_tx.clone());
+        let webchannel = webchannel_factory(msg_tx.clone(), self_tx.clone());
 
         // Add initial projects
         let mut projects = self.config.config().projects;
@@ -1835,10 +1833,16 @@ impl Server {
         }
 
         // Dispatch to ssh transport.
-        if let webchannel::TransportConfig::SshStdio { ssh_host, projects } = &transport_config {
+        if let webchannel::TransportConfig::SshStdio {
+            ssh_host,
+            command,
+            projects,
+        } = &transport_config
+        {
             let ssh_host = ssh_host.clone();
+            let command = command.clone();
             let projects = projects.clone();
-            self.try_connect_remote_ssh(next, host_id, ssh_host, projects, msg_tx, is_new)
+            self.try_connect_remote_ssh(next, host_id, ssh_host, command, projects, msg_tx, is_new)
                 .await;
             return;
         }
@@ -1957,6 +1961,7 @@ impl Server {
         next: &Next<'a>,
         host_id: ServerId,
         ssh_host: String,
+        command: String,
         projects: Vec<crate::config_man::ConfigProject>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         is_new: bool,
@@ -1988,6 +1993,7 @@ impl Server {
 
         let transport_config = webchannel::TransportConfig::SshStdio {
             ssh_host: ssh_host.clone(),
+            command: command.clone(),
             projects: projects.clone(),
         };
         if let Some(remote) = self.active_remotes.get_mut(&host_id) {
@@ -2038,6 +2044,7 @@ impl Server {
                         peer.clone(),
                         webchannel::Transport::Ssh {
                             ssh_host: ssh_host.clone(),
+                            command: command.clone(),
                         },
                         key_cert,
                     )

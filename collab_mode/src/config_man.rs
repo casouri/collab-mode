@@ -359,6 +359,12 @@ impl ConfigManager {
         Permission::default().delete
     }
 
+    /// Add or replace a permission entry for a host. Used by envoy mode
+    /// to grant the spawning host full permissions.
+    pub fn add_permission(&mut self, server_id: ServerId, permission: Permission) {
+        self.config.permission.insert(server_id, permission);
+    }
+
     /// Add a trusted host to the configuration
     pub fn add_trusted_host(&mut self, server_id: ServerId, cert_hash: String) {
         self.config.trusted_hosts.insert(server_id, cert_hash);

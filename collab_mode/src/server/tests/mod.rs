@@ -651,9 +651,16 @@ pub async fn setup_hub_and_spoke_servers(
     let hub_handle = {
         let factory_arc = factory_arc.clone();
         let signaling_factory = signaling_factory.clone();
+        let hub_id_for_factory = hub_id.clone();
         tokio::spawn(async move {
+            let web_factory: crate::server::WebChannelFactory =
+                Box::new(move |msg_tx, self_tx| {
+                    Arc::new(factory_arc.get_channel(hub_id_for_factory, msg_tx, self_tx))
+                });
+            let sig_factory: crate::server::SignalingChannelFactory =
+                Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
             if let Err(e) = hub_server
-                .run(hub_tx, hub_rx, Some(factory_arc), Some(signaling_factory))
+                .run(hub_tx, hub_rx, web_factory, sig_factory)
                 .await
             {
                 tracing::error!("Hub server error: {}", e);
@@ -706,14 +713,22 @@ pub async fn setup_hub_and_spoke_servers(
         let spoke_handle = {
             let factory_arc = factory_arc.clone();
             let signaling_factory = signaling_factory.clone();
+            let spoke_id_for_factory = spoke_id.clone();
             tokio::spawn(async move {
+                let web_factory: crate::server::WebChannelFactory =
+                    Box::new(move |msg_tx, self_tx| {
+                        Arc::new(factory_arc.get_channel(
+                            spoke_id_for_factory,
+                            msg_tx,
+                            self_tx,
+                        ))
+                    });
+                let sig_factory: crate::server::SignalingChannelFactory =
+                    Box::new(move |sig_msg_tx| {
+                        Box::new(signaling_factory.get_channel(sig_msg_tx))
+                    });
                 if let Err(e) = spoke_server
-                    .run(
-                        spoke_tx,
-                        spoke_rx,
-                        Some(factory_arc),
-                        Some(signaling_factory),
-                    )
+                    .run(spoke_tx, spoke_rx, web_factory, sig_factory)
                     .await
                 {
                     tracing::error!("Spoke server {} error: {}", i + 1, e);
@@ -745,7 +760,7 @@ pub async fn setup_hub_and_spoke_servers(
                 "Connect",
                 serde_json::json!({
                     "hostId": hub_id.clone(),
-                    "transportType": { "SCTP": { "signalingAddr": "test" } },
+                    "transportConfig": { "SCTP": { "signalingAddr": "test" } },
                 }),
             )
             .await?;
@@ -871,6 +886,7 @@ mod config;
 mod connection;
 mod delete_file;
 mod doc_project;
+mod envoy;
 mod list_files;
 mod list_projects;
 mod local_remote_ops;

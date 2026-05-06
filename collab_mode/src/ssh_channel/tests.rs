@@ -35,12 +35,7 @@ async fn openssh_localhost_roundtrip() {
     let (remote_tx, mut rx) = mpsc::channel::<Message>(16);
     let (loopback_tx, _) = mpsc::unbounded_channel::<Message>();
 
-    let channel = SshMsgChannel::new(
-        "me".into(),
-        remote_tx,
-        loopback_tx,
-        vec!["cat".into()],
-    );
+    let channel = SshMsgChannel::new("me".into(), remote_tx, loopback_tx);
     let key_cert = Arc::new(create_key_cert("me-test"));
 
     channel
@@ -48,6 +43,7 @@ async fn openssh_localhost_roundtrip() {
             "peer".into(),
             Transport::Ssh {
                 ssh_host: "yuan@localhost".into(),
+                command: "cat".into(),
             },
             key_cert,
         )

@@ -441,6 +441,16 @@ pub struct HeyMessage {
     pub version: String,
 }
 
+impl HeyMessage {
+    pub fn new(message: String, credentials: String, version: String) -> Self {
+        Self {
+            message,
+            credentials,
+            version,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
 #[non_exhaustive]
 pub enum Msg {

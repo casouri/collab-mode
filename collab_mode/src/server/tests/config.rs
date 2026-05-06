@@ -124,10 +124,27 @@ async fn test_server_run_config_projects_expansion() {
     let (editor_to_server_tx, editor_to_server_rx) = mpsc::channel(100);
     let (server_to_editor_tx, mut server_to_editor_rx) = mpsc::channel(100);
 
-    // Run server in background task.
+    // Run server in background task. This test doesn't test the
+    // network path, so use a dummy channel.
+    let test_web_factory = Arc::new(crate::webchannel::TestWebChannelFactory::new(
+        crate::webchannel::TravelTime::Instant,
+    ));
+    let test_signaling_factory =
+        Arc::new(crate::signaling::client_new::TestSignalingChannelFactory::new());
+    let host_id_for_factory = host_id.clone();
     let server_task = tokio::spawn(async move {
+        let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
+            Arc::new(test_web_factory.get_channel(host_id_for_factory, msg_tx, self_tx))
+        });
+        let sig_factory: crate::server::SignalingChannelFactory =
+            Box::new(move |sig_tx| Box::new(test_signaling_factory.get_channel(sig_tx)));
         server
-            .run(server_to_editor_tx, editor_to_server_rx, None, None)
+            .run(
+                server_to_editor_tx,
+                editor_to_server_rx,
+                web_factory,
+                sig_factory,
+            )
             .await
     });
 

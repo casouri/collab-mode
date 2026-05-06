@@ -66,9 +66,10 @@ pub enum Transport {
     ///
     /// [`Sock`]: crate::signaling::client_new::Sock
     Sock(crate::signaling::client_new::Sock),
-    /// Connect by spawning ssh to `ssh_host` and using its stdio as the
-    /// data channel.
-    Ssh { ssh_host: String },
+    /// Connect by spawning ssh to `ssh_host` and running `command` on
+    /// the remote, using its stdio as the data channel. `command`
+    /// should run `collab-mode envoy`.
+    Ssh { ssh_host: String, command: String },
     /// Placeholder used by tests where the channel implementation ignores
     /// the transport entirely (e.g. `TestWebChannel`).
     Dummy,
@@ -111,11 +112,13 @@ pub enum TransportConfig {
     /// Connect via ICE + SCTP through the signaling server at
     /// `signaling_addr`.
     SCTP { signaling_addr: String },
-    /// Connect by spawning ssh to `ssh_host` and using its stdio as the
-    /// data channel. `projects` is the set of projects the host wants
-    /// the envoy to expose; the envoy adopts these in `init_for_envoy`.
+    /// Connect by spawning ssh to `ssh_host` and running `command`
+    /// (whitespace-split into program + args). `projects` is the set of
+    /// projects the host wants the envoy to expose; the envoy adopts
+    /// these in `init_for_envoy`.
     SshStdio {
         ssh_host: String,
+        command: String,
         projects: Vec<ConfigProject>,
     },
 }
