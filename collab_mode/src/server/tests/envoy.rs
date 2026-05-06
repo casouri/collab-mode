@@ -66,10 +66,17 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
     });
 
     let manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
-    let command = format!(
-        "cargo run --quiet --manifest-path {} --bin collab_mode -- envoy",
-        manifest_path
-    );
+    let command = vec![
+        "cargo".to_string(),
+        "run".to_string(),
+        "--quiet".to_string(),
+        "--manifest-path".to_string(),
+        manifest_path,
+        "--bin".to_string(),
+        "collab_mode".to_string(),
+        "--".to_string(),
+        "envoy".to_string(),
+    ];
 
     mock_editor
         .send_notification(

@@ -125,10 +125,9 @@ impl MsgChannel for SshMsgChannel {
 }
 
 /// Spawn ssh to `ssh_host` and run `command`, returning a
-/// [`ReaderWriter`] over the child's stdio. `command` is split by
-/// whitespace into program + args. Dropping the returned
-/// `ReaderWriter` closes the ssh session and terminates the remote
-/// command.
+/// [`ReaderWriter`] over the child's stdio. All segments in `command`
+/// are shell-escaped. Dropping the returned `ReaderWriter` closes the
+/// ssh session and terminates the remote command.
 ///
 /// We create a separate ssh session for each connection, so when
 /// reader writer is dropped, the ssh session is closed, killing any
@@ -137,11 +136,11 @@ impl MsgChannel for SshMsgChannel {
 ///
 /// Honors `~/.ssh/config`, ssh-agent, ProxyJump, etc. via the `openssh`
 /// crate.
-pub async fn ssh_reader_writer(ssh_host: &str, command: &str) -> anyhow::Result<ReaderWriter> {
-    let command: Vec<String> = command.split_whitespace().map(String::from).collect();
+pub async fn ssh_reader_writer(ssh_host: &str, command: &[String]) -> anyhow::Result<ReaderWriter> {
     if command.is_empty() {
         return Err(anyhow!("command must not be empty"));
     }
+    let command: Vec<String> = command.to_vec();
 
     // Spawn a background task that owns the `Session` and `RemoteChild`
     // (the child borrows the session) for their entire lifetime. The

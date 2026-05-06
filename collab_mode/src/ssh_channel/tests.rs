@@ -43,7 +43,7 @@ async fn openssh_localhost_roundtrip() {
             "peer".into(),
             Transport::Ssh {
                 ssh_host: "yuan@localhost".into(),
-                command: "cat".into(),
+                command: vec!["cat".into()],
             },
             key_cert,
         )

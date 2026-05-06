@@ -717,7 +717,7 @@ impl Server {
                 state: ConnectionState::ConnectingStage2(unix_epoch_secs(), true),
                 transport_config: webchannel::TransportConfig::SshStdio {
                     ssh_host: "N/A".into(),
-                    command: "N/A".into(),
+                    command: Vec::new(),
                     projects: Vec::new(),
                 },
                 next_reconnect_stride: 1,
@@ -1961,7 +1961,7 @@ impl Server {
         next: &Next<'a>,
         host_id: ServerId,
         ssh_host: String,
-        command: String,
+        command: Vec<String>,
         projects: Vec<crate::config_man::ConfigProject>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         is_new: bool,
