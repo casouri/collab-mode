@@ -374,6 +374,7 @@ pub struct UndoResp {
 pub struct ConnectionStateEntry {
     pub host_id: ServerId,
     pub state: server::ConnectionState,
+    pub transport: TransportConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

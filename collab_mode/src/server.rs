@@ -3360,6 +3360,7 @@ impl Server {
             connections.push(message::ConnectionStateEntry {
                 host_id: host_id.clone(),
                 state: remote.state,
+                transport: remote.transport_config.clone(),
             });
         }
 
