@@ -1,7 +1,7 @@
 //! Main body of the collab server.
 //!
 //! Uses [`webchannel`] for communicating with remote servers, and
-//! [`signaling::client_new`] for communicating with the signaling server.
+//! [`crate::signaling::client_new`] for communicating with the signaling server.
 //!
 //! The main entry point is [`Server::run`], which runs in a loop and calls:
 //! - [`Server::handle_editor_message`] for messages from the editor
@@ -20,7 +20,7 @@
 //!
 //! The reconnect tick handler handles reconnect and timeout for
 //! connections. But there’s no timeout handling for editor requests,
-//! editor will handle timeout on their end.
+//! editor will handle timeout on their end anyway.
 
 use crate::config_man::{ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, InternalDoc, ServerEngine};
@@ -28,7 +28,7 @@ use crate::error::CollabError;
 use crate::message::{self, *};
 use crate::signaling::SignalingMsg;
 use crate::types::*;
-use crate::webchannel::{self, MsgChannel, WebChannel, WebChannelError};
+use crate::webchannel::{self, MsgChannel, WebChannelError};
 use anyhow::{anyhow, Context};
 use fmt_derive;
 use gapbuf::GapBuffer;
@@ -1919,7 +1919,7 @@ impl Server {
         next: &Next<'a>,
         host_id: ServerId,
         transport_config: webchannel::TransportConfig,
-        msg_tx: &mpsc::Sender<webchannel::Message>,
+        _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
         is_new: bool,
     ) {

@@ -70,7 +70,7 @@ manually for max safety.
 
 # Server implementation
 
-See [Implementation Details](implementation.md) and [Editor Message API](editor_data_contract.md).
+See [Implementation Details](crate::implementation_doc) and [Editor Request Flows](crate::editor_request_flows_doc).
 
 # OT control algorithm
 
