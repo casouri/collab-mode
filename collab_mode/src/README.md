@@ -64,25 +64,13 @@ mode, but once the connection is made and public key stored, they can
 go back to trusted-only mode. Users can also add id-key mapping
 manually for max safety.
 
-Editor plugin can auto-generate long and memorable id for users, like
-`acelice-<three>-<random>-<words>`.
-
 # Communicating with editor
 
 [crate::editor_receptor] provides a jsonrpc server that faces the editor.
 
-# Message processing
+# Server implementation
 
-The server ([crate::server]) runs a sync main loop and reads messages
-from three channels: one from editor, one from webchannel (remote
-hosts), one from signaling servers. For async operations, we basically
-use message to carry the context. and use message as continuation. For
-example, server receive editor message, process it (sync), send a
-message to remote host; remote host returns a message, server reads
-and process it (sync) and sends a message back to editor. Compare this
-to the opposite approach where server receives a editor message,
-spawns a thread to handle it, send a message to remote host and await
-on a response, then sending a message back to editor.
+See [Implementation Details](implementation.md) and [Editor Message API](editor_data_contract.md).
 
 # OT control algorithm
 

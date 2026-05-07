@@ -114,8 +114,7 @@ Lists all available projects from a server (local or remote).
 {
   "method": "ListProjects",
   "params": {
-    "hostId": "target-server-id",
-    "signalingAddr": "wss://signaling.server/path"
+    "hostId": "target-server-id"
   }
 }
 ```
@@ -173,8 +172,7 @@ Lists files within a specific directory/project.
 {
   "method": "ListFiles",
   "params": {
-    "dir": {"hostId": "server-id", "project": "myproject", "file": "src"},
-    "signalingAddr": "wss://signaling.server/path"
+    "dir": {"hostId": "server-id", "project": "myproject", "file": "src"}
   }
 }
 ```
@@ -272,6 +270,52 @@ Opens a file for editing, creating it if necessary.
 - `IoError`: If file doesn't exist (mode=Open) or can't be created (mode=Create)
 - `NotConnected`: If remote host is not connected
 - `PermissionDenied`: If remote server denies access
+
+### Make directory
+
+Creates an empty directory inside a project on the target host.
+
+**Request**
+```json
+{
+  "method": "MakeDirectory",
+  "params": {
+    "file": {"hostId": "server-id", "project": "myproject", "file": "src/newdir"}
+  }
+}
+```
+
+**Response**
+The server echoes the request back so the editor can confirm what was
+created:
+```json
+{
+  "file": {"hostId": "server-id", "project": "myproject", "file": "src/newdir"}
+}
+```
+
+**Flow**
+1. Editor sends MakeDirectory with the descriptor of the directory
+   to create.
+2. Server checks if target is local or remote.
+3. **If local**:
+   - Resolve the descriptor to a filesystem path under the project
+     root.
+   - Reject relative or escaping paths (`BadRequest`).
+   - Check the calling peer has `create` permission.
+   - `mkdir -p`-style create the directory.
+   - Echo the descriptor back as the response.
+4. **If remote**:
+   - Forward as a remote request to the host that owns the project.
+   - Remote performs the same check + create, sends a response back.
+   - Local server forwards the response to the editor.
+
+**Errors**
+- `BadRequest`: Path is absolute, escapes the project, or names a
+  reserved project (`_files`, `_buffers`).
+- `IoError`: Filesystem error (parent missing, permission, etc.).
+- `PermissionDenied`: Calling peer lacks `create` permission.
+- `NotConnected`: Remote host is not connected.
 
 ### Share file
 
@@ -812,15 +856,16 @@ This buffering mechanism ensures ops arrive in order and are processed atomicall
   "method": "AcceptConnection",
   "params": {
     "addr": "wss://signaling.server/path",
-    "transportType": "WebRTC",
     "mode": "TrustedOnly" // Optional: "All" or "TrustedOnly" (default)
   }
 }
 ```
 Starts accepting connections on the specified signaling server.
+`AcceptConnection` is signaling-server-only — the SSH/envoy transport
+doesn't bind to anything.
 
 **Accept connection flow**
-1. Editor sends AcceptConnection notification with signaling address, transport type, and optional accept mode
+1. Editor sends AcceptConnection notification with signaling address and optional accept mode
 2. Server checks if already accepting on this signaling address:
    - If yes and already bound:
      - Updates accept mode if provided
@@ -912,14 +957,33 @@ Changes the accept mode for an active signaling server connection. The server wi
   "method": "Connect",
   "params": {
     "hostId": "remote-server",
-    "signalingAddr": "wss://signaling.server/path",
-    "transportType": "WebRTC"
+    "transportConfig": {
+      "SCTP": { "signalingAddr": "wss://signaling.server/path" }
+    }
   }
 }
 ```
-Initiates connection to a remote server.
 
-After receiving a Connect notification, the server will always send a **Connected** notification to indicate the connection status:
+Initiates connection to a remote server. `transportConfig` is a tagged
+enum carrying all per-peer connection info; it should be one of:
+
+- `{ "SCTP": { "signalingAddr": ADDR } }` — connect via the
+  signaling server at ADDR. The host must already be bound on that
+  signaling server (the editor sends `AcceptConnection` first on
+  its own end).
+- `{ "SshStdio": { "sshHost": "user@host", "command": [...],
+   "projects": [...] } }` — “envoy mode”. The collab process spawns
+  `ssh user@host -- COMMAND...`; the remote command is expected to
+  end up running `collab-mode envoy`. `command` is an array (program
+  + args, each will be shell-escaped by server). `projects` is the list of
+  `{name, path}` the editor wants the envoy to expose; the envoy
+  adopts that list verbatim and trusts the spawning host with full
+  read/write/delete permissions for that session. The envoy uses an
+  ephemeral key/cert provisioned by the host, so no per-peer trust
+  setup is required.
+
+After receiving a Connect notification, the server will always send a
+**Connected** notification to indicate the connection status:
 - If the remote is already connected, the Connected notification is sent immediately.
 - If the remote is not yet connected, the Connected notification is sent after the connection is established.
 

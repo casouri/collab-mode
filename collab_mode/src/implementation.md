@@ -1,5 +1,18 @@
 # Implementation details
 
+## Message processing
+
+The server ([crate::server]) runs a sync main loop and reads messages
+from three channels: one from editor, one from webchannel (remote
+hosts), one from signaling servers. For async operations, we basically
+use message to carry the context. and use message as continuation. For
+example, server receive editor message, process it (sync), send a
+message to remote host; remote host returns a message, server reads
+and process it (sync) and sends a message back to editor. Compare this
+to the opposite approach where server receives a editor message,
+spawns a thread to handle it, send a message to remote host and await
+on a response, then sending a message back to editor.
+
 ## Connection error handling
 
 When we create a connection, we spawn a thread that listens for
