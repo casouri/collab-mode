@@ -115,29 +115,30 @@ should be the port number.")
 
 (defvar collab-known-hosts nil
   "Stores the hosts that you can connect to.
-Used to provide a list of options when connecting to remotes. Should
-have the same format as ‘collab-host-alist’. ‘collab-host-alist’ stores
-the hosts that we are currently connected to, this variable stores the
-hosts that we know how to connect to.")
 
-(defvar collab-host-alist nil
-  "An alist of host configurations.
+Used to provide a list of options when connecting to remotes.
 
 Each key is HOST-ID. Each value is a transport config — a plist whose
 single key is the transport variant, mirroring the wire shape sent to
 the collab process. One of:
 
   (:SCTP (:signalingAddr ADDR))
-    — Connect via the signaling server at ADDR (WebRTC/SCTP path).
+
+  Meaning to connect via the signaling server at ADDR.
 
   (:SshStdio (:sshHost \"user@host\"
               :command [\"collab-mode\" \"envoy\"]
               :projects [(:name \"demo\" :path \"/abs/path\") ...]))
-    — Spawn ssh and run COMMAND on the remote (envoy mode). PROJECTS
-    is the set of projects the host wants the envoy to expose.
 
-Only contains the hosts that we connect to, not hosts that connect to
-us. Don’t modify this alist by hand once collab-mode process starts.")
+  Meaning to connect by ssh on user@host and run COMMAND on the remote
+  in envoy mode. PROJECTS is the set of projects that the envoy should
+  expose.")
+
+(defvar collab--hosts-to-connect-to nil
+  "Hosts to keep connection with for this session.
+
+The value should have the same form as ‘collab-known-hosts’: an alist of
+host id and host config.")
 
 (defvar collab-hasty-p nil
   "If t, buffer changes are sent to collab process immediately.
@@ -253,13 +254,19 @@ A tooltip shows the full host-id on hover."
     ;; If pattern doesn't match, return as-is.
     host-id))
 
+(defvar collab--host-idx-hosts nil
+  "A list of hosts we encountered. Purely for ‘collab--host-idx’.")
+
 (defun collab--host-idx (host-id)
-  "Get HOST-ID’s index in ‘collab--known-hosts’.
-Add the host to the list if it doesn’t exists in it."
-  (or (seq-position collab--known-hosts host-id)
-      (setq collab--known-hosts
-            (append collab--known-hosts (list host-id)))
-      (1- (length collab--known-hosts))))
+  "Get HOST-ID’s index.
+
+Don’t worry about how the index is calculated. Just know that you can
+use the index as an unique numerical id for the host for the current
+session."
+  (or (seq-position collab--host-idx-hosts host-id)
+      (setq collab--host-idx-hosts
+            (append collab--host-idx-hosts (list host-id)))
+      (1- (length collab--host-idx-hosts))))
 
 (defmacro collab--save-excursion (&rest body)
   "Save position, execute BODY, and restore point.
@@ -270,19 +277,28 @@ Point is not restored in the face of non-local exit."
 
 ;;; Host data
 
-(defun collab--host-alist ()
-  "Return ‘collab-host-alist’ plus outselves.
+(defun collab--all-hosts (connection-state)
+  "Return the host ids reported in CONNECTION-STATE plus ourself.
 
-Don’t use this function before a connection is established, because it
-uses ‘collab--my-host-id’."
-  (cons `(,collab--my-host-id . (:SCTP (:signalingAddr "")))
-        collab-host-alist))
+CONNECTION-STATE is the full ‘ConnectionState’ response plist; we pluck
+its ‘:connections’ vector and map each entry to its host id."
+  (cons collab--my-host-id
+        (seq-map (lambda (entry) (plist-get entry :hostId))
+                 (plist-get connection-state :connections))))
 
-(defsubst collab--host-data (host-id)
-  "Get host info of HOST-ID.
+(defun collab--host-data (host-id connection-state)
+  "Return host data (transport config) of HOST-ID from CONNECTION-STATE.
 
-Gets data from ‘collab--host-alist’."
-  (alist-get host-id (collab--host-alist) nil nil #'equal))
+Return nil for local host and hosts not in CONNECTION-STATE."
+  (if (equal host-id collab--my-host-id)
+      nil
+    ;; Use ‘seq-find’ which works with arrays.
+    (let ((entry (seq-find (lambda (entry)
+                             (equal (plist-get entry :hostId) host-id))
+                           connection-state)))
+      (if entry
+          (plist-get entry :transport)
+        nil))))
 
 (defun collab--host-state (host-id connection-state)
   "Return connection state of HOST-ID in CONNECTION-STATE.
@@ -375,6 +391,30 @@ MSG should be something like “can’t do xxx”."
                 (display-warning 'collab
                                  (format "collab %s: %s" ,msg ,err)))
             (user-error "collab %s: %s" ,msg ,err)))))))
+
+(defmacro collab--catch-error-no-signal (msg &rest body)
+  "Execute BODY, catch jsonrpc errors.
+If there’s an error, print “collab MSG: ERROR-DESCRIPTION”,
+and append the error to collab error buffer (*collab errors*).
+DocFatal errors disable ‘collab-monitored-mode’ and surface as a
+warning; other errors are signaled with ‘user-error’ and leave the
+mode intact.
+MSG should be something like “can’t do xxx”."
+  (declare (indent 1) (debug (sexp &rest form)))
+  (let ((err (gensym))
+        (code (gensym)))
+    `(condition-case ,err
+         (progn
+           ,@body)
+       ((debug error)
+        (let ((,code (alist-get 'jsonrpc-error-code (cdr-safe ,err))))
+          (if (eq (alist-get ,code collab--error-code-alist) 'DocFatal)
+              (progn
+                (when collab-monitored-mode
+                  (collab--disable))
+                (display-warning 'collab
+                                 (format "collab %s: %s" ,msg ,err)))
+            (message "collab %s: %s" ,msg ,err)))))))
 
 (defvar collab--jsonrpc-connection)
 (defvar collab--file)
@@ -485,9 +525,6 @@ If MARK non-nil, show active region."
 (defvar collab--events nil
   "A list of events for display.
 Each event is a string.")
-
-(defvar collab--known-hosts nil
-  "A list hosts connected to us or we connected to in this session.")
 
 ;; Used for debugging.
 (defvar collab--pause-auto-update nil
@@ -976,8 +1013,7 @@ buffer shouldn’t already be in monitored mode."
         (conn-state
          (plist-get
           (collab--use-query 'ConnectionState
-                             (lambda ()
-                               (collab--connection-state-req))
+                             #'collab--connection-state-req
                              30)
           :data)))
     ;; THIS-FILE-PATH will be nil for directories.
@@ -1209,19 +1245,19 @@ If we receive a ServerError notification, just display a warning."
      (collab--hub-rerender))
     ('Connected
      (collab--refetch 'ConnectionState #'collab--connection-state-req)
-     (let* ((host-id (plist-get params :hostId))
-            (hub-buffer (collab--hub-buffer)))
+     (let ((host-id (plist-get params :hostId))
+           (hub-buffer (collab--hub-buffer)))
        ;; Send an async list files request and update collab hub. This
        ;; might be unnecessary but it doesn’t hurt. But don’t send
        ;; files list request if it’s just from a remote that connected
-       ;; to US.
-       (when (alist-get host-id (collab--host-alist) nil nil #'equal)
-         (when (buffer-live-p hub-buffer)
-           (collab--list-files-req
-            nil host-id
-            (lambda (status resp)
-              ;; This calls ‘collab--hub-rerender’.
-              (collab--list-files-callback host-id nil status resp)))))
+       ;; to US — those won’t be in our address book.
+       (when (and (buffer-live-p hub-buffer)
+                  (assoc host-id collab-known-hosts))
+         (collab--list-files-req
+          nil host-id
+          (lambda (status resp)
+            ;; This calls ‘collab--hub-rerender’.
+            (collab--list-files-callback host-id nil status resp))))
        ;; Open the doc we were trying to open before connecting.
        (when (and collab--open-this-doc
                   (equal host-id (car collab--open-this-doc)))
@@ -1467,9 +1503,8 @@ collab process pick its default."
 (defun collab--connect-notif (host-id host-data)
   "Connect to HOST-ID using transport info from HOST-DATA.
 
-HOST-DATA is the value of an entry in `collab-host-alist'. It already
-matches the wire shape of a `transportConfig', so we just pass it
-through. See `collab-host-alist' for the supported shapes."
+HOST-DATA is the value of an entry in `collab-known-hosts', matching the
+wire shape of a `transportConfig'."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'Connect
                     `(:hostId ,host-id :transportConfig ,host-data))))
@@ -1703,18 +1738,20 @@ Call QUERY-FN to fetch data if:
 - There’s no cached data
 
 Returns a plist of (:data DATA :error ERROR :fetch-time TIMESTAMP)."
-  (let* ((cached-data (gethash 'ConnectionState collab--cached-responses))
+  (let* ((cached-data (gethash key collab--cached-responses))
          (fetch-time (plist-get cached-data :fetch-time)))
     (when (or (memq :error cached-data)
               (and fetch-time
                    (> (time-to-seconds (time-since fetch-time)) stale-time))
               (null cached-data))
       (collab--refetch key query-fn))
-    (gethash 'ConnectionState collab--cached-responses)))
+    (gethash key collab--cached-responses)))
 
 (defun collab--refetch (key query-fn)
   "Run QUERY-FN and save the result under KEY in ‘collab--cached-responses’.
-Key can be any object."
+
+Key can be any object. Return the result. The returned value is
+either (:data RESPONSE) or (:error ERROR)."
   (condition-case err
       (progn
         (let ((resp (funcall query-fn)))
@@ -1921,7 +1958,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
                      (gethash 'Connected collab--cached-responses)
                      :data))
          (accepting (plist-get conn-state-data :accepting))
-         (hosts (mapcar #'car (collab--host-alist)))
+         (hosts (collab--all-hosts conn-state-data))
          (current-message (gethash 'CurrentMessage collab--cached-responses)))
     ;; 1. Insert headers.
     (insert "Connection: ")
@@ -2003,10 +2040,8 @@ PRESS \\[collab--toggle-accept-connection] TO TOGGLE ACCEPTING REMOTE CONNECTION
 
 (defun collab--hub-refetch ()
   "Recompute data for collab hub."
-  (let (connected connection-state)
-
+  (let (connected connection-state fetched)
     (puthash 'CurrentMessage nil collab--cached-responses)
-
     (setq connected (condition-case nil
                         (progn
                           (collab--connect-process)
@@ -2014,24 +2049,29 @@ PRESS \\[collab--toggle-accept-connection] TO TOGGLE ACCEPTING REMOTE CONNECTION
                       (error nil)))
     (puthash 'Connected `(:data ,connected) collab--cached-responses)
 
-    (collab--refetch 'ConnectionState
-                     (lambda ()
-                       (collab--connection-state-req)))
-
-    (dolist (entry (collab--host-alist))
-      (let* ((host-id (car entry))
-             (host-data (cdr entry))
-             (state (collab--host-state host-id connection-state)))
-        (when connected
-          (if (equal state "Connected")
-              ;; Connected, get files async.
-              (collab--list-files-req
-               nil host-id
-               (lambda (status resp)
-                 (collab--list-files-callback host-id nil status resp)))
-            ;; Not connected, connect first.
-            (unless (equal host-id collab--my-host-id)
-              (collab--connect-notif host-id host-data))))))))
+    (setq connection-state
+          (plist-get (collab--refetch
+                      'ConnectionState #'collab--connection-state-req)
+                     :data))
+    (when (and connected connection-state)
+      ;; Fetch file list for connected hosts.
+      (seq-doseq (entry (plist-get connection-state :connections))
+        (let ((host-id (plist-get entry :hostId))
+              (state (plist-get entry :state)))
+          (push host-id fetched)
+          (when (equal state "Connected")
+            ;; Connected, get files async.
+            (collab--list-files-req
+             nil host-id
+             (lambda (status resp)
+               (collab--list-files-callback host-id nil status resp))))))
+      ;; If any host in ‘collab--hosts-to-connect-to’ isn’t connected,
+      ;; try to connect to it.
+      (dolist (host collab--hosts-to-connect-to)
+        (let ((host-id (car host))
+              (host-data (cdr host)))
+          (when (not (member host-id fetched))
+            (collab--connect-notif host-id host-data)))))))
 
 ;;;; Docs listing
 
@@ -2359,11 +2399,18 @@ Returned path doesn't have trailing slash even if it's a directory."
 
 SEGMENTS is a list of path segments. DIR-P is t if SEGMENTS is meant to
 be a directory (the original path string ends with slash)."
-  (let ((append-slash (lambda (str) (concat str "/"))))
+  (let ((append-slash (lambda (str) (concat str "/")))
+        (conn-state (plist-get
+                     (collab--use-query 'ConnectionState
+                                        #'collab--connection-state-req
+                                        30)
+                     :data)))
+    (when (not conn-state)
+      (user-error "Not connected to collab process"))
     (if (eq (length segments) 0)
         (seq-map append-slash
                  (seq-map #'collab--prettify-host-id
-                          (collab--get-available-hosts)))
+                          (collab--all-hosts conn-state)))
       (condition-case nil
           (let* ((host (car segments))
                  (file-desc (pcase (length segments)
@@ -2406,9 +2453,6 @@ PRED and FLAG see manual."
       ('metadata '(metadata (category . file)))
       (_ nil))))
 
-(defun collab--get-available-hosts ()
-  "Return a list of available host IDs."
-  (mapcar #'car (collab--host-alist)))
 
 (defun collab--open-thing-at-point ()
   "Open the file at point.
@@ -2694,7 +2738,7 @@ If called interactively, uses the current buffer's FILE-DESC."
   "Disconnect current buffer, returning it to a regular buffer."
   (interactive)
   (collab--check-precondition)
-  (collab--catch-error
+  (collab--catch-error-no-signal
       (format "can't disconnect from %s" (collab--encode-filename collab--file))
     (collab--disconnect-from-file-req collab--file))
   (collab--disable)
@@ -2720,23 +2764,19 @@ If called interactively, uses the current buffer's FILE-DESC."
   "Connect to a known remote or with a share link.
 
 Prompt for a remote host to connect to. Select the sepcial “By share
-link” option to connect by a share link. If there’s no known hosts to
-connect to, skip to prompt for share link."
+link” option to connect by a share link."
   (interactive)
-  (let* ((connected (mapcar #'car collab-host-alist))
-         (not-connected (seq-difference (mapcar #'car collab-known-hosts)
-                                        connected))
-         (choices (cons "By share link" not-connected)))
-    (when (> (length choices) 1)
-      (let* ((choice (completing-read "Connect to: " choices nil t))
-             (link (if (equal choice by-link)
-                       (read-string "Share link: ")
-                     (let* ((data (cdr (assoc choice collab-known-hosts)))
-                            (signaling (plist-get (plist-get data :SCTP)
-                                                  :signalingAddr)))
-                       (format "%s/%s" signaling choice)))))
-        (collab-connect link))
-      (call-interactively #'collab-connect))))
+  (let* ((by-link "By share link")
+         (hosts (mapcar #'car collab-known-hosts))
+         (choices (cons by-link hosts))
+         (choice (completing-read "Connect to: " choices nil t))
+         (link (if (equal choice by-link)
+                   (read-string "Share link: ")
+                 (let* ((data (cdr (assoc choice collab-known-hosts)))
+                        (signaling (plist-get (plist-get data :SCTP)
+                                              :signalingAddr)))
+                   (format "%s/%s" signaling choice)))))
+    (collab-connect link)))
 
 ;;;###autoload
 (defun collab-connect (share-link)
@@ -2756,9 +2796,14 @@ SHARE-LINK should be in the form of signaling-server/host-id/#/doc-id."
                    (string-join (seq-subseq segments 3) "/")
                  nil)))
 
-    (unless (alist-get host-id collab-host-alist nil nil #'equal)
-      (push (cons host-id (list :SCTP (list :signalingAddr signaling-addr)))
-            collab-host-alist))
+    (let ((entry (cons host-id
+                       (list :SCTP
+                             (list :signalingAddr signaling-addr)))))
+      (unless (alist-get host-id collab-known-hosts nil nil #'equal)
+        (push entry collab-known-hosts))
+      (unless (alist-get host-id collab--hosts-to-connect-to
+                         nil nil #'equal)
+        (push entry collab--hosts-to-connect-to)))
 
     (if (equal host-id collab--my-host-id)
         ;; TODO fairy.
