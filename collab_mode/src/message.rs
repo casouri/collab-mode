@@ -204,7 +204,6 @@ pub struct DeclareProjectsParams {
 #[serde(rename_all = "camelCase")]
 pub struct ListProjectsParams {
     pub host_id: ServerId,
-    pub signaling_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -230,7 +229,7 @@ pub struct ListFilesEntry {
     pub meta: JsonMap,
 }
 
-// **** OpenFile & CreateFile
+// **** OpenFile & MakeDirectory
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +253,14 @@ pub struct OpenFileResp {
     pub filename: String,
     pub file: EditorFileDesc,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MakeDirectoryParams {
+    pub file: EditorFileDesc,
+}
+
+pub type MakeDirectoryResp = MakeDirectoryParams;
 
 // **** MoveFile
 
@@ -474,6 +481,8 @@ pub enum Msg {
         after: GlobalSeq,
     },
     RequestFile(FileDesc, OpenMode),
+    MakeDirectory(FileDesc),
+    DirectoryMade(FileDesc),
     MoveFile {
         project: ProjectId,
         source: String,

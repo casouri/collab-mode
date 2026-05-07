@@ -653,10 +653,9 @@ pub async fn setup_hub_and_spoke_servers(
         let signaling_factory = signaling_factory.clone();
         let hub_id_for_factory = hub_id.clone();
         tokio::spawn(async move {
-            let web_factory: crate::server::WebChannelFactory =
-                Box::new(move |msg_tx, self_tx| {
-                    Arc::new(factory_arc.get_channel(hub_id_for_factory, msg_tx, self_tx))
-                });
+            let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
+                Arc::new(factory_arc.get_channel(hub_id_for_factory, msg_tx, self_tx))
+            });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
             if let Err(e) = hub_server
@@ -717,16 +716,10 @@ pub async fn setup_hub_and_spoke_servers(
             tokio::spawn(async move {
                 let web_factory: crate::server::WebChannelFactory =
                     Box::new(move |msg_tx, self_tx| {
-                        Arc::new(factory_arc.get_channel(
-                            spoke_id_for_factory,
-                            msg_tx,
-                            self_tx,
-                        ))
+                        Arc::new(factory_arc.get_channel(spoke_id_for_factory, msg_tx, self_tx))
                     });
                 let sig_factory: crate::server::SignalingChannelFactory =
-                    Box::new(move |sig_msg_tx| {
-                        Box::new(signaling_factory.get_channel(sig_msg_tx))
-                    });
+                    Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
                 if let Err(e) = spoke_server
                     .run(spoke_tx, spoke_rx, web_factory, sig_factory)
                     .await
@@ -890,6 +883,7 @@ mod envoy;
 mod list_files;
 mod list_projects;
 mod local_remote_ops;
+mod make_directory;
 mod open_file;
 mod send_info;
 mod send_ops;

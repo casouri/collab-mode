@@ -1149,6 +1149,15 @@ impl Server {
                     .await?;
                 Ok(())
             }
+            "MakeDirectory" => {
+                let params: MakeDirectoryParams = serde_json::from_value(req.params)?;
+                let host_id = params.file.host_id().clone();
+                if !self.check_connection(next, &host_id).await {
+                    return Ok(());
+                }
+                self.make_directory_from_editor(next, params.file).await?;
+                Ok(())
+            }
             "SendOps" => {
                 let params: SendOpsParams = serde_json::from_value(req.params)?;
                 self.handle_send_ops_from_editor(next, params).await?;
@@ -1575,6 +1584,51 @@ impl Server {
                 } else {
                     tracing::warn!("Received Snapshot without req_id, ignoring");
                 }
+                Ok(())
+            }
+            Msg::MakeDirectory(file_desc) => {
+                if !self.config.write_allowed(&msg.host) {
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::PermissionDenied("Write permission denied".to_string()),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                let (project, file) = match &file_desc {
+                    FileDesc::ProjectFile { project, file } => (project.clone(), file.clone()),
+                    FileDesc::Project { id } => {
+                        let reply = Msg::ErrorResp {
+                            code: ErrorCode::BadRequest,
+                            file: Some(file_desc.clone()),
+                            message: format!("Cannot create project root as directory: {}", id),
+                        };
+                        next.send_to_remote(&msg.host, reply).await;
+                        return Ok(());
+                    }
+                };
+                let res = self.make_directory_on_disk(&project, &file).await;
+                let reply = if let Err(err) = res {
+                    Msg::ErrorResp {
+                        code: ErrorCode::IoError,
+                        file: Some(file_desc),
+                        message: err.to_string(),
+                    }
+                } else {
+                    Msg::DirectoryMade(file_desc)
+                };
+                next.send_to_remote(&msg.host, reply).await;
+                Ok(())
+            }
+            Msg::DirectoryMade(file_desc) => {
+                if msg.req_id.is_none() {
+                    tracing::warn!("Received DirectoryMade without req_id, ignoring");
+                    return Ok(());
+                }
+                let resp = MakeDirectoryResp {
+                    file: EditorFileDesc::new(file_desc, msg.host.clone()),
+                };
+                next.send_resp(resp, None).await;
                 Ok(())
             }
             Msg::OpFromClient(context_ops) => {
@@ -2116,12 +2170,9 @@ impl Server {
         }
     }
 
-    // If host_id is not us, delegate to remote, if it’s us, handle
-    // ourselves: if in attached mode, respond with empty because
-    // editor should be the source of truth so why ur asking me man??
-    // In non-attached mode read files from disk. If dir is None, list
-    // top-level projects and docs, if dir non-nil, list files in that
-    // dir.
+    // If host_id is not us, delegate to remote, if it’s us, read
+    // files from disk. If dir is None, list top-level projects and
+    // docs, if dir non-nil, list files in that dir.
     async fn list_files_from_editor<'a>(
         &mut self,
         next: &Next<'a>,
@@ -2574,6 +2625,58 @@ impl Server {
         // Don’t have it opened, send request to remote.
         let msg = Msg::RequestFile(file_desc.clone().into(), mode);
         next.send_to_remote(&file_desc.host_id(), msg).await;
+        Ok(())
+    }
+
+    async fn make_directory_from_editor<'a>(
+        &mut self,
+        next: &Next<'a>,
+        file_desc: EditorFileDesc,
+    ) -> anyhow::Result<()> {
+        if &self.host_id == file_desc.host_id() {
+            // Local.
+            let res = self
+                .make_directory_on_disk(&file_desc.project, &file_desc.file)
+                .await;
+            if let Err(err) = res {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: err.to_string(),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+                return Ok(());
+            }
+            let resp = MakeDirectoryResp { file: file_desc };
+            next.send_resp(resp, None).await;
+            return Ok(());
+        }
+
+        // Remote.
+        let msg = Msg::MakeDirectory(file_desc.clone().into());
+        next.send_to_remote(&file_desc.host_id(), msg).await;
+        Ok(())
+    }
+
+    async fn make_directory_on_disk(
+        &self,
+        project_id: &ProjectId,
+        rel_path: &str,
+    ) -> anyhow::Result<()> {
+        if project_id == RESERVED_BUFFERS_PROJECT || project_id == RESERVED_FILES_PROJECT {
+            return Err(anyhow!(
+                "Cannot create directory in reserved project {}",
+                project_id
+            ));
+        }
+        let project = self
+            .projects
+            .get(project_id)
+            .ok_or_else(|| anyhow!("Project {} not found", project_id))?;
+        let full_path = std::path::PathBuf::from(&project.root).join(rel_path);
+
+        std::fs::create_dir_all(&full_path)
+            .with_context(|| format!("Failed to create directory: {}", full_path.display()))?;
         Ok(())
     }
 

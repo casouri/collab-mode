@@ -31,10 +31,9 @@ async fn test_accept_connect() {
         let signaling_factory = signaling_factory.clone();
         let id1 = id1.clone();
         tokio::spawn(async move {
-            let web_factory: crate::server::WebChannelFactory =
-                Box::new(move |msg_tx, self_tx| {
-                    Arc::new(factory_arc.get_channel(id1, msg_tx, self_tx))
-                });
+            let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
+                Arc::new(factory_arc.get_channel(id1, msg_tx, self_tx))
+            });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
             if let Err(e) = server1
@@ -51,10 +50,9 @@ async fn test_accept_connect() {
         let signaling_factory = signaling_factory.clone();
         let id2 = id2.clone();
         tokio::spawn(async move {
-            let web_factory: crate::server::WebChannelFactory =
-                Box::new(move |msg_tx, self_tx| {
-                    Arc::new(factory_arc.get_channel(id2, msg_tx, self_tx))
-                });
+            let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
+                Arc::new(factory_arc.get_channel(id2, msg_tx, self_tx))
+            });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
             if let Err(e) = server2
