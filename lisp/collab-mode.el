@@ -811,7 +811,7 @@ To prevent them from being invoked."
                 #'collab--warn-for-unsupported-undo)
     ;; Other commands
     (define-key map [remap save-buffer] #'collab-save-buffer)
-    ;; (define-key map [remap find-file] #'collab-find-file)
+    (define-key map [remap find-file] #'collab-find-file-bifurcated)
     map)
   "Keymap for ‘collab-monitored-mode’.")
 
@@ -2159,7 +2159,7 @@ immediately."
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
 
-    (define-key map [remap find-file] #'collab-find-file)
+    (define-key map [remap find-file] #'collab-find-file-bifurcated)
     map)
   "Keymap for ‘collab-dired-mode’.")
 
@@ -2569,6 +2569,21 @@ Uses ‘collab--default-directory’ as initial input."
           (collab--open-thing parsed
                               (file-name-nondirectory path)
                               nil))))))
+
+(defun collab-find-file-bifurcated ()
+  "Find and open a collab file.
+
+Use ‘find-file’ for local files. Use ‘collab-find-file’ for remote
+files. Uses ‘collab--default-directory’ as initial input."
+  (interactive)
+  (let ((file-desc (and collab--default-directory
+                        (collab--parse-filename
+                         collab--default-directory))))
+    (cond
+     ((and file-desc (collab--file-local-p file-desc))
+      (call-interactively #'find-file))
+     (t
+      (call-interactively #'collab-find-file)))))
 
 ;;;###autoload
 (defun collab-hub ()
