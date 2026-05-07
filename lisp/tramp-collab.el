@@ -6,6 +6,8 @@
 
 ;;; Commentary:
 
+;; Disclosure: this file is mostly llm-coded.
+
 ;; A minimal Tramp backend that exposes collab-mode’s remote files as a
 ;; regular Emacs filesystem.  The path syntax is
 ;;
@@ -34,24 +36,7 @@
 (require 'tramp)
 (require 'tramp-cache)
 (require 'jsonrpc)
-
-;; Forward declarations — collab-mode loads this file at the end of its
-;; own load, so all of these are bound by the time anything here runs.
-;; We avoid (require 'collab-mode) to break the load cycle.
-(defvar collab--jsonrpc-connection)
-(defvar collab--my-host-id)
-(defvar collab--file)
-(defvar collab-monitored-mode)
-(defvar collab-host-alist)
-(declare-function collab--make-file-desc "collab-mode")
-(declare-function collab--host-alist "collab-mode")
-(declare-function collab--host-state "collab-mode")
-(declare-function collab--connection-state-req "collab-mode")
-(declare-function collab--list-files-req "collab-mode")
-(declare-function collab--open-file-req "collab-mode")
-(declare-function collab--save-file-req "collab-mode")
-(declare-function collab--enable "collab-mode")
-(declare-function collab--encode-filename "collab-mode")
+(require 'collab-mode)
 
 (defconst tramp-collab-method "collab"
   "Tramp method name for the collab backend.")
@@ -93,14 +78,14 @@ may be empty strings."
 
 (defun tramp-collab--connected-p (host-id)
   "Return non-nil if HOST-ID is currently usable as a collab remote.
-We never auto-spawn the collab process from a Tramp call: if the
-JSONRPC connection is not already up, the remote is treated as
-unavailable."
+
+The local host is treated as unavailable, so that hosted files are
+opened via their normal paths, not through Tramp."
   (cond
    ((or (null collab--jsonrpc-connection)
         (not (jsonrpc-running-p collab--jsonrpc-connection)))
     nil)
-   ((equal host-id collab--my-host-id) t)
+   ((equal host-id collab--my-host-id) nil)
    (t
     (condition-case nil
         (equal "Connected"
@@ -113,6 +98,7 @@ unavailable."
 
 (defun tramp-collab--list-files (vec)
   "Return the listing for the directory at VEC.
+
 For the host root this is the project list; for a project root or
 subdirectory this is the file/dir listing.  Returns the raw
 ListFiles/ListProjects entries (a vector of plists) or nil when
@@ -124,16 +110,12 @@ unavailable.  Cached per (host, localname)."
       (with-tramp-file-property vec localname "list-files"
         (condition-case nil
             (let* ((file-desc (tramp-collab--vec-file-desc vec))
-                   (host-data (alist-get host (collab--host-alist)
-                                         nil nil #'equal))
-                   (signaling (or (nth 0 host-data) ""))
-                   (credential (or (nth 1 host-data) ""))
-                   ;; Empty project ⇒ host root ⇒ ListProjects.
+                   ;; If project is empty, we’re at root, list
+                   ;; projects by sending null file desc.
                    (dir (if (equal "" (plist-get file-desc :project))
                             nil
                           file-desc))
-                   (resp (collab--list-files-req
-                          dir host signaling credential)))
+                   (resp (collab--list-files-req dir host)))
               (plist-get resp :files))
           (error nil))))))
 
@@ -198,6 +180,19 @@ Return the matching entry plist or nil."
       (when-let* ((entry (tramp-collab--lookup-entry v)))
         (tramp-collab--entry-attrs entry))))))
 
+(defun tramp-collab-file-equal-p (file-desc)
+  "Return non-nil if the current buffer is collab-monitored on FILE-DESC.
+Matches when ‘collab-monitored-mode’ is on and the buffer-local
+‘collab--file’ refers to the same host, project, and file."
+  (and collab-monitored-mode
+       collab--file
+       (equal (plist-get collab--file :hostId)
+              (plist-get file-desc :hostId))
+       (equal (plist-get collab--file :project)
+              (plist-get file-desc :project))
+       (equal (plist-get collab--file :file)
+              (plist-get file-desc :file))))
+
 (defun tramp-collab--filter-and-sort (names match nosort count)
   "Apply MATCH/NOSORT/COUNT to NAMES (a list of strings)."
   (let* ((filtered (if match
@@ -213,7 +208,10 @@ Return the matching entry plist or nil."
     (when (tramp-collab--connected-p host)
       (let* ((entries (tramp-collab--list-files v))
              (names (mapcar (lambda (e) (plist-get e :filename)) entries))
-             (with-dots (append '("." "..") names))
+             (dots (if (tramp-collab--at-host-root-p localname)
+                       '(".")
+                     '("." "..")))
+             (with-dots (append dots names))
              (result (tramp-collab--filter-and-sort
                       with-dots match nosort count))
              (dir (file-name-as-directory directory)))
@@ -246,9 +244,11 @@ Return the matching entry plist or nil."
                        (cons (plist-get e :filename)
                              (tramp-collab--entry-attrs e)))
                      entries))
-             (all (append (list (cons "." (tramp-collab--dir-attrs))
-                                (cons ".." (tramp-collab--dir-attrs)))
-                          pairs))
+             (dots (if (tramp-collab--at-host-root-p localname)
+                       (list (cons "." (tramp-collab--dir-attrs)))
+                     (list (cons "." (tramp-collab--dir-attrs))
+                           (cons ".." (tramp-collab--dir-attrs)))))
+             (all (append dots pairs))
              (filtered (if match
                            (seq-filter (lambda (p)
                                          (string-match-p match (car p)))
@@ -268,8 +268,7 @@ Return the matching entry plist or nil."
 (defun tramp-collab-handle-insert-file-contents
     (filename &optional visit beg end replace)
   "Insert contents of collab FILENAME into the current buffer.
-After inserting, if the buffer isn’t already collab-monitored,
-flip it into ‘collab-monitored-mode’ using the OpenFile response."
+After inserting, move to point-min and enable ‘collab-monitored-mode’."
   (barf-if-buffer-read-only)
   (let ((expanded (expand-file-name filename)))
     (with-parsed-tramp-file-name expanded nil
@@ -293,7 +292,7 @@ flip it into ‘collab-monitored-mode’ using the OpenFile response."
           (setq buffer-file-name expanded)
           (set-buffer-modified-p nil)
           (set-visited-file-modtime))
-        (unless (bound-and-true-p collab-monitored-mode)
+        (unless collab-monitored-mode
           (condition-case err
               (collab--enable resp-fd site-id
                               (collab--encode-filename resp-fd))
@@ -303,26 +302,17 @@ flip it into ‘collab-monitored-mode’ using the OpenFile response."
 
 (defun tramp-collab-handle-write-region
     (_start _end filename &optional _append visit _lockname _mustbenew)
-  "Persist collab FILENAME via SaveFile.
-Buffer contents are intentionally ignored — collab already holds
-the authoritative document via ops.  If the current buffer is not
-the live collab-monitored buffer for FILENAME, signal a file-error
-rather than silently saving stale remote state."
+  "Just send a SaveFile request since buffer edits are synced in real time.
+
+If the current buffer is not the live collab-monitored buffer for
+FILENAME, signal a file-error."
   (let ((expanded (expand-file-name filename)))
     (with-parsed-tramp-file-name expanded nil
       (when (not (tramp-collab--connected-p host))
         (signal 'file-error
                 (list "Collab host not connected" host expanded)))
       (let ((file-desc (tramp-collab--vec-file-desc v)))
-        (when (not (and (bound-and-true-p collab-monitored-mode)
-                        (boundp 'collab--file)
-                        collab--file
-                        (equal (plist-get collab--file :hostId)
-                               (plist-get file-desc :hostId))
-                        (equal (plist-get collab--file :project)
-                               (plist-get file-desc :project))
-                        (equal (plist-get collab--file :file)
-                               (plist-get file-desc :file))))
+        (when (not (tramp-collab-file-equal-p file-desc))
           (signal 'file-error
                   (list "write-region without collab monitor" expanded)))
         (collab--save-file-req file-desc)
@@ -404,7 +394,7 @@ file-error, e.g. for delete-file/copy-file/rename-file).")
 (defsubst tramp-collab-file-name-p (vec-or-filename)
   "Check whether VEC-OR-FILENAME is handled by the collab backend."
   (when-let* ((vec (tramp-ensure-dissected-file-name vec-or-filename)))
-    (string= (tramp-file-name-method vec) tramp-collab-method)))
+    (equal (tramp-file-name-method vec) tramp-collab-method)))
 
 ;;;###tramp-autoload
 (defun tramp-collab-file-name-handler (operation &rest args)
@@ -416,18 +406,16 @@ file-error, e.g. for delete-file/copy-file/rename-file).")
 ;;;; Host completion
 
 (defun tramp-collab--parse-hosts (&optional _filename)
-  "Return collab hosts as a list of (USER HOST) tuples for completion.
-The list is the union of ‘collab-host-alist’ keys and the local
-host id when known.  Returns nil if collab-mode hasn’t loaded yet."
-  (when (boundp 'collab-host-alist)
-    (let ((hosts (mapcar #'car collab-host-alist)))
-      (when (and (boundp 'collab--my-host-id) collab--my-host-id)
-        (cl-pushnew collab--my-host-id hosts :test #'equal))
-      (mapcar (lambda (h) (list nil h)) hosts))))
+  "Return remote collab hosts as a list of (USER HOST) tuples.
 
-;; Register directly: tramp.el has already fully loaded (because we
-;; (require 'tramp) at the top of this file), so the tramp--with-startup
-;; hook has already fired and adding to it now would be a no-op.
+Hosts taken from ‘collab-host-alist’. Local host is excluded because we
+want to open loacal files in normal ‘find-file’."
+  (mapcar (lambda (host) (list nil host))
+          (seq-remove (lambda (host) (equal host collab--my-host-id))
+                      (mapcar #'car collab-host-alist))))
+
+;;; Setup
+
 (add-to-list 'tramp-methods `(,tramp-collab-method))
 (tramp-register-foreign-file-name-handler
  #'tramp-collab-file-name-p #'tramp-collab-file-name-handler)
