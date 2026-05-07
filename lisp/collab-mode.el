@@ -113,6 +113,13 @@ The value can be ‘pipe’, meaning use stdio for connection,
 or (socket PORT), meaning using a socket connection, and PORT
 should be the port number.")
 
+(defvar collab-known-hosts nil
+  "Stores the hosts that you can connect to.
+Used to provide a list of options when connecting to remotes. Should
+have the same format as ‘collab-host-alist’. ‘collab-host-alist’ stores
+the hosts that we are currently connected to, this variable stores the
+hosts that we know how to connect to.")
+
 (defvar collab-host-alist nil
   "An alist of host configurations.
 
@@ -1172,11 +1179,6 @@ If we receive a ServerError notification, just display a warning."
             (when (buffer-live-p buf)
               (with-current-buffer buf
                 (collab--move-cursor host-id pos mark))))))))
-    ;; ('ServerError
-    ;;  (display-warning
-    ;;   'collab
-    ;;   (format "Local host errored, you might want to restart collab process. Cause: %s"
-    ;;           params)))
     ('AcceptStopped
      (with-current-buffer (collab--hub-buffer)
        (collab--msg-event
@@ -1227,6 +1229,9 @@ If we receive a ServerError notification, just display a warning."
                       collab--open-this-doc))
            (setq collab--open-this-doc nil)
            (collab--open-thing file-desc filename directory-p)))))
+    ('FailedToConnect
+     ;; TODO
+     )
     ('ConnectionBroke
      (let* ((host-id (plist-get params :hostId))
             (reason (plist-get params :reason))
@@ -1244,6 +1249,9 @@ If we receive a ServerError notification, just display a warning."
      ;; very soon.
      )
     ('FileListUpdated
+     ;; TODO
+     )
+    ('FileMoved
      ;; TODO
      )
     ('FileDeleted
@@ -1272,8 +1280,6 @@ If we receive a ServerError notification, just display a warning."
     ('UnimportantError
      (collab--msg-event 'info (plist-get params :message) 'no-message))
     ('InternalError
-     (collab--msg-event 'error (plist-get params :message)))
-    ('NetworkError
      (collab--msg-event 'error (plist-get params :message)))
     ('ErrorResponse
      (let* ((file (plist-get params :file))
@@ -2708,6 +2714,29 @@ If called interactively, uses the current buffer's FILE-DESC."
                           (collab--encode-filename file-desc))))
         (kill-new link)
         (message (collab--fairy "Copied link to clipboard for ya (%s)" link))))))
+
+;;;###autoload
+(defun collab-connect-remote ()
+  "Connect to a known remote or with a share link.
+
+Prompt for a remote host to connect to. Select the sepcial “By share
+link” option to connect by a share link. If there’s no known hosts to
+connect to, skip to prompt for share link."
+  (interactive)
+  (let* ((connected (mapcar #'car collab-host-alist))
+         (not-connected (seq-difference (mapcar #'car collab-known-hosts)
+                                        connected))
+         (choices (cons "By share link" not-connected)))
+    (when (> (length choices) 1)
+      (let* ((choice (completing-read "Connect to: " choices nil t))
+             (link (if (equal choice by-link)
+                       (read-string "Share link: ")
+                     (let* ((data (cdr (assoc choice collab-known-hosts)))
+                            (signaling (plist-get (plist-get data :SCTP)
+                                                  :signalingAddr)))
+                       (format "%s/%s" signaling choice)))))
+        (collab-connect link))
+      (call-interactively #'collab-connect))))
 
 ;;;###autoload
 (defun collab-connect (share-link)
