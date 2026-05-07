@@ -116,11 +116,21 @@ should be the port number.")
 (defvar collab-host-alist nil
   "An alist of host configurations.
 
-Each key is HOST-ID, each value is (SIGNALING-SERVER-ADDR
-CREDENTIAL).
+Each key is HOST-ID. Each value is a transport config — a plist whose
+single key is the transport variant, mirroring the wire shape sent to
+the collab process. One of:
 
-Only contains the host that we connect to, not hosts that connects to
-us.")
+  (:SCTP (:signalingAddr ADDR))
+    — Connect via the signaling server at ADDR (WebRTC/SCTP path).
+
+  (:SshStdio (:sshHost \"user@host\"
+              :command [\"collab-mode\" \"envoy\"]
+              :projects [(:name \"demo\" :path \"/abs/path\") ...]))
+    — Spawn ssh and run COMMAND on the remote (envoy mode). PROJECTS
+    is the set of projects the host wants the envoy to expose.
+
+Only contains the hosts that we connect to, not hosts that connect to
+us. Don’t modify this alist by hand once collab-mode process starts.")
 
 (defvar collab-hasty-p nil
   "If t, buffer changes are sent to collab process immediately.
@@ -258,7 +268,7 @@ Point is not restored in the face of non-local exit."
 
 Don’t use this function before a connection is established, because it
 uses ‘collab--my-host-id’."
-  (cons `(,collab--my-host-id . ("" "" t))
+  (cons `(,collab--my-host-id . (:SCTP (:signalingAddr "")))
         collab-host-alist))
 
 (defsubst collab--host-data (host-id)
@@ -1087,7 +1097,6 @@ Return nil if there’s no parent."
                      (nth 1 collab-local-host-config))
             (jsonrpc-notify conn 'AcceptConnection
                             `( :addr ,(nth 1 collab-local-host-config)
-                               :transportType "SCTP"
                                :mode "TrustedOnly")))
 
           (when collab--jsonrpc-connection
@@ -1199,8 +1208,7 @@ If we receive a ServerError notification, just display a warning."
     ('Connected
      (collab--refetch 'ConnectionState #'collab--connection-state-req)
      (let* ((host-id (plist-get params :hostId))
-            (hub-buffer (collab--hub-buffer))
-            (host-data (collab--host-data host-id)))
+            (hub-buffer (collab--hub-buffer)))
        ;; Send an async list files request and update collab hub. This
        ;; might be unnecessary but it doesn’t hurt. But don’t send
        ;; files list request if it’s just from a remote that connected
@@ -1208,7 +1216,7 @@ If we receive a ServerError notification, just display a warning."
        (when (alist-get host-id (collab--host-alist) nil nil #'equal)
          (when (buffer-live-p hub-buffer)
            (collab--list-files-req
-            nil host-id (car host-data) (cadr host-data)
+            nil host-id
             (lambda (status resp)
               ;; This calls ‘collab--hub-rerender’.
               (collab--list-files-callback host-id nil status resp)))))
@@ -1291,13 +1299,11 @@ If we receive a ServerError notification, just display a warning."
 
 ;;;; Requests
 
-(defun collab--list-files-req
-    (dir host signaling-server credential &optional callback)
-  "Request for files on HOST with CREDENTIAL.
+(defun collab--list-files-req (dir host &optional callback)
+  "Request for files on HOST.
 
 If DIR is non-nil, it should be the FILE-DESC of the directory we want
-to list. ‘collab--make-file-desc’ can create it. SIGNALING-SERVER is the
-address of the signaling server.
+to list. ‘collab--make-file-desc’ can create it.
 
 Return a plist (:files [(:docDesc DOC-DESC :fileName FILE-NAME) ...]).
 
@@ -1310,8 +1316,7 @@ the full plist response). STATUS can be ‘:success’, ‘:error’, and
         (request-object
          (if dir
              `(:dir ,dir)
-           `( :hostId ,host
-              :signalingAddr ,signaling-server))))
+           `(:hostId ,host))))
     (if callback
         ;; Async request.
         (jsonrpc-async-request
@@ -1445,7 +1450,6 @@ collab process pick its default."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'AcceptConnection
                     `( :addr ,signaling-addr
-                       :transportType "SCTP"
                        :mode ,mode))))
 
 (defun collab--stop-accepting-notif (signaling-addr)
@@ -1454,13 +1458,15 @@ collab process pick its default."
     (jsonrpc-notify conn 'StopAccepting
                     `(:addr ,signaling-addr))))
 
-(defun collab--connect-notif (host-id signaling-addr)
-  "Connect to HOST-ID on SIGNALING-ADDR."
+(defun collab--connect-notif (host-id host-data)
+  "Connect to HOST-ID using transport info from HOST-DATA.
+
+HOST-DATA is the value of an entry in `collab-host-alist'. It already
+matches the wire shape of a `transportConfig', so we just pass it
+through. See `collab-host-alist' for the supported shapes."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'Connect
-                    `( :hostId ,host-id
-                       :signalingAddr ,signaling-addr
-                       :transportType "SCTP"))))
+                    `(:hostId ,host-id :transportConfig ,host-data))))
 
 (defun collab--update-config-req (trusted-hosts permissions)
   "Send UpdateConfig request.
@@ -2008,19 +2014,18 @@ PRESS \\[collab--toggle-accept-connection] TO TOGGLE ACCEPTING REMOTE CONNECTION
 
     (dolist (entry (collab--host-alist))
       (let* ((host-id (car entry))
-             (signaling-server (nth 0 (cdr entry)))
-             (credential (nth 1 (cdr entry)))
+             (host-data (cdr entry))
              (state (collab--host-state host-id connection-state)))
         (when connected
           (if (equal state "Connected")
               ;; Connected, get files async.
               (collab--list-files-req
-               nil host-id signaling-server credential
+               nil host-id
                (lambda (status resp)
                  (collab--list-files-callback host-id nil status resp)))
             ;; Not connected, connect first.
             (unless (equal host-id collab--my-host-id)
-              (collab--connect-notif host-id signaling-server))))))))
+              (collab--connect-notif host-id host-data))))))))
 
 ;;;; Docs listing
 
@@ -2185,10 +2190,8 @@ immediately."
                                   (collab--file-desc-host-id collab--file)))
       (let* ((file-desc collab--file)
              (host-id (collab--file-desc-host-id collab--file))
-             (host-data (collab--host-data host-id))
              (projectp (equal (plist-get file-desc :file) ""))
-             (file-list-resp (collab--list-files-req
-                              file-desc host-id (nth 0 host-data) (nth 1 host-data)))
+             (file-list-resp (collab--list-files-req file-desc host-id))
              (file-list (seq-map #'identity
                                  (plist-get file-list-resp :files)))
              (parent-file-desc (collab--file-desc-parent file-desc)))
@@ -2357,10 +2360,6 @@ be a directory (the original path string ends with slash)."
                           (collab--get-available-hosts)))
       (condition-case nil
           (let* ((host (car segments))
-                 (host-data (alist-get host (collab--host-alist)
-                                       nil nil #'equal))
-                 (signaling (nth 0 host-data))
-                 (credential (nth 1 host-data))
                  (file-desc (pcase (length segments)
                               (1 nil)
                               (2 (collab--make-file-desc
@@ -2371,8 +2370,7 @@ be a directory (the original path string ends with slash)."
                                   (string-join
                                    (seq-subseq segments 2 (if dir-p nil -1))
                                    "/")))))
-                 (resp (collab--list-files-req
-                        file-desc host signaling credential))
+                 (resp (collab--list-files-req file-desc host))
                  (files (plist-get resp :files)))
             (seq-map (lambda (file)
                        (let ((name (plist-get file :filename))
@@ -2730,7 +2728,7 @@ SHARE-LINK should be in the form of signaling-server/host-id/#/doc-id."
                  nil)))
 
     (unless (alist-get host-id collab-host-alist nil nil #'equal)
-      (push (cons host-id (list signaling-addr ""))
+      (push (cons host-id (list :SCTP (list :signalingAddr signaling-addr)))
             collab-host-alist))
 
     (if (equal host-id collab--my-host-id)
