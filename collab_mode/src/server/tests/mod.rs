@@ -658,8 +658,9 @@ pub async fn setup_hub_and_spoke_servers(
             });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
+            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             if let Err(e) = hub_server
-                .run(hub_tx, hub_rx, web_factory, sig_factory)
+                .run(hub_tx, hub_rx, web_factory, sig_factory, shutdown)
                 .await
             {
                 tracing::error!("Hub server error: {}", e);
@@ -720,8 +721,9 @@ pub async fn setup_hub_and_spoke_servers(
                     });
                 let sig_factory: crate::server::SignalingChannelFactory =
                     Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
+                let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
                 if let Err(e) = spoke_server
-                    .run(spoke_tx, spoke_rx, web_factory, sig_factory)
+                    .run(spoke_tx, spoke_rx, web_factory, sig_factory, shutdown)
                     .await
                 {
                     tracing::error!("Spoke server {} error: {}", i + 1, e);

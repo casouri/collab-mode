@@ -36,8 +36,9 @@ async fn test_accept_connect() {
             });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
+            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             if let Err(e) = server1
-                .run(server_tx1, server_rx1, web_factory, sig_factory)
+                .run(server_tx1, server_rx1, web_factory, sig_factory, shutdown)
                 .await
             {
                 tracing::error!("Server1 error: {}", e);
@@ -55,8 +56,9 @@ async fn test_accept_connect() {
             });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
+            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             if let Err(e) = server2
-                .run(server_tx2, server_rx2, web_factory, sig_factory)
+                .run(server_tx2, server_rx2, web_factory, sig_factory, shutdown)
                 .await
             {
                 tracing::error!("Server2 error: {}", e);

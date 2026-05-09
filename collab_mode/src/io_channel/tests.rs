@@ -67,29 +67,29 @@ async fn roundtrip() {
 }
 
 #[tokio::test]
-async fn disconnect_terminates_tasks() {
+async fn shutdown_terminates_tasks() {
     let (chan_a, _rx_a, _chan_b, mut rx_b) = pair();
 
-    // Sanity: send works before disconnect.
+    // Sanity: send works before shutdown.
     chan_a.send(&"b".into(), None, hey_msg()).await.unwrap();
     let _ = recv_with_timeout(&mut rx_b)
         .await
         .expect("first msg arrives");
 
-    chan_a.disconnect(&"b".into());
+    chan_a.shutdown().await.unwrap();
 
-    // After disconnect, send should fail (out_tx is gone).
+    // After shutdown, send should fail (out_tx is gone).
     let result = chan_a.send(&"b".into(), None, hey_msg()).await;
     assert!(
         result.is_err(),
-        "send after disconnect should fail, got {:?}",
+        "send after shutdown should fail, got {:?}",
         result
     );
 
     // The other side observes EOF and emits ConnectionBroke.
     let msg = recv_with_timeout(&mut rx_b)
         .await
-        .expect("expected ConnectionBroke after disconnect");
+        .expect("expected ConnectionBroke after shutdown");
     assert!(
         is_connection_broke(&msg.body),
         "expected ConnectionBroke, got {:?}",

@@ -215,11 +215,17 @@ impl MsgChannel for IoMsgChannel {
     }
 
     fn disconnect(&self, _peer: &ServerId) {
+        // io_channel is a unary channel so it doesn’t make sense to
+        // disconnect unless shutting down.
+    }
+
+    async fn shutdown(&self) -> anyhow::Result<()> {
         // Drop both halves so the outbound task's `out_rx.recv` returns
         // None and the inbound task's `cancel_tx.closed()` fires.
         let mut s = self.state.lock().unwrap();
         s.out_tx = None;
         s.cancel_rx = None;
+        Ok(())
     }
 }
 

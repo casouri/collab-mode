@@ -151,4 +151,17 @@ impl MsgChannel for PolyMsgChannel {
             None => {}
         }
     }
+
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        // The backends’ shutdown are bounded, so we don’t need to use
+        // a timeout.
+        let (web_res, ssh_res) = tokio::join!(self.web.shutdown(), self.ssh.shutdown());
+        if let Err(err) = web_res {
+            tracing::warn!("WebChannel shutdown error: {}", err);
+        }
+        if let Err(err) = ssh_res {
+            tracing::warn!("SshMsgChannel shutdown error: {}", err);
+        }
+        Ok(())
+    }
 }

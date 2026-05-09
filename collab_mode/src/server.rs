@@ -31,6 +31,7 @@ use crate::types::*;
 use crate::webchannel::{self, MsgChannel, WebChannelError};
 use anyhow::{anyhow, Context};
 use fmt_derive;
+use futures::future::join_all;
 use gapbuf::GapBuffer;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -44,6 +45,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+const SHUTDOWN_TIMEOUT: u64 = 10;
 
 // This is the only condition that needs special handling.
 #[derive(Debug, thiserror::Error)]
@@ -734,6 +738,7 @@ impl Server {
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
         webchannel_factory: WebChannelFactory,
         signaling_channel_factory: SignalingChannelFactory,
+        shutdown: std::sync::Arc<tokio::sync::Notify>,
     ) -> anyhow::Result<()> {
         // webrtc-dtls uses the ring feature of rustls, so there's an
         // ambiguity of which provider to use. Here we just set the
@@ -765,8 +770,12 @@ impl Server {
 
         loop {
             tokio::select! {
+                // Shutdown signal, can be editor disconnect, SIGINT,
+                // or SIGTERM.
+                _ = shutdown.notified() => break,
                 // Handle messages from the editor.
-                Some(msg) = editor_rx.recv() => {
+                msg = editor_rx.recv() => {
+                    let Some(msg) = msg else { break; };
                     let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx, &mut *signaling_channel).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
@@ -821,6 +830,52 @@ impl Server {
                 }
             }
         }
+
+        // Try to shutdown gracefully: close connections grafully,
+        // save all unsaved files.
+        let total_timeout = Duration::from_secs(SHUTDOWN_TIMEOUT);
+        if tokio::time::timeout(total_timeout, self.shutdown(webchannel))
+            .await
+            .is_err()
+        {
+            tracing::warn!("Timeout exceeded ({}s), force quit", SHUTDOWN_TIMEOUT);
+        }
+        Ok(())
+    }
+
+    /// Save owned docs to disk, send `Bye` to connected peers, then
+    /// flush the webchannel. Each step is best-effort: errors are
+    /// logged and never propagated, so a single failure does not
+    /// prevent the rest of shutdown from running. Be sure to bound
+    /// this with timeout.
+    async fn shutdown(&mut self, webchannel: Arc<dyn MsgChannel>) {
+        tracing::info!("Shuting down");
+
+        let mut handles: Vec<JoinHandle<()>> = Vec::new();
+
+        // Send Bye to every peer.
+        let handle = tokio::spawn(async move {
+            if let Err(err) = webchannel.broadcast(None, Msg::Bye).await {
+                tracing::warn!("Failed to send Bye to remote hosts: {}", err);
+            }
+            if let Err(err) = webchannel.shutdown().await {
+                tracing::warn!("Error shutting down webchannel: {}", err);
+            }
+        });
+        handles.push(handle);
+
+        // Save all docs to disk in parallel.
+        for (_id, mut doc) in self.docs.drain() {
+            let handle = tokio::spawn(async move {
+                let file_desc = doc.file_desc.clone();
+                if let Err(err) = doc.save_to_disk() {
+                    tracing::warn!("Failed to save doc {} during shutdown: {}", file_desc, err);
+                }
+            });
+            handles.push(handle);
+        }
+
+        join_all(handles).await;
     }
 
     /// Return all locally hosted docs whose absolute paths are not
@@ -1473,6 +1528,20 @@ impl Server {
                 .await;
                 Ok(())
             }
+            Msg::RemoteLeft(host_id) => {
+                // Remove peer left, don’t reconnect.
+                next.webchannel.disconnect(&host_id);
+                self.active_remotes.remove(&host_id);
+                next.send_notif(
+                    NotificationCode::RemoteLeft,
+                    ConnectionBrokeNote {
+                        host_id,
+                        reason: "Not sure, maybe vibe’s off".to_string(),
+                    },
+                )
+                .await;
+                Ok(())
+            }
             Msg::Hey(hey_msg) => {
                 let host = msg.host;
                 if let Some(remote) = self.active_remotes.get_mut(&host) {
@@ -1840,6 +1909,22 @@ impl Server {
                     message: reason,
                 };
                 next.send_notif(NotificationCode::ErrorResponse, msg).await;
+                Ok(())
+            }
+            Msg::Bye => {
+                // Peer is shutting down. Drop our entry for them so the
+                // reconnect tick doesn’t try to reach them, and tell the
+                // editor to clean up the host without scheduling a retry.
+                let host = msg.host;
+                self.active_remotes.remove(&host);
+                next.send_notif(
+                    NotificationCode::RemoteLeft,
+                    HostAndMessageNote {
+                        host_id: host,
+                        message: "Peer said goodbye".to_string(),
+                    },
+                )
+                .await;
                 Ok(())
             }
             Msg::SetAcceptModeInternal { addr, mode } => {
@@ -4444,6 +4529,32 @@ impl Server {
 }
 
 // *** Helper functions
+
+/// Spawn a background task that installs SIGINT/SIGTERM handlers and
+/// notifies the returned `Notify` once either signal arrives.
+pub fn listen_for_signal() -> Arc<tokio::sync::Notify> {
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_for_sig = shutdown.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term =
+                signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
+                _ = term.recv() => tracing::info!("SIGTERM received"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("Ctrl-C received");
+        }
+        shutdown_for_sig.notify_waiters();
+    });
+    shutdown
+}
 
 /// The [Next] object stores references to channels and have a borrow
 /// lifetime, but the channels don’t really have to be references

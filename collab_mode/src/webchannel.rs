@@ -19,6 +19,7 @@ use crate::{
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::future::join_all;
 use lsp_server::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_ice::state::ConnectionState;
 use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
@@ -107,6 +109,11 @@ pub trait MsgChannel: Send + Sync {
     /// Disconnect from a peer, or give up establishing connections.
     /// If the peer doesn’t exist, no error is signaled.
     fn disconnect(&self, peer: &ServerId);
+
+    /// Flush any pending outgoing messages to the wire and tear down
+    /// all peer connections. This can potentially hang so caller must
+    /// have a timeout around it.
+    async fn shutdown(&self) -> anyhow::Result<()>;
 }
 
 /// Types of transport.
@@ -187,9 +194,14 @@ impl DualReceiver {
 struct RemoteChannels {
     /// Caller uses this tx to send outgoing messages to remotes.
     msg_tx: mpsc::Sender<Message>,
-    /// This rx is dropped when this struct is dropped, causing the tx
-    /// to receive a message and stop the background task.
-    _cancel_rx: mpsc::Receiver<()>,
+    /// Send `()` to signal an expected shutdown so the per-peer task
+    /// skips the `ConnectionBroke` notification. `Option<>` so callers
+    /// can `take()` it.
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Handle to the per-peer background task. `WebChannel::shutdown`
+    /// awaits this to make sure the SCTP/DTLS/ICE teardown finishes
+    /// before returning. `Option<>` so callers can `take()` it.
+    bg_task_handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -392,28 +404,20 @@ impl WebChannel {
         dtls_conn: Arc<DTLSConn>,
         ice_agent: Arc<webrtc_ice::agent::Agent>,
     ) -> anyhow::Result<()> {
-        // Create channel for outgoing messages
-        let (tx, rx) = mpsc::channel(16);
-        let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
-        let (err_tx, mut err_rx) = mpsc::channel::<()>(1);
-
-        // Store the sender in the association map.
-        {
-            let mut map = self.assoc_tx.lock().unwrap();
-            if map.get(remote_hostid).is_some() {
-                return Err(anyhow!(WebChannelError::ConnectionExists(
-                    remote_hostid.clone()
-                )));
-            }
-            let channels = RemoteChannels {
-                msg_tx: tx,
-                _cancel_rx: cancel_rx,
-            };
-            map.insert(remote_hostid.clone(), channels);
+        if self.assoc_tx.lock().unwrap().contains_key(remote_hostid) {
+            return Err(anyhow!(WebChannelError::ConnectionExists(
+                remote_hostid.clone()
+            )));
         }
 
-        // Initialize the stream ID counter to the initial value for this side.
-        // This will be 1 for client (odd IDs) or 2 for server (even IDs).
+        // Create channel for outgoing messages
+        let (tx, rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (err_tx, mut err_rx) = mpsc::channel::<()>(1);
+
+        // Initialize the stream ID counter to the initial value for
+        // this side. This will be 1 for client (odd IDs) or 2 for
+        // server (even IDs).
         self.next_stream_id.store(stream_id_init, Ordering::SeqCst);
 
         // Spawn task to handle outgoing messages.
@@ -439,7 +443,8 @@ impl WebChannel {
         let remote_hostid_clone = remote_hostid.to_string();
         let assoc_tx_clone = self.assoc_tx.clone();
 
-        tokio::spawn(async move {
+        let bg_task_handle = tokio::spawn(async move {
+            let mut expected = false;
             tokio::select! {
                 _ = handle_incoming_messages(
                     sctp_assoc.clone(),
@@ -447,10 +452,8 @@ impl WebChannel {
                     remote_hostid_clone.clone(),
                     stream_id_init,
                 ) => (),
-                // When the cancel_rx in the map is dropped, this
-                // completes and we clean up.
-                _ = cancel_tx.closed() => {
-                    tracing::info!("Background task for {} exiting because: cancelled", remote_hostid_clone);
+                res = shutdown_rx => {
+                    expected = res.is_ok();
                 },
                 // When there’s an async error, we terminate and clean up.
                 _ = err_rx.recv() => {
@@ -465,25 +468,52 @@ impl WebChannel {
                 _ = conn_broke_rx => (),
             }
 
-            // Clean up when connection closes
+            // Clean up when connection closes.
             assoc_tx_clone.lock().unwrap().remove(&remote_hostid_clone);
 
-            let res = sctp_assoc.close().await;
-            tracing::info!("SCTP association closed: {:?}", res);
-            let res = dtls_conn.close().await;
-            tracing::info!("DTLS connection closed: {:?}", res);
-            let res = ice_agent.close().await;
-            tracing::info!("ICE agent closed: {:?}", res);
+            let timeout = Duration::from_secs(5);
+            let _ = tokio::time::timeout(timeout, async move {
+                let _ = sctp_assoc.shutdown().await;
+                // These aren’t really necessary but doesn’t harm to do
+                // them.
+                let _ = sctp_assoc.close().await;
+                let _ = dtls_conn.close().await;
+                let _ = ice_agent.close().await;
+            });
 
-            // Connection closed, send ConnectionBroke message
-            let _ = msg_tx_clone
-                .send(Message {
-                    host: remote_hostid_clone.clone(),
-                    body: Msg::ConnectionBroke(remote_hostid_clone),
-                    req_id: None,
-                })
-                .await;
+            if !expected {
+                let _ = msg_tx_clone
+                    .send(Message {
+                        host: remote_hostid_clone.clone(),
+                        body: Msg::ConnectionBroke(remote_hostid_clone),
+                        req_id: None,
+                    })
+                    .await;
+            }
         });
+
+        // Insert into the association map. If a connection already
+        // exists, abort the bg task and bail out.
+        {
+            let mut map = self.assoc_tx.lock().unwrap();
+            if map.contains_key(remote_hostid) {
+                let _ = tokio::spawn(async move {
+                    let _ = shutdown_tx.send(());
+                    let _ = bg_task_handle.await;
+                });
+                return Err(anyhow!(WebChannelError::ConnectionExists(
+                    remote_hostid.clone()
+                )));
+            }
+            map.insert(
+                remote_hostid.clone(),
+                RemoteChannels {
+                    msg_tx: tx,
+                    shutdown_tx: Some(shutdown_tx),
+                    bg_task_handle: Some(bg_task_handle),
+                },
+            );
+        }
 
         Ok(())
     }
@@ -519,7 +549,31 @@ impl MsgChannel for WebChannel {
 
     fn disconnect(&self, peer: &ServerId) {
         let mut map = self.assoc_tx.lock().unwrap();
-        map.remove(peer);
+        let peer = map.remove(peer);
+        if let Some(mut peer) = peer {
+            if let Some(tx) = peer.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+        }
+        // peer is dropped here.
+    }
+
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        let peers: Vec<RemoteChannels> = {
+            let mut map = self.assoc_tx.lock().unwrap();
+            map.drain().map(|(_, v)| v).collect()
+        };
+        let mut handles = Vec::new();
+        for mut peer in peers {
+            if let Some(tx) = peer.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(handle) = peer.bg_task_handle.take() {
+                handles.push(handle);
+            }
+        }
+        join_all(handles).await;
+        Ok(())
     }
 }
 
@@ -1189,6 +1243,11 @@ impl MsgChannel for TestWebChannel {
 
     fn disconnect(&self, _peer: &ServerId) {
         // No-op for test channel
+    }
+
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        // Tests don't need flushing; messages are delivered synchronously.
+        Ok(())
     }
 }
 

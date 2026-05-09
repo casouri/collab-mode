@@ -15,24 +15,43 @@ use std::collections::HashMap;
 #[non_exhaustive]
 #[allow(dead_code)]
 pub enum NotificationCode {
-    RemoteOpsArrived,    // Editor should fetch remote ops.
-    FileListUpdated,     // Editor should update the file list.
-    ConnectionBroke,     // Editor should indicate connection is broken.
-    FailedToConnect,     // Editor should show reason for failed connection attempt.
-    Connecting,          // Editor should set connection state of the host to "connecting".
-    ConnectionProgress,  // Editor should show connection progress.
-    AcceptingConnection, // Editor should show that we’re accepting connections.
-    AcceptStopped,       // Editor should show that we’re not accepting connections anymore.
-    AcceptModeChanged,   // Accept mode changed for a signaling server.
-    Connected,           // Editor should mark the remote as connected.
-    FileMoved,           // A file moved, editor should update it accordingly.
-    FileDeleted,         // A file/directory was deleted.
-    FileClosed,          // A file is closed.
-    InfoReceived,        // Info received from remote for a file.
+    /// Editor should fetch remote ops.
+    RemoteOpsArrived,
+    /// Editor should update the file list.
+    FileListUpdated,
+    /// Editor should indicate connection is broken.
+    ConnectionBroke,
+    /// Peer sent a Bye; editor should drop the host entry and not auto-reconnect.
+    RemoteLeft,
+    /// Editor should show reason for failed connection attempt.
+    FailedToConnect,
+    /// Editor should set connection state of the host to “connecting”.
+    Connecting,
+    /// Editor should show connection progress.
+    ConnectionProgress,
+    /// Editor should show that we’re accepting connections.
+    AcceptingConnection,
+    /// Editor should show that we’re not accepting connections anymore.
+    AcceptStopped,
+    /// Accept mode changed for a signaling server.
+    AcceptModeChanged,
+    /// Editor should mark the remote as connected.
+    Connected,
+    /// A file moved, editor should update it accordingly.
+    FileMoved,
+    /// A file/directory was deleted.
+    FileDeleted,
+    /// A file is closed.
+    FileClosed,
+    /// Info received from remote for a file.
+    InfoReceived,
 
-    UnimportantError, // Editor should log it but not display it.
-    InternalError,    // Error that user should see, display it.
-    ErrorResponse,    // Async request error, comes with error code.
+    /// Editor should log it but not display it.
+    UnimportantError,
+    /// Error that user should see, display it.
+    InternalError,
+    /// Async request error, comes with error code.
+    ErrorResponse,
 }
 
 #[derive(Clone, Copy, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
@@ -513,6 +532,8 @@ pub enum Msg {
     // Misc
     IceProgress(ServerId, String),
     Hey(HeyMessage),
+    /// Close the connection and don’t try to reconnect to me.
+    Bye,
 
     /// Sent from the host to an envoy as the first message on the SSH
     /// stdio stream. Sets the envoy's id, the host's id, certs for
@@ -534,6 +555,8 @@ pub enum Msg {
     // Errors
     FailedToConnect(ServerId, String),
     ConnectionBroke(ServerId),
+    /// Remote left, don’t try to reconnect.
+    RemoteLeft(ServerId),
     StopSendingOps(DocId),
     SerializationErr(String),
     PermissionDenied(String),

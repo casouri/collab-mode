@@ -138,12 +138,14 @@ async fn test_server_run_config_projects_expansion() {
         });
         let sig_factory: crate::server::SignalingChannelFactory =
             Box::new(move |sig_tx| Box::new(test_signaling_factory.get_channel(sig_tx)));
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
         server
             .run(
                 server_to_editor_tx,
                 editor_to_server_rx,
                 web_factory,
                 sig_factory,
+                shutdown,
             )
             .await
     });

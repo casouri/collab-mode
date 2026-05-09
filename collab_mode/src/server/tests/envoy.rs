@@ -52,12 +52,14 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
     let sig_factory: SignalingChannelFactory = Box::new(|_| Box::new(NoopSignalingChannel));
 
     let server_handle = tokio::spawn(async move {
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
         if let Err(e) = host_server
             .run(
                 server_to_editor_tx,
                 editor_to_server_rx,
                 web_factory,
                 sig_factory,
+                shutdown,
             )
             .await
         {

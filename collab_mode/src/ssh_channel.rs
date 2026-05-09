@@ -122,17 +122,25 @@ impl MsgChannel for SshMsgChannel {
         // openssh cleanup, closing ssh.
         self.peers.lock().unwrap().remove(peer);
     }
+
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        // Clear the peers map. Dropping each `IoMsgChannel` causes its
+        // tasks to exit, the `ReaderWriter` halves to drop, the cleanup
+        // carrier to drop, and the openssh background task to wake and
+        // run `session.close()`.
+        self.peers.lock().unwrap().clear();
+        Ok(())
+    }
 }
 
 /// Spawn ssh to `ssh_host` and run `command`, returning a
 /// [`ReaderWriter`] over the child's stdio. All segments in `command`
-/// are shell-escaped. Dropping the returned `ReaderWriter` closes the
-/// ssh session and terminates the remote command.
+/// are shell-escaped. Dropping the returned `ReaderWriter` causes a
+/// background task to wake and run `session.close().await` for a
+/// graceful SSH teardown.
 ///
-/// We create a separate ssh session for each connection, so when
-/// reader writer is dropped, the ssh session is closed, killing any
-/// remote process it created, and we don’t need to manage any of
-/// that.
+/// We create a separate ssh session for each connection, so closing
+/// the session also kills the remote process it spawned.
 ///
 /// Honors `~/.ssh/config`, ssh-agent, ProxyJump, etc. via the `openssh`
 /// crate.
@@ -200,24 +208,35 @@ pub async fn ssh_reader_writer(ssh_host: &str, command: &[String]) -> anyhow::Re
 
         if init_tx.send(Ok((stdin, stdout))).is_err() {
             // Caller dropped the future; nothing to keep alive.
-            ()
-        } else {
-            // Hold `child` and `session` here until the caller drops the
-            // `ReaderWriter` (which drops `shutdown_tx`).
-            let _ = shutdown_rx.await;
+            return;
         }
 
-        // Just being explicit.
+        // Hold `child` and `session` here until the caller drops the
+        // `ReaderWriter` (which drops `shutdown_tx`).
+        let _ = shutdown_rx.await;
+
+        // Drop the child first (kills the remote command), then call
+        // `session.close().await` for a graceful SSH teardown that
+        // flushes any in-flight writes before returning. No timeout
+        // here — the server bounds the visible shutdown window with
+        // its own timeout; this task is fire-and-forget and is
+        // cancelled when the runtime drops at process exit.
         drop(child);
-        drop(session);
+        if let Err(err) = session.close().await {
+            tracing::warn!(
+                "openssh session close failed for {}: {}",
+                ssh_host_owned,
+                err
+            );
+        }
     });
 
     let (stdin, stdout) = init_rx
         .await
         .map_err(|_| anyhow!("openssh spawn task ended before sending result"))??;
 
-    /// Cleanup carrier: dropping it sends a shutdown signal to the
-    /// background task that owns the openssh `Session` + `RemoteChild`.
+    /// Cleanup carrier: dropping it signals the background task to
+    /// wake from `shutdown_rx` and run `session.close()`.
     struct Cleanup {
         _shutdown: oneshot::Sender<()>,
     }
