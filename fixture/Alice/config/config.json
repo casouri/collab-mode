@@ -9,9 +9,21 @@
       "path": "~/p/emacs-doom-themes"
     }
   ],
-  "trusted_hosts": {
-    "bob": "FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13"
-  },
+  "trusted_hosts": [
+    "cat::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13",
+    "bob::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13"
+  ],
   "host_id": "alice",
-  "permission": {}
+  "permission": {
+    "cat::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13": {
+      "write": true,
+      "create": true,
+      "delete": false
+    },
+    "bob::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13": {
+      "write": false,
+      "create": false,
+      "delete": false
+    }
+  }
 }
