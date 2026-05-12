@@ -35,6 +35,7 @@ xdg = "3.0.0"
 sha2 = "0.10.8"
 pem = "3.0.4"
 expanduser = "1.2.2"
+hostname = "0.4"
 tempfile = "3.8.0"
 content_inspector = "0.2"
 
@@ -71,6 +72,10 @@ rcgen = { version = "0.13", features = ["pem", "x509-parser"]}
 # This is the version used by webrtc-dtls.
 rustls = "0.23.27"
 rustls-pki-types = "1.0"
+# For application-layer auth on the signaling Bind message.
+ring = "0.17"
+x509-parser = "0.16"
+base64 = "0.22"
 
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 fmt-derive = "0.1.2"

@@ -107,7 +107,7 @@ async fn test_server_run_config_projects_expansion() {
                 path: project_dir.path().to_string_lossy().to_string(),
             },
         ],
-        trusted_hosts: HashMap::new(),
+        trusted_hosts: std::collections::HashSet::new(),
         host_id: Some("test-server".to_string()),
         permission: HashMap::new(),
     };

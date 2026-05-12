@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::signaling::client_new::{SignalingChannelTrait, TestSignalingChannelFactory};
-use crate::signaling::{SignalingMessage, SignalingMsg, SDP};
+use crate::signaling::{SignalingMessage, SignalingMsg};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -19,23 +19,18 @@ async fn test_sdp_and_ice_candidate_routing() {
     let mut channel_a = factory.get_channel(signaling_tx_a);
     let mut channel_b = factory.get_channel(signaling_tx_b);
 
-    // Define endpoint IDs
-    let id_a = "endpoint-a".to_string();
-    let id_b = "endpoint-b".to_string();
     let signaling_addr = "test-signaling-addr".to_string();
 
-    // Create dummy certificates
-    let cert_a = "cert-hash-a".to_string();
-    let cert_b = "cert-hash-b".to_string();
-
-    // Create dummy key/cert (not actually used in test signaling)
+    // Create key/cert pairs.
     let temp_dir_a = tempfile::TempDir::new().unwrap();
     let config_a = ConfigManager::new(Some(temp_dir_a.path().to_path_buf()), None).unwrap();
-    let key_cert_a = Arc::new(config_a.get_key_and_cert(id_a.clone()).unwrap());
+    let key_cert_a = Arc::new(config_a.get_key_and_cert("endpoint-a").unwrap());
+    let id_a = format!("endpoint-a::{}", key_cert_a.cert_der_hash());
 
     let temp_dir_b = tempfile::TempDir::new().unwrap();
     let config_b = ConfigManager::new(Some(temp_dir_b.path().to_path_buf()), None).unwrap();
-    let key_cert_b = Arc::new(config_b.get_key_and_cert(id_b.clone()).unwrap());
+    let key_cert_b = Arc::new(config_b.get_key_and_cert("endpoint-b").unwrap());
+    let id_b = format!("endpoint-b::{}", key_cert_b.cert_der_hash());
 
     // Both endpoints bind to the signaling address
     channel_a
@@ -54,13 +49,13 @@ async fn test_sdp_and_ice_candidate_routing() {
 
     // Endpoint A creates a Sock for communicating with endpoint B
     let mut sock_a = channel_a
-        .create_sock(&signaling_addr, id_b.clone(), cert_b.clone())
+        .create_sock(&signaling_addr, id_b.clone())
         .await
         .unwrap();
 
     // Endpoint B creates a Sock for communicating with endpoint A
     let mut sock_b = channel_b
-        .create_sock(&signaling_addr, id_a.clone(), cert_a.clone())
+        .create_sock(&signaling_addr, id_a.clone())
         .await
         .unwrap();
 
@@ -118,22 +113,17 @@ async fn test_connect_message_routing() {
     let mut channel_a = factory.get_channel(signaling_tx_a);
     let mut channel_b = factory.get_channel(signaling_tx_b);
 
-    // Define endpoint IDs
-    let id_a = "endpoint-a".to_string();
-    let id_b = "endpoint-b".to_string();
     let signaling_addr = "test-signaling-addr".to_string();
 
-    // Create dummy certificates
-    let cert_a = "cert-hash-a".to_string();
-
-    // Create dummy key/cert (not actually used in test signaling)
     let temp_dir_a = tempfile::TempDir::new().unwrap();
     let config_a = ConfigManager::new(Some(temp_dir_a.path().to_path_buf()), None).unwrap();
-    let key_cert_a = Arc::new(config_a.get_key_and_cert(id_a.clone()).unwrap());
+    let key_cert_a = Arc::new(config_a.get_key_and_cert("endpoint-a").unwrap());
+    let id_a = format!("endpoint-a::{}", key_cert_a.cert_der_hash());
 
     let temp_dir_b = tempfile::TempDir::new().unwrap();
     let config_b = ConfigManager::new(Some(temp_dir_b.path().to_path_buf()), None).unwrap();
-    let key_cert_b = Arc::new(config_b.get_key_and_cert(id_b.clone()).unwrap());
+    let key_cert_b = Arc::new(config_b.get_key_and_cert("endpoint-b").unwrap());
+    let id_b = format!("endpoint-b::{}", key_cert_b.cert_der_hash());
 
     // Both endpoints bind to the signaling address
     channel_a
@@ -150,14 +140,8 @@ async fn test_connect_message_routing() {
     let _ = signaling_rx_a.recv().await.unwrap();
     let _ = signaling_rx_b.recv().await.unwrap();
 
-    // Endpoint A sends a Connect message to endpoint B
-    let connect_msg = SignalingMsg::Connect(
-        id_a.clone(),   // sender
-        id_b.clone(),   // receiver
-        cert_a.clone(), // sender cert
-        true,           // initiator
-    );
-
+    // Endpoint A sends a Connect message to endpoint B.
+    let connect_msg = SignalingMsg::Connect(id_a.clone(), id_b.clone(), true);
     channel_a
         .send(&signaling_addr, connect_msg.clone())
         .await
@@ -168,23 +152,16 @@ async fn test_connect_message_routing() {
     assert_eq!(received_message.signaling_addr, signaling_addr);
 
     match received_message.msg {
-        Ok(SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator)) => {
+        Ok(SignalingMsg::Connect(sender_id, receiver_id, initiator)) => {
             assert_eq!(sender_id, id_a);
             assert_eq!(receiver_id, id_b);
-            assert_eq!(sender_cert, cert_a);
             assert_eq!(initiator, true);
         }
         _ => panic!("Expected Connect message, got {:?}", received_message.msg),
     }
 
-    // Test reverse direction: B sends Connect to A
-    let connect_msg_b = SignalingMsg::Connect(
-        id_b.clone(),              // sender
-        id_a.clone(),              // receiver
-        "cert-hash-b".to_string(), // sender cert
-        false,                     // not initiator (responding)
-    );
-
+    // Reverse: B sends Connect to A.
+    let connect_msg_b = SignalingMsg::Connect(id_b.clone(), id_a.clone(), false);
     channel_b
         .send(&signaling_addr, connect_msg_b.clone())
         .await
@@ -195,10 +172,9 @@ async fn test_connect_message_routing() {
     assert_eq!(received_message.signaling_addr, signaling_addr);
 
     match received_message.msg {
-        Ok(SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator)) => {
+        Ok(SignalingMsg::Connect(sender_id, receiver_id, initiator)) => {
             assert_eq!(sender_id, id_b);
             assert_eq!(receiver_id, id_a);
-            assert_eq!(sender_cert, "cert-hash-b");
             assert_eq!(initiator, false);
         }
         _ => panic!("Expected Connect message, got {:?}", received_message.msg),

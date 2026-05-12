@@ -173,7 +173,7 @@ pub struct SetAcceptModeParams {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdatableConfig {
-    pub trusted_hosts: HashMap<ServerId, String>,
+    pub trusted_hosts: std::collections::HashSet<ServerId>,
     pub permission: HashMap<ServerId, Permission>,
 }
 
@@ -435,8 +435,8 @@ pub struct ConnectionStateResp {
     pub connected: Vec<ConnectedDocEntry>,
     /// Local projects.
     pub projects: Vec<ConfigProject>,
-    /// Trusted hosts with their certificate hashes.
-    pub trusted_hosts: HashMap<ServerId, String>,
+    /// Trusted host ids (full `name::cert_hash`).
+    pub trusted_hosts: std::collections::HashSet<ServerId>,
     /// Permissions for each host.
     pub permission: HashMap<ServerId, Permission>,
     /// Our own certificate hash.
@@ -523,8 +523,6 @@ pub enum Msg {
     FileClosed(FileDesc),
     Snapshot(NewSnapshot),
     ResetFile(DocId),
-    Login(Credential),
-    LoggedYouIn(SiteId),
     Info(Info),
     InfoFromClient(Info),
     InfoFromServer(Info),
@@ -537,12 +535,12 @@ pub enum Msg {
 
     /// Sent from the host to an envoy as the first message on the SSH
     /// stdio stream. Sets the envoy's id, the host's id, certs for
-    /// the envoy to use, host cert to trust, and the projects to
-    /// share.
+    /// the envoy to use, and the projects to share. The host's
+    /// `host_id` contains the cert hash of host (that envoy will
+    /// trust).
     EnvoyInit {
         host_id: ServerId,
         envoy_id: ServerId,
-        host_cert: crate::signaling::CertDerHash,
         envoy_key_pem: String,
         envoy_cert_pem: String,
         projects: Vec<ConfigProject>,

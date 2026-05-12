@@ -5,7 +5,9 @@
 //! connections can be handled through a single SignalingClient.
 
 use crate::config_man::ArcKeyCert;
-use crate::signaling::{CertDerHash, EndpointId, ICECandidate, SignalingMsg, SDP};
+use crate::signaling::auth::sign_identity;
+use crate::signaling::{EndpointId, ICECandidate, SignalingMsg, SDP};
+use crate::types::id_hash;
 use anyhow::anyhow;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -33,12 +35,7 @@ pub trait SignalingChannelTrait: Send + Sync {
     async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()>;
 
     /// Create a Sock for communicating with a peer through a signaling server.
-    async fn create_sock(
-        &self,
-        signaling_addr: &str,
-        peer_id: EndpointId,
-        peer_cert: CertDerHash,
-    ) -> anyhow::Result<Sock>;
+    async fn create_sock(&self, signaling_addr: &str, peer_id: EndpointId) -> anyhow::Result<Sock>;
 
     /// Remove a signaling client.
     fn remove(&mut self, signaling_addr: &str);
@@ -68,7 +65,6 @@ impl SignalingChannelTrait for NoopSignalingChannel {
         &self,
         _signaling_addr: &str,
         _peer_id: EndpointId,
-        _peer_cert: CertDerHash,
     ) -> anyhow::Result<Sock> {
         Err(anyhow!("Envoy mode shouldn’t use signaling"))
     }
@@ -144,7 +140,6 @@ impl SignalingChannel {
         &self,
         signaling_addr: &str,
         peer_id: EndpointId,
-        peer_cert: CertDerHash,
     ) -> anyhow::Result<Sock> {
         let client = {
             let clients = self.clients.lock().unwrap();
@@ -153,7 +148,7 @@ impl SignalingChannel {
                 .ok_or_else(|| anyhow!("No signaling client for address {}", signaling_addr))?
                 .clone()
         };
-        Ok(client.create_sock(peer_id, peer_cert).await)
+        Ok(client.create_sock(peer_id).await)
     }
 
     /// Remove a signaling client.
@@ -177,13 +172,8 @@ impl SignalingChannelTrait for SignalingChannel {
         self.send(signaling_addr, msg).await
     }
 
-    async fn create_sock(
-        &self,
-        signaling_addr: &str,
-        peer_id: EndpointId,
-        peer_cert: CertDerHash,
-    ) -> anyhow::Result<Sock> {
-        self.create_sock(signaling_addr, peer_id, peer_cert).await
+    async fn create_sock(&self, signaling_addr: &str, peer_id: EndpointId) -> anyhow::Result<Sock> {
+        self.create_sock(signaling_addr, peer_id).await
     }
 
     fn remove(&mut self, signaling_addr: &str) {
@@ -221,11 +211,10 @@ struct SockTx {
     candidate_tx: mpsc::UnboundedSender<ICECandidate>,
 }
 
-/// Socket for communicating with a peer through signaling server
+/// Socket for communicating with a peer through signaling server.
 pub struct Sock {
     my_id: EndpointId,
     peer_id: EndpointId,
-    peer_cert: CertDerHash,
     sdp_rx: mpsc::Receiver<SDP>,
     msg_out_tx: mpsc::Sender<SignalingMsg>,
     candidate_rx: mpsc::UnboundedReceiver<ICECandidate>,
@@ -285,8 +274,18 @@ impl SignalingClient {
             .instrument(span),
         );
 
+        // Sanity check: make sure the id's hash portion match our
+        // cert hash.
         let cert_hash = my_key_cert.cert_der_hash();
-        let bind_msg = SignalingMsg::Bind(id.clone(), cert_hash);
+        if id_hash(&id) != cert_hash {
+            return Err(anyhow!(
+                "Endpoint id hash {} doesn't match our cert hash {}",
+                id_hash(&id),
+                cert_hash
+            ));
+        }
+        let (identity, signature) = sign_identity(&my_key_cert)?;
+        let bind_msg = SignalingMsg::Bind(id.clone(), identity, signature);
         msg_out_tx
             .send(bind_msg)
             .await
@@ -314,9 +313,9 @@ impl SignalingClient {
 
     /// Create a Sock for communicating with a peer.
     ///
-    /// The Sock allows exchanging SDP and ICE candidates with the peer
-    /// through the signaling server.
-    pub async fn create_sock(&self, peer_id: EndpointId, peer_cert: CertDerHash) -> Sock {
+    /// The Sock allows exchanging SDP and ICE candidates with the
+    /// peer through the signaling server.
+    pub async fn create_sock(&self, peer_id: EndpointId) -> Sock {
         let (sdp_tx, sdp_rx) = mpsc::channel(1);
         let (candidate_tx, candidate_rx) = mpsc::unbounded_channel();
 
@@ -335,7 +334,6 @@ impl SignalingClient {
         Sock {
             my_id: self.id.clone(),
             peer_id,
-            peer_cert,
             sdp_rx,
             msg_out_tx: self.msg_out_tx.clone(),
             candidate_rx,
@@ -385,14 +383,15 @@ impl Sock {
         self.candidate_rx.recv().await
     }
 
-    /// Get peer's certificate hash.
-    pub fn cert_hash(&self) -> &str {
-        &self.peer_cert
-    }
-
     /// Get peer's ID.
     pub fn id(&self) -> &str {
         &self.peer_id
+    }
+
+    /// Get peer's cert hash, which is the hash portion of
+    /// [`Sock::id`].
+    pub fn cert_hash(&self) -> &str {
+        id_hash(&self.peer_id)
     }
 
     /// Get a candidate sender for this sock.
@@ -633,7 +632,7 @@ async fn handle_incoming_message(
             }
         }
 
-        SignalingMsg::IdTaken(_endpoint_id, _message)
+        SignalingMsg::BindErr(_endpoint_id, _message)
         | SignalingMsg::IdNotFound(_endpoint_id, _message)
         | SignalingMsg::Rejected(_endpoint_id, _message) => {
             // Forward the error to Server.
@@ -702,19 +701,13 @@ impl TestSignalingChannelFactory {
         signaling_addr: &str,
         sender_id: &EndpointId,
         receiver_id: &EndpointId,
-        sender_cert: &CertDerHash,
         initiator: bool,
     ) -> anyhow::Result<()> {
         let state = self.state.lock().unwrap();
         let key = (signaling_addr.to_string(), receiver_id.clone());
 
         if let Some(endpoint_state) = state.endpoints.get(&key) {
-            let msg = SignalingMsg::Connect(
-                sender_id.clone(),
-                receiver_id.clone(),
-                sender_cert.clone(),
-                initiator,
-            );
+            let msg = SignalingMsg::Connect(sender_id.clone(), receiver_id.clone(), initiator);
             let signaling_message = crate::signaling::SignalingMessage {
                 signaling_addr: signaling_addr.to_string(),
                 msg: Ok(msg),
@@ -855,14 +848,9 @@ impl SignalingChannelTrait for TestSignalingChannel {
     async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
         // Route the message based on type
         match msg {
-            SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator) => {
-                self.factory.route_connect(
-                    signaling_addr,
-                    &sender_id,
-                    &receiver_id,
-                    &sender_cert,
-                    initiator,
-                )?;
+            SignalingMsg::Connect(sender_id, receiver_id, initiator) => {
+                self.factory
+                    .route_connect(signaling_addr, &sender_id, &receiver_id, initiator)?;
             }
             SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
                 self.factory
@@ -881,12 +869,7 @@ impl SignalingChannelTrait for TestSignalingChannel {
         Ok(())
     }
 
-    async fn create_sock(
-        &self,
-        signaling_addr: &str,
-        peer_id: EndpointId,
-        peer_cert: CertDerHash,
-    ) -> anyhow::Result<Sock> {
+    async fn create_sock(&self, signaling_addr: &str, peer_id: EndpointId) -> anyhow::Result<Sock> {
         // Get my_id from our bound endpoints
         let my_id = {
             let endpoints = self.bound_endpoints.lock().unwrap();
@@ -949,7 +932,6 @@ impl SignalingChannelTrait for TestSignalingChannel {
         Ok(Sock {
             my_id,
             peer_id,
-            peer_cert,
             sdp_rx,
             msg_out_tx,
             candidate_rx,

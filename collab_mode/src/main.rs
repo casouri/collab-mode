@@ -2,7 +2,6 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, editor_receptor, server::Server};
 use std::sync::Arc;
-use uuid::Uuid;
 
 #[derive(Parser)]
 struct Cli {
@@ -67,26 +66,22 @@ fn main() -> anyhow::Result<()> {
             let mut config_man =
                 config_man::ConfigManager::new(config_location, profile.to_owned())?;
 
-            // Determine host_id, if exists in config, use that,
-            // otherwise generate one.
-            let (host_id, generated_id) =
-                if let Some(config_id) = config_man.config().host_id.clone() {
-                    (config_id, false)
-                } else {
-                    (Uuid::new_v4().to_string(), true)
-                };
-
-            if generated_id {
+            // Load or create our key/cert.
+            let (name, generated_name) = match config_man.config().host_id.clone() {
+                Some(n) => (n, false),
+                None => (default_name(), true),
+            };
+            // Write back the created name.
+            if generated_name {
                 let mut new_config = config_man.config();
-                new_config.host_id = Some(host_id.clone());
-                let res = config_man.replace_and_save(new_config);
-                if let Err(err) = res {
-                    panic!(
-                        "Failed to save generated host id to config file: {:#?}",
-                        err
-                    );
+                new_config.host_id = Some(name.clone());
+                if let Err(err) = config_man.replace_and_save(new_config) {
+                    panic!("Failed to save generated host id to config: {:#?}", err);
                 }
             }
+            // Compose host_id from the name and cert hash.
+            let cert_hash = config_man.get_key_and_cert(&name)?.cert_der_hash();
+            let host_id = collab_mode::types::make_id(Some(&name), &cert_hash);
 
             let mut server = Server::new(host_id.clone(), config_man)?;
             let (server_in_tx, server_in_rx) = tokio::sync::mpsc::channel(32);
@@ -178,49 +173,44 @@ fn run_envoy() -> anyhow::Result<()> {
         let init_frame = frame_read(&mut stdin)
             .await
             .context("reading EnvoyInit from stdin")?;
-        let (host_id, envoy_id, host_cert, envoy_key_pem, envoy_cert_pem, projects) =
-            match init_frame.body {
-                Msg::EnvoyInit {
-                    host_id,
-                    envoy_id,
-                    host_cert,
-                    envoy_key_pem,
-                    envoy_cert_pem,
-                    projects,
-                } => (
-                    host_id,
-                    envoy_id,
-                    host_cert,
-                    envoy_key_pem,
-                    envoy_cert_pem,
-                    projects,
-                ),
-                other => {
-                    let err = format!("expected EnvoyInit, got {:?}", other);
-                    let mut stdout = tokio::io::stdout();
-                    let _ = frame_write(
-                        &mut stdout,
-                        &webchannel::Message {
-                            host: "envoy".into(),
-                            body: Msg::EnvoyInitError(err.clone()),
-                            req_id: None,
-                        },
-                    )
-                    .await;
-                    return Err(anyhow::anyhow!("{}", err));
-                }
-            };
+        let (host_id, envoy_id, envoy_key_pem, envoy_cert_pem, projects) = match init_frame.body {
+            Msg::EnvoyInit {
+                host_id,
+                envoy_id,
+                envoy_key_pem,
+                envoy_cert_pem,
+                projects,
+            } => (host_id, envoy_id, envoy_key_pem, envoy_cert_pem, projects),
+            other => {
+                let err = format!("expected EnvoyInit, got {:?}", other);
+                let mut stdout = tokio::io::stdout();
+                let _ = frame_write(
+                    &mut stdout,
+                    &webchannel::Message {
+                        host: "envoy".into(),
+                        body: Msg::EnvoyInitError(err.clone()),
+                        req_id: None,
+                    },
+                )
+                .await;
+                return Err(anyhow::anyhow!("{}", err));
+            }
+        };
 
         // Use a temp dir for config. We don’t save config anyway.
-        let temp = tempfile::TempDir::new().context("creating envoy tempdir")?;
+        let temp = tempfile::TempDir::new().context("Create envoy tempdir")?;
         let config_man = config_man::ConfigManager::new(Some(temp.path().to_owned()), None)?;
 
         let key_cert = std::sync::Arc::new(config_man::key_cert_from_pem(
             &envoy_key_pem,
             &envoy_cert_pem,
         )?);
-        let mut server = Server::new_with_keycert(envoy_id.clone(), config_man, key_cert)?;
-        server.init_for_envoy(host_id.clone(), host_cert.clone(), projects)?;
+        let envoy_name = collab_mode::types::id_name(&envoy_id)
+            .ok_or_else(|| anyhow::anyhow!("envoy_id has no name: {:?}", envoy_id))?
+            .to_string();
+        let mut server =
+            Server::new_with_keycert(envoy_id.clone(), envoy_name, config_man, key_cert)?;
+        server.init_for_envoy(host_id.clone(), projects)?;
 
         // Send Hey to the host to boostrap. Write directly to stdout.
         {
@@ -268,4 +258,31 @@ fn run_envoy() -> anyhow::Result<()> {
             .run(sink_tx, editor_rx, web_factory, sig_factory, shutdown)
             .await
     })
+}
+
+/// Pick a default name when the user hasn't set `host_id` in config.
+/// Use the OS hostname, replace non-`[A-Za-z0-9_-]` char with
+/// `-` and truncating to 20 chars. Falls back to "dude" if the
+/// hostname is unavailable or sanitizes to empty.
+fn default_name() -> String {
+    let raw = hostname::get()
+        .ok()
+        .and_then(|os| os.into_string().ok())
+        .unwrap_or_default();
+    let sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(20)
+        .collect();
+    if sanitized.is_empty() {
+        "dude".to_string()
+    } else {
+        sanitized
+    }
 }

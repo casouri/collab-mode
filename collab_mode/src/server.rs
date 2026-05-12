@@ -340,8 +340,11 @@ impl SignalingState {
 /// Stores relevant for the server.
 pub struct Server {
     /// Host id of this server. Once set, this cannot change, because
-    /// we use our own host_id in remote_docs, etc too.
+    /// we use our own host_id in remote_docs, etc too. Host id should
+    /// be in the form of `<name>::<cert hash>`.
     host_id: ServerId,
+    /// Name part of the `host_id`.
+    host_name: String,
     /// SiteId given to ourselves.
     site_id: SiteId,
     /// SiteId given to the next connected client.
@@ -354,9 +357,6 @@ pub struct Server {
     remote_docs: RemoteDocs,
     /// Projects.
     projects: HashMap<ProjectId, Project>,
-    /// Map of recognized users.
-    #[allow(dead_code)]
-    users: HashMap<Credential, SiteId>,
     /// Active remote peers.
     active_remotes: HashMap<ServerId, RemoteState>,
     /// Maps host id to site id.
@@ -374,8 +374,10 @@ pub struct Server {
     config: ConfigManager,
     /// Key and certificate for the server.
     key_cert: Arc<KeyCert>,
-    /// Trusted hosts with their certificate hashes
-    trusted_hosts: HashMap<ServerId, String>,
+    /// Trusted host ids (full `name::cert_hash`). Trust check
+    /// compares the hash portion of an incoming id against the hash
+    /// portion of each entry.
+    trusted_hosts: HashSet<ServerId>,
 }
 
 // *** Impl Doc
@@ -632,8 +634,13 @@ impl RemoteDocs {
 
 impl Server {
     pub fn new(host_id: ServerId, config: ConfigManager) -> anyhow::Result<Self> {
-        let key_cert = config.get_key_and_cert(host_id.clone())?;
-        Self::new_with_keycert(host_id, config, Arc::new(key_cert))
+        let name = id_name(&host_id)
+            .ok_or(anyhow!(
+                "host_id has no name; expects `<name>::<cert-hash>`"
+            ))?
+            .to_string();
+        let key_cert = config.get_key_and_cert(&name)?;
+        Self::new_with_keycert(host_id, name, config, Arc::new(key_cert))
     }
 
     /// Like [`Server::new`] but uses an externally-supplied
@@ -642,6 +649,7 @@ impl Server {
     /// `Msg::EnvoyInit`.
     pub fn new_with_keycert(
         host_id: ServerId,
+        host_name: String,
         config: ConfigManager,
         key_cert: ArcKeyCert,
     ) -> anyhow::Result<Self> {
@@ -650,13 +658,13 @@ impl Server {
 
         let server = Server {
             host_id,
+            host_name,
             site_id: 0,
             next_site_id: AtomicU32::new(1),
             next_doc_id: AtomicU32::new(1),
             docs: HashMap::new(),
             remote_docs: RemoteDocs::new(),
             projects: HashMap::new(),
-            users: HashMap::new(),
             active_remotes: HashMap::new(),
             site_id_map: HashMap::new(),
             active_signaling: HashMap::new(),
@@ -671,14 +679,13 @@ impl Server {
     /// `Msg::EnvoyInit` payload.
     ///
     /// - Registers the projects to share.
-    /// - Trusts the host's cert.
+    /// - Trusts the host.
     /// - Pre-populates `active_remotes[host_id]` so the existing
     ///   `Hey` handler can flip it to `Connected` when the host's `Hey`
     ///   arrives.
     pub fn init_for_envoy(
         &mut self,
         host_id: ServerId,
-        host_cert: crate::signaling::CertDerHash,
         mut projects: Vec<ConfigProject>,
     ) -> anyhow::Result<()> {
         // Reject reserved project names, same as in
@@ -701,7 +708,7 @@ impl Server {
             );
         }
 
-        self.trusted_hosts.insert(host_id.clone(), host_cert);
+        self.trusted_hosts.insert(host_id.clone());
 
         // Trust the host that initiated us.
         self.config.add_permission(
@@ -926,48 +933,20 @@ impl Server {
         }
     }
 
-    /// Check if a certificate hash is trusted based on the configured trusted hosts.
-    pub fn is_cert_trusted(
-        &mut self,
-        cert_hash: &str,
-        remote_hostid: &str,
-        signaling_addr: &str,
-    ) -> bool {
-        // Get accept mode from signaling state
+    /// Check whether `cert_hash` is trusted on `signaling_addr`.
+    /// Accept-all signaling trusts every cert; trusted-only signaling
+    /// looks for the hash among `trusted_hosts`.
+    pub fn is_cert_trusted(&self, cert_hash: &str, signaling_addr: &str) -> bool {
         let accept_mode = self
             .active_signaling
             .get(signaling_addr)
             .map(|state| state.accept_mode)
             .unwrap_or(AcceptMode::TrustedOnly);
 
-        let is_trusted = if matches!(accept_mode, AcceptMode::All) {
-            tracing::info!(
-                "Accepted connection from {} with certificate hash {} (AcceptMode::All)",
-                remote_hostid,
-                cert_hash
-            );
-            true
-        } else {
-            let cert_found = self.trusted_hosts.values().any(|hash| hash == cert_hash);
-            if cert_found {
-                tracing::info!(
-                    "Accepted connection from {} with trusted certificate hash {}",
-                    remote_hostid,
-                    cert_hash
-                );
-            } else {
-                tracing::warn!(
-                    "Refusing connection from {}, certificate hash {} not in trusted hosts",
-                    remote_hostid,
-                    cert_hash
-                );
-            }
-            cert_found
-        };
-
-        self.trusted_hosts
-            .insert(remote_hostid.to_string(), cert_hash.to_string());
-        is_trusted
+        if matches!(accept_mode, AcceptMode::All) {
+            return true;
+        }
+        self.trusted_hosts.iter().any(|id| id_hash(id) == cert_hash)
     }
 
     /// Handle periodic reconnection tick (every 2 seconds).
@@ -2146,25 +2125,33 @@ impl Server {
         }
 
         // Generate key+cert for the envoy to use, and trust it.
+        let envoy_name = format!("{}-envoy", self.host_name);
         let (envoy_key_pem, envoy_cert_pem, envoy_cert_hash) =
-            match crate::config_man::generate_temp_key_cert(&host_id) {
+            match crate::config_man::generate_temp_key_cert(&envoy_name) {
                 Ok(t) => t,
                 Err(err) => {
-                    tracing::warn!("Failed to generate cert for {}: {}", host_id, err);
+                    tracing::warn!("Failed to generate cert for {}: {}", &envoy_name, &err);
                     if let Some(remote) = self.active_remotes.get_mut(&host_id) {
                         remote.mark_failed();
                     }
+                    let msg = webchannel::Message {
+                        host: envoy_name.clone(),
+                        body: Msg::FailedToConnect(
+                            envoy_name,
+                            format!("Failed to generate cert: {}", err),
+                        ),
+                        req_id: None,
+                    };
+                    let _ = msg_tx.send(msg).await;
                     return;
                 }
             };
-        self.trusted_hosts.insert(host_id.clone(), envoy_cert_hash);
-
-        let host_cert = self.key_cert.cert_der_hash();
+        let envoy_id = format!("{}::{}", envoy_name, envoy_cert_hash);
+        self.trusted_hosts.insert(envoy_id.clone());
 
         let envoy_init = Msg::EnvoyInit {
             host_id: self.host_id.clone(),
-            envoy_id: host_id.clone(),
-            host_cert,
+            envoy_id: envoy_id.clone(),
             envoy_key_pem,
             envoy_cert_pem,
             projects,
@@ -2172,7 +2159,6 @@ impl Server {
 
         let webchannel = next.webchannel.clone();
         let key_cert = self.key_cert.clone();
-        let peer = host_id.clone();
         let my_host_id = self.host_id.clone();
         let msg_tx = msg_tx.clone();
 
@@ -2180,7 +2166,7 @@ impl Server {
             let res = async {
                 webchannel
                     .connect(
-                        peer.clone(),
+                        envoy_id.clone(),
                         webchannel::Transport::Ssh {
                             ssh_host: ssh_host.clone(),
                             command: command.clone(),
@@ -2188,10 +2174,10 @@ impl Server {
                         key_cert,
                     )
                     .await?;
-                webchannel.send(&peer, None, envoy_init).await?;
+                webchannel.send(&envoy_id, None, envoy_init).await?;
                 webchannel
                     .send(
-                        &peer,
+                        &envoy_id,
                         None,
                         Msg::Hey(message::HeyMessage {
                             message: "Nice to meet ya".to_string(),
@@ -2205,10 +2191,10 @@ impl Server {
             .await;
 
             if let Err(err) = res {
-                tracing::warn!("SSH connect to {} failed: {}", peer, err);
+                tracing::warn!("Failed to connect to {}: {}", envoy_id, err);
                 let msg = webchannel::Message {
                     host: my_host_id,
-                    body: Msg::FailedToConnect(peer, err.to_string()),
+                    body: Msg::FailedToConnect(envoy_id, err.to_string()),
                     req_id: None,
                 };
                 let _ = msg_tx.send(msg).await;
@@ -2227,11 +2213,9 @@ impl Server {
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
         initiator: bool,
     ) {
-        let my_cert = self.key_cert.cert_der_hash();
         let connect_msg = crate::signaling::SignalingMsg::Connect(
             self.host_id.clone(),
             peer_id.clone(),
-            my_cert,
             initiator,
         );
         let res = signaling_channel.send(signaling_addr, connect_msg).await;
@@ -4161,11 +4145,10 @@ impl Server {
                 Ok(())
             }
 
-            SignalingMsg::Connect(peer_id, _my_id, peer_cert, initiator) => {
+            SignalingMsg::Connect(peer_id, _my_id, initiator) => {
                 self.handle_signaling_connect_msg(
                     signaling_addr,
                     peer_id,
-                    peer_cert,
                     initiator,
                     next,
                     msg_tx,
@@ -4196,7 +4179,7 @@ impl Server {
             // we don’t need to do anything here (The AcceptStopped
             // handler will do the work). For IdNotFound, it’s not a
             // fatal error so no need to do anything either.
-            SignalingMsg::IdTaken(_endpoint_id, message)
+            SignalingMsg::BindErr(_endpoint_id, message)
             | SignalingMsg::IdNotFound(_endpoint_id, message) => {
                 // Send error to editor
                 next.send_notif(
@@ -4278,14 +4261,12 @@ impl Server {
         &mut self,
         signaling_addr: String,
         peer_id: ServerId,
-        peer_cert: String,
         initiator: bool,
         next: &Next<'a>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
         // Check if we're already connecting or connected to this peer.
-        dbg!(&self.active_remotes);
         let is_connecting_or_connected = self.active_remotes.get(&peer_id).map_or(false, |r| {
             matches!(
                 r.state,
@@ -4305,8 +4286,12 @@ impl Server {
             return;
         }
 
-        // Check if the certificate is trusted.
-        if !self.is_cert_trusted(&peer_cert, &peer_id, &signaling_addr) {
+        let peer_cert_hash = id_hash(&peer_id).to_string();
+        let trusted = self.is_cert_trusted(&peer_cert_hash, &signaling_addr);
+        if trusted {
+            self.trusted_hosts.insert(peer_id.clone());
+        }
+        if !trusted {
             let msg = ErrorResponseNote {
                 code: ErrorCode::PermissionDenied,
                 file: None,
@@ -4317,7 +4302,7 @@ impl Server {
             };
             next.send_notif(NotificationCode::ErrorResponse, msg).await;
             let reject_msg = SignalingMsg::Rejected(
-                self.host_id.clone(),
+                peer_id.clone(),
                 "Provided certificate not in my trusted list".to_string(),
             );
             let _ = signaling_channel.send(&signaling_addr, reject_msg).await;
@@ -4365,7 +4350,7 @@ impl Server {
         // handles sending receiving SDP and ICE candidate
         // to/from the remote peer through signaling server.
         let sock = match signaling_channel
-            .create_sock(&signaling_addr, peer_id.clone(), peer_cert.clone())
+            .create_sock(&signaling_addr, peer_id.clone())
             .await
         {
             Ok(sock) => sock,

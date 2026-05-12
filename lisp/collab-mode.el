@@ -118,9 +118,8 @@ should be the port number.")
 
 Used to provide a list of options when connecting to remotes.
 
-Each key is HOST-ID. Each value is a transport config — a plist whose
-single key is the transport variant, mirroring the wire shape sent to
-the collab process. One of:
+Each key is HOST-ID in the form <name>::<cert-hash>. Each value is a
+transport config. One of:
 
   (:SCTP (:signalingAddr ADDR))
 
@@ -233,26 +232,46 @@ If NO-MESSAGE is non-nil, don’t message, only and to events."
            (propertize message 'face face))
    collab--events 30))
 
-(defun collab--prettify-host-id (host-id)
-  "Return HOST-ID with UUID part displayed as '...'.
+(defun collab--id-hash (host-id)
+  "Return the cert-hash portion of HOST-ID.
 
-HOST-ID should be in the format '<human-readable-name>-<uuid>'.
-The full host-id is preserved in the string, only the display is affected.
-A tooltip shows the full host-id on hover."
-  (if (string-match (rx bos
-                        (group (* anychar))
-                        (group "-" (* anychar))
-                        eos)
-                    host-id)
-      (let* ((name-part (match-string 1 host-id))
-             (full-str (copy-sequence host-id)))
-        (put-text-property (length name-part) (length full-str)
-                           'display "..." full-str)
-        (put-text-property (length name-part) (length full-str)
+HOST-ID is <name>::<cert hash>. If name doesn’t exist, we consider the whole
+thing cert hash."
+  (let ((idx (string-search "::" host-id)))
+    (if idx (substring host-id (+ idx 2)) host-id)))
+
+(defun collab--id-name (host-id)
+  "Return the name portion of HOST-ID, or nil if there isn't one."
+  (let ((idx (string-search "::" host-id)))
+    (when (and idx (> idx 0))
+      (substring host-id 0 idx))))
+
+(defun collab--prettify-host-id (host-id)
+  "Return HOST-ID with the cert-hash portion displayed as '@'.
+
+HOST-ID should be <name>::<cert-hash> but name might not exist. The full
+host-id is preserved in the string, only the display is affected. A
+tooltip shows the full host-id on hover."
+  (let ((name (collab--id-name host-id)))
+    (cond
+     ;; Name exists, show name.
+     (name
+      (let* ((full-str (copy-sequence host-id))
+             (split (length name)))
+        (put-text-property split (length full-str)
+                           'display "@" full-str)
+        (put-text-property split (length full-str)
                            'help-echo host-id full-str)
-        full-str)
-    ;; If pattern doesn't match, return as-is.
-    host-id))
+        full-str))
+     ;; No name, show the first two bytes.
+     (t
+      (let ((full-str (copy-sequence host-id)))
+        (when (> (length full-str) 5)
+          (put-text-property 5 (length full-str)
+                             'display "@" full-str)
+          (put-text-property 5 (length full-str)
+                             'help-echo host-id full-str))
+        full-str)))))
 
 (defvar collab--host-idx-hosts nil
   "A list of hosts we encountered. Purely for ‘collab--host-idx’.")
@@ -1511,11 +1530,12 @@ wire shape of a `transportConfig'."
 
 (defun collab--update-config-req (trusted-hosts permissions)
   "Send UpdateConfig request.
-TRUSTED-HOSTS is a hash table mapping host-id to cert-hash.
+TRUSTED-HOSTS is a list of trusted host-ids.
 PERMISSIONS is a hash table mapping host-id to permission hash tables."
   (let ((conn (collab--connect-process))
         (config (make-hash-table :test #'equal)))
-    (puthash "trustedHosts" trusted-hosts config)
+    ;; Convert to a vector.
+    (puthash "trustedHosts" (vconcat trusted-hosts) config)
     (puthash "permission" permissions config)
     (jsonrpc-request conn 'UpdateConfig
                      `(:config ,config)
@@ -2945,7 +2965,7 @@ detailed history."
       (insert (substitute-command-keys
                ";; Edit trusted hosts and their permission in this buffer, and
 ;; type \\[collab-config-submit] to submit, or type \\[collab-config-abort] to cancel
-;; Each line is made of <host-id> [ <permission> ] ( <cert-hash> )
+;; Each line is made of <host-id> [ <permission> ]
 ;; <permission> can be any combination of `W', `C', and `D'
 ;; `W': write, `C': create, `D': delete, empty means read-only.\n\n"))
       ;; Fetch current config.
@@ -2954,14 +2974,15 @@ detailed history."
                  (trusted-hosts (plist-get resp :trustedHosts))
                  (permissions (plist-get resp :permission)))
             ;; Insert each trusted host.
-            (cl-loop for (key cert-hash) on trusted-hosts by #'cddr
-                     do (let* ((host-id (substring (symbol-name key) 1))
-                               (perm (plist-get permissions key))
-                               (perm-str (if perm
-                                             (collab--permission-to-string perm)
-                                           "")))
-                          (insert (format "%s[%s](%s)\n"
-                                          host-id perm-str cert-hash)))))
+            (mapc (lambda (host-id)
+                    (let* ((key (intern (concat ":" host-id)))
+                           (perm (plist-get permissions key))
+                           (perm-str (if perm
+                                         (collab--permission-to-string perm)
+                                       "")))
+                      (insert (format "%s[%s]\n"
+                                      (collab--prettify-host-id host-id) perm-str))))
+                  trusted-hosts))
         (error
          (insert (format ";; Error fetching currently trusted hosts: %s\n" err)))))))
 
@@ -2973,7 +2994,7 @@ detailed history."
 (defun collab-config-submit ()
   "Parse the buffer and submit the config update."
   (interactive)
-  (let ((trusted-hosts (make-hash-table :test #'equal))
+  (let ((trusted-hosts nil)
         (permissions (make-hash-table :test #'equal))
         (errors nil)
         (inhibit-read-only t))
@@ -2988,28 +3009,24 @@ detailed history."
            ;; Skip empty lines and comments.
            ((string-match-p (rx bos (* space) eos) line))
            ((string-match-p (rx bos (* space) ";") line))
-           ;; Parse data line: <host-id>[<permission>](<cert-hash>)
+           ;; Parse data line: <host-id>[<permission>]
            ((string-match (rx bos (* space)
                               (group (+? nonl))
                               (* space) "[" (* space)
                               (group (* (any "WCDwcd")))
-                              (* space) "]" (* space)
-                              "(" (* space)
-                              (group (+? nonl))
-                              (* space) ")"
+                              (* space) "]"
                               (* space) eos)
                           line)
-            (let ((host-id (string-trim (match-string 1 line)))
-                  (perm-str (upcase (match-string 2 line)))
-                  (cert-hash (string-trim (match-string 3 line))))
-              (puthash host-id cert-hash trusted-hosts)
+            (let* ((host-id (string-trim (match-string 1 line)))
+                   (perm-str (upcase (match-string 2 line))))
+              (push host-id trusted-hosts)
               (puthash host-id (collab--string-to-permission perm-str) permissions)))
            ;; Invalid line.
            (t
             (push (point) errors)
             (let ((ov (make-overlay (pos-eol) (pos-eol))))
               (overlay-put ov 'after-string
-                           (propertize " <-- parse error: expected <host-id>[<permission>](<cert-hash>)"
+                           (propertize " <-- parse error: expected <host-id>[<permission>]"
                                        'face 'error))
               (overlay-put ov 'collab-config-error t)))))
         (forward-line 1)))

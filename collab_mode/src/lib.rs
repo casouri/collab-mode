@@ -12,7 +12,7 @@ pub mod poly_channel;
 pub mod server;
 pub mod signaling;
 pub mod ssh_channel;
-mod types;
+pub mod types;
 pub mod webchannel;
 pub mod websocket_receptor;
 

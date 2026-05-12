@@ -75,21 +75,18 @@ fn get_random_port() -> u16 {
 
 /// Wait for the signaling server to be ready by attempting to connect to it.
 /// Returns Ok(()) when connection succeeds, Err if timeout is reached.
-async fn wait_for_signaling_server(url: &str, timeout: Duration) -> anyhow::Result<()> {
+async fn wait_for_signaling_server(addr: &str, timeout: Duration) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     let retry_interval = Duration::from_millis(10);
 
     while start.elapsed() < timeout {
-        // Try to connect to the WebSocket server
-        match tokio_tungstenite::connect_async(url).await {
-            Ok((ws_stream, _response)) => {
-                // Connection succeeded, close it and return
-                drop(ws_stream);
-                tracing::debug!("Signaling server is ready at {}", url);
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(stream) => {
+                drop(stream);
+                tracing::debug!("Signaling server is ready at {}", addr);
                 return Ok(());
             }
             Err(_) => {
-                // Server not ready yet, wait a bit and retry
                 if start.elapsed() + retry_interval < timeout {
                     sleep(retry_interval).await;
                 }
@@ -111,19 +108,15 @@ impl TestEnvironment {
         tracing::info!("Creating new test environment");
 
         let temp_dir = tempfile::TempDir::new()?;
-        let db_path = temp_dir.path().join("test-signal.db");
-        tracing::debug!("Test database path: {:?}", db_path);
 
         let port = get_random_port();
         let addr = format!("127.0.0.1:{}", port);
 
-        let db_path_clone = db_path.clone();
         let addr_string = addr.to_string();
         tracing::info!("Starting signaling server on {}", addr_string);
         let signaling_task = tokio::spawn(async move {
             tracing::debug!("Signaling server task started");
-            let result =
-                signaling::server::run_signaling_server(&addr_string, Some(&db_path_clone)).await;
+            let result = signaling::server::run_signaling_server(&addr_string).await;
             if let Err(e) = result {
                 tracing::error!("Signaling server error: {}", e);
             }
@@ -133,7 +126,8 @@ impl TestEnvironment {
         let signaling_url = format!("ws://{}", addr);
 
         // Wait for signaling server to be ready
-        wait_for_signaling_server(&signaling_url, Duration::from_secs(5)).await?;
+        // TODO: Change to pingning signaling server.
+        wait_for_signaling_server(&addr, Duration::from_secs(5)).await?;
 
         Ok(Self {
             signaling_addr: signaling_url,

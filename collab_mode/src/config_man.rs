@@ -1,10 +1,29 @@
 use crate::error::CollabResult;
 use crate::types::*;
 use crate::{error::CollabError, signaling::CertDerHash};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// Reject names that aren't safe to use as filenames or cert subject
+/// alt names. Allow `[A-Za-z0-9_-]` only.
+pub fn sanitize_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("Name cannot be empty"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(anyhow!(
+            "Name must contain only ASCII letters, digits, '_', or '-': {:?}",
+            name
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct KeyCert {
@@ -73,12 +92,13 @@ pub fn create_key_cert(name: &str) -> KeyCert {
 }
 
 /// Generate a fresh self-signed key/cert pair without saving to disk.
-/// Returns `(key_pem, cert_pem, cert_hash)`. Used for generating cert
-/// for both sides when connecting to a remote envoy.
-pub fn generate_temp_key_cert(uuid: &str) -> anyhow::Result<(String, String, CertDerHash)> {
+/// Returns `(key_pem, cert_pem, cert_hash)`. `name` is used as the
+/// cert's subject alt name.
+pub fn generate_temp_key_cert(name: &str) -> anyhow::Result<(String, String, CertDerHash)> {
+    sanitize_name(name)?;
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let key_pem = key_pair.serialize_pem();
-    let params = rcgen::CertificateParams::new(vec![uuid.to_string()])?;
+    let params = rcgen::CertificateParams::new(vec![name.to_string()])?;
     let cert = params.self_signed(&key_pair)?;
     let cert_pem = cert.pem();
     let cert_der = pem::parse(&cert_pem)?.into_contents();
@@ -124,13 +144,12 @@ pub struct Config {
     /// Projects that are shared by default.
     #[serde(default = "Vec::new")]
     pub projects: Vec<ConfigProject>,
-    // We're really only checking the hash. the ServerId is for user
-    // to know which hash belongs to which peer.
-    #[serde(default = "HashMap::new")]
-    pub trusted_hosts: HashMap<ServerId, String>,
-    // The host id of this server. User can put it in the config if
-    // they run the server in headless mode and not connect an editor
-    // to it.
+    // Trusted host ids. Each id is `<name>::<cert-hash>`. Trust is
+    // checked by comparing the cert-hash portion of an incoming id
+    // against the hash portion of each entry.
+    #[serde(default = "HashSet::new")]
+    pub trusted_hosts: HashSet<ServerId>,
+    // Name for this server, the name part in `<name>::<cert-hash>`.
     pub host_id: Option<ServerId>,
     #[serde(default = "HashMap::new")]
     pub permission: HashMap<ServerId, Permission>,
@@ -140,7 +159,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             projects: Vec::new(),
-            trusted_hosts: HashMap::new(),
+            trusted_hosts: HashSet::new(),
             host_id: None,
             permission: HashMap::new(),
         }
@@ -229,27 +248,26 @@ impl ConfigManager {
         Ok(config)
     }
 
-    /// Either load or create keys and a certificate for `uuid` in
-    /// standard (XDG) config location. The subject alt names of the
-    /// certificate would be `uuid`.
-    pub fn get_key_and_cert(&self, uuid: String) -> CollabResult<KeyCert> {
+    /// Load or create and write a self-signed key/cert pair for `name`.
+    pub fn get_key_and_cert(&self, name: &str) -> CollabResult<KeyCert> {
+        sanitize_name(name).map_err(|err| CollabError::Fatal(err.to_string()))?;
         if let Some(config_dir) = &self.config_dir {
             let _ = std::fs::create_dir_all(config_dir.join("secrets"));
         }
         let key_file = if let Some(config_dir) = &self.config_dir {
-            config_dir.join(format!("secrets/{uuid}.key.pem"))
+            config_dir.join(format!("secrets/{name}.key.pem"))
         } else {
             self.base_dirs
-                .place_config_file(format!("{uuid}.key.pem"))
+                .place_config_file(format!("{name}.key.pem"))
                 .map_err(|err| {
                     CollabError::Fatal(format!("Failed to find/create private key: {:#?}", err))
                 })?
         };
         let cert_file = if let Some(config_dir) = &self.config_dir {
-            config_dir.join(format!("secrets/{uuid}.cert.pem"))
+            config_dir.join(format!("secrets/{name}.cert.pem"))
         } else {
             self.base_dirs
-                .place_config_file(format!("{uuid}.cert.pem"))
+                .place_config_file(format!("{name}.cert.pem"))
                 .map_err(|err| {
                     CollabError::Fatal(format!("Failed to find/create certificate: {:#?}", err))
                 })?
@@ -281,9 +299,7 @@ impl ConfigManager {
             })?;
             pem::parse(pem)?.into_contents()
         } else {
-            // The alt subject name doesn't really matter, but let's
-            // use the uuid because why not.
-            let params = rcgen::CertificateParams::new(vec![uuid])?;
+            let params = rcgen::CertificateParams::new(vec![name.to_string()])?;
             let cert = params.self_signed(&key_pair)?;
             let cert_pem = cert.pem();
             let cert_der = pem::parse(&cert_pem)?.into_contents();
@@ -365,9 +381,9 @@ impl ConfigManager {
         self.config.permission.insert(server_id, permission);
     }
 
-    /// Add a trusted host to the configuration
-    pub fn add_trusted_host(&mut self, server_id: ServerId, cert_hash: String) {
-        self.config.trusted_hosts.insert(server_id, cert_hash);
+    /// Add a trusted host to the configuration.
+    pub fn add_trusted_host(&mut self, server_id: ServerId) {
+        self.config.trusted_hosts.insert(server_id);
     }
 
     /// Override with a new config and save to disk

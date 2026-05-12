@@ -37,10 +37,34 @@ pub fn truncate_for_log(s: &str, max_len: usize) -> String {
     }
 }
 
+/// A server's identity. Format is `<name>::<cert-hash>` but also
+/// accept (grudgingly) `<cert-hash>`. The hash portion is the SHA-256
+/// of the DER cert in colon-separated upper-hex. The name is for
+/// convenience.
 pub type ServerId = String;
-#[allow(dead_code)]
-pub const SERVER_ID_SELF: &str = "self";
-pub type Credential = String;
+
+/// Returns the cert-hash portion of a [`ServerId`]. Splits on the
+/// first `::`; if there's no `::`, treat the whole id as the hash.
+pub fn id_hash(id: &str) -> &str {
+    match id.find("::") {
+        Some(idx) => &id[idx + 2..],
+        None => id,
+    }
+}
+
+/// Returns the name portion of a [`ServerId`], or `None` if there
+/// isn't one.
+pub fn id_name(id: &str) -> Option<&str> {
+    id.find("::").map(|idx| &id[..idx])
+}
+
+/// Compose a [`ServerId`] from an optional name and a cert hash.
+pub fn make_id(name: Option<&str>, cert_hash: &str) -> ServerId {
+    match name {
+        Some(name) if !name.is_empty() => format!("{name}::{cert_hash}"),
+        _ => cert_hash.to_string(),
+    }
+}
 /// A file in a directory that’s not yet a doc. The path is a relative
 /// path. We don’t want to use full path since some people might
 /// consider the full path sensitive?

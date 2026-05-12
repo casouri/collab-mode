@@ -53,36 +53,27 @@ mod e2e_tests {
 
             tracing::info!("Creating new test environment");
 
-            // Create temp directory for test database
             let temp_dir = tempfile::TempDir::new()?;
-            let db_path = temp_dir.path().join("test-signal.db");
-            tracing::debug!("Test database path: {:?}", db_path);
 
             // Find available port
             let port = get_random_port();
             let addr = format!("127.0.0.1:{}", port);
-            // let listener = TcpListener::bind("127.0.0.1:0").await?;
-            // let addr = listener.local_addr()?;
-            // drop(listener);
-            // tracing::info!("Found available port: {}", addr);
-
-            // Start signaling server
-            let db_path_clone = db_path.clone();
             let addr_string = addr.to_string();
             tracing::info!("Starting signaling server on {}", addr_string);
             let signaling_task = tokio::spawn(async move {
-                tracing::debug!("Signaling server task started");
-                let result =
-                    signaling::server::run_signaling_server(&addr_string, Some(&db_path_clone))
-                        .await;
+                let result = signaling::server::run_signaling_server(&addr_string).await;
                 if let Err(e) = result {
                     tracing::error!("Signaling server error: {}", e);
                 }
-                tracing::debug!("Signaling server task ended");
             });
 
-            // Give server time to start
-            sleep(Duration::from_millis(100)).await;
+            // Wait for the listener.
+            for _ in 0..50 {
+                if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
 
             Ok(Self {
                 signaling_addr: format!("ws://{}", addr),
@@ -106,14 +97,20 @@ mod e2e_tests {
         }
     }
 
-    // Helper to create unique test IDs
-    fn create_test_id(prefix: &str) -> ServerId {
-        format!("{}-{}", prefix, Uuid::new_v4())
-    }
-
-    // Helper to create test key/cert pairs
+    // Helper to create test key/cert pairs.
     fn create_test_key_cert(name: &str) -> ArcKeyCert {
         Arc::new(create_key_cert(name))
+    }
+
+    // Helper to create a unique test endpoint id whose hash portion
+    // matches `key_cert`.
+    fn create_test_id(prefix: &str, key_cert: &ArcKeyCert) -> ServerId {
+        format!(
+            "{}-{}::{}",
+            prefix,
+            Uuid::new_v4(),
+            key_cert.cert_der_hash()
+        )
     }
 
     // *** Helper functions for SignalingClient-based connection establishment ***
@@ -179,7 +176,6 @@ mod e2e_tests {
         sig_rx: &mut mpsc::Receiver<crate::signaling::SignalingMessage>,
         sig_client: &crate::signaling::client_new::SignalingClient,
         my_id: String,
-        my_cert_hash: String,
         expected_peer_id: Option<String>,
     ) -> anyhow::Result<crate::signaling::client_new::Sock> {
         use crate::signaling::SignalingMsg;
@@ -189,8 +185,7 @@ mod e2e_tests {
             .map_err(|_| anyhow::anyhow!("Timeout waiting for Connect message"))?
             .ok_or(anyhow::anyhow!("Channel closed"))?;
 
-        if let Ok(SignalingMsg::Connect(sender_id, receiver_id, sender_cert, initiator)) =
-            signaling_message.msg
+        if let Ok(SignalingMsg::Connect(sender_id, receiver_id, initiator)) = signaling_message.msg
         {
             assert_eq!(receiver_id, my_id, "Connect receiver ID mismatch");
             if let Some(expected) = expected_peer_id {
@@ -200,13 +195,12 @@ mod e2e_tests {
             // Only send Connect response if this is an initial request (initiator=true)
             // If initiator=false, this is already a response, so don't respond to it
             if initiator {
-                let response =
-                    SignalingMsg::Connect(receiver_id, sender_id.clone(), my_cert_hash, false);
+                let response = SignalingMsg::Connect(receiver_id, sender_id.clone(), false);
                 sig_client.send(response).await?;
             }
 
             // Create Sock for peer
-            let sock = sig_client.create_sock(sender_id, sender_cert).await;
+            let sock = sig_client.create_sock(sender_id).await;
             Ok(sock)
         } else {
             Err(anyhow::anyhow!(
@@ -244,29 +238,18 @@ mod e2e_tests {
         )
         .await?;
 
-        let cert_hash_a = key_cert_a.cert_der_hash();
-        let cert_hash_b = key_cert_b.cert_der_hash();
-
-        // A initiates connection
-        let connect_msg =
-            SignalingMsg::Connect(id_a.clone(), id_b.clone(), cert_hash_a.clone(), true);
+        // A initiates connection.
+        let connect_msg = SignalingMsg::Connect(id_a.clone(), id_b.clone(), true);
         sig_client_a.send(connect_msg).await?;
 
         // B receives Connect and creates Sock
         let sock_b_task = tokio::spawn({
             let sig_client_b = sig_client_b.clone();
             let id_b = id_b.clone();
-            let cert_hash_b = cert_hash_b.clone();
             let id_a = id_a.clone();
             async move {
-                wait_for_connect_and_create_sock(
-                    &mut sig_rx_b,
-                    &sig_client_b,
-                    id_b,
-                    cert_hash_b,
-                    Some(id_a),
-                )
-                .await
+                wait_for_connect_and_create_sock(&mut sig_rx_b, &sig_client_b, id_b, Some(id_a))
+                    .await
             }
         });
 
@@ -275,7 +258,6 @@ mod e2e_tests {
             &mut sig_rx_a,
             &sig_client_a,
             id_a.clone(),
-            cert_hash_a,
             Some(id_b.clone()),
         )
         .await?;
@@ -304,18 +286,16 @@ mod e2e_tests {
         let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
         let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
-        // Create unique IDs
-        let id1 = create_test_id("host1");
-        let id2 = create_test_id("host2");
+        // Create key/cert pairs and matching IDs.
+        let key_cert1 = create_test_key_cert("host1");
+        let key_cert2 = create_test_key_cert("host2");
+        let id1 = create_test_id("host1", &key_cert1);
+        let id2 = create_test_id("host2", &key_cert2);
         tracing::info!("Created test IDs: {} and {}", id1, id2);
 
         // Create WebChannels
         let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
         let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
-
-        // Create key/cert pairs
-        let key_cert1 = create_test_key_cert(&id1);
-        let key_cert2 = create_test_key_cert(&id2);
 
         // Establish bidirectional connection using helper
         tracing::info!("Establishing connection between {} and {}", id1, id2);
@@ -367,14 +347,13 @@ mod e2e_tests {
         let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
         let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
-        let id1 = create_test_id("host1");
-        let id2 = create_test_id("host2");
+        let key_cert1 = create_test_key_cert("host1");
+        let key_cert2 = create_test_key_cert("host2");
+        let id1 = create_test_id("host1", &key_cert1);
+        let id2 = create_test_id("host2", &key_cert2);
 
         let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
         let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
-
-        let key_cert1 = create_test_key_cert(&id1);
-        let key_cert2 = create_test_key_cert(&id2);
 
         establish_connection_pair(
             &channel1,
@@ -441,20 +420,19 @@ mod e2e_tests {
         let (self_tx_c, _self_rx_c) = mpsc::unbounded_channel::<Message>();
         let (self_tx_d, _self_rx_d) = mpsc::unbounded_channel::<Message>();
 
-        let id_a = create_test_id("host_a");
-        let id_b = create_test_id("host_b");
-        let id_c = create_test_id("host_c");
-        let id_d = create_test_id("host_d");
+        let key_cert_a = create_test_key_cert("host_a");
+        let key_cert_b = create_test_key_cert("host_b");
+        let key_cert_c = create_test_key_cert("host_c");
+        let key_cert_d = create_test_key_cert("host_d");
+        let id_a = create_test_id("host_a", &key_cert_a);
+        let id_b = create_test_id("host_b", &key_cert_b);
+        let id_c = create_test_id("host_c", &key_cert_c);
+        let id_d = create_test_id("host_d", &key_cert_d);
 
         let channel_a = WebChannel::new(id_a.clone(), tx_a, self_tx_a);
         let channel_b = WebChannel::new(id_b.clone(), tx_b, self_tx_b);
         let channel_c = WebChannel::new(id_c.clone(), tx_c, self_tx_c);
         let channel_d = WebChannel::new(id_d.clone(), tx_d, self_tx_d);
-
-        let key_cert_a = create_test_key_cert(&id_a);
-        let key_cert_b = create_test_key_cert(&id_b);
-        let key_cert_c = create_test_key_cert(&id_c);
-        let key_cert_d = create_test_key_cert(&id_d);
 
         // Establish A ↔ B connection
         tracing::info!("Establishing A ↔ B connection");
@@ -540,14 +518,13 @@ mod e2e_tests {
         let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
         let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
-        let id1 = create_test_id("host1");
-        let id2 = create_test_id("host2");
+        let key_cert1 = create_test_key_cert("host1");
+        let key_cert2 = create_test_key_cert("host2");
+        let id1 = create_test_id("host1", &key_cert1);
+        let id2 = create_test_id("host2", &key_cert2);
 
         let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
         let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
-
-        let key_cert1 = create_test_key_cert(&id1);
-        let key_cert2 = create_test_key_cert(&id2);
 
         // Get expected certificate hashes before connection
         let expected_cert1 = key_cert1.cert_der_hash();
@@ -592,14 +569,13 @@ mod e2e_tests {
         let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
         let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
-        let id1 = create_test_id("host1");
-        let id2 = create_test_id("host2");
+        let key_cert1 = create_test_key_cert("host1");
+        let key_cert2 = create_test_key_cert("host2");
+        let id1 = create_test_id("host1", &key_cert1);
+        let id2 = create_test_id("host2", &key_cert2);
 
         let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
         let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
-
-        let key_cert1 = create_test_key_cert(&id1);
-        let key_cert2 = create_test_key_cert(&id2);
 
         establish_connection_pair(
             &channel1,
@@ -665,14 +641,13 @@ mod e2e_tests {
         let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
         let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
 
-        let id1 = create_test_id("host1");
-        let id2 = create_test_id("host2");
+        let key_cert1 = create_test_key_cert("host1");
+        let key_cert2 = create_test_key_cert("host2");
+        let id1 = create_test_id("host1", &key_cert1);
+        let id2 = create_test_id("host2", &key_cert2);
 
         let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
         let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
-
-        let key_cert1 = create_test_key_cert(&id1);
-        let key_cert2 = create_test_key_cert(&id2);
 
         establish_connection_pair(
             &channel1,

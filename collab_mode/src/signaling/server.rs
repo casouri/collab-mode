@@ -7,14 +7,27 @@
 //! endpoint ids to the channel that sends messages to that endpoint.
 //! Serving requests mostly consists of adding entries to the map, and
 //! relaying messages to the endpoint with the target id.
+//!
+//! The id of each client is in the form of <name>::<cert hash>. And
+//! when client tries to bind to an id on the signaling server, they
+//! have to prove that they own the key of the cert. They prove if by
+//! attaching a signed signature with the bind request. Which is
+//! basically `<timestamp>:<cert>` encrypted using the key.
+//!
+//! This is just a spam-filtering check so someone doens’t claim to be
+//! someone else and spams messages and get the “someone else”
+//! blocked. (TODO: implement rate limiting.) When the clients
+//! establish connections betwee each other, they also check the
+//! validity of the provided cert.
 
+use crate::signaling::auth::verify_identity;
 use crate::signaling::{EndpointId, SignalingMsg};
+use crate::types::id_hash;
 use futures_util::{SinkExt, StreamExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -28,26 +41,19 @@ use tokio_tungstenite::tungstenite::{
 use tokio_tungstenite::WebSocketStream;
 use tracing::{instrument, Instrument};
 
-use super::key_store::{self, PubKeyStore};
-use super::{CertDerHash, SignalingError, SignalingResult};
+use super::SignalingResult;
 
-/// Run the signaling server on `addr`. Addr should be of the form
-/// "ip:port". If `db_path` is None, run in stateless mode (no cert
-/// persistence, only check active connections for ID conflicts).
-pub async fn run_signaling_server(addr: &str, db_path: Option<&Path>) -> anyhow::Result<()> {
+/// Run the signaling server on `addr` (form: `"ip:port"`).
+pub async fn run_signaling_server(addr: &str) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    let key_store = match db_path {
-        Some(path) => Some(key_store::PubKeyStore::new(path)?),
-        None => None,
-    };
-    let server = Server::new(key_store);
+    let server = Server::new();
     while let Ok((stream, client_addr)) = listener.accept().await {
         tracing::info!("Accepted a connection from {}", client_addr);
         let server = server.clone();
         let span = tracing::info_span!("Serve connection", %client_addr);
         let _ = tokio::spawn(
             async move {
-                let mut endpoint_id = None;
+                let mut endpoint_id: Option<EndpointId> = None;
                 let res = handle_connection(&server, stream, &mut endpoint_id).await;
                 tracing::info!(?endpoint_id);
                 if let Some(id) = endpoint_id {
@@ -80,78 +86,37 @@ struct EndpointInfo {
 /// Signaling server.
 #[derive(Clone)]
 struct Server {
-    /// Maps collab server id to their SDP.
     endpoint_map: Arc<RwLock<HashMap<EndpointId, EndpointInfo>>>,
-    /// Certificate store for persistent mode. None in stateless mode.
-    key_store: Option<Arc<Mutex<PubKeyStore>>>,
 }
 
 impl Server {
-    fn new(key_store: Option<PubKeyStore>) -> Server {
+    fn new() -> Server {
         Server {
             endpoint_map: Arc::new(RwLock::new(HashMap::new())),
-            key_store: key_store.map(|ks| Arc::new(Mutex::new(ks))),
         }
     }
 
-    /// Bind a collab server to `id`. Return error if some endpoint
-    /// is already connected with that id, or (in persistent mode) if
-    /// some endpoint has connected with that id and the pub key
-    /// doesn't match.
+    /// Bind a collab server to `id`. Return error if some endpoint is
+    /// already connected with that id.
     async fn bind_endpoint(
         &self,
         id: EndpointId,
-        key: CertDerHash,
         msg_tx: mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
-        tracing::info!(id, key, "Handle req: bind()");
-
-        // In persistent mode, check pub key against stored keys.
-        if let Some(key_store) = &self.key_store {
-            let id_taken = {
-                let key_store = key_store.lock().unwrap();
-                if let Some(saved_key) = key_store.get_key_for(&id)? {
-                    if saved_key != key {
-                        tracing::info!(saved_key, key, "key mismatch");
-                    }
-                    saved_key != key
-                } else {
-                    key_store.set_key_for(&id, &key)?;
-                    false
-                }
-            };
-            if id_taken {
-                let _ = msg_tx
-                    .send(
-                        SignalingMsg::IdTaken(
-                            id.clone(),
-                            "ID already taken (key mismatch)".to_string(),
-                        )
-                        .into(),
-                    )
-                    .await;
-                return Err(SignalingError::OtherError(
-                    "ID already taken (key mismatch)".to_string(),
-                ));
-            }
-        }
-        // In stateless mode, we skip cert verification and only check
-        // the endpoint_map below for active connection conflicts.
-
-        // Try to insert connection to endpoint map, if there's
-        // already a connection using that id, fail.
-        let server_info = EndpointInfo {
+        tracing::info!(%id, "Handle req: bind()");
+        let info = EndpointInfo {
             msg_tx: msg_tx.clone(),
         };
-        let success = self.insert_endpoint(id.clone(), server_info).await;
-        if !success {
+        let inserted = self.insert_endpoint(id.clone(), info).await;
+        if !inserted {
             let _ = msg_tx
-                .send(SignalingMsg::IdTaken(id.clone(), "ID already taken".to_string()).into())
+                .send(SignalingMsg::BindErr(id.clone(), "ID already taken".to_string()).into())
                 .await;
-            return Err(SignalingError::OtherError("ID already taken".to_string()));
+            return Err(super::SignalingError::OtherError(
+                "ID already taken".to_string(),
+            ));
         }
-
-        let _ = msg_tx.send(SignalingMsg::Bound(id.clone()).into()).await;
+        let _ = msg_tx.send(SignalingMsg::Bound(id).into()).await;
         Ok(())
     }
 
@@ -160,30 +125,18 @@ impl Server {
         &self,
         sender_id: &EndpointId,
         receiver_id: EndpointId,
-        sender_key: CertDerHash,
         initiator: bool,
         resp_tx: &mpsc::Sender<Message>,
     ) -> SignalingResult<()> {
-        tracing::info!(
-            sender_id,
-            receiver_id,
-            sender_key,
-            initiator,
-            "Handle req: connect()"
-        );
+        tracing::info!(sender_id, receiver_id, initiator, "Handle req: connect()");
         let endpoint_info = self.get_endpoint_info(&receiver_id).await;
         match endpoint_info {
-            Some(endpoint_info) => {
-                // Notify connection listener.
-                let connect_req = SignalingMsg::Connect(
-                    sender_id.clone(),
-                    receiver_id.clone(),
-                    sender_key,
-                    initiator,
-                );
-                let _ = endpoint_info.msg_tx.send(connect_req.into()).await;
+            Some(info) => {
+                let connect_req =
+                    SignalingMsg::Connect(sender_id.clone(), receiver_id.clone(), initiator);
+                let _ = info.msg_tx.send(connect_req.into()).await;
                 tracing::info!(
-                    "Sent Connect message to {} on behave of {}",
+                    "Sent Connect message to {} on behalf of {}",
                     receiver_id,
                     sender_id
                 );
@@ -222,11 +175,7 @@ impl Server {
 
     /// Get the server info for the server with `id`.
     async fn get_endpoint_info(&self, id: &EndpointId) -> Option<EndpointInfo> {
-        self.endpoint_map
-            .read()
-            .await
-            .get(id)
-            .map(|info| info.clone())
+        self.endpoint_map.read().await.get(id).cloned()
     }
 }
 
@@ -285,38 +234,27 @@ async fn handle_message(
         Message::Text(msg) => {
             let msg: SignalingMsg = serde_json::from_str(&msg)?;
             match msg {
-                SignalingMsg::Bind(id, key) => {
-                    server
-                        .bind_endpoint(id.clone(), key.clone(), resp_tx.clone())
-                        .await?;
+                SignalingMsg::Bind(id, identity, signature) => {
+                    verify_signature(&id, &identity, &signature, resp_tx).await?;
+                    server.bind_endpoint(id.clone(), resp_tx.clone()).await?;
                     *endpoint_id = Some(id);
                 }
-                SignalingMsg::Connect(sender_id, receiver_id, sender_key, initiator) => {
+                SignalingMsg::Connect(sender_id, receiver_id, initiator) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
-
                     if endpoint_id.is_none() {
-                        server
-                            .bind_endpoint(sender_id.clone(), sender_key.clone(), resp_tx.clone())
-                            .await?;
-                        *endpoint_id = Some(sender_id.clone());
+                        let resp = resp_unsupported("You should send Bind before Connect");
+                        resp_tx.send(resp).await?;
+                        return Ok(());
                     }
                     server
-                        .connect_to_endpoint(
-                            &sender_id,
-                            receiver_id,
-                            sender_key,
-                            initiator,
-                            &resp_tx,
-                        )
+                        .connect_to_endpoint(&sender_id, receiver_id, initiator, resp_tx)
                         .await?;
                 }
                 SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
-                        let resp = resp_unsupported(
-                            "You should send a Connect or Bind message before sending SDP message",
-                        );
+                        let resp = resp_unsupported("You should send Bind or Connect before SDP");
                         resp_tx.send(resp).await?;
                         return Ok(());
                     }
@@ -335,7 +273,8 @@ async fn handle_message(
                     check_id(&sender_id, endpoint_id, &resp_tx).await?;
 
                     if endpoint_id.is_none() {
-                        let resp = resp_unsupported("You should send a Connect or Bind message before sending Candidate message");
+                        let resp =
+                            resp_unsupported("You should send Bind or Connect before Candidate");
                         resp_tx.send(resp).await?;
                         return Ok(());
                     }
@@ -377,6 +316,50 @@ async fn handle_message(
             }));
             resp_tx.send(resp).await?;
         }
+    }
+    Ok(())
+}
+
+/// Verify the [`Identity`]/[`Signature`] pair attached to a `Bind`,
+/// and verify that `id`'s hash portion matches the verified cert
+/// hash. On failure, sends an `IdTaken` to the client and returns an
+/// error so caller closes the connection.
+async fn verify_signature(
+    id: &EndpointId,
+    identity: &super::Identity,
+    signature: &super::Signature,
+    resp_tx: &mpsc::Sender<Message>,
+) -> anyhow::Result<()> {
+    let verified_hash = match verify_identity(identity, signature) {
+        Ok(h) => h,
+        Err(err) => {
+            let _ = resp_tx
+                .send(
+                    SignalingMsg::BindErr(
+                        id.clone(),
+                        format!("Identity verification failed: {err}"),
+                    )
+                    .into(),
+                )
+                .await;
+            return Err(err);
+        }
+    };
+    if id_hash(id) != verified_hash {
+        let _ = resp_tx
+            .send(
+                SignalingMsg::BindErr(
+                    id.clone(),
+                    format!(
+                        "Bind id hash {} doesn't match identity cert hash {}",
+                        id_hash(id),
+                        verified_hash
+                    ),
+                )
+                .into(),
+            )
+            .await;
+        return Err(anyhow::anyhow!("Bind id hash mismatch with identity cert"));
     }
     Ok(())
 }
