@@ -96,11 +96,6 @@ pub enum Transport {
     /// Connect over a pre-established byte stream. Used by the envoy
     /// (stdio) and as the underlying carrier for `Ssh`.
     Io(crate::io_channel::ReaderWriter),
-    /// Used by in-memory tests; no real transport behind it.
-    Test,
-    /// Placeholder used by older tests where the channel implementation
-    /// ignores the transport entirely (e.g. `TestWebChannel`).
-    Dummy,
 }
 
 /// Trait for message channel operations. Provides async methods for
@@ -328,17 +323,14 @@ impl WebChannel {
             Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
             Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
             Transport::Io(_) => Err(anyhow!("WebChannel does not handle Io transports yet")),
-            Transport::Test => Err(anyhow!(
-                "WebChannel without a test factory cannot serve Transport::Test"
-            )),
-            Transport::Dummy => Err(anyhow!("WebChannel does not handle Dummy transport")),
         }
     }
 
     /// In-process routing via `TestRemote`. Same map-reserve dance as
     /// `connect_with_sock` so concurrent connects to the same peer
-    /// behave identically.
-    async fn connect_test(&self, peer_id: ServerId) -> anyhow::Result<()> {
+    /// behave identically. `pub(crate)` so the in-file unit tests can
+    /// drive a connect without constructing a mock `Sock`.
+    pub(crate) async fn connect_test(&self, peer_id: ServerId) -> anyhow::Result<()> {
         let factory_state = self
             .test_factory_state
             .as_ref()
@@ -1318,10 +1310,6 @@ mod tests {
         format!("test-{}", name)
     }
 
-    fn key_cert() -> ArcKeyCert {
-        Arc::new(crate::config_man::create_key_cert("test"))
-    }
-
     /// Build two test WebChannels bound to a shared `TestFactory`,
     /// drain their dual receivers for the caller.
     fn pair(travel: TravelTime) -> (WebChannel, DualReceiver, WebChannel, DualReceiver) {
@@ -1339,10 +1327,7 @@ mod tests {
     async fn test_sync_send_instant() {
         let (chan_a, _dual_a, chan_b, mut dual_b) = pair(TravelTime::Instant);
 
-        chan_a
-            .connect(chan_b.hostid(), Transport::Test, key_cert())
-            .await
-            .unwrap();
+        chan_a.connect_test(chan_b.hostid()).await.unwrap();
 
         chan_a
             .send(&chan_b.hostid(), None, Msg::FileShared(42))
@@ -1358,10 +1343,7 @@ mod tests {
     async fn test_sync_send_ms_zero() {
         let (chan_a, _dual_a, chan_b, mut dual_b) = pair(TravelTime::Ms(0));
 
-        chan_a
-            .connect(chan_b.hostid(), Transport::Test, key_cert())
-            .await
-            .unwrap();
+        chan_a.connect_test(chan_b.hostid()).await.unwrap();
 
         chan_a
             .send(&chan_b.hostid(), None, Msg::FileShared(99))
@@ -1405,14 +1387,8 @@ mod tests {
 
         // Sender connects to both receivers (broadcast iterates the
         // sender's remote_map — receivers don't need to connect back).
-        chan_sender
-            .connect(id_recv1.clone(), Transport::Test, key_cert())
-            .await
-            .unwrap();
-        chan_sender
-            .connect(id_recv2.clone(), Transport::Test, key_cert())
-            .await
-            .unwrap();
+        chan_sender.connect_test(id_recv1.clone()).await.unwrap();
+        chan_sender.connect_test(id_recv2.clone()).await.unwrap();
 
         chan_sender
             .broadcast(None, Msg::FileShared(123))

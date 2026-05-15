@@ -81,7 +81,7 @@ impl MsgChannel for SshMsgChannel {
     ) -> anyhow::Result<()> {
         let (ssh_host, command) = match transport {
             Transport::Ssh { ssh_host, command } => (ssh_host, command),
-            Transport::Sock(_) | Transport::Io(_) | Transport::Test | Transport::Dummy => {
+            Transport::Sock(_) | Transport::Io(_) => {
                 return Err(anyhow!("SshMsgChannel only handles Ssh transports"))
             }
         };
