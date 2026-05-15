@@ -1423,42 +1423,8 @@ impl Server {
                 },
             )
             .await;
-
-            // If mode is All, spawn background task to revert after 3
-            // minutes.
-            if matches!(mode, AcceptMode::All) {
-                Self::revert_back_to_trusted_only_in_3min(
-                    addr.clone(),
-                    self.host_id.clone(),
-                    next.webchannel.clone(),
-                );
-            }
         }
         Ok(())
-    }
-
-    // Spawn a background task to revert accept mode to TrustedOnly after 3
-    // minutes.
-    fn revert_back_to_trusted_only_in_3min(
-        signaling_addr: String,
-        host_id: ServerId,
-        webchannel: Arc<dyn MsgChannel>,
-    ) {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(180)).await;
-            // Send SetAcceptModeInternal message to ourselves via
-            // webchannel.
-            let _ = webchannel
-                .send(
-                    &host_id,
-                    None,
-                    Msg::SetAcceptModeInternal {
-                        addr: signaling_addr,
-                        mode: AcceptMode::TrustedOnly,
-                    },
-                )
-                .await;
-        });
     }
 
     #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
@@ -1905,19 +1871,6 @@ impl Server {
                 )
                 .await;
                 Ok(())
-            }
-            Msg::SetAcceptModeInternal { addr, mode } => {
-                // Only process the request if it’s sent from ourself.
-                // The host is set by us when receiving the request,
-                // so no worry about remote forging it.
-                if msg.host != self.host_id {
-                    tracing::warn!(
-                        "Ignoring SetAcceptModeInternal from non-self host {}",
-                        msg.host
-                    );
-                    return Ok(());
-                }
-                self.handle_set_accept_mode(&next, addr, mode).await
             }
             _ => {
                 let message = format!(
@@ -4444,16 +4397,6 @@ impl Server {
                 state.reset_backoff();
             }
 
-            // If mode is All, spawn background task to revert after
-            // 3 minutes.
-            if matches!(params.mode, Some(AcceptMode::All)) {
-                Self::revert_back_to_trusted_only_in_3min(
-                    params.addr.clone(),
-                    self.host_id.clone(),
-                    next.webchannel.clone(),
-                );
-            }
-
             if matches!(state.state, SignalingConnectionState::Bound) {
                 next.send_notif(
                     NotificationCode::AcceptingConnection,
@@ -4500,15 +4443,6 @@ impl Server {
                 },
             )
             .await;
-        }
-        // If mode is All, spawn background task to revert after
-        // 3 minutes.
-        if matches!(params.mode, Some(AcceptMode::All)) {
-            Self::revert_back_to_trusted_only_in_3min(
-                params.addr.clone(),
-                self.host_id.clone(),
-                next.webchannel.clone(),
-            );
         }
     }
 }

@@ -569,12 +569,6 @@ pub enum Msg {
         file: Option<FileDesc>,
         message: String,
     },
-    // Internal message to change accept mode, sent from the server to
-    // itself (e.g., for timed revert).
-    SetAcceptModeInternal {
-        addr: String,
-        mode: server::AcceptMode,
-    },
 }
 
 // *** Functions
