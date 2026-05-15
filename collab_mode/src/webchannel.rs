@@ -19,16 +19,14 @@ use crate::{
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
-use futures::future::join_all;
 use lsp_server::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_ice::state::ConnectionState;
 use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
@@ -37,6 +35,25 @@ use webrtc_util::Conn;
 
 const STREAM_ID_CLIENT_INIT: u16 = 1; // Client uses odd stream IDs: 1, 3, 5, ...
 const STREAM_ID_SERVER_INIT: u16 = 2; // Server uses even stream IDs: 2, 4, 6, ...
+
+// Dedicated bidirectional SCTP stream for heartbeat pings. Both sides
+// `open_stream(PING_STREAM_ID)` at the top of `SctpRemote::run`; SCTP
+// resolves the duplicate open to a single bidirectional stream. Each
+// side writes raw bytes (no framing, no serde); receipt of any byte is
+// a liveness signal.
+const PING_STREAM_ID: u16 = 0;
+const PING_INTERVAL_SECS: u64 = 10;
+const PING_TIMEOUT_SECS: u64 = 30;
+const PING_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Unix-epoch seconds. Timebase for the ping liveness counters so we
+/// can stuff them into an `AtomicU64`.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 // Only this condition needs special handling.
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
@@ -76,8 +93,13 @@ pub enum Transport {
         ssh_host: String,
         command: Vec<String>,
     },
-    /// Placeholder used by tests where the channel implementation ignores
-    /// the transport entirely (e.g. `TestWebChannel`).
+    /// Connect over a pre-established byte stream. Used by the envoy
+    /// (stdio) and as the underlying carrier for `Ssh`.
+    Io(crate::io_channel::ReaderWriter),
+    /// Used by in-memory tests; no real transport behind it.
+    Test,
+    /// Placeholder used by older tests where the channel implementation
+    /// ignores the transport entirely (e.g. `TestWebChannel`).
     Dummy,
 }
 
@@ -191,26 +213,46 @@ impl DualReceiver {
     }
 }
 
-struct RemoteChannels {
-    /// Caller uses this tx to send outgoing messages to remotes.
-    msg_tx: mpsc::Sender<Message>,
-    /// Send `()` to signal an expected shutdown so the per-peer task
-    /// skips the `ConnectionBroke` notification. `Option<>` so callers
-    /// can `take()` it.
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    /// Handle to the per-peer background task. `WebChannel::shutdown`
-    /// awaits this to make sure the SCTP/DTLS/ICE teardown finishes
-    /// before returning. `Option<>` so callers can `take()` it.
-    bg_task_handle: Option<JoinHandle<()>>,
+/// In-band command sent over the per-peer mpsc.
+///
+/// `Msg` carries a regular outgoing message. `Shutdown` asks the actor
+/// to tear down its SCTP/DTLS/ICE state and reply on the oneshot when
+/// cleanup finishes (so callers can join the teardown).
+pub enum Command {
+    Msg(Message),
+    Shutdown(oneshot::Sender<anyhow::Result<()>>),
+}
+
+/// Handle stored in [`WebChannel::remote_map`]. Cloneable.
+#[derive(Clone)]
+pub struct RemoteHandle {
+    msg_tx: mpsc::Sender<Command>,
+}
+
+impl RemoteHandle {
+    /// A handle is “dead” once its actor has dropped the receiver
+    /// (connection broke or shutdown). The map keeps dead handles
+    /// around until the next `send` (which surfaces a
+    /// `ConnectionBroke`) or `connect` (which replaces). But no
+    /// worries because normally whenever the connection is broken,
+    /// main loop receives ConnectionBroke and will try to reconnect.
+    fn is_dead(&self) -> bool {
+        self.msg_tx.is_closed()
+    }
 }
 
 #[derive(Clone)]
 pub struct WebChannel {
     my_hostid: ServerId,
+    /// Main mailbox the server reads from. Actors push deserialized
+    /// peer messages, `ConnectionBroke`, `SerializationErr`, and
+    /// `IceProgress` onto this.
     remote_msg_tx: mpsc::Sender<Message>,
+    /// Side channel for self-addressed messages so they don’t fight the
+    /// bounded `remote_msg_tx` for capacity.
     loopback_tx: mpsc::UnboundedSender<Message>,
-    assoc_tx: Arc<Mutex<HashMap<ServerId, RemoteChannels>>>,
-    next_stream_id: Arc<AtomicU16>,
+    /// One entry per peer (live or recently-dead).
+    remote_map: Arc<Mutex<HashMap<ServerId, RemoteHandle>>>,
 }
 
 impl WebChannel {
@@ -223,14 +265,29 @@ impl WebChannel {
             my_hostid,
             remote_msg_tx,
             loopback_tx,
-            assoc_tx: Arc::new(Mutex::new(HashMap::new())),
-            // Will be set in setup_message_handling to 1 or 2.
-            next_stream_id: Arc::new(AtomicU16::new(0)),
+            remote_map: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn hostid(&self) -> ServerId {
         self.my_hostid.clone()
+    }
+
+    /// Top-level dispatcher. Only `Sock` is wired up; the other
+    /// transports will get their own `*Remote` actors later.
+    pub async fn connect(
+        &self,
+        _remote_id: ServerId,
+        transport: Transport,
+        my_key_cert: ArcKeyCert,
+    ) -> anyhow::Result<()> {
+        match transport {
+            Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
+            Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
+            Transport::Io(_) => Err(anyhow!("WebChannel does not handle Io transports yet")),
+            Transport::Test => Err(anyhow!("WebChannel does not handle Test transport yet")),
+            Transport::Dummy => Err(anyhow!("WebChannel does not handle Dummy transport")),
+        }
     }
 
     /// Connect using an existing Sock from SignalingClient.
@@ -245,8 +302,9 @@ impl WebChannel {
     ) -> anyhow::Result<()> {
         let peer_id = sock.id().to_string();
 
-        // Determine stream ID parity based on host ID ordering
+        // Stream-ID parity comes from host-ID ordering, not who dialed.
         let stream_id = stream_id_init(&self.my_hostid, &peer_id);
+        let as_server = stream_id == STREAM_ID_SERVER_INIT;
 
         tracing::info!(
             "Connecting with sock: my_id={}, peer_id={}, init_stream_id={}",
@@ -255,56 +313,93 @@ impl WebChannel {
             stream_id
         );
 
-        let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
-        let remote_msg_tx = self.remote_msg_tx.clone();
-        let hostid = self.hostid();
-        let hostid_clone = hostid.clone();
-        let peer_id_clone = peer_id.clone();
-        let as_server = stream_id_init(&hostid_clone, &peer_id) == 1;
+        // Reserve the map slot up front. A live handle wins; a dead
+        // one gets evicted. We never concurrently connect but good to
+        // stay clean.
+        let rx = {
+            let mut map = self.remote_map.lock().unwrap();
+            if let Some(h) = map.get(&peer_id) {
+                if !h.is_dead() {
+                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
+                }
+                map.remove(&peer_id);
+            }
+            let (tx, rx) = mpsc::channel::<Command>(16);
+            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
+            rx
+        };
 
-        // Spawn a thread that sends ICE progress to editor. If some
-        // thing goes wrong in the following steps, progress_rx.recv
-        // will error and this thread will exit.
+        // Establish the wire. If anything below fails, evict our slot
+        // and propagate.
+        let setup = self
+            .establish_sctp(sock, my_key_cert, as_server, &peer_id)
+            .await;
+        let (sctp_assoc, dtls_conn, ice_agent) = match setup {
+            Ok(t) => t,
+            Err(e) => {
+                self.remote_map.lock().unwrap().remove(&peer_id);
+                return Err(e);
+            }
+        };
+
+        let remote = SctpRemote::new(
+            peer_id,
+            sctp_assoc,
+            dtls_conn,
+            ice_agent,
+            stream_id,
+            self.remote_msg_tx.clone(),
+            rx,
+        );
+        tokio::spawn(remote.run());
+        Ok(())
+    }
+
+    /// ICE/DTLS/SCTP establishment.
+    async fn establish_sctp(
+        &self,
+        sock: crate::signaling::client_new::Sock,
+        my_key_cert: ArcKeyCert,
+        as_server: bool,
+        peer_id: &ServerId,
+    ) -> anyhow::Result<(
+        Arc<association::Association>,
+        Arc<DTLSConn>,
+        Arc<webrtc_ice::agent::Agent>,
+    )> {
+        // Forward ICE progress to the server as IceProgress messages.
+        // Exits when progress_tx drops (i.e. ICE finishes / fails).
+        let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
+        let progress_msg_tx = self.remote_msg_tx.clone();
+        let my_id = self.my_hostid.clone();
+        let peer_for_progress = peer_id.clone();
         tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
                 tracing::info!("ICE progress: {progress}");
-                let _ = remote_msg_tx
+                let _ = progress_msg_tx
                     .send(Message {
-                        host: hostid.clone(),
-                        body: Msg::IceProgress(peer_id_clone.clone(), progress.to_string()),
+                        host: my_id.clone(),
+                        body: Msg::IceProgress(peer_for_progress.clone(), progress.to_string()),
                         req_id: None,
                     })
                     .await;
             }
         });
 
-        // Establish connection with ICE.
-        let ((conn, their_cert, ice_agent), conn_broke_rx) =
+        let (conn, their_cert, ice_agent) =
             crate::ice::ice_connect_with_sock(sock, Some(progress_tx), as_server).await?;
-
-        let dtls_connection = if as_server {
+        let dtls_conn = if as_server {
             create_dtls_server(conn, my_key_cert, their_cert).await?
         } else {
             create_dtls_client(conn, my_key_cert, their_cert).await?
         };
         let sctp_assoc = if as_server {
-            create_sctp_server(dtls_connection.clone()).await?
+            create_sctp_server(dtls_conn.clone()).await?
         } else {
-            create_sctp_client(dtls_connection.clone()).await?
+            create_sctp_client(dtls_conn.clone()).await?
         };
 
-        // Spawn background tasks to handle messages.
-        self.setup_message_handling(
-            &peer_id,
-            sctp_assoc,
-            stream_id,
-            conn_broke_rx,
-            dtls_connection,
-            ice_agent,
-        )
-        .await?;
-
-        Ok(())
+        Ok((sctp_assoc, dtls_conn, ice_agent))
     }
 
     /// Send a message to a remote host. Doesn't block.
@@ -329,17 +424,20 @@ impl WebChannel {
         }
 
         let tx = self
-            .assoc_tx
+            .remote_map
             .lock()
             .unwrap()
             .get(recipient)
-            .map(|channels| channels.msg_tx.clone())
+            .map(|h| h.msg_tx.clone())
             .ok_or_else(|| anyhow!("Not connected"))?;
 
-        tx.send(message)
-            .await
-            .map_err(|_| anyhow!("Channel broke"))?;
-
+        if tx.send(Command::Msg(message)).await.is_err() {
+            // Leave the dead handle in the map, next connect() will
+            // replace it. Don’t even send a ConnectionBroke message,
+            // because the remote itself must have sent one already
+            // when it broke.
+            return Err(anyhow!("Channel broke"));
+        }
         Ok(())
     }
 
@@ -352,173 +450,68 @@ impl WebChannel {
             req_id,
         };
 
-        // Clone the entries to avoid holding the lock across await.
+        // Clone the txs out so we don’t hold the lock across awaits.
         let peers: Vec<_> = self
-            .assoc_tx
+            .remote_map
             .lock()
             .unwrap()
             .iter()
-            .map(|(hostid, channels)| (hostid.clone(), channels.msg_tx.clone()))
+            .map(|(id, h)| (id.clone(), h.msg_tx.clone()))
             .collect();
 
-        let mut results = Vec::new();
-        for (remote_hostid, tx) in peers {
-            let result = tx
-                .send(message.clone())
-                .await
-                .map_err(|_| anyhow!("Can't send msg to {}", remote_hostid));
-            results.push(result);
-        }
-
-        // Check if any sends failed
-        let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
-        if !errors.is_empty() {
-            return Err(anyhow!(
-                "Failed to broadcast to {} peer(s): {}",
-                errors.len(),
-                errors
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Create threads that accept SCTP streams from remote and read
-    /// the message and sends to message channel; create another thread
-    /// that reads from outgoing message channel and sends to remote
-    /// host.
-    ///
-    /// `stream_id_init`: Initial stream ID for this side. One side
-    /// uses even IDs (2, 4, 6, ...), the other uses odd IDs (1, 3, 5,
-    /// ...). Stream IDs increment by 2 and wrap around on overflow.
-    async fn setup_message_handling(
-        &self,
-        remote_hostid: &ServerId,
-        sctp_assoc: Arc<association::Association>,
-        stream_id_init: u16,
-        conn_broke_rx: oneshot::Receiver<()>,
-        dtls_conn: Arc<DTLSConn>,
-        ice_agent: Arc<webrtc_ice::agent::Agent>,
-    ) -> anyhow::Result<()> {
-        if self.assoc_tx.lock().unwrap().contains_key(remote_hostid) {
-            return Err(anyhow!(WebChannelError::ConnectionExists(
-                remote_hostid.clone()
-            )));
-        }
-
-        // Create channel for outgoing messages
-        let (tx, rx) = mpsc::channel(16);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let (err_tx, mut err_rx) = mpsc::channel::<()>(1);
-
-        // Initialize the stream ID counter to the initial value for
-        // this side. This will be 1 for client (odd IDs) or 2 for
-        // server (even IDs).
-        self.next_stream_id.store(stream_id_init, Ordering::SeqCst);
-
-        // Spawn task to handle outgoing messages.
-        let sctp_assoc_clone = sctp_assoc.clone();
-        let next_stream_id = self.next_stream_id.clone();
-        let remote_hostid_clone = remote_hostid.clone();
-        let msg_tx_clone = self.remote_msg_tx.clone();
-
-        tokio::spawn(async move {
-            handle_outgoing_messages(
-                rx,
-                sctp_assoc_clone,
-                next_stream_id,
-                remote_hostid_clone,
-                msg_tx_clone,
-                err_tx,
-            )
-            .await;
-        });
-
-        // Spawn task to handle incoming streams.
-        let msg_tx_clone = self.remote_msg_tx.clone();
-        let remote_hostid_clone = remote_hostid.to_string();
-        let assoc_tx_clone = self.assoc_tx.clone();
-
-        let bg_task_handle = tokio::spawn(async move {
-            let mut expected = false;
-            tokio::select! {
-                _ = handle_incoming_messages(
-                    sctp_assoc.clone(),
-                    msg_tx_clone.clone(),
-                    remote_hostid_clone.clone(),
-                    stream_id_init,
-                ) => (),
-                res = shutdown_rx => {
-                    expected = res.is_ok();
-                },
-                // When there’s an async error, we terminate and clean up.
-                _ = err_rx.recv() => {
-                    tracing::info!("Background task for {} exiting because: receives error", remote_hostid_clone);
-                },
-                // Why do we need a channel to know that connection broke?
-                // SCTP SHOULD have implemented heartbeat and return None
-                // with connection breaks, but doesn't. Which means when
-                // connection breaks, accept_stream just hangs
-                // indefinitely. To take the matter into our own hands, I
-                // added this channel.
-                _ = conn_broke_rx => (),
-            }
-
-            // Clean up when connection closes.
-            assoc_tx_clone.lock().unwrap().remove(&remote_hostid_clone);
-
-            let timeout = Duration::from_secs(5);
-            let _ = tokio::time::timeout(timeout, async move {
-                let _ = sctp_assoc.shutdown().await;
-                // These aren’t really necessary but doesn’t harm to do
-                // them.
-                let _ = sctp_assoc.close().await;
-                let _ = dtls_conn.close().await;
-                let _ = ice_agent.close().await;
-            });
-
-            if !expected {
-                let _ = msg_tx_clone
+        let mut errs = Vec::new();
+        for (peer, tx) in peers {
+            if tx.send(Command::Msg(message.clone())).await.is_err() {
+                let _ = self
+                    .remote_msg_tx
                     .send(Message {
-                        host: remote_hostid_clone.clone(),
-                        body: Msg::ConnectionBroke(remote_hostid_clone),
+                        host: peer.clone(),
+                        body: Msg::ConnectionBroke(peer.clone()),
                         req_id: None,
                     })
                     .await;
+                errs.push(peer);
             }
-        });
-
-        // Insert into the association map. If a connection already
-        // exists, abort the bg task and bail out.
-        {
-            let mut map = self.assoc_tx.lock().unwrap();
-            if map.contains_key(remote_hostid) {
-                let _ = tokio::spawn(async move {
-                    let _ = shutdown_tx.send(());
-                    let _ = bg_task_handle.await;
-                });
-                return Err(anyhow!(WebChannelError::ConnectionExists(
-                    remote_hostid.clone()
-                )));
-            }
-            map.insert(
-                remote_hostid.clone(),
-                RemoteChannels {
-                    msg_tx: tx,
-                    shutdown_tx: Some(shutdown_tx),
-                    bg_task_handle: Some(bg_task_handle),
-                },
-            );
         }
+        if !errs.is_empty() {
+            return Err(anyhow!("broadcast failed for {} peer(s)", errs.len()));
+        }
+        Ok(())
+    }
 
+    pub fn disconnect(&self, peer: &ServerId) {
+        let handle = self.remote_map.lock().unwrap().remove(peer);
+        if let Some(handle) = handle {
+            // Fire-and-forget: we don’t wait for the cleanup result
+            // here. TODO: think about this more later, maybe this
+            // should be try_send.
+            tokio::spawn(async move {
+                let (tx, _rx) = oneshot::channel();
+                let _ = handle.msg_tx.send(Command::Shutdown(tx)).await;
+            });
+        }
+    }
+
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let handles: Vec<RemoteHandle> = {
+            let mut map = self.remote_map.lock().unwrap();
+            map.drain().map(|(_, h)| h).collect()
+        };
+        let mut replies = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let (tx, rx) = oneshot::channel();
+            if handle.msg_tx.send(Command::Shutdown(tx)).await.is_ok() {
+                replies.push(rx);
+            }
+        }
+        for rx in replies {
+            let _ = rx.await;
+        }
         Ok(())
     }
 }
 
+// TODO: Remove this.
 #[async_trait]
 impl MsgChannel for WebChannel {
     async fn send(
@@ -532,15 +525,11 @@ impl MsgChannel for WebChannel {
 
     async fn connect(
         &self,
-        _remote_id: ServerId,
+        remote_id: ServerId,
         transport: Transport,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
-        match transport {
-            Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
-            Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
-            Transport::Dummy => Err(anyhow!("WebChannel does not handle Dummy transport")),
-        }
+        self.connect(remote_id, transport, my_key_cert).await
     }
 
     async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
@@ -548,31 +537,217 @@ impl MsgChannel for WebChannel {
     }
 
     fn disconnect(&self, peer: &ServerId) {
-        let mut map = self.assoc_tx.lock().unwrap();
-        let peer = map.remove(peer);
-        if let Some(mut peer) = peer {
-            if let Some(tx) = peer.shutdown_tx.take() {
-                let _ = tx.send(());
-            }
-        }
-        // peer is dropped here.
+        self.disconnect(peer)
     }
 
     async fn shutdown(&self) -> anyhow::Result<()> {
-        let peers: Vec<RemoteChannels> = {
-            let mut map = self.assoc_tx.lock().unwrap();
-            map.drain().map(|(_, v)| v).collect()
-        };
-        let mut handles = Vec::new();
-        for mut peer in peers {
-            if let Some(tx) = peer.shutdown_tx.take() {
-                let _ = tx.send(());
+        self.shutdown().await
+    }
+}
+
+// *** SctpRemote actor
+
+/// Per-peer SCTP actor. Owned by a single tokio task; `WebChannel`
+/// talks to it only via [`RemoteHandle`]. Probably could have just
+/// passed everything into a run function (the run function consumes
+/// the remote anyway), but using a struct looks a little tidier.
+struct SctpRemote {
+    peer_id: ServerId,
+    sctp_assoc: Arc<association::Association>,
+    dtls_conn: Arc<DTLSConn>,
+    ice_agent: Arc<webrtc_ice::agent::Agent>,
+    /// Next stream ID this actor will use for an outgoing message.
+    /// Increments by 2 with wrapping; parity preserved.
+    next_stream_id: u16,
+    /// Parity of stream IDs we initiate. Used to filter out our own
+    /// streams when SCTP echoes them back via `accept_stream`.
+    stream_id_parity: u16,
+    remote_msg_tx: mpsc::Sender<Message>,
+    rx: mpsc::Receiver<Command>,
+    /// Unix-epoch seconds of the last ping byte we wrote.
+    last_ping_sent: u64,
+    /// Unix-epoch seconds of the last byte received on any stream.
+    /// Shared with the per-stream `read_from_stream` tasks.
+    last_ping_recv: Arc<AtomicU64>,
+}
+
+/// Why the actor’s main loop exited. Determines the cleanup.
+enum Exit {
+    Shutdown(oneshot::Sender<anyhow::Result<()>>),
+    OutgoingErr,
+    IncomingClosed,
+    SenderDropped,
+    PingTimeout,
+}
+
+impl SctpRemote {
+    fn new(
+        peer_id: ServerId,
+        sctp_assoc: Arc<association::Association>,
+        dtls_conn: Arc<DTLSConn>,
+        ice_agent: Arc<webrtc_ice::agent::Agent>,
+        stream_id_init: u16,
+        remote_msg_tx: mpsc::Sender<Message>,
+        rx: mpsc::Receiver<Command>,
+    ) -> Self {
+        let now = now_secs();
+        Self {
+            peer_id,
+            sctp_assoc,
+            dtls_conn,
+            ice_agent,
+            next_stream_id: stream_id_init,
+            stream_id_parity: stream_id_init,
+            remote_msg_tx,
+            rx,
+            // saturating_sub so the timer’s immediate first tick fires
+            // a ping right away.
+            last_ping_sent: now.saturating_sub(PING_INTERVAL_SECS),
+            last_ping_recv: Arc::new(AtomicU64::new(now)),
+        }
+    }
+
+    /// Runs select! in a loop, once the loop exits, run cleanup. For
+    /// graceful shutdowns the cleanup result is reported to the
+    /// requester; for everything else we send `ConnectionBroke` to
+    /// the main loop in server.rs to handle.
+    async fn run(mut self) {
+        // Open ping stream symmetrically.
+        let ping_stream = match self
+            .sctp_assoc
+            .open_stream(PING_STREAM_ID, PayloadProtocolIdentifier::Binary)
+            .await
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!("Failed to open ping stream for {}: {e}", self.peer_id);
+                let _ = self.cleanup().await;
+                let _ = self
+                    .remote_msg_tx
+                    .send(Message {
+                        host: self.peer_id.clone(),
+                        body: Msg::ConnectionBroke(self.peer_id.clone()),
+                        req_id: None,
+                    })
+                    .await;
+                return;
             }
-            if let Some(handle) = peer.bg_task_handle.take() {
-                handles.push(handle);
+        };
+
+        // Real work happens here.
+        let exit = self.run_inner(ping_stream).await;
+        let cleanup_res = self.cleanup().await;
+
+        // Cleanup.
+        match exit {
+            Exit::Shutdown(tx) => {
+                let _ = tx.send(cleanup_res);
+            }
+            Exit::OutgoingErr | Exit::IncomingClosed | Exit::SenderDropped | Exit::PingTimeout => {
+                let _ = self
+                    .remote_msg_tx
+                    .send(Message {
+                        host: self.peer_id.clone(),
+                        body: Msg::ConnectionBroke(self.peer_id.clone()),
+                        req_id: None,
+                    })
+                    .await;
             }
         }
-        join_all(handles).await;
+    }
+
+    /// Single select loop over the four event sources. Returns the
+    /// reason we’re exiting.
+    async fn run_inner(&mut self, ping_stream: Arc<stream::Stream>) -> Exit {
+        // First tick fires immediately. At t=0 last_ping_recv = now
+        // (not timed out) and last_ping_sent = now - PING_INTERVAL, so
+        // both sides write their first ping byte right away.
+        let mut ping_timer = tokio::time::interval(PING_CHECK_INTERVAL);
+        let mut ping_buf = [0u8; 64];
+
+        loop {
+            tokio::select! {
+                cmd = self.rx.recv() => match cmd {
+                    Some(Command::Shutdown(tx)) => return Exit::Shutdown(tx),
+                    Some(Command::Msg(msg)) => {
+                        if self.handle_outgoing_message(msg).await.is_err() {
+                            return Exit::OutgoingErr;
+                        }
+                    }
+                    None => return Exit::SenderDropped,
+                },
+                stream = self.sctp_assoc.accept_stream() => match stream {
+                    Some(stream) => self.handle_incoming_stream(stream),
+                    None => return Exit::IncomingClosed,
+                },
+                _ = ping_timer.tick() => {
+                    if let Some(exit) = self.handle_ping_tick(&ping_stream).await {
+                        return exit;
+                    }
+                }
+                res = ping_stream.read(&mut ping_buf) => {
+                    match res {
+                        Ok(0) => {
+                            tracing::warn!("Ping stream closed by {}", self.peer_id);
+                            return Exit::PingTimeout;
+                        }
+                        Ok(_) => {
+                            self.last_ping_recv.store(now_secs(), Ordering::Relaxed);
+                        }
+                        Err(err) => {
+                            tracing::warn!("Ping stream read error for {}: {:?}", self.peer_id, err);
+                            return Exit::PingTimeout;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// This function does two things.
+    /// 1. If too long has past since we receives a message or ping,
+    /// consider the connection broken and abort. (webrtc_sctp doesn’t
+    /// implement a heartbeat itself so we need this to detect
+    /// connection breakage.)
+    /// 2. Send out ping every n seconds.
+    async fn handle_ping_tick(&mut self, ping_stream: &Arc<stream::Stream>) -> Option<Exit> {
+        let now = now_secs();
+
+        let last_recv = self.last_ping_recv.load(Ordering::Relaxed);
+        if now.saturating_sub(last_recv) > PING_TIMEOUT_SECS {
+            tracing::warn!(
+                "Ping timeout for {}: last recv {}s ago",
+                self.peer_id,
+                now.saturating_sub(last_recv)
+            );
+            return Some(Exit::PingTimeout);
+        }
+
+        if now.saturating_sub(self.last_ping_sent) < PING_INTERVAL_SECS {
+            return None;
+        }
+
+        if let Err(e) = ping_stream.write(&bytes::Bytes::from_static(&[0u8])).await {
+            tracing::warn!("Failed to write ping byte to {}: {e}", self.peer_id);
+            return Some(Exit::OutgoingErr);
+        }
+        self.last_ping_sent = now;
+        None
+    }
+
+    /// Best-effort teardown of SCTP/DTLS/ICE, capped by a timeout so a
+    /// wedged peer can’t block shutdown forever.
+    async fn cleanup(&self) -> anyhow::Result<()> {
+        let timeout = Duration::from_secs(5);
+        tokio::time::timeout(timeout, async {
+            let _ = self.sctp_assoc.shutdown().await;
+            // These aren’t strictly necessary but they don’t hurt.
+            let _ = self.sctp_assoc.close().await;
+            let _ = self.dtls_conn.close().await;
+            let _ = self.ice_agent.close().await;
+        })
+        .await
+        .map_err(|_| anyhow!("cleanup timed out for {}", self.peer_id))?;
         Ok(())
     }
 }
@@ -660,154 +835,105 @@ async fn create_sctp_client(
     Ok(Arc::new(assoc))
 }
 
-// *** Helper functions for WebChannel
+// *** SctpRemote per-message handlers
 
-// Read messages from `rx` and send them out to remote. Open a new
-// stream for every message to send out. Stream IDs increment by 2
-// with wrapping to maintain odd/even property, ensuring the two ends
-// of the connection create non-overlapping stream IDs.
-async fn handle_outgoing_messages(
-    mut rx: mpsc::Receiver<Message>,
-    sctp_assoc: Arc<association::Association>,
-    next_stream_id: Arc<AtomicU16>,
-    remote_hostid: ServerId,
-    msg_tx: mpsc::Sender<Message>,
-    err_tx: mpsc::Sender<()>,
-) {
-    while let Some(message) = rx.recv().await {
-        // Fetch current stream ID and increment by 2 with wrapping.
-        // This maintains odd/even property: odd stays odd, even stays even.
-        let stream_id = next_stream_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                Some(current.wrapping_add(2))
-            })
-            .unwrap();
+impl SctpRemote {
+    /// Frame and write one outgoing message on a fresh SCTP stream.
+    /// Returns Err(()) on any fatal stream/serialization error; the
+    /// caller turns that into `Exit::OutgoingErr` and we tear down.
+    async fn handle_outgoing_message(&mut self, message: Message) -> Result<(), ()> {
+        // Bump the stream-ID counter by 2 with wrapping. Parity is
+        // preserved so the two ends of the connection never collide.
+        let stream_id = self.next_stream_id;
+        self.next_stream_id = self.next_stream_id.wrapping_add(2);
 
-        // open_stream only errs when _ourselves_ accept_stream
-        // blocked, which shouldn’t happen. So just drop and let
-        // setup_message_handling clean things up and send connection
-        // broke error.
-        let res = sctp_assoc
+        // open_stream only errors when our own accept_stream is
+        // blocked, which shouldn’t happen.
+        let stream = match self
+            .sctp_assoc
             .open_stream(stream_id, PayloadProtocolIdentifier::Binary)
-            .await;
-        if res.is_err() {
-            tracing::warn!(
-                "Failed to open stream #{}: {}",
-                stream_id,
-                res.err().unwrap()
-            );
-            let _ = err_tx.send(()).await;
-            break; // Break and drop rx
-        }
-        let stream = res.unwrap();
-        // let data = match bincode::serialize(&message) {
-        let data = match serde_json::to_string(&message) {
-            Ok(data) => data.into_bytes(),
+            .await
+        {
+            Ok(s) => s,
             Err(e) => {
-                // I don’t expect this to happen.
-                tracing::warn!("Failed to serialize message: {}", e);
-                let _ = msg_tx
-                    .send(Message {
-                        host: remote_hostid.clone(),
-                        body: Msg::SerializationErr(remote_hostid),
-                        req_id: None,
-                    })
-                    .await;
-                let _ = err_tx.send(()).await;
-                let _ = stream.shutdown(std::net::Shutdown::Both).await;
-                break;
+                tracing::warn!("Failed to open stream #{}: {}", stream_id, e);
+                return Err(());
             }
         };
 
-        // Write length prefix (8 bytes) followed by data
-        let len_bytes = (data.len() as u64).to_be_bytes();
-        let len_bytes = bytes::Bytes::from(len_bytes.to_vec());
+        let data = match serde_json::to_string(&message) {
+            Ok(s) => s.into_bytes(),
+            Err(e) => {
+                // I don’t expect this to happen.
+                tracing::warn!("Failed to serialize message: {}", e);
+                let _ = self
+                    .remote_msg_tx
+                    .send(Message {
+                        host: self.peer_id.clone(),
+                        body: Msg::SerializationErr(self.peer_id.clone()),
+                        req_id: None,
+                    })
+                    .await;
+                let _ = stream.shutdown(std::net::Shutdown::Both).await;
+                return Err(());
+            }
+        };
+
+        // Write 8-byte length prefix followed by the payload.
+        let len_bytes = bytes::Bytes::from((data.len() as u64).to_be_bytes().to_vec());
         if let Err(e) = stream.write(&len_bytes).await {
             tracing::warn!("Failed to write length prefix to stream: {}", e);
-            // Let setup_message_handling send the connection broke message.
-            let _ = err_tx.send(()).await;
             let _ = stream.shutdown(std::net::Shutdown::Both).await;
-            break;
+            return Err(());
         }
 
-        // Send data in chunks of MAX_FRAME_SIZE
+        // Send data in chunks of MAX_FRAME_SIZE.
         let mut offset = 0;
         while offset < data.len() {
             let chunk_end = std::cmp::min(offset + MAX_FRAME_SIZE, data.len());
             let chunk = bytes::Bytes::from(data[offset..chunk_end].to_vec());
-
             if let Err(e) = stream.write(&chunk).await {
                 tracing::warn!("Failed to write data chunk to stream: {}", e);
-                // Let setup_message_handling send the connection broke message.
-                let _ = err_tx.send(()).await;
                 let _ = stream.shutdown(std::net::Shutdown::Both).await;
-                break;
+                return Err(());
             }
-
             offset = chunk_end;
         }
         let _ = stream.shutdown(std::net::Shutdown::Write).await;
+        Ok(())
     }
-}
 
-// Listen for new SCTP streams, each stream is a new message. For each
-// new stream, spawn a new thread that reads a message from it and
-// send to `msg_tx`. `stream_id_init` is the same as the one passed to
-// `handle_outgoing_messages`, we use it to determine which streams we
-// get are actually from ourselves by checking odd/even parity.
-async fn handle_incoming_messages(
-    sctp_assoc: Arc<association::Association>,
-    msg_tx: mpsc::Sender<Message>,
-    remote_hostid: ServerId,
-    stream_id_init: u16,
-) {
-    loop {
-        let stream_result = sctp_assoc.accept_stream().await;
-        match stream_result {
-            Some(stream) => {
-                let stream_id = stream.stream_identifier();
-                // Check if stream has same odd/even parity as our init value.
-                // If so, it's from ourselves, so don't read from it.
-                // Client (init=1, odd) ignores odd streams.
-                // Server (init=2, even) ignores even streams.
-                let stream_is_from_us = (stream_id % 2) == (stream_id_init % 2);
+    /// Handle one inbound SCTP stream. Streams with id matching our
+    /// parity are streams we opened, ignore them and close the
+    /// receiving half. Stream with `PING_STREAM_ID` is the ping
+    /// stream, don’t close the receiving half, but also ignore it,
+    /// because we alread have a copy. For everything else, spawn a
+    /// task to read the message and forward it to `remote_msg_tx`.
+    fn handle_incoming_stream(&self, stream: Arc<stream::Stream>) {
+        let stream_id = stream.stream_identifier();
 
-                if stream_is_from_us {
-                    let _ = stream.shutdown(std::net::Shutdown::Read).await;
-                    continue;
-                }
-
-                let msg_tx = msg_tx.clone();
-                let remote_hostid = remote_hostid.clone();
-
-                tracing::info!(
-                    "New stream (#{}) from {}",
-                    stream.stream_identifier(),
-                    remote_hostid
-                );
-                tokio::spawn(async move {
-                    read_from_stream(stream, msg_tx, remote_hostid).await;
-                });
-            }
-            None => {
-                // When this function returns, the caller cleans up
-                // assoc_tx map and sends connection closed message.
-                tracing::info!("No more streams from {}", remote_hostid);
-                break;
-            }
+        // Ignore ping stream but don’t close the receiving half.
+        if stream_id == PING_STREAM_ID {
+            return;
         }
-    }
 
-    // No need to use the shutdown method (graceful shutdown) since
-    // something already went wrong.
-    if let Err(e) = sctp_assoc.close().await {
-        tracing::warn!(
-            "Failed to close SCTP association for {}: {}",
-            remote_hostid,
-            e
-        );
-    } else {
-        tracing::debug!("SCTP association closed successfully for {}", remote_hostid);
+        // Client (init=1, odd) ignores odd streams; server (init=2,
+        // even) ignores even streams.
+        if (stream_id % 2) == (self.stream_id_parity % 2) {
+            let s = stream.clone();
+            tokio::spawn(async move {
+                let _ = s.shutdown(std::net::Shutdown::Read).await;
+            });
+            return;
+        }
+
+        tracing::info!("New stream (#{}) from {}", stream_id, self.peer_id);
+        let tx = self.remote_msg_tx.clone();
+        let peer = self.peer_id.clone();
+        let last_ping_recv = self.last_ping_recv.clone();
+        tokio::spawn(async move {
+            read_from_stream(stream, tx, peer, last_ping_recv).await;
+        });
     }
 }
 
@@ -815,6 +941,7 @@ async fn read_from_stream(
     stream: Arc<stream::Stream>,
     msg_tx: mpsc::Sender<Message>,
     remote_hostid: ServerId,
+    last_ping_recv: Arc<AtomicU64>,
 ) {
     // First, read 8 bytes for the length
     let mut len_bytes = [0u8; 8];
@@ -910,6 +1037,7 @@ async fn read_from_stream(
     // match bincode::deserialize::<Message>(&full_buffer) {
     match serde_json::from_slice::<Message>(&full_buffer) {
         Ok(message) => {
+            last_ping_recv.store(now_secs(), Ordering::Relaxed);
             if let Err(e) = msg_tx.send(message).await {
                 tracing::warn!("Failed to send message to channel: {}", e);
                 // No need to send error, the incoming_message handler

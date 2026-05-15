@@ -3,7 +3,6 @@ use crate::signaling::CertDerHash;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::instrument;
@@ -35,14 +34,10 @@ pub async fn ice_connect_with_sock(
     mut sock: crate::signaling::client_new::Sock,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     is_server: bool,
-) -> WebrpcResult<(
-    (Arc<dyn Conn + Send + Sync>, CertDerHash, Arc<Agent>),
-    oneshot::Receiver<()>,
-)> {
+) -> WebrpcResult<(Arc<dyn Conn + Send + Sync>, CertDerHash, Arc<Agent>)> {
     let (error_tx, mut error_rx) = mpsc::channel(1);
     let (cancel_tx, cancel_rx) = mpsc::channel(1);
     let (connected_tx, connected_rx) = watch::channel(());
-    let (conn_broke_tx, conn_broke_rx) = oneshot::channel();
 
     let agent = Arc::new(make_ice_agent(is_server).await?);
 
@@ -63,7 +58,7 @@ pub async fn ice_connect_with_sock(
     let (ufrag, pwd) = get_ice_credential_from_sdp(&peer_sdp)?;
     let their_cert = sock.cert_hash().to_string();
 
-    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone(), conn_broke_tx);
+    ice_monitor_progress(agent.clone(), progress_tx, error_tx.clone());
     let candidate_task =
         ice_exchange_candidates_with_sock(agent.clone(), sock, error_tx.clone(), connected_rx)?;
 
@@ -80,7 +75,7 @@ pub async fn ice_connect_with_sock(
                 drop(connected_tx);
                 let conn = conn?;
                 let conn: Arc<dyn Conn + Send + Sync> = conn;
-                Ok(((conn, their_cert, agent), conn_broke_rx))
+                Ok((conn, their_cert, agent))
             }
         }
     } else {
@@ -95,7 +90,7 @@ pub async fn ice_connect_with_sock(
                 drop(connected_tx);
                 let conn = conn?;
                 let conn: Arc<dyn Conn + Send + Sync> = conn;
-                Ok(((conn, their_cert, agent), conn_broke_rx))
+                Ok((conn, their_cert, agent))
             }
         }
     };
@@ -169,24 +164,22 @@ fn ice_exchange_candidates_with_sock(
     Ok(candidate_task)
 }
 
-/// Monitor the handshake progress. If connection failed, send an error
-/// to `error_tx`. If `progress_tx` is non-none, send ConnectionState
-/// to it at each step.
+/// Monitor the handshake progress. If connection failed during the
+/// initial handshake, send an error to `error_tx` so the caller can
+/// bail. If `progress_tx` is non-none, send ConnectionState to it at
+/// each step.
 #[instrument(skip_all)]
 fn ice_monitor_progress(
     agent: Arc<Agent>,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     error_tx: mpsc::Sender<WebrpcError>,
-    conn_broke_tx: oneshot::Sender<()>,
 ) {
-    let mut conn_broke_tx = Some(conn_broke_tx);
     agent.on_connection_state_change(Box::new(move |state| {
         tracing::debug!(?state, "ICE state changed");
         if let Some(tx) = &progress_tx {
             let _ = tx.try_send(state);
         }
 
-        // Check for terminal states and close the agent
         if state == ConnectionState::Failed
             // Technically disconnected state is recoverable with
             // ice_restart, but to keep things simple, we just
@@ -202,14 +195,8 @@ fn ice_monitor_progress(
             };
 
             let _ = error_tx.try_send(WebrpcError::ICEError(format!("Connection {}", description)));
-
-            // Signal connection breakage. Webchannel will close the agent.
-            drop(conn_broke_tx.take());
-
-            Box::pin(async move {})
-        } else {
-            Box::pin(async move {})
         }
+        Box::pin(async move {})
     }));
 }
 

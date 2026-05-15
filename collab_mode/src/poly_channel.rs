@@ -94,8 +94,8 @@ impl MsgChannel for PolyMsgChannel {
         let kind = match &transport {
             Transport::Sock(_) => TransportKind::Sctp,
             Transport::Ssh { .. } => TransportKind::Ssh,
-            Transport::Dummy => {
-                return Err(anyhow!("PolyMsgChannel does not handle Dummy transport"))
+            Transport::Io(_) | Transport::Test | Transport::Dummy => {
+                return Err(anyhow!("PolyMsgChannel does not handle this transport"))
             }
         };
 

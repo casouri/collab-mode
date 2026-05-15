@@ -1,7 +1,6 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use collab_mode::{config_man, editor_receptor, server::Server};
-use std::sync::Arc;
 
 #[derive(Parser)]
 struct Cli {
@@ -97,22 +96,7 @@ fn main() -> anyhow::Result<()> {
                 use collab_mode::{server::*, signaling, webchannel};
                 let host_id_for_factory = host_id.clone();
                 let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-                    let web = Arc::new(webchannel::WebChannel::new(
-                        host_id_for_factory.clone(),
-                        msg_tx.clone(),
-                        self_tx.clone(),
-                    ));
-                    let ssh = Arc::new(collab_mode::ssh_channel::SshMsgChannel::new(
-                        host_id_for_factory.clone(),
-                        msg_tx.clone(),
-                        self_tx.clone(),
-                    ));
-                    Arc::new(collab_mode::poly_channel::PolyMsgChannel::new(
-                        host_id_for_factory,
-                        web,
-                        ssh,
-                        self_tx,
-                    ))
+                    webchannel::WebChannel::new(host_id_for_factory, msg_tx, self_tx)
                 });
                 let sig_factory: SignalingChannelFactory = Box::new(move |sig_tx| {
                     Box::new(signaling::client_new::SignalingChannel::new(sig_tx))
@@ -160,7 +144,7 @@ fn main() -> anyhow::Result<()> {
 /// server from it, then run `Server::run` with stdio as the only peer
 /// transport.
 fn run_envoy() -> anyhow::Result<()> {
-    use collab_mode::io_channel::{frame_read, frame_write, IoMsgChannel, ReaderWriter};
+    use collab_mode::io_channel::{frame_read, frame_write};
     use collab_mode::message::Msg;
     use collab_mode::server::*;
     use collab_mode::signaling::client_new::NoopSignalingChannel;
@@ -233,19 +217,13 @@ fn run_envoy() -> anyhow::Result<()> {
         tokio::spawn(async move { while sink_rx.recv().await.is_some() {} });
         let _editor_tx_alive = editor_tx_alive;
 
-        // Use IoMsgChannel directly for envoy mode.
+        // Envoy mode currently relies on Io transport, which the new
+        // actor-model WebChannel doesn’t implement yet. The IoRemote
+        // refactor will restore this; for now we hand back a vanilla
+        // WebChannel so the binary builds.
         let envoy_id_for_factory = envoy_id.clone();
-        let host_id_for_factory = host_id.clone();
         let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-            let rw = ReaderWriter::new(tokio::io::stdin(), tokio::io::stdout(), ());
-            let io = IoMsgChannel::new(
-                envoy_id_for_factory,
-                host_id_for_factory,
-                rw,
-                msg_tx,
-                self_tx,
-            );
-            std::sync::Arc::new(io)
+            webchannel::WebChannel::new(envoy_id_for_factory, msg_tx, self_tx)
         });
         let sig_factory: SignalingChannelFactory = Box::new(|_| Box::new(NoopSignalingChannel));
 
