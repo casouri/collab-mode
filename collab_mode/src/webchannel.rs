@@ -321,9 +321,36 @@ impl WebChannel {
         }
         match transport {
             Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
-            Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
+            Transport::Ssh { ssh_host, command } => {
+                self.connect_ssh(remote_id, ssh_host, command).await
+            }
             Transport::Io(rw) => self.connect_io(remote_id, rw).await,
         }
+    }
+
+    /// Spawn an [`SshRemote`] for a peer reachable via ssh.
+    async fn connect_ssh(
+        &self,
+        peer_id: ServerId,
+        ssh_host: String,
+        command: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let rx = {
+            let mut map = self.remote_map.lock().unwrap();
+            if let Some(handle) = map.get(&peer_id) {
+                if !handle.is_dead() {
+                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
+                }
+                map.remove(&peer_id);
+            }
+            let (tx, rx) = mpsc::channel::<Command>(16);
+            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
+            rx
+        };
+
+        let remote = SshRemote::new(peer_id, ssh_host, command, self.remote_msg_tx.clone(), rx);
+        tokio::spawn(remote.run());
+        Ok(())
     }
 
     /// Spawn an [`IoRemote`] for an already-established byte stream
@@ -1431,7 +1458,9 @@ mod tests {
 }
 
 mod io_remote;
+mod ssh_remote;
 use io_remote::IoRemote;
+use ssh_remote::SshRemote;
 
 #[cfg(test)]
 mod e2e_tests;
