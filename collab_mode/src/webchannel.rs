@@ -322,8 +322,33 @@ impl WebChannel {
         match transport {
             Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
             Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
-            Transport::Io(_) => Err(anyhow!("WebChannel does not handle Io transports yet")),
+            Transport::Io(rw) => self.connect_io(remote_id, rw).await,
         }
+    }
+
+    /// Spawn an [`IoRemote`] for an already-established byte stream
+    /// (envoy stdio, ssh stdio).
+    async fn connect_io(
+        &self,
+        peer_id: ServerId,
+        rw: crate::io_channel::ReaderWriter,
+    ) -> anyhow::Result<()> {
+        let rx = {
+            let mut map = self.remote_map.lock().unwrap();
+            if let Some(h) = map.get(&peer_id) {
+                if !h.is_dead() {
+                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
+                }
+                map.remove(&peer_id);
+            }
+            let (tx, rx) = mpsc::channel::<Command>(16);
+            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
+            rx
+        };
+
+        let remote = IoRemote::new(peer_id, rw, self.remote_msg_tx.clone(), rx);
+        tokio::spawn(remote.run());
+        Ok(())
     }
 
     /// In-process routing via `TestRemote`. Same map-reserve dance as
@@ -1404,6 +1429,9 @@ mod tests {
         assert!(matches!(msg2.body, Msg::FileShared(123)));
     }
 }
+
+mod io_remote;
+use io_remote::IoRemote;
 
 #[cfg(test)]
 mod e2e_tests;
