@@ -7,8 +7,8 @@ async fn test_accept_connect() {
 
     let factory = TestChannelFactory::new();
 
-    let id1 = "server1".to_string();
-    let id2 = "server2".to_string();
+    let id1 = "server1::test-cert-hash".to_string();
+    let id2 = "server2::test-cert-hash".to_string();
 
     tracing::info!("Creating servers with IDs: {} and {}", id1, id2);
 
@@ -23,17 +23,15 @@ async fn test_accept_connect() {
     let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();
     let (mut mock_editor2, server_tx2, server_rx2) = MockEditor::new();
 
-    let factory_arc = factory.inner();
     let signaling_factory = Arc::new(TestSignalingChannelFactory::new());
 
     let server1_handle = {
-        let factory_arc = factory_arc.clone();
+        let channel_factory = factory.clone();
         let signaling_factory = signaling_factory.clone();
         let id1 = id1.clone();
         tokio::spawn(async move {
-            let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-                Arc::new(factory_arc.get_channel(id1, msg_tx, self_tx))
-            });
+            let web_factory: crate::server::WebChannelFactory =
+                Box::new(move |msg_tx, self_tx| channel_factory.get_channel(id1, msg_tx, self_tx));
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -47,13 +45,12 @@ async fn test_accept_connect() {
     };
 
     let server2_handle = {
-        let factory_arc = factory_arc.clone();
+        let channel_factory = factory.clone();
         let signaling_factory = signaling_factory.clone();
         let id2 = id2.clone();
         tokio::spawn(async move {
-            let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-                Arc::new(factory_arc.get_channel(id2, msg_tx, self_tx))
-            });
+            let web_factory: crate::server::WebChannelFactory =
+                Box::new(move |msg_tx, self_tx| channel_factory.get_channel(id2, msg_tx, self_tx));
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());

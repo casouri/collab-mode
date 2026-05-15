@@ -11,7 +11,7 @@
 //! When connection breaks, webchannel cleans itself up and sends a
 //! ConnectionBroke message to the main message channel.
 
-use crate::message::{HeyMessage, Msg};
+use crate::message::Msg;
 use crate::{
     config_man::{hash_der, ConfigProject},
     signaling::CertDerHash,
@@ -253,6 +253,13 @@ pub struct WebChannel {
     loopback_tx: mpsc::UnboundedSender<Message>,
     /// One entry per peer (live or recently-dead).
     remote_map: Arc<Mutex<HashMap<ServerId, RemoteHandle>>>,
+    /// Populated only when this WebChannel is wired into a test
+    /// factory. Shared by all WebChannels under the same factory so
+    /// they can route to each other in-process. None in production.
+    test_factory_state: Option<Arc<Mutex<FactoryState>>>,
+    /// Simulated network delay for the test transport. Ignored when
+    /// `test_factory_state` is None.
+    test_travel_time: TravelTime,
 }
 
 impl WebChannel {
@@ -266,6 +273,36 @@ impl WebChannel {
             remote_msg_tx,
             loopback_tx,
             remote_map: Arc::new(Mutex::new(HashMap::new())),
+            test_factory_state: None,
+            test_travel_time: TravelTime::Instant,
+        }
+    }
+
+    /// Test-only constructor. All `WebChannel`s built under the same
+    /// `factory_state` route messages to each other in-process via
+    /// `TestRemote` actors instead of touching the network.
+    pub fn new_for_test(
+        my_hostid: ServerId,
+        remote_msg_tx: mpsc::Sender<Message>,
+        loopback_tx: mpsc::UnboundedSender<Message>,
+        factory_state: Arc<Mutex<FactoryState>>,
+        travel_time: TravelTime,
+    ) -> Self {
+        // Register so other test WebChannels can find our mailbox.
+        factory_state.lock().unwrap().hosts.insert(
+            my_hostid.clone(),
+            HostState {
+                inbox: Vec::new(),
+                msg_tx: remote_msg_tx.clone(),
+            },
+        );
+        Self {
+            my_hostid,
+            remote_msg_tx,
+            loopback_tx,
+            remote_map: Arc::new(Mutex::new(HashMap::new())),
+            test_factory_state: Some(factory_state),
+            test_travel_time: travel_time,
         }
     }
 
@@ -273,21 +310,62 @@ impl WebChannel {
         self.my_hostid.clone()
     }
 
-    /// Top-level dispatcher. Only `Sock` is wired up; the other
-    /// transports will get their own `*Remote` actors later.
+    /// Top-level dispatcher. In test mode (`test_factory_state` is
+    /// Some) we ignore the `transport` argument and route through
+    /// `TestRemote`; the server still hands us a real-looking
+    /// `Transport::Sock` from the test signaling layer but it isn’t
+    /// needed for in-process routing.
     pub async fn connect(
         &self,
-        _remote_id: ServerId,
+        remote_id: ServerId,
         transport: Transport,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
+        if self.test_factory_state.is_some() {
+            return self.connect_test(remote_id).await;
+        }
         match transport {
             Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
             Transport::Ssh { .. } => Err(anyhow!("WebChannel does not handle Ssh transports")),
             Transport::Io(_) => Err(anyhow!("WebChannel does not handle Io transports yet")),
-            Transport::Test => Err(anyhow!("WebChannel does not handle Test transport yet")),
+            Transport::Test => Err(anyhow!(
+                "WebChannel without a test factory cannot serve Transport::Test"
+            )),
             Transport::Dummy => Err(anyhow!("WebChannel does not handle Dummy transport")),
         }
+    }
+
+    /// In-process routing via `TestRemote`. Same map-reserve dance as
+    /// `connect_with_sock` so concurrent connects to the same peer
+    /// behave identically.
+    async fn connect_test(&self, peer_id: ServerId) -> anyhow::Result<()> {
+        let factory_state = self
+            .test_factory_state
+            .as_ref()
+            .expect("connect_test called without a test factory")
+            .clone();
+
+        let rx = {
+            let mut map = self.remote_map.lock().unwrap();
+            if let Some(h) = map.get(&peer_id) {
+                if !h.is_dead() {
+                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
+                }
+                map.remove(&peer_id);
+            }
+            let (tx, rx) = mpsc::channel::<Command>(16);
+            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
+            rx
+        };
+
+        let remote = TestRemote {
+            peer_id,
+            factory_state,
+            travel_time: self.test_travel_time.clone(),
+            rx,
+        };
+        tokio::spawn(remote.run());
+        Ok(())
     }
 
     /// Connect using an existing Sock from SignalingClient.
@@ -1061,16 +1139,16 @@ async fn read_from_stream(
     }
 }
 
-// *** Test utilities
+// *** Test transport
 
-/// Travel time configuration for message delivery
+/// Simulated network delay for the test transport.
 #[derive(Debug, Clone)]
 pub enum TravelTime {
-    /// Random delay between min and max milliseconds
+    /// Random delay between min and max milliseconds.
     Random(u64, u64),
-    /// Fixed delay in milliseconds
+    /// Fixed delay in milliseconds.
     Ms(u64),
-    /// Instant delivery with no delay
+    /// Instant delivery with no delay.
     Instant,
 }
 
@@ -1078,83 +1156,127 @@ pub enum TravelTime {
 struct HostState {
     inbox: Vec<Message>,
     msg_tx: mpsc::Sender<Message>,
-    self_tx: mpsc::UnboundedSender<Message>,
-    deliverable: bool,
 }
 
-/// Shared state for the test factory
-struct FactoryState {
+/// Shared routing table for the test transport. One per logical
+/// network; multiple `WebChannel`s register themselves in it via
+/// `WebChannel::new_for_test`.
+pub struct FactoryState {
     hosts: HashMap<ServerId, HostState>,
 }
 
 impl FactoryState {
-    /// Synchronous part of deliver - checks deliverable flag, drains inbox.
-    /// Returns messages and msg_tx without holding lock across await.
-    fn deliver_sync(
+    pub fn new() -> Self {
+        Self {
+            hosts: HashMap::new(),
+        }
+    }
+
+    /// Push a message onto the recipient’s inbox.
+    fn push(&mut self, hostid: &ServerId, msg: Message) -> anyhow::Result<()> {
+        let host = self
+            .hosts
+            .get_mut(hostid)
+            .ok_or_else(|| anyhow!("Host {} not registered", hostid))?;
+        host.inbox.push(msg);
+        Ok(())
+    }
+
+    /// Drain the recipient’s inbox and clone its msg_tx so the caller
+    /// can `send` outside the lock.
+    fn drain(
         &mut self,
         hostid: &ServerId,
     ) -> anyhow::Result<(Vec<Message>, mpsc::Sender<Message>)> {
-        let host_state = self
+        let host = self
             .hosts
             .get_mut(hostid)
-            .ok_or_else(|| anyhow!("Host {} not found", hostid))?;
+            .ok_or_else(|| anyhow!("Host {} not registered", hostid))?;
+        Ok((std::mem::take(&mut host.inbox), host.msg_tx.clone()))
+    }
+}
 
-        if !host_state.deliverable {
-            return Err(anyhow!("Inbox for {} not deliverable", hostid));
-        }
-
-        let messages = std::mem::take(&mut host_state.inbox);
-        let msg_tx = host_state.msg_tx.clone();
-        Ok((messages, msg_tx))
+impl Default for FactoryState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// Factory for creating test web channels with in-memory message passing
-pub struct TestWebChannelFactory {
+#[derive(Clone)]
+pub struct TestFactory {
     state: Arc<Mutex<FactoryState>>,
     travel_time: TravelTime,
 }
 
-impl TestWebChannelFactory {
+impl TestFactory {
     pub fn new(travel_time: TravelTime) -> Self {
         Self {
-            state: Arc::new(Mutex::new(FactoryState {
-                hosts: HashMap::new(),
-            })),
+            state: Arc::new(Mutex::new(FactoryState::new())),
             travel_time,
         }
     }
 
-    /// Create a new test channel for a host
-    pub fn get_channel(
-        self: &Arc<Self>,
+    /// Build a `WebChannel` wired into this factory.
+    pub fn build_channel(
+        &self,
         my_hostid: ServerId,
-        msg_tx: mpsc::Sender<Message>,
-        self_tx: mpsc::UnboundedSender<Message>,
-    ) -> TestWebChannel {
-        let mut state = self.state.lock().unwrap();
-        state.hosts.insert(
-            my_hostid.clone(),
-            HostState {
-                inbox: Vec::new(),
-                msg_tx,
-                self_tx,
-                deliverable: false,
-            },
-        );
-
-        TestWebChannel {
+        remote_msg_tx: mpsc::Sender<Message>,
+        loopback_tx: mpsc::UnboundedSender<Message>,
+    ) -> WebChannel {
+        WebChannel::new_for_test(
             my_hostid,
-            factory: self.clone(),
+            remote_msg_tx,
+            loopback_tx,
+            self.state.clone(),
+            self.travel_time.clone(),
+        )
+    }
+}
+
+/// Per-peer actor for the in-process test transport. Mirrors the
+/// `SctpRemote` shape: spawned by `WebChannel::connect_test`, owns its
+/// `Command` receiver, exits on `Shutdown` or when all senders drop.
+struct TestRemote {
+    peer_id: ServerId,
+    factory_state: Arc<Mutex<FactoryState>>,
+    travel_time: TravelTime,
+    rx: mpsc::Receiver<Command>,
+}
+
+impl TestRemote {
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                cmd = self.rx.recv() => match cmd {
+                    Some(Command::Shutdown(tx)) => {
+                        let _ = tx.send(Ok(()));
+                        return;
+                    }
+                    Some(Command::Msg(msg)) => {
+                        if let Err(e) = self.route(msg).await {
+                            tracing::warn!(
+                                "TestRemote routing to {} failed: {e}",
+                                self.peer_id
+                            );
+                        }
+                    }
+                    None => return,
+                }
+            }
         }
     }
 
-    /// Deliver messages from a host's inbox to its msg_tx.
-    /// Returns error if inbox is not marked as deliverable.
-    /// If travel_time is 0, delivers synchronously. Otherwise spawns a task
-    /// that waits for the travel time and then delivers all pending messages.
-    pub async fn deliver(&self, hostid: &ServerId) -> anyhow::Result<()> {
-        // Calculate travel time in milliseconds
+    /// Deliver messages from a host's inbox to its msg_tx. Returns
+    /// error if inbox is not marked as deliverable. If travel_time is
+    /// 0, delivers synchronously. Otherwise spawns a task that waits
+    /// for the travel time and then delivers all pending messages.
+    async fn route(&self, msg: Message) -> anyhow::Result<()> {
+        self.factory_state
+            .lock()
+            .unwrap()
+            .push(&self.peer_id, msg)?;
+
         let delay_ms = match &self.travel_time {
             TravelTime::Instant => 0,
             TravelTime::Ms(ms) => *ms,
@@ -1162,219 +1284,28 @@ impl TestWebChannelFactory {
         };
 
         if delay_ms == 0 {
-            // Deliver synchronously
-            let (messages, msg_tx) = { self.state.lock().unwrap().deliver_sync(hostid)? };
+            return Self::deliver(&self.factory_state, &self.peer_id).await;
+        }
 
-            for msg in messages {
-                msg_tx
-                    .send(msg)
-                    .await
-                    .map_err(|_| anyhow!("Channel broke for {}", hostid))?;
+        let state = self.factory_state.clone();
+        let peer = self.peer_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            if let Err(e) = Self::deliver(&state, &peer).await {
+                tracing::warn!("Delayed deliver to {peer} failed: {e}");
             }
-
-            Ok(())
-        } else {
-            // Deliver asynchronously after delay
-            let hostid = hostid.clone();
-            let state = self.state.clone();
-
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-
-                let (messages, msg_tx) = match state.lock().unwrap().deliver_sync(&hostid) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        tracing::debug!("Failed to deliver to {}: {}", hostid, e);
-                        return;
-                    }
-                };
-
-                for msg in messages {
-                    if let Err(e) = msg_tx.send(msg).await {
-                        tracing::warn!("Channel broke for {}: {}", hostid, e);
-                        break;
-                    }
-                }
-            });
-
-            Ok(())
-        }
-    }
-}
-
-/// Test web channel that uses in-memory message passing
-#[derive(Clone)]
-pub struct TestWebChannel {
-    my_hostid: ServerId,
-    factory: Arc<TestWebChannelFactory>,
-}
-
-impl TestWebChannel {
-    pub fn hostid(&self) -> ServerId {
-        self.my_hostid.clone()
-    }
-}
-
-#[async_trait]
-impl MsgChannel for TestWebChannel {
-    async fn send(
-        &self,
-        recipient: &ServerId,
-        req_id: Option<RequestId>,
-        msg: Msg,
-    ) -> anyhow::Result<()> {
-        let message = Message {
-            host: self.my_hostid.clone(),
-            body: msg.clone(),
-            req_id,
-        };
-
-        // Send to self via the unbounded channel.
-        if recipient == &self.my_hostid {
-            let self_tx = {
-                let state = self.factory.state.lock().unwrap();
-                let host_state = state
-                    .hosts
-                    .get(recipient)
-                    .ok_or_else(|| anyhow!("Recipient {} not found", recipient))?;
-                host_state.self_tx.clone()
-            };
-
-            return self_tx
-                .send(message)
-                .map_err(|_| anyhow!("Self channel closed for {}", recipient));
-        }
-
-        // Push to recipient's inbox
-        {
-            let mut state = self.factory.state.lock().unwrap();
-            let host_state = state
-                .hosts
-                .get_mut(recipient)
-                .ok_or_else(|| anyhow!("Recipient {} not found", recipient))?;
-
-            host_state.inbox.push(message);
-        }
-
-        // Deliver immediately using factory's deliver method
-        self.factory.deliver(recipient).await?;
-
+        });
         Ok(())
     }
 
-    async fn connect(
-        &self,
-        remote_hostid: ServerId,
-        _transport: Transport,
-        _my_key_cert: ArcKeyCert,
-    ) -> anyhow::Result<()> {
-        // Mark both self and remote as deliverable
-        {
-            let mut state = self.factory.state.lock().unwrap();
-
-            // Mark remote as deliverable
-            let remote_host_state = state
-                .hosts
-                .get_mut(&remote_hostid)
-                .ok_or_else(|| anyhow!("Remote host {} not found", remote_hostid))?;
-            remote_host_state.deliverable = true;
-
-            // Mark self as deliverable too
-            let my_host_state = state
-                .hosts
-                .get_mut(&self.my_hostid)
-                .ok_or_else(|| anyhow!("My host {} not found", self.my_hostid))?;
-            my_host_state.deliverable = true;
+    async fn deliver(state: &Arc<Mutex<FactoryState>>, recipient: &ServerId) -> anyhow::Result<()> {
+        let (messages, msg_tx) = state.lock().unwrap().drain(recipient)?;
+        for msg in messages {
+            msg_tx
+                .send(msg)
+                .await
+                .map_err(|_| anyhow!("recipient channel broke for {recipient}"))?;
         }
-
-        // Send Hey messages bidirectionally to establish connection
-        // From connector to remote
-        self.send(
-            &remote_hostid,
-            None,
-            Msg::Hey(HeyMessage {
-                message: "Nice to meet ya".to_string(),
-                credentials: "".to_string(),
-                version: "v1.0.0".to_string(),
-            }),
-        )
-        .await?;
-
-        // From remote back to connector (simulate bidirectional handshake)
-        {
-            let mut state = self.factory.state.lock().unwrap();
-            let my_host_state = state
-                .hosts
-                .get_mut(&self.my_hostid)
-                .ok_or_else(|| anyhow!("My host {} not found", self.my_hostid))?;
-
-            my_host_state.inbox.push(Message {
-                host: remote_hostid.clone(),
-                body: Msg::Hey(HeyMessage {
-                    message: "Welcome to my server".to_string(),
-                    credentials: "".to_string(),
-                    version: "v1.0.0".to_string(),
-                }),
-                req_id: None,
-            });
-        }
-
-        // Deliver the Hey from remote to self
-        self.factory.deliver(&self.my_hostid).await?;
-
-        Ok(())
-    }
-
-    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
-        let message = Message {
-            host: self.my_hostid.clone(),
-            body: msg,
-            req_id,
-        };
-
-        // Collect all deliverable host IDs and push message to their inboxes
-        let deliverable_hosts: Vec<_> = {
-            let mut state = self.factory.state.lock().unwrap();
-            state
-                .hosts
-                .iter_mut()
-                .filter(|(_, host_state)| host_state.deliverable)
-                .map(|(hostid, host_state)| {
-                    host_state.inbox.push(message.clone());
-                    hostid.clone()
-                })
-                .collect()
-        };
-
-        // Deliver to all hosts using factory's deliver method
-        let mut errors = Vec::new();
-        for hostid in deliverable_hosts {
-            if let Err(e) = self.factory.deliver(&hostid).await {
-                errors.push(e);
-            }
-        }
-
-        if !errors.is_empty() {
-            return Err(anyhow!(
-                "Failed to broadcast to {} peer(s): {}",
-                errors.len(),
-                errors
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn disconnect(&self, _peer: &ServerId) {
-        // No-op for test channel
-    }
-
-    async fn shutdown(&self) -> anyhow::Result<()> {
-        // Tests don't need flushing; messages are delivered synchronously.
         Ok(())
     }
 }
@@ -1382,204 +1313,117 @@ impl MsgChannel for TestWebChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
 
     fn create_test_id(name: &str) -> ServerId {
         format!("test-{}", name)
     }
 
+    fn key_cert() -> ArcKeyCert {
+        Arc::new(crate::config_man::create_key_cert("test"))
+    }
+
+    /// Build two test WebChannels bound to a shared `TestFactory`,
+    /// drain their dual receivers for the caller.
+    fn pair(travel: TravelTime) -> (WebChannel, DualReceiver, WebChannel, DualReceiver) {
+        let factory = TestFactory::new(travel);
+        let id_a = create_test_id("a");
+        let id_b = create_test_id("b");
+        let (dual_a, tx_a, self_tx_a) = DualReceiver::new();
+        let (dual_b, tx_b, self_tx_b) = DualReceiver::new();
+        let chan_a = factory.build_channel(id_a, tx_a, self_tx_a);
+        let chan_b = factory.build_channel(id_b, tx_b, self_tx_b);
+        (chan_a, dual_a, chan_b, dual_b)
+    }
+
     #[tokio::test]
     async fn test_sync_send_instant() {
-        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Instant));
+        let (chan_a, _dual_a, chan_b, mut dual_b) = pair(TravelTime::Instant);
 
-        let (tx1, _rx1) = mpsc::channel::<Message>(10);
-        let (tx2, mut rx2) = mpsc::channel::<Message>(10);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
-
-        let id1 = create_test_id("host1");
-        let id2 = create_test_id("host2");
-
-        let channel1 = factory.get_channel(id1.clone(), tx1, self_tx1);
-        let channel2 = factory.get_channel(id2.clone(), tx2, self_tx2);
-
-        // Mark both as deliverable by connecting to each other
-        channel1
-            .connect(
-                id2.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("test1")),
-            )
-            .await
-            .unwrap();
-        channel2
-            .connect(
-                id1.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("test2")),
-            )
+        chan_a
+            .connect(chan_b.hostid(), Transport::Test, key_cert())
             .await
             .unwrap();
 
-        // Drain Hey messages from connection establishment
-        let _ = rx2.recv().await; // Hey from channel1
-        let _ = rx2.recv().await; // Hey from channel2 to itself
-
-        // Send message from channel1 to channel2
-        channel1
-            .send(&id2, None, Msg::FileShared(42))
+        chan_a
+            .send(&chan_b.hostid(), None, Msg::FileShared(42))
             .await
             .unwrap();
 
-        // Should receive immediately with Instant travel time
-        let msg = rx2.recv().await.unwrap();
-        assert_eq!(msg.host, id1);
+        let msg = dual_b.recv().await.unwrap();
+        assert_eq!(msg.host, chan_a.hostid());
         assert!(matches!(msg.body, Msg::FileShared(42)));
     }
 
     #[tokio::test]
     async fn test_sync_send_ms_zero() {
-        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Ms(0)));
+        let (chan_a, _dual_a, chan_b, mut dual_b) = pair(TravelTime::Ms(0));
 
-        let (tx1, _rx1) = mpsc::channel::<Message>(10);
-        let (tx2, mut rx2) = mpsc::channel::<Message>(10);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
-
-        let id1 = create_test_id("sender");
-        let id2 = create_test_id("receiver");
-
-        let channel1 = factory.get_channel(id1.clone(), tx1, self_tx1);
-        let channel2 = factory.get_channel(id2.clone(), tx2, self_tx2);
-
-        // Mark both as deliverable by connecting to each other
-        channel1
-            .connect(
-                id2.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("test1")),
-            )
-            .await
-            .unwrap();
-        channel2
-            .connect(
-                id1.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("test2")),
-            )
+        chan_a
+            .connect(chan_b.hostid(), Transport::Test, key_cert())
             .await
             .unwrap();
 
-        // Drain Hey messages from connection establishment
-        let _ = rx2.recv().await; // Hey from channel1
-        let _ = rx2.recv().await; // Hey from channel2 to itself
-
-        // Send message
-        channel1
-            .send(&id2, None, Msg::FileShared(99))
+        chan_a
+            .send(&chan_b.hostid(), None, Msg::FileShared(99))
             .await
             .unwrap();
 
-        // Should receive immediately with Ms(0)
-        let msg = rx2.recv().await.unwrap();
-        assert_eq!(msg.host, id1);
+        let msg = dual_b.recv().await.unwrap();
+        assert_eq!(msg.host, chan_a.hostid());
         assert!(matches!(msg.body, Msg::FileShared(99)));
     }
 
+    /// In the actor model there is no `deliverable` flag — a send to
+    /// a peer that was never `connect`ed fails at `remote_map` lookup.
     #[tokio::test]
-    async fn test_send_to_non_deliverable_fails() {
-        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Instant));
+    async fn test_send_without_connect_fails() {
+        let (chan_a, _dual_a, chan_b, _dual_b) = pair(TravelTime::Instant);
 
-        let (tx1, _rx1) = mpsc::channel::<Message>(10);
-        let (tx2, _rx2) = mpsc::channel::<Message>(10);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
-
-        let id1 = create_test_id("sender");
-        let id2 = create_test_id("receiver");
-
-        let channel1 = factory.get_channel(id1.clone(), tx1, self_tx1);
-        let _channel2 = factory.get_channel(id2.clone(), tx2, self_tx2);
-
-        // Don't connect - both channels are not deliverable
-
-        // Try to send to non-deliverable recipient - should fail
-        let result = channel1.send(&id2, None, Msg::FileShared(1)).await;
+        // No connect call.
+        let result = chan_a
+            .send(&chan_b.hostid(), None, Msg::FileShared(1))
+            .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not deliverable"));
+        assert!(result.unwrap_err().to_string().contains("Not connected"));
     }
 
     #[tokio::test]
     async fn test_sync_broadcast() {
-        let factory = Arc::new(TestWebChannelFactory::new(TravelTime::Instant));
-
-        let (tx_sender, _rx_sender) = mpsc::channel::<Message>(10);
-        let (tx_recv1, mut rx_recv1) = mpsc::channel::<Message>(10);
-        let (tx_recv2, mut rx_recv2) = mpsc::channel::<Message>(10);
-        let (self_tx_sender, _self_rx_sender) = mpsc::unbounded_channel::<Message>();
-        let (self_tx_recv1, _self_rx_recv1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx_recv2, _self_rx_recv2) = mpsc::unbounded_channel::<Message>();
+        let factory = TestFactory::new(TravelTime::Instant);
 
         let id_sender = create_test_id("sender");
         let id_recv1 = create_test_id("receiver1");
         let id_recv2 = create_test_id("receiver2");
 
-        let channel_sender = factory.get_channel(id_sender.clone(), tx_sender, self_tx_sender);
-        let channel_recv1 = factory.get_channel(id_recv1.clone(), tx_recv1, self_tx_recv1);
-        let channel_recv2 = factory.get_channel(id_recv2.clone(), tx_recv2, self_tx_recv2);
+        let (_dual_sender, tx_sender, self_tx_sender) = DualReceiver::new();
+        let (mut dual_recv1, tx_recv1, self_tx_recv1) = DualReceiver::new();
+        let (mut dual_recv2, tx_recv2, self_tx_recv2) = DualReceiver::new();
 
-        // Mark all as deliverable by connecting them
-        channel_sender
-            .connect(
-                id_recv1.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("sender")),
-            )
+        let chan_sender = factory.build_channel(id_sender.clone(), tx_sender, self_tx_sender);
+        let _chan_recv1 = factory.build_channel(id_recv1.clone(), tx_recv1, self_tx_recv1);
+        let _chan_recv2 = factory.build_channel(id_recv2.clone(), tx_recv2, self_tx_recv2);
+
+        // Sender connects to both receivers (broadcast iterates the
+        // sender's remote_map — receivers don't need to connect back).
+        chan_sender
+            .connect(id_recv1.clone(), Transport::Test, key_cert())
             .await
             .unwrap();
-        channel_recv1
-            .connect(
-                id_sender.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("recv1")),
-            )
-            .await
-            .unwrap();
-        channel_sender
-            .connect(
-                id_recv2.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("sender")),
-            )
-            .await
-            .unwrap();
-        channel_recv2
-            .connect(
-                id_sender.clone(),
-                Transport::Dummy,
-                Arc::new(crate::config_man::create_key_cert("recv2")),
-            )
+        chan_sender
+            .connect(id_recv2.clone(), Transport::Test, key_cert())
             .await
             .unwrap();
 
-        // Drain Hey messages from connection establishment
-        let _ = rx_recv1.recv().await; // Hey from sender
-        let _ = rx_recv1.recv().await; // Hey from recv1 to itself
-        let _ = rx_recv2.recv().await; // Hey from sender
-        let _ = rx_recv2.recv().await; // Hey from recv2 to itself
-
-        // Broadcast from sender
-        channel_sender
+        chan_sender
             .broadcast(None, Msg::FileShared(123))
             .await
             .unwrap();
 
-        // Both receivers should get the message
-        let msg1 = rx_recv1.recv().await.unwrap();
+        let msg1 = dual_recv1.recv().await.unwrap();
         assert_eq!(msg1.host, id_sender);
         assert!(matches!(msg1.body, Msg::FileShared(123)));
 
-        let msg2 = rx_recv2.recv().await.unwrap();
+        let msg2 = dual_recv2.recv().await.unwrap();
         assert_eq!(msg2.host, id_sender);
         assert!(matches!(msg2.body, Msg::FileShared(123)));
     }

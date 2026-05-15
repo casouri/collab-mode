@@ -1,11 +1,8 @@
 use super::*;
 use crate::config_man::ConfigManager;
-use crate::poly_channel::PolyMsgChannel;
 use crate::server::{Server, SignalingChannelFactory, WebChannelFactory};
 use crate::signaling::client_new::NoopSignalingChannel;
-use crate::ssh_channel::SshMsgChannel;
 use crate::webchannel::WebChannel;
-use std::sync::Arc;
 
 /// Tempdirs and channels held by an envoy e2e test. Drops
 /// `mock_editor` first (signaling shutdown), then the host server,
@@ -35,20 +32,13 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
 
     let (mut mock_editor, server_to_editor_tx, editor_to_server_rx) = MockEditor::new();
 
+    // NOTE: envoy tests are `#[ignore]`d — they need Transport::Ssh,
+    // which the actor-model WebChannel doesn’t handle yet (the SshRemote
+    // refactor will restore it). This factory just hands back a vanilla
+    // WebChannel so the file compiles.
     let host_id_for_factory = host_id.to_string();
-    let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-        let web = Arc::new(WebChannel::new(
-            host_id_for_factory.clone(),
-            msg_tx.clone(),
-            self_tx.clone(),
-        ));
-        let ssh = Arc::new(SshMsgChannel::new(
-            host_id_for_factory.clone(),
-            msg_tx.clone(),
-            self_tx.clone(),
-        ));
-        Arc::new(PolyMsgChannel::new(host_id_for_factory, web, ssh, self_tx))
-    });
+    let web_factory: WebChannelFactory =
+        Box::new(move |msg_tx, self_tx| WebChannel::new(host_id_for_factory, msg_tx, self_tx));
     let sig_factory: SignalingChannelFactory = Box::new(|_| Box::new(NoopSignalingChannel));
 
     let server_handle = tokio::spawn(async move {

@@ -4697,11 +4697,8 @@ pub fn remote_message_to_string(msg: &webchannel::Message) -> String {
 
 // *** Tests
 
-// Disabled until TestRemote lands: these integration tests drive Server::run
-// with TestWebChannel via the trait, but Server::run now takes WebChannel
-// directly. Re-enable once the test transport is reworked.
-#[cfg(any())]
+#[cfg(test)]
 pub mod tests;
 
-#[cfg(any())]
+#[cfg(test)]
 pub mod transcript_tests;

@@ -108,7 +108,7 @@ async fn test_server_run_config_projects_expansion() {
             },
         ],
         trusted_hosts: std::collections::HashSet::new(),
-        host_id: Some("test-server".to_string()),
+        host_id: Some("test-server::test-cert-hash".to_string()),
         permission: HashMap::new(),
     };
 
@@ -117,7 +117,7 @@ async fn test_server_run_config_projects_expansion() {
     config_manager.replace_and_save(config).unwrap();
 
     // Create and run server.
-    let host_id = "test-server".to_string();
+    let host_id = "test-server::test-cert-hash".to_string();
     let mut server = Server::new(host_id.clone(), config_manager).unwrap();
 
     // Create channels for server.
@@ -126,15 +126,14 @@ async fn test_server_run_config_projects_expansion() {
 
     // Run server in background task. This test doesn't test the
     // network path, so use a dummy channel.
-    let test_web_factory = Arc::new(crate::webchannel::TestWebChannelFactory::new(
-        crate::webchannel::TravelTime::Instant,
-    ));
+    let test_web_factory =
+        crate::webchannel::TestFactory::new(crate::webchannel::TravelTime::Instant);
     let test_signaling_factory =
         Arc::new(crate::signaling::client_new::TestSignalingChannelFactory::new());
     let host_id_for_factory = host_id.clone();
     let server_task = tokio::spawn(async move {
         let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-            Arc::new(test_web_factory.get_channel(host_id_for_factory, msg_tx, self_tx))
+            test_web_factory.build_channel(host_id_for_factory, msg_tx, self_tx)
         });
         let sig_factory: crate::server::SignalingChannelFactory =
             Box::new(move |sig_tx| Box::new(test_signaling_factory.get_channel(sig_tx)));
@@ -170,7 +169,7 @@ async fn test_server_run_config_projects_expansion() {
     if let Ok(Some(lsp_server::Message::Response(resp))) = response {
         assert!(resp.error.is_none(), "Initialize should succeed");
         let result = resp.result.unwrap();
-        assert_eq!(result["hostId"], "test-server");
+        assert_eq!(result["hostId"], "test-server::test-cert-hash");
     } else {
         panic!("Expected Initialize response");
     }

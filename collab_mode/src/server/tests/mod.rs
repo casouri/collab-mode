@@ -9,7 +9,7 @@ use crate::config_man::{ConfigManager, Permission};
 use crate::message::{SendOpsResp, UndoResp};
 use crate::signaling;
 use crate::signaling::client_new::TestSignalingChannelFactory;
-use crate::webchannel::{TestWebChannel, TestWebChannelFactory, TravelTime};
+use crate::webchannel::{self, TestFactory, TravelTime, WebChannel};
 use rand::Rng;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -39,17 +39,20 @@ pub struct TestEnvironment {
     temp_dir: tempfile::TempDir,
 }
 
-/// Factory for creating test web channels for server tests
+/// Factory for creating test web channels for server tests.
+/// Cloneable — the underlying `TestFactory` holds an `Arc`, so cloning
+/// just gives another handle to the same in-process network.
 #[cfg(test)]
+#[derive(Clone)]
 pub struct TestChannelFactory {
-    factory: Arc<TestWebChannelFactory>,
+    factory: TestFactory,
 }
 
 impl TestChannelFactory {
     pub fn new() -> Self {
         init_test_tracing();
         Self {
-            factory: Arc::new(TestWebChannelFactory::new(TravelTime::Instant)),
+            factory: TestFactory::new(TravelTime::Instant),
         }
     }
 
@@ -58,12 +61,8 @@ impl TestChannelFactory {
         host_id: ServerId,
         msg_tx: mpsc::Sender<webchannel::Message>,
         self_tx: mpsc::UnboundedSender<webchannel::Message>,
-    ) -> TestWebChannel {
-        self.factory.get_channel(host_id, msg_tx, self_tx)
-    }
-
-    pub fn inner(&self) -> Arc<TestWebChannelFactory> {
-        self.factory.clone()
+    ) -> WebChannel {
+        self.factory.build_channel(host_id, msg_tx, self_tx)
     }
 }
 
@@ -155,8 +154,10 @@ impl Drop for TestEnvironment {
 }
 
 fn create_test_id(prefix: &str) -> ServerId {
-    // format!("{}-{}", prefix, Uuid::new_v4())
-    prefix.to_string()
+    // `Server::new` requires `name::cert-hash`. The hash isn't
+    // validated against the actual cert in test mode (TestRemote
+    // skips DTLS), so a fixed placeholder is fine.
+    format!("{prefix}::test-cert-hash")
 }
 
 #[cfg(test)]
@@ -640,15 +641,14 @@ pub async fn setup_hub_and_spoke_servers(
     let mut hub_server = Server::new(hub_id.clone(), hub_config)?;
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
 
-    let factory_arc = factory.inner();
     let signaling_factory = Arc::new(TestSignalingChannelFactory::new());
     let hub_handle = {
-        let factory_arc = factory_arc.clone();
+        let channel_factory = factory.clone();
         let signaling_factory = signaling_factory.clone();
         let hub_id_for_factory = hub_id.clone();
         tokio::spawn(async move {
             let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-                Arc::new(factory_arc.get_channel(hub_id_for_factory, msg_tx, self_tx))
+                channel_factory.get_channel(hub_id_for_factory, msg_tx, self_tx)
             });
             let sig_factory: crate::server::SignalingChannelFactory =
                 Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
@@ -705,13 +705,13 @@ pub async fn setup_hub_and_spoke_servers(
         let (mut spoke_editor, spoke_tx, spoke_rx) = MockEditor::new();
 
         let spoke_handle = {
-            let factory_arc = factory_arc.clone();
+            let channel_factory = factory.clone();
             let signaling_factory = signaling_factory.clone();
             let spoke_id_for_factory = spoke_id.clone();
             tokio::spawn(async move {
                 let web_factory: crate::server::WebChannelFactory =
                     Box::new(move |msg_tx, self_tx| {
-                        Arc::new(factory_arc.get_channel(spoke_id_for_factory, msg_tx, self_tx))
+                        channel_factory.get_channel(spoke_id_for_factory, msg_tx, self_tx)
                     });
                 let sig_factory: crate::server::SignalingChannelFactory =
                     Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
