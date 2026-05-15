@@ -10,8 +10,7 @@
 //! remote process), and `session.close().await` runs a graceful SSH
 //! teardown — all in the same task, no helper spawn needed.
 
-use super::{Command, IoRemote, Message};
-use crate::io_channel::ReaderWriter;
+use super::{Command, IoRemote, Message, ReaderWriter};
 use crate::message::Msg;
 use crate::types::ServerId;
 use tokio::sync::mpsc;

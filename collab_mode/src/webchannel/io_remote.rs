@@ -6,8 +6,7 @@
 //! framed onto the writer; inbound frames are deserialized and
 //! forwarded to the server mailbox.
 
-use super::{Command, Message};
-use crate::io_channel::{frame_read, frame_write, ReaderWriter};
+use super::{frame_read, frame_write, Command, Message, ReaderWriter};
 use crate::message::Msg;
 use crate::types::ServerId;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -101,7 +100,6 @@ impl IoRemote {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::io_channel::ReaderWriter;
     use crate::message::{HeyMessage, Msg};
     use std::time::Duration;
     use tokio::time::timeout;

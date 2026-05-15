@@ -144,11 +144,11 @@ fn main() -> anyhow::Result<()> {
 /// server from it, then run `Server::run` with stdio as the only peer
 /// transport.
 fn run_envoy() -> anyhow::Result<()> {
-    use collab_mode::io_channel::{frame_read, frame_write};
     use collab_mode::message::Msg;
     use collab_mode::server::*;
     use collab_mode::signaling::client_new::NoopSignalingChannel;
     use collab_mode::webchannel;
+    use collab_mode::webchannel::{frame_read, frame_write};
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {

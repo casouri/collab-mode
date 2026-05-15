@@ -108,8 +108,8 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
 }
 
 /// Tear down: drop the mock editor so editor_rx's held tx is gone;
-/// dropping `SshMsgChannel` (when the server's webchannel ref count
-/// hits zero) closes the ssh session, killing the remote envoy.
+/// the server task then exits, the `SshRemote` actor drops, the ssh
+/// session closes, and the remote envoy is killed.
 async fn teardown(harness: EnvoyHarness) {
     drop(harness.mock_editor);
     let _ = tokio::time::timeout(Duration::from_secs(5), harness.server_handle).await;

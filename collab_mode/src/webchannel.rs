@@ -18,7 +18,6 @@ use crate::{
     types::*,
 };
 use anyhow::anyhow;
-use async_trait::async_trait;
 use lsp_server::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,8 +76,7 @@ fn stream_id_init(my_id: &str, peer_id: &str) -> u16 {
 }
 
 /// Carries the transport-specific data needed to establish a connection
-/// to a peer. Each [`MsgChannel`] implementation handles the variants it
-/// supports and errors on the rest.
+/// to a peer. [`WebChannel::connect`] dispatches on the variant.
 pub enum Transport {
     /// Connect via WebRTC (SCTP/DTLS/ICE) using a [`Sock`] from the
     /// signaling client.
@@ -95,42 +93,7 @@ pub enum Transport {
     },
     /// Connect over a pre-established byte stream. Used by the envoy
     /// (stdio) and as the underlying carrier for `Ssh`.
-    Io(crate::io_channel::ReaderWriter),
-}
-
-/// Trait for message channel operations. Provides async methods for
-/// sending, connecting, and broadcasting messages.
-#[async_trait]
-pub trait MsgChannel: Send + Sync {
-    /// Send a message to a remote host. Doesn't block.
-    async fn send(
-        &self,
-        recipient: &ServerId,
-        req_id: Option<RequestId>,
-        msg: Msg,
-    ) -> anyhow::Result<()>;
-
-    /// Connect to a peer using the given [`Transport`]. Each implementation
-    /// handles the variants it supports and returns an error for others.
-    async fn connect(
-        &self,
-        remote_id: ServerId,
-        transport: Transport,
-        my_key_cert: ArcKeyCert,
-    ) -> anyhow::Result<()>;
-
-    #[allow(dead_code)]
-    /// Broadcasts a message to all connected peers. Doesn't block.
-    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()>;
-
-    /// Disconnect from a peer, or give up establishing connections.
-    /// If the peer doesn’t exist, no error is signaled.
-    fn disconnect(&self, peer: &ServerId);
-
-    /// Flush any pending outgoing messages to the wire and tear down
-    /// all peer connections. This can potentially hang so caller must
-    /// have a timeout around it.
-    async fn shutdown(&self) -> anyhow::Result<()>;
+    Io(ReaderWriter),
 }
 
 /// Types of transport.
@@ -355,11 +318,7 @@ impl WebChannel {
 
     /// Spawn an [`IoRemote`] for an already-established byte stream
     /// (envoy stdio, ssh stdio).
-    async fn connect_io(
-        &self,
-        peer_id: ServerId,
-        rw: crate::io_channel::ReaderWriter,
-    ) -> anyhow::Result<()> {
+    async fn connect_io(&self, peer_id: ServerId, rw: ReaderWriter) -> anyhow::Result<()> {
         let rx = {
             let mut map = self.remote_map.lock().unwrap();
             if let Some(h) = map.get(&peer_id) {
@@ -630,40 +589,6 @@ impl WebChannel {
             let _ = rx.await;
         }
         Ok(())
-    }
-}
-
-// TODO: Remove this.
-#[async_trait]
-impl MsgChannel for WebChannel {
-    async fn send(
-        &self,
-        recipient: &ServerId,
-        req_id: Option<RequestId>,
-        msg: Msg,
-    ) -> anyhow::Result<()> {
-        self.send(recipient, req_id, msg).await
-    }
-
-    async fn connect(
-        &self,
-        remote_id: ServerId,
-        transport: Transport,
-        my_key_cert: ArcKeyCert,
-    ) -> anyhow::Result<()> {
-        self.connect(remote_id, transport, my_key_cert).await
-    }
-
-    async fn broadcast(&self, req_id: Option<RequestId>, msg: Msg) -> anyhow::Result<()> {
-        self.broadcast(req_id, msg).await
-    }
-
-    fn disconnect(&self, peer: &ServerId) {
-        self.disconnect(peer)
-    }
-
-    async fn shutdown(&self) -> anyhow::Result<()> {
-        self.shutdown().await
     }
 }
 
@@ -1457,8 +1382,10 @@ mod tests {
     }
 }
 
+mod byte_stream;
 mod io_remote;
 mod ssh_remote;
+pub use byte_stream::{frame_read, frame_write, ReaderWriter};
 use io_remote::IoRemote;
 use ssh_remote::SshRemote;
 

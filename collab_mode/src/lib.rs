@@ -5,7 +5,6 @@ pub mod editor_receptor;
 mod engine;
 mod error;
 mod ice;
-pub mod io_channel;
 pub mod message;
 mod op;
 pub mod server;
