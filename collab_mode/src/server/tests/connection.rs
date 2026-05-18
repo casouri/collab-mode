@@ -13,11 +13,21 @@ async fn test_accept_connect() {
     tracing::info!("Creating servers with IDs: {} and {}", id1, id2);
 
     let temp_dir1 = tempfile::TempDir::new().unwrap();
-    let config1 = ConfigManager::new(Some(temp_dir1.path().to_path_buf()), None).unwrap();
+    let mut config1 = ConfigManager::new(Some(temp_dir1.path().to_path_buf()), None).unwrap();
+    {
+        let mut cfg = config1.config();
+        cfg.trusted_hosts.insert(id2.clone());
+        config1.replace_and_save(cfg).unwrap();
+    }
     let mut server1 = Server::new(id1.clone(), config1).unwrap();
 
     let temp_dir2 = tempfile::TempDir::new().unwrap();
-    let config2 = ConfigManager::new(Some(temp_dir2.path().to_path_buf()), None).unwrap();
+    let mut config2 = ConfigManager::new(Some(temp_dir2.path().to_path_buf()), None).unwrap();
+    {
+        let mut cfg = config2.config();
+        cfg.trusted_hosts.insert(id1.clone());
+        config2.replace_and_save(cfg).unwrap();
+    }
     let mut server2 = Server::new(id2.clone(), config2).unwrap();
 
     let (mut mock_editor1, server_tx1, server_rx1) = MockEditor::new();

@@ -129,12 +129,11 @@ pub struct FileClosedNote {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AcceptModeChangedNote {
+pub struct AcceptingConnectionNote {
     pub addr: String,
-    pub mode: server::AcceptMode,
 }
 
-pub type AcceptingConnectionNote = AcceptModeChangedNote;
+pub type AcceptingStoppedNote = AcceptingConnectionNote;
 
 // *** Requests and responses
 
@@ -152,7 +151,6 @@ pub struct InitResp {
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
     pub addr: String,
-    pub mode: Option<AcceptMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -532,6 +530,9 @@ pub enum Msg {
     Hey(HeyMessage),
     /// Close the connection and don’t try to reconnect to me.
     Bye,
+    /// Self-message asking the main loop to run `fix_world` now,
+    /// without waiting for the next 1s tick. Never sent over the wire.
+    FixWorld,
 
     /// Sent from the host to an envoy as the first message on the SSH
     /// stdio stream. Sets the envoy's id, the host's id, certs for
@@ -553,8 +554,6 @@ pub enum Msg {
     // Errors
     FailedToConnect(ServerId, String),
     ConnectionBroke(ServerId),
-    /// Remote left, don’t try to reconnect.
-    RemoteLeft(ServerId),
     StopSendingOps(DocId),
     SerializationErr(String),
     PermissionDenied(String),

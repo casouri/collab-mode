@@ -184,16 +184,6 @@ pub enum ConnectionState {
     FailedToConnect,
 }
 
-/// Connection state for signaling server connection.
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
-pub enum SignalingConnectionState {
-    Bound,
-    /// u64 is unix epoch seconds. Instant isn't serializable.
-    Binding(u64),
-    Disconnected,
-    FailedToBind,
-}
-
 /// Get current unix epoch in seconds.
 fn unix_epoch_secs() -> u64 {
     std::time::SystemTime::now()
@@ -202,138 +192,211 @@ fn unix_epoch_secs() -> u64 {
         .as_secs()
 }
 
-const MAX_RECONNECT_STRIDE_SECS: u64 = 256;
+// *** WorldState types
+//
+// Declarative connection management. `Server` carries two
+// `WorldState` values: `ideal_world` (the editor's declared intent)
+// and `current_world` (the current state). `fix_world` reconciles the
+// second toward the first.
 
-#[derive(PartialEq, Eq, Debug, Clone)]
-struct RemoteState {
-    /// Connections state.
-    state: ConnectionState,
-    /// Transport info used to connect to this remote.
-    transport_config: webchannel::TransportConfig,
-    /// Next reconnect should be attempted aftert this duration. We
-    /// use exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256. Max at 256.
-    next_reconnect_stride: u64,
-    /// Next reconnect attempt time.
-    next_reconnect_time: std::time::Instant,
+/// Status of a connection to a signaling server.
+#[derive(Debug, Clone)]
+pub enum SignalingStatus {
+    /// Declared but not yet attempted. Equivalent to “no entry”.
+    Pending,
+    /// `bind()` in flight, awaiting `Bound`.
+    Binding { since: Instant },
+    /// Active.
+    Bound,
+    /// Transient failure. `fix_world` retries when now ≥ next_retry_at.
+    Disconnected {
+        next_retry_at: Instant,
+        stride_secs: u64,
+    },
+    /// Hard failure. `fix_world` ignores; explicit editor request resets.
+    Failed { reason: String },
 }
 
-impl RemoteState {
-    fn connecting(transport_config: webchannel::TransportConfig, is_new: bool) -> Self {
-        RemoteState {
-            state: ConnectionState::ConnectingStage1(unix_epoch_secs(), is_new),
-            next_reconnect_stride: 1,
-            transport_config,
-            next_reconnect_time: std::time::Instant::now(),
+/// State of a signaling server entry in `WorldState`.
+#[derive(Debug, Clone)]
+pub struct SignalingState {
+    pub status: SignalingStatus,
+}
+
+/// Status of a connection to a remote peer.
+#[derive(Debug, Clone)]
+pub enum RemoteStatus {
+    /// Declared but not yet attempted. Equivalent to “no entry”.
+    Pending,
+    /// We sent (or are about to send) `SignalingMsg::Connect`.
+    ConnectingStage1 { since: Instant },
+    /// SDP/ICE in progress, awaiting `Msg::Hey`.
+    ConnectingStage2 { since: Instant },
+    /// `Msg::Hey` received.
+    Connected,
+    /// Was connected at least once, then broke. `fix_world` retries.
+    Disconnected {
+        next_retry_at: Instant,
+        stride_secs: u64,
+    },
+    /// Hard failure or first-attempt failure. No auto-retry.
+    Failed { reason: String },
+}
+
+/// State of a remote peer entry in `WorldState`.
+#[derive(Debug, Clone)]
+pub struct RemoteState {
+    pub transport: webchannel::TransportConfig,
+    pub status: RemoteStatus,
+    /// True once we have reached `Connected` for this peer at least once.
+    /// Used on timeout to decide between `Failed` and `Disconnected`.
+    pub ever_connected: bool,
+}
+
+/// Declarative connection state. In `Server.ideal_world` this records
+/// what the editor has declared; the `status` fields are written as
+/// `Connected` / `Bound` and never read. In `Server.current_world` the
+/// `status` fields track the live state machine.
+#[derive(Debug, Clone, Default)]
+pub struct WorldState {
+    pub signaling: HashMap<String, SignalingState>,
+    pub remotes: HashMap<ServerId, RemoteState>,
+    /// Declared trusted peers. On the current side this has no writer
+    /// yet; reserved for the future signaling-Trust refactor.
+    pub trusted: HashSet<ServerId>,
+}
+
+impl WorldState {
+    pub fn set_remote_connecting1(
+        &mut self,
+        peer: &ServerId,
+        transport: webchannel::TransportConfig,
+    ) {
+        let ever = self
+            .remotes
+            .get(peer)
+            .map(|r| r.ever_connected)
+            .unwrap_or(false);
+        self.remotes.insert(
+            peer.clone(),
+            RemoteState {
+                transport,
+                status: RemoteStatus::ConnectingStage1 {
+                    since: Instant::now(),
+                },
+                ever_connected: ever,
+            },
+        );
+    }
+
+    pub fn set_remote_connecting2(
+        &mut self,
+        peer: &ServerId,
+        transport: webchannel::TransportConfig,
+    ) {
+        let ever = self
+            .remotes
+            .get(peer)
+            .map(|r| r.ever_connected)
+            .unwrap_or(false);
+        self.remotes.insert(
+            peer.clone(),
+            RemoteState {
+                transport,
+                status: RemoteStatus::ConnectingStage2 {
+                    since: Instant::now(),
+                },
+                ever_connected: ever,
+            },
+        );
+    }
+
+    pub fn set_remote_pending(&mut self, peer: &ServerId, transport: webchannel::TransportConfig) {
+        let ever = self
+            .remotes
+            .get(peer)
+            .map(|r| r.ever_connected)
+            .unwrap_or(false);
+        self.remotes.insert(
+            peer.clone(),
+            RemoteState {
+                transport,
+                status: RemoteStatus::Pending,
+                ever_connected: ever,
+            },
+        );
+    }
+
+    pub fn mark_remote_connected(&mut self, peer: &ServerId) {
+        if let Some(state) = self.remotes.get_mut(peer) {
+            state.status = RemoteStatus::Connected;
+            state.ever_connected = true;
         }
     }
 
-    fn pending(transport_config: webchannel::TransportConfig) -> Self {
-        RemoteState {
-            state: ConnectionState::Pending,
-            next_reconnect_stride: 1,
-            transport_config,
-            next_reconnect_time: std::time::Instant::now(),
+    pub fn mark_remote_disconnected(&mut self, peer: &ServerId) {
+        if let Some(state) = self.remotes.get_mut(peer) {
+            state.status = RemoteStatus::Disconnected {
+                next_retry_at: Instant::now(),
+                stride_secs: 1,
+            };
         }
     }
 
-    /// Reset reconnection backoff to initial state (stride=1, time=now).
-    fn reset_backoff(&mut self) {
-        self.next_reconnect_stride = 1;
-        self.next_reconnect_time = Instant::now();
-    }
-
-    /// Mark connection as failed. Won't auto-reconnect.
-    fn mark_failed(&mut self) {
-        self.state = ConnectionState::FailedToConnect;
-        self.reset_backoff();
-    }
-
-    /// Mark connection as disconnected. Will auto-reconnect.
-    fn mark_disconnected(&mut self) {
-        self.state = ConnectionState::Disconnected;
-        self.reset_backoff();
-    }
-
-    /// Mark connection as successfully connected.
-    fn mark_connected(&mut self) {
-        self.state = ConnectionState::Connected;
-    }
-
-    /// Mark as connecting stage 1 (sent connect request to remote).
-    /// `is_new` should be true for a newly attempted connection,
-    /// false if reconnecting.
-    fn mark_connecting(&mut self, is_new: bool) {
-        self.state = ConnectionState::ConnectingStage1(unix_epoch_secs(), is_new);
-    }
-
-    /// Mark as connecting stage 2 (received connect response from
-    /// remote). `is_new` should be true for a newly attempted
-    /// connection, false if reconnecting.
-    fn mark_connecting_stage2(&mut self, is_new: bool) {
-        self.state = ConnectionState::ConnectingStage2(unix_epoch_secs(), is_new);
-    }
-
-    /// Mark as pending (waiting for signaling server to be ready).
-    fn mark_pending(&mut self) {
-        self.state = ConnectionState::Pending;
-    }
-
-    /// Advance exponential backoff for next reconnection attempt.
-    fn advance_backoff(&mut self) {
-        let stride = Duration::from_secs(self.next_reconnect_stride);
-        self.next_reconnect_time = Instant::now() + stride;
-        self.next_reconnect_stride =
-            std::cmp::min(self.next_reconnect_stride * 2, MAX_RECONNECT_STRIDE_SECS);
-    }
-}
-
-/// State for a signaling server connection.
-#[derive(PartialEq, Eq, Debug, Clone)]
-struct SignalingState {
-    /// Connection state.
-    state: SignalingConnectionState,
-    /// Next reconnect should be attempted after this duration. We
-    /// use exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256. Max at 256.
-    next_reconnect_stride: u64,
-    /// Next reconnect attempt time.
-    next_reconnect_time: std::time::Instant,
-    /// Accept mode for incoming connections.
-    accept_mode: AcceptMode,
-}
-
-impl SignalingState {
-    fn connecting(mode: AcceptMode) -> Self {
-        SignalingState {
-            state: SignalingConnectionState::Binding(unix_epoch_secs()),
-            next_reconnect_stride: 1,
-            next_reconnect_time: std::time::Instant::now(),
-            accept_mode: mode,
+    pub fn mark_remote_failed(&mut self, peer: &ServerId, reason: String) {
+        if let Some(state) = self.remotes.get_mut(peer) {
+            state.status = RemoteStatus::Failed { reason };
         }
     }
 
-    /// Reset reconnection backoff to initial state (stride=1, time=now).
-    fn reset_backoff(&mut self) {
-        self.next_reconnect_stride = 1;
-        self.next_reconnect_time = Instant::now();
+    pub fn remove_remote(&mut self, peer: &ServerId) {
+        self.remotes.remove(peer);
     }
 
-    /// Mark signaling connection as successfully bound.
-    fn mark_bound(&mut self) {
-        self.state = SignalingConnectionState::Bound;
-        self.reset_backoff();
+    pub fn set_signaling_binding(&mut self, addr: &str) {
+        self.signaling.insert(
+            addr.to_string(),
+            SignalingState {
+                status: SignalingStatus::Binding {
+                    since: Instant::now(),
+                },
+            },
+        );
     }
 
-    /// Mark signaling connection as disconnected. Will auto-reconnect.
-    fn mark_disconnected(&mut self) {
-        self.state = SignalingConnectionState::Disconnected;
+    pub fn mark_signaling_bound(&mut self, addr: &str) {
+        self.signaling
+            .entry(addr.to_string())
+            .and_modify(|s| s.status = SignalingStatus::Bound)
+            .or_insert(SignalingState {
+                status: SignalingStatus::Bound,
+            });
     }
 
-    /// Advance exponential backoff for next reconnection attempt.
-    fn advance_backoff(&mut self) {
-        let stride = Duration::from_secs(self.next_reconnect_stride);
-        self.next_reconnect_time = Instant::now() + stride;
-        self.next_reconnect_stride =
-            std::cmp::min(self.next_reconnect_stride * 2, MAX_RECONNECT_STRIDE_SECS);
+    pub fn mark_signaling_disconnected(&mut self, addr: &str) {
+        if let Some(state) = self.signaling.get_mut(addr) {
+            state.status = SignalingStatus::Disconnected {
+                next_retry_at: Instant::now(),
+                stride_secs: 1,
+            };
+        }
+    }
+
+    pub fn mark_signaling_failed(&mut self, addr: &str, reason: String) {
+        self.signaling
+            .entry(addr.to_string())
+            .and_modify(|s| {
+                s.status = SignalingStatus::Failed {
+                    reason: reason.clone(),
+                }
+            })
+            .or_insert(SignalingState {
+                status: SignalingStatus::Failed { reason },
+            });
+    }
+
+    pub fn remove_signaling(&mut self, addr: &str) {
+        self.signaling.remove(addr);
     }
 }
 
@@ -357,19 +420,8 @@ pub struct Server {
     remote_docs: RemoteDocs,
     /// Projects.
     projects: HashMap<ProjectId, Project>,
-    /// Active remote peers.
-    active_remotes: HashMap<ServerId, RemoteState>,
     /// Maps host id to site id.
     site_id_map: HashMap<ServerId, SiteId>,
-    /// Active signaling server connections.
-    ///
-    /// This map serves a dual purpose:
-    /// 1. The presence of an address indicates we want to maintain a connection
-    ///    to that signaling server (for accepting connections or connecting to peers)
-    /// 2. The SignalingState tracks the actual connection state and reconnection backoff
-    ///
-    /// To stop maintaining a connection, remove the entry from this map.
-    active_signaling: HashMap<String, SignalingState>,
     /// Configuration manager for the server.
     config: ConfigManager,
     /// Key and certificate for the server.
@@ -378,6 +430,16 @@ pub struct Server {
     /// compares the hash portion of an incoming id against the hash
     /// portion of each entry.
     trusted_hosts: HashSet<ServerId>,
+    /// Declared world state: what the editor wants us to be doing.
+    /// Only editor handlers write here. `fix_world` reads only.
+    pub ideal_world: WorldState,
+    /// Observed world state: connections in flight or live, with
+    /// backoff bookkeeping. Message handlers and `fix_world` write here.
+    pub current_world: WorldState,
+    /// Cert hashes trusted only for the lifetime of this process,
+    /// eg. the temp envoy cert generated during outgoing SSH connect.
+    /// Not user-declared, so does not belong in `WorldState.trusted`.
+    pub local_trusted_hosts: HashSet<ServerId>,
 }
 
 // *** Impl Doc
@@ -665,12 +727,13 @@ impl Server {
             docs: HashMap::new(),
             remote_docs: RemoteDocs::new(),
             projects: HashMap::new(),
-            active_remotes: HashMap::new(),
             site_id_map: HashMap::new(),
-            active_signaling: HashMap::new(),
             config,
             key_cert,
             trusted_hosts,
+            ideal_world: WorldState::default(),
+            current_world: WorldState::default(),
+            local_trusted_hosts: HashSet::new(),
         };
         Ok(server)
     }
@@ -720,21 +783,24 @@ impl Server {
             },
         );
 
-        // Populate active_remotes in ConnectingStage2 so the existing
-        // Hey handler can mark it Connected.
-        self.active_remotes.insert(
+        // Populate current_world.remotes in ConnectingStage2 so the
+        // Hey handler can mark it Connected. Also declare it in
+        // ideal_world so fix_world doesn't tear it down.
+        let envoy_transport = webchannel::TransportConfig::SshStdio {
+            ssh_host: "N/A".into(),
+            command: Vec::new(),
+            projects: Vec::new(),
+        };
+        self.ideal_world.remotes.insert(
             host_id.clone(),
             RemoteState {
-                state: ConnectionState::ConnectingStage2(unix_epoch_secs(), true),
-                transport_config: webchannel::TransportConfig::SshStdio {
-                    ssh_host: "N/A".into(),
-                    command: Vec::new(),
-                    projects: Vec::new(),
-                },
-                next_reconnect_stride: 1,
-                next_reconnect_time: Instant::now(),
+                transport: envoy_transport.clone(),
+                status: RemoteStatus::Connected,
+                ever_connected: false,
             },
         );
+        self.current_world
+            .set_remote_connecting2(&host_id, envoy_transport);
 
         Ok(())
     }
@@ -775,6 +841,10 @@ impl Server {
             self.projects.insert(project.name, proj);
         }
 
+        let mut fix_world_ticker = tokio::time::interval(Duration::from_secs(1));
+        // Skip the immediate first tick; we want intervals, not edge-trigger on start.
+        fix_world_ticker.tick().await;
+
         loop {
             tokio::select! {
                 // Shutdown signal, can be editor disconnect, SIGINT,
@@ -793,12 +863,16 @@ impl Server {
                 },
                 // Handle messages from remote peers and self.
                 Some(web_msg) = dual_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
-                    // Normally the handler shouldn't return an error.
-                    // Most errors ar handled by sending error
-                    // response to editor/remote.
-                    if let Err(err) = res {
-                        tracing::warn!("Failed to handle remote message: {}", err);
+                    if matches!(&web_msg.body, Msg::FixWorld) {
+                        self.fix_world(&editor_tx, &msg_tx, &webchannel, &mut *signaling_channel).await;
+                    } else {
+                        let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                        // Normally the handler shouldn't return an error.
+                        // Most errors ar handled by sending error
+                        // response to editor/remote.
+                        if let Err(err) = res {
+                            tracing::warn!("Failed to handle remote message: {}", err);
+                        }
                     }
                 },
                 // Handle messages from signaling clients.
@@ -815,10 +889,7 @@ impl Server {
                             let signaling_addr = signaling_message.signaling_addr;
                             let reason = accept_stopped.0;
 
-                            // Update state to Disconnected to trigger reconnection
-                            if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-                                state.mark_disconnected();
-                            }
+                            self.current_world.mark_signaling_disconnected(&signaling_addr);
 
                             next.send_notif(
                                 NotificationCode::AcceptStopped,
@@ -828,12 +899,13 @@ impl Server {
                                 }),
                             )
                             .await;
+                            self.fix_world_next(&webchannel).await;
                         }
                     }
                 },
-                // Reconnection handler.
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                    self.handle_reconnect_tick(&editor_tx, &msg_tx, &webchannel, &mut *signaling_channel).await;
+                // Declarative world reconciliation tick.
+                _ = fix_world_ticker.tick() => {
+                    self.fix_world(&editor_tx, &msg_tx, &webchannel, &mut *signaling_channel).await;
                 }
             }
         }
@@ -933,159 +1005,247 @@ impl Server {
         }
     }
 
-    /// Check whether `cert_hash` is trusted on `signaling_addr`.
-    /// Accept-all signaling trusts every cert; trusted-only signaling
-    /// looks for the hash among `trusted_hosts`.
-    pub fn is_cert_trusted(&self, cert_hash: &str, signaling_addr: &str) -> bool {
-        let accept_mode = self
-            .active_signaling
-            .get(signaling_addr)
-            .map(|state| state.accept_mode)
-            .unwrap_or(AcceptMode::TrustedOnly);
-
-        if matches!(accept_mode, AcceptMode::All) {
-            return true;
-        }
+    /// Check whether `cert_hash` is trusted.
+    pub fn is_cert_trusted(&self, cert_hash: &str) -> bool {
         self.trusted_hosts.iter().any(|id| id_hash(id) == cert_hash)
+            || self
+                .local_trusted_hosts
+                .iter()
+                .any(|id| id_hash(id) == cert_hash)
     }
 
-    /// Handle periodic reconnection tick (every 2 seconds).
-    async fn handle_reconnect_tick(
+    /// Queue a `Msg::FixWorld` self-message so the main loop runs
+    /// `fix_world` on its next iteration. Use after writing to
+    /// `current_world` so reconciliation happens promptly instead of
+    /// waiting for the 1s ticker.
+    async fn fix_world_next(&self, webchannel: &WebChannel) {
+        let _ = webchannel.send(&self.host_id, None, Msg::FixWorld).await;
+    }
+
+    /// Reconcile `current_world` toward `ideal_world`. Idempotent.
+    /// Runs every 1s and on `Msg::FixWorld` self-messages.
+    async fn fix_world(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         webchannel: &WebChannel,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
-        // Check for connection timeouts.
-        let now = unix_epoch_secs();
-        for (host, remote) in self.active_remotes.iter_mut() {
-            let timeout = match remote.state {
-                ConnectionState::ConnectingStage1(started, is_new) if now - started > 10 => {
-                    Some(("Connection timed out in Stage1", is_new))
+        self.fix_world_signaling(editor_tx, signaling_channel).await;
+        self.fix_world_remotes(editor_tx, msg_tx, webchannel, signaling_channel)
+            .await;
+        self.fix_world_timeouts(editor_tx, webchannel).await;
+    }
+
+    /// Remote pass: drive `current_world.remotes` toward `ideal_world.remotes`.
+    async fn fix_world_remotes(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        msg_tx: &mpsc::Sender<webchannel::Message>,
+        webchannel: &WebChannel,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
+        let now = Instant::now();
+
+        // 1. Close entries that are no longer in ideal world.
+        let to_remove: Vec<ServerId> = self
+            .current_world
+            .remotes
+            .keys()
+            .filter(|peer| !self.ideal_world.remotes.contains_key(*peer))
+            .cloned()
+            .collect();
+        for peer in &to_remove {
+            webchannel.disconnect(peer);
+            self.current_world.remove_remote(peer);
+        }
+
+        // 2. For each ideal entry, start a connection if missing,
+        //    Pending, or Disconnected past its retry_at.
+        let to_start: Vec<(ServerId, webchannel::TransportConfig)> = self
+            .ideal_world
+            .remotes
+            .iter()
+            .filter_map(|(peer, ideal)| {
+                let go = match self.current_world.remotes.get(peer) {
+                    None => true,
+                    Some(cur) => match &cur.status {
+                        RemoteStatus::Pending => true,
+                        RemoteStatus::Disconnected { next_retry_at, .. } => now >= *next_retry_at,
+                        _ => false,
+                    },
+                };
+                if go {
+                    Some((peer.clone(), ideal.transport.clone()))
+                } else {
+                    None
                 }
-                ConnectionState::ConnectingStage2(started, is_new) if now - started > 30 => {
-                    Some(("Connection timed out in Stage2", is_new))
+            })
+            .collect();
+
+        let next = Next::new(editor_tx, None, webchannel);
+        for (peer, transport) in to_start {
+            // SCTP requires the corresponding signaling server to be Bound.
+            if let webchannel::TransportConfig::SCTP { signaling_addr } = &transport {
+                let ready = matches!(
+                    self.current_world
+                        .signaling
+                        .get(signaling_addr)
+                        .map(|s| &s.status),
+                    Some(SignalingStatus::Bound)
+                );
+                if !ready {
+                    // Add to the pending list, connection proces will
+                    // be picked up once the signaling server is
+                    // connected.
+                    self.current_world
+                        .set_remote_pending(&peer, transport.clone());
+                    continue;
+                }
+            }
+            self.try_connect_remote(&next, peer, transport, msg_tx, signaling_channel)
+                .await;
+        }
+    }
+
+    /// Timeout pass: Stage1 > 10s and Stage2 > 30s flip to Disconnected
+    /// (if `ever_connected`) or Failed (if never connected).
+    async fn fix_world_timeouts(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        webchannel: &WebChannel,
+    ) {
+        let now = Instant::now();
+        let timeouts: Vec<(ServerId, &'static str)> = self
+            .current_world
+            .remotes
+            .iter()
+            .filter_map(|(peer, state)| match state.status {
+                RemoteStatus::ConnectingStage1 { since }
+                    if now.duration_since(since) > Duration::from_secs(10) =>
+                {
+                    Some((peer.clone(), "stage1 timeout"))
+                }
+                RemoteStatus::ConnectingStage2 { since }
+                    if now.duration_since(since) > Duration::from_secs(30) =>
+                {
+                    Some((peer.clone(), "stage2 timeout"))
                 }
                 _ => None,
-            };
-            if let Some((reason, is_new)) = timeout {
-                tracing::warn!("Connection to {} timed out", host);
-                if is_new {
-                    remote.mark_failed();
-                } else {
-                    remote.mark_disconnected();
-                }
-                webchannel.disconnect(&host);
-                send_notification(
-                    &editor_tx,
-                    NotificationCode::ConnectionBroke,
-                    ConnectionBrokeNote {
-                        host_id: host.clone(),
-                        reason: reason.to_string(),
-                    },
-                )
-                .await;
+            })
+            .collect();
+        for (peer, reason) in timeouts {
+            let ever = self
+                .current_world
+                .remotes
+                .get(&peer)
+                .map(|r| r.ever_connected)
+                .unwrap_or(false);
+            if ever {
+                self.current_world.mark_remote_disconnected(&peer);
+            } else {
+                self.current_world
+                    .mark_remote_failed(&peer, reason.to_string());
             }
-        }
-
-        // Check for signaling binding timeouts.
-        let mut timed_out: Vec<String> = Vec::new();
-        for (addr, state) in self.active_signaling.iter_mut() {
-            if let SignalingConnectionState::Binding(started) = state.state {
-                if now - started > 10 {
-                    tracing::warn!("Signaling binding to {} timed out", addr);
-                    state.state = SignalingConnectionState::FailedToBind;
-                    timed_out.push(addr.clone());
-                }
-            }
-        }
-        for addr in timed_out {
-            signaling_channel.remove(&addr);
-        }
-
-        let mut need_connect: Vec<(String, RemoteState)> = Vec::new();
-        for (host, remote) in self.active_remotes.iter_mut() {
-            // Only reconnect Disconnected remotes. Skip
-            // Pending (waiting for signaling),
-            // ConnectingStage2 (already starting to
-            // establish connection), Connected (already
-            // connected), and FailedToConnect (won't
-            // retry). Regarding ConnectingStage1:
-            // basically, unless we received a reply
-            // connection message, keep sending connect
-            // request to remote.  TODO: Add a Refused state?
-            if !matches!(
-                remote.state,
-                ConnectionState::Disconnected | ConnectionState::ConnectingStage1(_, _)
-            ) {
-                continue;
-            }
-            if Instant::now() < remote.next_reconnect_time {
-                continue;
-            }
-            tracing::info!("Attempting reconnection with remote {}", host);
+            webchannel.disconnect(&peer);
             send_notification(
-                &editor_tx,
-                NotificationCode::Connecting,
-                ConnectingNote {
-                    host_id: host.clone(),
+                editor_tx,
+                NotificationCode::FailedToConnect,
+                ConnectionBrokeNote {
+                    host_id: peer,
+                    reason: reason.to_string(),
                 },
             )
             .await;
-            need_connect.push((host.clone(), remote.clone()));
-            remote.advance_backoff();
+        }
+    }
+
+    /// Signaling pass: Connect to signaling servers. Also handles
+    /// bind timeouts.
+    async fn fix_world_signaling(
+        &mut self,
+        editor_tx: &mpsc::Sender<lsp_server::Message>,
+        signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
+    ) {
+        let now = Instant::now();
+
+        // 1. Timeout: Binding for more than 10s becomes Failed and the
+        //    client is dropped.
+        let timed_out: Vec<String> = self
+            .current_world
+            .signaling
+            .iter()
+            .filter_map(|(addr, state)| match state.status {
+                SignalingStatus::Binding { since }
+                    if now.duration_since(since) > Duration::from_secs(10) =>
+                {
+                    Some(addr.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for addr in &timed_out {
+            self.current_world
+                .mark_signaling_failed(addr, "bind timeout".to_string());
+            signaling_channel.remove(addr);
         }
 
-        let next = Next::new(&editor_tx, None, &webchannel);
-        for (host, remote) in need_connect {
-            self.try_connect_remote(
-                &next,
-                host.clone(),
-                remote.transport_config,
-                &msg_tx,
-                &mut *signaling_channel,
-                false, // Reconnecting, not new.
-            )
-            .await;
+        // 2. Tear down current entries that are no longer in ideal.
+        let to_remove: Vec<String> = self
+            .current_world
+            .signaling
+            .keys()
+            .filter(|addr| !self.ideal_world.signaling.contains_key(*addr))
+            .cloned()
+            .collect();
+        for addr in &to_remove {
+            signaling_channel.remove(addr);
+            self.current_world.remove_signaling(addr);
         }
 
-        // Handle signaling server reconnections (presence
-        // in active_signaling means we want to maintain
-        // connection).
-        let mut need_rebind: Vec<String> = Vec::new();
-        for (addr, state) in self.active_signaling.iter_mut() {
-            // Unlike remote connection, even if first
-            // attempt failed we still try to reconnect.
-            if state.state == SignalingConnectionState::Bound
-                || matches!(state.state, SignalingConnectionState::Binding(_))
-            {
-                continue;
+        // 3. For each ideal entry, start binding when missing/pending,
+        //    or when a Disconnected entry has elapsed its retry time.
+        //    Collect addresses first to avoid holding a borrow across
+        //    the async bind call.
+        let mut to_bind: Vec<String> = Vec::new();
+        for (addr, _) in self.ideal_world.signaling.iter() {
+            match self.current_world.signaling.get(addr) {
+                None => to_bind.push(addr.clone()),
+                Some(state) => match &state.status {
+                    SignalingStatus::Pending => to_bind.push(addr.clone()),
+                    SignalingStatus::Disconnected { next_retry_at, .. }
+                        if now >= *next_retry_at =>
+                    {
+                        to_bind.push(addr.clone());
+                    }
+                    _ => {}
+                },
             }
-            if Instant::now() < state.next_reconnect_time {
-                continue;
-            }
+        }
 
-            tracing::info!("Reconnecting to signaling server {}", addr);
-            next.send_notif(
+        for addr in to_bind {
+            self.current_world.set_signaling_binding(&addr);
+            send_notification(
+                editor_tx,
                 NotificationCode::ConnectionProgress,
                 serde_json::json!({
-                    "message": format!("Reconnecting to signaling server {}", addr),
+                    "message": format!("Binding to signaling server {}", addr),
                 }),
             )
             .await;
-            need_rebind.push(addr.clone());
-            state.advance_backoff();
-            state.state = SignalingConnectionState::Binding(unix_epoch_secs());
-        }
-
-        for addr in need_rebind {
-            let result = signaling_channel
+            let res = signaling_channel
                 .bind(addr.clone(), self.host_id.clone(), self.key_cert.clone())
                 .await;
-
-            if let Err(e) = result {
-                tracing::warn!("Failed to reconnect to signaling server {}: {}", addr, e);
+            if let Err(err) = res {
+                tracing::warn!("Failed to bind to signaling server {}: {}", addr, err);
+                self.current_world
+                    .mark_signaling_failed(&addr, err.to_string());
+                send_notification(
+                    editor_tx,
+                    NotificationCode::AcceptStopped,
+                    AcceptingStoppedNote { addr },
+                )
+                .await;
             }
         }
     }
@@ -1322,7 +1482,7 @@ impl Server {
         &mut self,
         next: &Next<'a>,
         notif: lsp_server::Notification,
-        msg_tx: &mpsc::Sender<webchannel::Message>,
+        _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
@@ -1339,17 +1499,22 @@ impl Server {
                 {
                     *signaling_addr = normalize_signaling_addr(signaling_addr);
                 }
-                if !self.remote_connected(&params.host_id) {
-                    self.try_connect_remote(
-                        next,
-                        params.host_id,
-                        params.transport_config,
-                        msg_tx,
-                        signaling_channel,
-                        true, // New connection requested by editor.
-                    )
-                    .await;
-                } else {
+                // Declare intent in ideal_world.
+                self.ideal_world.remotes.insert(
+                    params.host_id.clone(),
+                    RemoteState {
+                        transport: params.transport_config.clone(),
+                        status: RemoteStatus::Connected,
+                        ever_connected: false,
+                    },
+                );
+                // Reset a Failed entry to Pending so fix_world retries.
+                if let Some(state) = self.current_world.remotes.get_mut(&params.host_id) {
+                    if matches!(state.status, RemoteStatus::Failed { .. }) {
+                        state.status = RemoteStatus::Pending;
+                    }
+                }
+                if self.remote_connected(&params.host_id) {
                     next.send_notif(
                         NotificationCode::Connected,
                         HostAndMessageNote {
@@ -1359,6 +1524,7 @@ impl Server {
                     )
                     .await;
                 }
+                self.fix_world_next(next.webchannel).await;
             }
             "SendInfo" => {
                 let params: SendInfoParams = serde_json::from_value(notif.params)?;
@@ -1368,8 +1534,8 @@ impl Server {
                 let mut params: StopAcceptingParams = serde_json::from_value(notif.params)?;
                 params.addr = normalize_signaling_addr(&params.addr);
 
-                // Remove from active_signaling to stop maintaining connection
-                self.active_signaling.remove(&params.addr);
+                // Withdraw intent from ideal_world. fix_world will tear down current_world.
+                self.ideal_world.signaling.remove(&params.addr);
 
                 // Send AcceptStopped notification
                 next.send_notif(
@@ -1380,6 +1546,7 @@ impl Server {
                     }),
                 )
                 .await;
+                self.fix_world_next(next.webchannel).await;
             }
             "SetAcceptMode" => {
                 let mut params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
@@ -1400,30 +1567,11 @@ impl Server {
     // internal messages.
     async fn handle_set_accept_mode(
         &mut self,
-        next: &Next<'_>,
-        addr: String,
-        mode: AcceptMode,
+        _next: &Next<'_>,
+        _addr: String,
+        _mode: AcceptMode,
     ) -> anyhow::Result<()> {
-        // Set the accept mode.
-        let old_mode = if let Some(signaling_state) = self.active_signaling.get_mut(&addr) {
-            let old_mode = signaling_state.accept_mode;
-            signaling_state.accept_mode = mode;
-            Some(old_mode)
-        } else {
-            None
-        };
-
-        // If mode changed, send notification.
-        if old_mode.is_some() && old_mode != Some(mode) {
-            next.send_notif(
-                NotificationCode::AcceptModeChanged,
-                AcceptModeChangedNote {
-                    addr: addr.clone(),
-                    mode,
-                },
-            )
-            .await;
-        }
+        // No-op until the trust refactor removes AcceptMode entirely.
         Ok(())
     }
 
@@ -1437,6 +1585,11 @@ impl Server {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
+            Msg::FixWorld => {
+                // Dispatched at the top level in `run()` so we have
+                // access to signaling_channel; should not reach here.
+                Ok(())
+            }
             Msg::IceProgress(remote_hostid, progress) => {
                 next.send_notif(
                     NotificationCode::ConnectionProgress,
@@ -1449,9 +1602,8 @@ impl Server {
                 Ok(())
             }
             Msg::FailedToConnect(host_id, reason) => {
-                if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                    remote.mark_failed();
-                }
+                self.current_world
+                    .mark_remote_failed(&host_id, reason.clone());
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
                     ConnectionBrokeNote { host_id, reason },
@@ -1460,9 +1612,8 @@ impl Server {
                 Ok(())
             }
             Msg::ConnectionBroke(host_id) => {
-                if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                    remote.mark_disconnected();
-                }
+                self.current_world.mark_remote_disconnected(&host_id);
+                self.fix_world_next(next.webchannel).await;
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
                     ConnectionBrokeNote {
@@ -1473,25 +1624,9 @@ impl Server {
                 .await;
                 Ok(())
             }
-            Msg::RemoteLeft(host_id) => {
-                // Remove peer left, don’t reconnect.
-                next.webchannel.disconnect(&host_id);
-                self.active_remotes.remove(&host_id);
-                next.send_notif(
-                    NotificationCode::RemoteLeft,
-                    ConnectionBrokeNote {
-                        host_id,
-                        reason: "Not sure, maybe vibe’s off".to_string(),
-                    },
-                )
-                .await;
-                Ok(())
-            }
             Msg::Hey(hey_msg) => {
                 let host = msg.host;
-                if let Some(remote) = self.active_remotes.get_mut(&host) {
-                    remote.mark_connected();
-                }
+                self.current_world.mark_remote_connected(&host);
                 next.send_notif(
                     NotificationCode::Connected,
                     HostAndMessageNote {
@@ -1857,11 +1992,13 @@ impl Server {
                 Ok(())
             }
             Msg::Bye => {
-                // Peer is shutting down. Drop our entry for them so the
-                // reconnect tick doesn’t try to reach them, and tell the
+                // Peer is shutting down. Drop our entry for them so
+                // fix_world doesn’t try to reach them, and tell the
                 // editor to clean up the host without scheduling a retry.
                 let host = msg.host;
-                self.active_remotes.remove(&host);
+                self.current_world.remove_remote(&host);
+                next.webchannel.disconnect(&host);
+                self.fix_world_next(next.webchannel).await;
                 next.send_notif(
                     NotificationCode::RemoteLeft,
                     HostAndMessageNote {
@@ -1897,7 +2034,6 @@ impl Server {
         transport_config: webchannel::TransportConfig,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
-        is_new: bool,
     ) {
         if host_id == self.host_id {
             return;
@@ -1913,21 +2049,14 @@ impl Server {
             let ssh_host = ssh_host.clone();
             let command = command.clone();
             let projects = projects.clone();
-            self.try_connect_remote_ssh(next, host_id, ssh_host, command, projects, msg_tx, is_new)
+            self.try_connect_remote_ssh(next, host_id, ssh_host, command, projects, msg_tx)
                 .await;
             return;
         }
 
         // Dispatch to normal SCTP transport.
         return self
-            .try_connect_remote_sctp(
-                next,
-                host_id,
-                transport_config,
-                msg_tx,
-                signaling_channel,
-                is_new,
-            )
+            .try_connect_remote_sctp(next, host_id, transport_config, msg_tx, signaling_channel)
             .await;
     }
 
@@ -1938,17 +2067,12 @@ impl Server {
         transport_config: webchannel::TransportConfig,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
-        is_new: bool,
     ) {
         let signaling_addr = match &transport_config {
             webchannel::TransportConfig::SCTP { signaling_addr } => signaling_addr.clone(),
             webchannel::TransportConfig::SshStdio { .. } => unreachable!(),
         };
 
-        // We don’t check for ConnectionState::ConnectingStage1 in
-        // active_remotes here, our system is designed to work in
-        // spite of duplicate connect requests. We only check
-        // ConnectingStage2 in the Connect message handler.
         next.send_notif(
             NotificationCode::Connecting,
             ConnectingNote {
@@ -1957,72 +2081,16 @@ impl Server {
         )
         .await;
 
-        // Check if signaling server is connected
-        let signaling_state = self.active_signaling.get(&signaling_addr);
-        let signaling_ready = if let Some(state) = signaling_state {
-            state.state == SignalingConnectionState::Bound
-        } else {
-            false
-        };
+        self.current_world
+            .set_remote_connecting1(&host_id, transport_config);
 
-        if !signaling_ready {
-            // Signaling server not ready. Set remote to Pending state and
-            // ensure we're connecting to the signaling server.
-            tracing::info!(
-                "Signaling server {} not ready, setting remote {} to Pending",
-                signaling_addr,
-                host_id
-            );
-
-            // Set remote state to Pending.
-            if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                remote.mark_pending();
-            } else {
-                self.active_remotes.insert(
-                    host_id.clone(),
-                    RemoteState::pending(transport_config.clone()),
-                );
-            }
-
-            // If signaling server is not ready, trigger reconnection by
-            // sending AcceptConnection notification to self.
-            tracing::info!(
-                "Triggering connection to signaling server {}",
-                signaling_addr
-            );
-            let notif = lsp_server::Notification {
-                method: "AcceptConnection".to_string(),
-                params: serde_json::to_value(AcceptConnectionParams {
-                    addr: signaling_addr.clone(),
-                    mode: None,
-                })
-                .unwrap(),
-            };
-            let _ = next
-                .editor_tx
-                .send(lsp_server::Message::Notification(notif))
-                .await;
-
-            return;
-        }
-
-        // Signaling server is ready, set remote to Connecting
-        if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-            remote.mark_connecting(is_new);
-        } else {
-            self.active_remotes.insert(
-                host_id.clone(),
-                RemoteState::connecting(transport_config, is_new),
-            );
-        }
-
-        // Send Connect message to signaling server
-        // SDP exchange will happen later via ice_connect_with_sock
+        // Send Connect message to signaling server.
+        // SDP exchange happens later via ice_connect_with_sock.
         self.send_connect_message(next, host_id, &signaling_addr, signaling_channel, true)
             .await;
 
-        // The connection will continue in handle_signaling_msg when we receive
-        // the peer's Connect response message.
+        // The connection continues in handle_signaling_msg when we
+        // receive the peer's Connect response message.
     }
 
     /// Connect to a remote envoy via ssh. Spawn `ssh ssh_host --
@@ -2035,25 +2103,7 @@ impl Server {
         command: Vec<String>,
         projects: Vec<crate::config_man::ConfigProject>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        is_new: bool,
     ) {
-        // Skip if a connection attempt is already in flight or live.
-        if let Some(remote) = self.active_remotes.get(&host_id) {
-            if matches!(
-                remote.state,
-                ConnectionState::Connected
-                    | ConnectionState::ConnectingStage1(_, _)
-                    | ConnectionState::ConnectingStage2(_, _)
-            ) {
-                tracing::info!(
-                    "Skip connecting to {}, already in {:?}",
-                    host_id,
-                    remote.state
-                );
-                return;
-            }
-        }
-
         next.send_notif(
             NotificationCode::Connecting,
             ConnectingNote {
@@ -2067,15 +2117,8 @@ impl Server {
             command: command.clone(),
             projects: projects.clone(),
         };
-        if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-            remote.transport_config = transport_config.clone();
-            remote.mark_connecting(is_new);
-        } else {
-            self.active_remotes.insert(
-                host_id.clone(),
-                RemoteState::connecting(transport_config, is_new),
-            );
-        }
+        self.current_world
+            .set_remote_connecting1(&host_id, transport_config);
 
         // Generate key+cert for the envoy to use, and trust it.
         let envoy_name = format!("{}-envoy", self.host_name);
@@ -2084,9 +2127,8 @@ impl Server {
                 Ok(t) => t,
                 Err(err) => {
                     tracing::warn!("Failed to generate cert for {}: {}", &envoy_name, &err);
-                    if let Some(remote) = self.active_remotes.get_mut(&host_id) {
-                        remote.mark_failed();
-                    }
+                    self.current_world
+                        .mark_remote_failed(&host_id, format!("Failed to generate cert: {}", err));
                     let msg = webchannel::Message {
                         host: envoy_name.clone(),
                         body: Msg::FailedToConnect(
@@ -2100,7 +2142,10 @@ impl Server {
                 }
             };
         let envoy_id = format!("{}::{}", envoy_name, envoy_cert_hash);
-        self.trusted_hosts.insert(envoy_id.clone());
+        // The envoy connects back as a peer using this temporary cert.
+        // Only valid for this process's lifetime; lives outside the
+        // user-declared `ideal_world.trusted`.
+        self.local_trusted_hosts.insert(envoy_id.clone());
 
         let envoy_init = Msg::EnvoyInit {
             host_id: self.host_id.clone(),
@@ -2175,10 +2220,9 @@ impl Server {
         if let Err(err) = res {
             tracing::warn!("Failed to send Connect message: {}", err);
 
-            // Update remote state to FailedToConnect
-            if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                remote.mark_failed();
-            }
+            // Update remote state to Failed.
+            self.current_world
+                .mark_remote_failed(&peer_id, format!("Failed to send Connect message: {}", err));
 
             // Notify editor
             next.send_notif(
@@ -3376,24 +3420,39 @@ impl Server {
     }
 
     async fn handle_connection_state_from_editor<'a>(&self, next: &Next<'a>) -> () {
-        // Collect active remotes.
+        // Collect current remotes for the wire response.
         let mut connections = Vec::new();
-        for (host_id, remote) in &self.active_remotes {
+        for (host_id, remote) in &self.current_world.remotes {
+            let state = match &remote.status {
+                RemoteStatus::Pending => ConnectionState::Pending,
+                RemoteStatus::ConnectingStage1 { .. } => {
+                    ConnectionState::ConnectingStage1(unix_epoch_secs(), !remote.ever_connected)
+                }
+                RemoteStatus::ConnectingStage2 { .. } => {
+                    ConnectionState::ConnectingStage2(unix_epoch_secs(), !remote.ever_connected)
+                }
+                RemoteStatus::Connected => ConnectionState::Connected,
+                RemoteStatus::Disconnected { .. } => ConnectionState::Disconnected,
+                RemoteStatus::Failed { .. } => ConnectionState::FailedToConnect,
+            };
             connections.push(message::ConnectionStateEntry {
                 host_id: host_id.clone(),
-                state: remote.state,
-                transport: remote.transport_config.clone(),
+                state,
+                transport: remote.transport.clone(),
             });
         }
 
-        // Collect accepting signaling addresses (only Connected servers).
+        // Collect accepting signaling addresses (only Bound servers).
+        // AcceptMode is going away in the trust refactor; report
+        // TrustedOnly until the field is removed.
         let accepting: Vec<AcceptingEntry> = self
-            .active_signaling
+            .current_world
+            .signaling
             .iter()
-            .filter(|(_addr, state)| state.state == SignalingConnectionState::Bound)
-            .map(|(addr, state)| AcceptingEntry {
+            .filter(|(_addr, state)| matches!(state.status, SignalingStatus::Bound))
+            .map(|(addr, _)| AcceptingEntry {
                 addr: addr.clone(),
-                mode: state.accept_mode,
+                mode: AcceptMode::TrustedOnly,
             })
             .collect();
 
@@ -4040,7 +4099,9 @@ impl Server {
         let mut config = self.config.config();
 
         config.trusted_hosts = params.config.trusted_hosts.clone();
-        self.trusted_hosts = params.config.trusted_hosts;
+        self.trusted_hosts = params.config.trusted_hosts.clone();
+        // Declare the trusted set in ideal_world.
+        self.ideal_world.trusted = params.config.trusted_hosts;
 
         config.permission = params.config.permission;
 
@@ -4049,11 +4110,10 @@ impl Server {
     }
 
     fn remote_connected(&self, host_id: &ServerId) -> bool {
-        if let Some(remote) = self.active_remotes.get(host_id) {
-            remote.state == ConnectionState::Connected
-        } else {
-            false
-        }
+        matches!(
+            self.current_world.remotes.get(host_id).map(|r| &r.status),
+            Some(RemoteStatus::Connected)
+        )
     }
 
     /// If connection to `host_id` isn’t active, send ConnectionBroke
@@ -4115,9 +4175,8 @@ impl Server {
             // can be invalid certificate, etc. Mark the connection as
             // failed so we don’t retry.
             SignalingMsg::Rejected(remote_id, message) => {
-                if let Some(remote) = self.active_remotes.get_mut(&remote_id) {
-                    remote.mark_failed();
-                }
+                self.current_world
+                    .mark_remote_failed(&remote_id, format!("Rejected by signaling: {}", message));
                 let msg = ErrorResponseNote {
                     code: ErrorCode::NetworkError,
                     file: None,
@@ -4130,15 +4189,29 @@ impl Server {
 
             // For IdTaken, signaling server closes the connection so
             // we don’t need to do anything here (The AcceptStopped
-            // handler will do the work). For IdNotFound, it’s not a
-            // fatal error so no need to do anything either.
-            SignalingMsg::BindErr(_endpoint_id, message)
-            | SignalingMsg::IdNotFound(_endpoint_id, message) => {
-                // Send error to editor
+            // handler will do the work). For IdNotFound the peer was
+            // never bound on that signaling server; treat it as a hard
+            // failure on the remote side.
+            SignalingMsg::BindErr(_endpoint_id, message) => {
+                self.current_world
+                    .mark_signaling_failed(&signaling_addr, format!("BindErr: {}", message));
                 next.send_notif(
                     NotificationCode::ErrorResponse,
                     ErrorResponseNote {
-                        // TODO: More appropriate error code.
+                        code: ErrorCode::NetworkError,
+                        file: None,
+                        message: format!("Signaling error: {}", message),
+                    },
+                )
+                .await;
+                Ok(())
+            }
+            SignalingMsg::IdNotFound(endpoint_id, message) => {
+                self.current_world
+                    .mark_remote_failed(&endpoint_id, format!("IdNotFound: {}", message));
+                next.send_notif(
+                    NotificationCode::ErrorResponse,
+                    ErrorResponseNote {
                         code: ErrorCode::NetworkError,
                         file: None,
                         message: format!("Signaling error: {}", message),
@@ -4163,47 +4236,24 @@ impl Server {
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
-        // Update state to Connected
-        let mut mode = AcceptMode::TrustedOnly;
-        if let Some(state) = self.active_signaling.get_mut(&signaling_addr) {
-            state.mark_bound();
-            tracing::info!("Successfully bound to signaling server {}", signaling_addr);
-            mode = state.accept_mode;
-        }
-
-        // Start all pending connections waiting for this signaling server.
-        let mut pending_remotes: Vec<(String, RemoteState)> = Vec::new();
-        for (host_id, remote) in self.active_remotes.iter() {
-            if remote.state == ConnectionState::Pending
-                && remote.transport_config.signaling_addr() == Some(signaling_addr.as_str())
-            {
-                tracing::info!(
-                    "Start pending connection to {} via {}",
-                    host_id,
-                    signaling_addr
-                );
-                pending_remotes.push((host_id.clone(), remote.clone()));
-            }
-        }
-
-        for (host_id, remote) in pending_remotes {
-            self.try_connect_remote(
-                next,
-                host_id,
-                remote.transport_config,
-                msg_tx,
-                signaling_channel,
-                true, // Pending remotes are always new connections.
-            )
+        let _ = msg_tx;
+        let _ = signaling_channel;
+        self.current_world.mark_signaling_bound(&signaling_addr);
+        tracing::info!("Successfully bound to signaling server {}", signaling_addr);
+        // AcceptMode is going away in the trust refactor; report
+        // TrustedOnly until it’s removed entirely.
+        // fix_world will pick up any Pending remotes for this signaling
+        // server on the next tick.
+        let _ = next
+            .webchannel
+            .send(&self.host_id, None, Msg::FixWorld)
             .await;
-        }
 
         // Notify editor that we’re accepting.
         next.send_notif(
             NotificationCode::AcceptingConnection,
             AcceptingConnectionNote {
                 addr: signaling_addr.clone(),
-                mode,
             },
         )
         .await;
@@ -4220,12 +4270,13 @@ impl Server {
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
         // Check if we're already connecting or connected to this peer.
-        let is_connecting_or_connected = self.active_remotes.get(&peer_id).map_or(false, |r| {
-            matches!(
-                r.state,
-                ConnectionState::ConnectingStage2(_, _) | ConnectionState::Connected
-            )
-        });
+        let is_connecting_or_connected =
+            self.current_world.remotes.get(&peer_id).map_or(false, |r| {
+                matches!(
+                    r.status,
+                    RemoteStatus::ConnectingStage2 { .. } | RemoteStatus::Connected
+                )
+            });
         tracing::info!(
             "Received Connect message from {}, is_connecting_or_connected={}",
             peer_id,
@@ -4240,7 +4291,7 @@ impl Server {
         }
 
         let peer_cert_hash = id_hash(&peer_id).to_string();
-        let trusted = self.is_cert_trusted(&peer_cert_hash, &signaling_addr);
+        let trusted = self.is_cert_trusted(&peer_cert_hash);
         if trusted {
             self.trusted_hosts.insert(peer_id.clone());
         }
@@ -4259,32 +4310,17 @@ impl Server {
                 "Provided certificate not in my trusted list".to_string(),
             );
             let _ = signaling_channel.send(&signaling_addr, reject_msg).await;
-            if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-                remote.mark_failed();
-            }
+            self.current_world
+                .mark_remote_failed(&peer_id, "certificate not trusted".to_string());
             return;
         }
 
-        // Mark as connecting to prevent duplicate connection
-        // attempts. Preserve `is_new` flag when transitioning from
-        // Stage1 to Stage2.
-        if let Some(remote) = self.active_remotes.get_mut(&peer_id) {
-            let is_new = match remote.state {
-                ConnectionState::ConnectingStage1(_, new) => new,
-                _ => false, // Must be reconnection if in other states.
-            };
-            remote.mark_connecting_stage2(is_new);
-        } else {
-            self.active_remotes.insert(
-                peer_id.clone(),
-                RemoteState::connecting(
-                    webchannel::TransportConfig::SCTP {
-                        signaling_addr: signaling_addr.clone(),
-                    },
-                    false, // Default to reconnect for new remote
-                ),
-            );
-        }
+        // Mark as connecting to prevent duplicate connection attempts.
+        let sctp_transport = webchannel::TransportConfig::SCTP {
+            signaling_addr: signaling_addr.clone(),
+        };
+        self.current_world
+            .set_remote_connecting2(&peer_id, sctp_transport);
 
         // If the remote initiated the connection, reply with
         // a connect message.
@@ -4374,54 +4410,45 @@ impl Server {
         });
     }
 
-    /// Handle AcceptConnection notification from editor.
+    /// Handle AcceptConnection notification from editor. Declares
+    /// intent in `ideal_world` and kicks off the bind inline so the
+    /// caller’s next request (e.g. Connect) sees the binding underway.
+    /// `fix_world` handles subsequent retries on disconnect.
     async fn handle_accept_connection<'a>(
         &mut self,
         next: &Next<'a>,
         params: AcceptConnectionParams,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
     ) {
-        tracing::info!(
-            "AcceptConnection: addr={}, active_remotes={:?}, active_signaling={:?}",
-            params.addr,
-            self.active_remotes,
-            self.active_signaling
+        tracing::info!("AcceptConnection: addr={}", params.addr);
+
+        // Declare intent in ideal_world.
+        self.ideal_world.signaling.insert(
+            params.addr.clone(),
+            SignalingState {
+                status: SignalingStatus::Bound,
+            },
         );
 
-        // If already accepting, skip.
-        if let Some(state) = self.active_signaling.get_mut(&params.addr) {
-            // But make sure to update accept mode and reset
-            // reconnect time.
-            if let Some(mode) = params.mode {
-                state.accept_mode = mode;
-                state.reset_backoff();
-            }
-
-            if matches!(state.state, SignalingConnectionState::Bound) {
-                next.send_notif(
-                    NotificationCode::AcceptingConnection,
-                    serde_json::json!({
-                        "signaling_addr": params.addr,
-                    }),
-                )
-                .await;
-                return;
+        // Skip if we’re already attempting or have an active bind.
+        if let Some(state) = self.current_world.signaling.get(&params.addr) {
+            match &state.status {
+                SignalingStatus::Bound | SignalingStatus::Binding { .. } => {
+                    if matches!(state.status, SignalingStatus::Bound) {
+                        next.send_notif(
+                            NotificationCode::AcceptingConnection,
+                            serde_json::json!({ "signaling_addr": params.addr }),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                _ => {}
             }
         }
 
-        // Track signaling connection state (in the map =
-        // maintain connection). Override any existing state.
-        let existing_mode = self
-            .active_signaling
-            .get(&params.addr)
-            .map(|s| s.accept_mode)
-            .unwrap_or(AcceptMode::TrustedOnly);
-        self.active_signaling.insert(
-            params.addr.clone(),
-            SignalingState::connecting(params.mode.unwrap_or(existing_mode)),
-        );
-
-        // Bind to signaling server.
+        // Start binding inline.
+        self.current_world.set_signaling_binding(&params.addr);
         let result = signaling_channel
             .bind(
                 params.addr.clone(),
@@ -4429,11 +4456,10 @@ impl Server {
                 self.key_cert.clone(),
             )
             .await;
-
-        // Error handling.
         if let Err(err) = result {
             tracing::warn!("Failed to bind SignalingClient: {}", err);
-            self.active_signaling.remove(&params.addr);
+            self.current_world
+                .mark_signaling_failed(&params.addr, err.to_string());
             next.send_notif(
                 NotificationCode::ErrorResponse,
                 ErrorResponseNote {

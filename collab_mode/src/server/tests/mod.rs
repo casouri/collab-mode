@@ -634,6 +634,9 @@ pub async fn setup_hub_and_spoke_servers(
             }
         };
         config.permission.insert(spoke_id.clone(), permission);
+        // The trust refactor removed `AcceptMode::All`; tests must declare
+        // peers as trusted upfront so incoming connections are accepted.
+        config.trusted_hosts.insert(spoke_id.clone());
     }
 
     hub_config.replace_and_save(config)?;
@@ -699,6 +702,9 @@ pub async fn setup_hub_and_spoke_servers(
                 delete: true,
             },
         );
+        // The trust refactor removed `AcceptMode::All`; tests must
+        // declare peers as trusted upfront.
+        config.trusted_hosts.insert(hub_id.clone());
         spoke_config.replace_and_save(config)?;
 
         let mut spoke_server = Server::new(spoke_id.clone(), spoke_config)?;
