@@ -7,6 +7,7 @@
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "cf-typegen": "wrangler types",
+    "check": "npx tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -14,7 +15,7 @@
     "@types/node": "^25.7.0",
     "reflect-metadata": "^0.2.2",
     "typescript": "^5.5.2",
-    "vitest": "^2.1.9",
+    "vitest": "^4.1.0",
     "wrangler": "^4.90.1"
   },
   "dependencies": {
