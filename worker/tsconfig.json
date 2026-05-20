@@ -38,7 +38,6 @@
 		"skipLibCheck": true,
 		"types": [
 			"./worker-configuration.d.ts",
-			"./src/env-augment.d.ts",
 			"node"
 		]
 	}
