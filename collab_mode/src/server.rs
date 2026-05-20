@@ -1618,7 +1618,10 @@ impl Server {
                 // access to signaling_channel; should not reach here.
                 Ok(())
             }
-            Msg::IceProgress(remote_hostid, progress) => {
+            Msg::IceProgress {
+                peer: remote_hostid,
+                message: progress,
+            } => {
                 next.send_notif(
                     NotificationCode::ConnectionProgress,
                     HostAndMessageNote {
@@ -1629,7 +1632,10 @@ impl Server {
                 .await;
                 Ok(())
             }
-            Msg::FailedToConnect(host_id, reason) => {
+            Msg::FailedToConnect {
+                peer: host_id,
+                reason,
+            } => {
                 self.current_world
                     .mark_remote_failed(&host_id, reason.clone());
                 next.send_notif(
@@ -1639,7 +1645,7 @@ impl Server {
                 .await;
                 Ok(())
             }
-            Msg::ConnectionBroke(host_id) => {
+            Msg::ConnectionBroke { peer: host_id } => {
                 self.current_world.mark_remote_disconnected(&host_id);
                 self.fix_world_next(next.webchannel).await;
                 next.send_notif(
@@ -1652,7 +1658,7 @@ impl Server {
                 .await;
                 Ok(())
             }
-            Msg::Hey(hey_msg) => {
+            Msg::Hey { hey: hey_msg } => {
                 let host = msg.host;
                 self.current_world.mark_remote_connected(&host);
                 next.send_notif(
@@ -1690,13 +1696,15 @@ impl Server {
                         next.webchannel,
                         &msg.host,
                         None,
-                        Msg::BadRequest("Missing req_id".to_string()),
+                        Msg::BadRequest {
+                            reason: "Missing req_id".to_string(),
+                        },
                     )
                     .await;
                 }
                 Ok(())
             }
-            Msg::FileList(files) => {
+            Msg::FileList { files } => {
                 if msg.req_id.is_none() {
                     tracing::warn!(
                         "Received FileList from remote {} without req_id, ignoring",
@@ -1743,18 +1751,26 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::RequestFile(file_desc, mode) => {
+            Msg::RequestFile {
+                file: file_desc,
+                mode,
+            } => {
                 if msg.req_id.is_some() {
                     self.handle_request_file(&next, file_desc, msg.host.clone(), mode)
                         .await?;
                 } else {
                     tracing::warn!("Received RequestFile without req_id, ignoring");
-                    next.send_to_remote(&msg.host, Msg::BadRequest("Missing req_id".to_string()))
-                        .await;
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::BadRequest {
+                            reason: "Missing req_id".to_string(),
+                        },
+                    )
+                    .await;
                 }
                 Ok(())
             }
-            Msg::Snapshot(snapshot) => {
+            Msg::Snapshot { snapshot } => {
                 if msg.req_id.is_some() {
                     self.handle_snapshot(&next, snapshot, msg.host.clone())
                         .await?;
@@ -1763,11 +1779,13 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::MakeDirectory(file_desc) => {
+            Msg::MakeDirectory { file: file_desc } => {
                 if !self.config.write_allowed(&msg.host) {
                     next.send_to_remote(
                         &msg.host,
-                        Msg::PermissionDenied("Write permission denied".to_string()),
+                        Msg::PermissionDenied {
+                            reason: "Write permission denied".to_string(),
+                        },
                     )
                     .await;
                     return Ok(());
@@ -1792,12 +1810,12 @@ impl Server {
                         message: err.to_string(),
                     }
                 } else {
-                    Msg::DirectoryMade(file_desc)
+                    Msg::DirectoryMade { file: file_desc }
                 };
                 next.send_to_remote(&msg.host, reply).await;
                 Ok(())
             }
-            Msg::DirectoryMade(file_desc) => {
+            Msg::DirectoryMade { file: file_desc } => {
                 if msg.req_id.is_none() {
                     tracing::warn!("Received DirectoryMade without req_id, ignoring");
                     return Ok(());
@@ -1808,7 +1826,7 @@ impl Server {
                 next.send_resp(resp, None).await;
                 Ok(())
             }
-            Msg::OpFromClient(context_ops) => {
+            Msg::OpFromClient { ops: context_ops } => {
                 self.handle_op_from_client(&next, context_ops, msg.host.clone())
                     .await?;
                 Ok(())
@@ -1832,7 +1850,9 @@ impl Server {
                 if !self.config.write_allowed(&msg.host) {
                     next.send_to_remote(
                         &msg.host,
-                        Msg::PermissionDenied("Write permission denied".to_string()),
+                        Msg::PermissionDenied {
+                            reason: "Write permission denied".to_string(),
+                        },
                     )
                     .await;
                     return Ok(());
@@ -1871,12 +1891,14 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::SaveFile(doc_id) => {
+            Msg::SaveFile { doc: doc_id } => {
                 // Check write permission.
                 if !self.config.write_allowed(&msg.host) {
                     next.send_to_remote(
                         &msg.host,
-                        Msg::PermissionDenied("Write permission denied".to_string()),
+                        Msg::PermissionDenied {
+                            reason: "Write permission denied".to_string(),
+                        },
                     )
                     .await;
                     return Ok(());
@@ -1890,16 +1912,21 @@ impl Server {
                         message: err.to_string(),
                     }
                 } else {
-                    Msg::FileSaved(doc_id)
+                    Msg::FileSaved { doc: doc_id }
                 };
                 next.send_to_remote(&msg.host, resp).await;
                 Ok(())
             }
-            Msg::FileSaved(doc_id) => {
+            Msg::FileSaved { doc: doc_id } => {
                 if msg.req_id.is_none() {
                     tracing::warn!("Received FileSaved without req_id, ignoring");
-                    next.send_to_remote(&msg.host, Msg::BadRequest("Missing req_id".to_string()))
-                        .await;
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::BadRequest {
+                            reason: "Missing req_id".to_string(),
+                        },
+                    )
+                    .await;
                     return Ok(());
                 }
 
@@ -1916,7 +1943,7 @@ impl Server {
                 };
                 Ok(())
             }
-            Msg::StopSendingOps(doc_id) => {
+            Msg::StopSendingOps { doc: doc_id } => {
                 // Remove the remote host from the doc's subscriber list.
                 if let Some(doc) = self.docs.get_mut(&doc_id) {
                     if doc.subscribers.remove(&msg.host).is_some() {
@@ -1938,7 +1965,7 @@ impl Server {
                     .await?;
                 Ok(())
             }
-            Msg::FileDeleted(file_desc) => {
+            Msg::FileDeleted { file: file_desc } => {
                 // Response from remote that file was deleted.
                 let editor_file_desc = EditorFileDesc::new(file_desc, msg.host.clone());
                 if msg.req_id.is_some() {
@@ -1956,7 +1983,7 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::FileClosed(file_desc) => {
+            Msg::FileClosed { file: file_desc } => {
                 // Notification from remote that file was closed.
                 let editor_file_desc = EditorFileDesc::new(file_desc, msg.host.clone());
                 let note = FileClosedNote {
@@ -1965,7 +1992,7 @@ impl Server {
                 next.send_notif(NotificationCode::FileClosed, note).await;
                 Ok(())
             }
-            Msg::InfoFromClient(info) => {
+            Msg::InfoFromClient { info } => {
                 // Received from a client, broadcast to all subscribers
                 let res = self.broadcast_info(&next, info).await;
                 if let Err(err) = res {
@@ -1973,7 +2000,7 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::InfoFromServer(info) => {
+            Msg::InfoFromServer { info } => {
                 let remote_doc = self.remote_docs.get(&msg.host, info.doc_id);
                 if let Some(remote_doc) = remote_doc {
                     let editor_file =
@@ -1987,12 +2014,12 @@ impl Server {
                     };
                     next.send_notif(NotificationCode::InfoReceived, note).await;
                 } else {
-                    next.send_to_remote(&msg.host, Msg::StopSendingOps(info.doc_id))
+                    next.send_to_remote(&msg.host, Msg::StopSendingOps { doc: info.doc_id })
                         .await;
                 }
                 Ok(())
             }
-            Msg::PermissionDenied(message) => {
+            Msg::PermissionDenied { reason: message } => {
                 if msg.req_id.is_some() {
                     let err = lsp_server::ResponseError {
                         code: ErrorCode::PermissionDenied as i32,
@@ -2009,7 +2036,10 @@ impl Server {
                 }
                 Ok(())
             }
-            Msg::DocFatal(doc_id, reason) => {
+            Msg::DocFatal {
+                doc: doc_id,
+                reason,
+            } => {
                 let remote_doc = self.remote_docs.remove(&msg.host, doc_id);
                 let msg = ErrorResponseNote {
                     code: ErrorCode::DocFatal,
@@ -2159,10 +2189,10 @@ impl Server {
                         .mark_remote_failed(&host_id, format!("Failed to generate cert: {}", err));
                     let msg = webchannel::Message {
                         host: envoy_name.clone(),
-                        body: Msg::FailedToConnect(
-                            envoy_name,
-                            format!("Failed to generate cert: {}", err),
-                        ),
+                        body: Msg::FailedToConnect {
+                            peer: envoy_name,
+                            reason: format!("Failed to generate cert: {}", err),
+                        },
                         req_id: None,
                     };
                     let _ = msg_tx.send(msg).await;
@@ -2205,11 +2235,13 @@ impl Server {
                     .send(
                         &envoy_id,
                         None,
-                        Msg::Hey(message::HeyMessage {
-                            message: "Nice to meet ya".to_string(),
-                            credentials: "".to_string(),
-                            version: "v1.0.0".to_string(),
-                        }),
+                        Msg::Hey {
+                            hey: message::HeyMessage {
+                                message: "Nice to meet ya".to_string(),
+                                credentials: "".to_string(),
+                                version: "v1.0.0".to_string(),
+                            },
+                        },
                     )
                     .await?;
                 anyhow::Ok(())
@@ -2220,7 +2252,10 @@ impl Server {
                 tracing::warn!("Failed to connect to {}: {}", envoy_id, err);
                 let msg = webchannel::Message {
                     host: my_host_id,
-                    body: Msg::FailedToConnect(envoy_id, err.to_string()),
+                    body: Msg::FailedToConnect {
+                        peer: envoy_id,
+                        reason: err.to_string(),
+                    },
                     req_id: None,
                 };
                 let _ = msg_tx.send(msg).await;
@@ -2304,7 +2339,7 @@ impl Server {
     ) -> anyhow::Result<()> {
         match self.list_files_from_disk(dir.clone()).await {
             Ok(files) => {
-                let msg = Msg::FileList(files);
+                let msg = Msg::FileList { files: files };
                 next.send_to_remote(&remote_host_id, msg).await;
             }
             Err(err) => {
@@ -2717,7 +2752,10 @@ impl Server {
         }
 
         // Don’t have it opened, send request to remote.
-        let msg = Msg::RequestFile(file_desc.clone().into(), mode);
+        let msg = Msg::RequestFile {
+            file: file_desc.clone().into(),
+            mode: mode,
+        };
         next.send_to_remote(&file_desc.host_id(), msg).await;
         Ok(())
     }
@@ -2747,7 +2785,9 @@ impl Server {
         }
 
         // Remote.
-        let msg = Msg::MakeDirectory(file_desc.clone().into());
+        let msg = Msg::MakeDirectory {
+            file: file_desc.clone().into(),
+        };
         next.send_to_remote(&file_desc.host_id(), msg).await;
         Ok(())
     }
@@ -2814,7 +2854,7 @@ impl Server {
                             file_desc: file_desc.clone(),
                             doc_id: *doc_id,
                         };
-                        next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                        next.send_to_remote(&remote_host_id, Msg::Snapshot { snapshot: snapshot })
                             .await;
                         return Ok(());
                     }
@@ -2877,13 +2917,15 @@ impl Server {
                     file_desc,
                     doc_id,
                 };
-                next.send_to_remote(&remote_host_id, Msg::Snapshot(snapshot))
+                next.send_to_remote(&remote_host_id, Msg::Snapshot { snapshot: snapshot })
                     .await;
             }
             FileDesc::Project { .. } => {
                 next.send_to_remote(
                     &remote_host_id,
-                    Msg::BadRequest("Cannot open a project directory".to_string()),
+                    Msg::BadRequest {
+                        reason: "Cannot open a project directory".to_string(),
+                    },
                 )
                 .await;
             }
@@ -2994,7 +3036,9 @@ impl Server {
         if !self.config.write_allowed(&remote_host_id) {
             next.send_to_remote(
                 &remote_host_id,
-                Msg::PermissionDenied("Write permission denied".to_string()),
+                Msg::PermissionDenied {
+                    reason: "Write permission denied".to_string(),
+                },
             )
             .await;
             return Ok(());
@@ -3005,7 +3049,9 @@ impl Server {
         if doc.is_none() {
             next.send_to_remote(
                 &remote_host_id,
-                Msg::BadRequest(format!("Doc {} not found", doc_id)),
+                Msg::BadRequest {
+                    reason: format!("Doc {} not found", doc_id),
+                },
             )
             .await;
             return Ok(());
@@ -3015,7 +3061,9 @@ impl Server {
         // Check site seq.
         let subscriber_data = doc.subscribers.get(&remote_host_id).copied();
         if subscriber_data.is_none() {
-            let msg = Msg::BadRequest(format!("Doc {} ({}) not open", doc.name, doc_id));
+            let msg = Msg::BadRequest {
+                reason: format!("Doc {} ({}) not open", doc.name, doc_id),
+            };
             next.send_to_remote(&remote_host_id, msg).await;
             return Ok(());
         }
@@ -3030,7 +3078,10 @@ impl Server {
                     "Site seq mismatch: expected {}, got {}",
                     expected_seq, first_op.site_seq
                 );
-                let msg = Msg::DocFatal(doc_id, err);
+                let msg = Msg::DocFatal {
+                    doc: doc_id,
+                    reason: err,
+                };
                 next.send_to_remote(&remote_host_id, msg).await;
                 return Ok(());
             }
@@ -3085,7 +3136,9 @@ impl Server {
             );
             next.send_to_remote(
                 &remote_host_id,
-                Msg::BadRequest(format!("Doc {} not found", doc_id)),
+                Msg::BadRequest {
+                    reason: format!("Doc {} not found", doc_id),
+                },
             )
             .await;
             return Ok(());
@@ -3177,7 +3230,7 @@ impl Server {
                 doc_id,
                 remote_host_id
             );
-            next.send_to_remote(&remote_host_id, Msg::StopSendingOps(doc_id))
+            next.send_to_remote(&remote_host_id, Msg::StopSendingOps { doc: doc_id })
                 .await;
             return Ok(());
         }
@@ -3275,7 +3328,7 @@ impl Server {
             };
 
             let remote_host_id = file.host_id().clone();
-            next.send_to_remote(&remote_host_id, Msg::InfoFromClient(info))
+            next.send_to_remote(&remote_host_id, Msg::InfoFromClient { info: info })
                 .await;
             return Ok(());
         }
@@ -3394,7 +3447,7 @@ impl Server {
             // Send to the owner (could be ourselves or a remote)
             // Don't attach req_id since this isn’t a direct response
             // (not that it matters much).
-            next.send_to_remote_no_req_id(&host_id, Msg::OpFromClient(context_ops))
+            next.send_to_remote_no_req_id(&host_id, Msg::OpFromClient { ops: context_ops })
                 .await;
         }
 
@@ -3780,7 +3833,8 @@ impl Server {
         if host_id != self.host_id {
             // Remote: resolve doc id and forward.
             if let Some((doc_id, _)) = self.get_remote_doc(&file) {
-                next.send_to_remote(&host_id, Msg::SaveFile(doc_id)).await;
+                next.send_to_remote(&host_id, Msg::SaveFile { doc: doc_id })
+                    .await;
                 return Ok(());
             } else {
                 let err = lsp_server::ResponseError {
@@ -3834,7 +3888,7 @@ impl Server {
                 doc_id,
                 host_id
             );
-            next.send_to_remote(&host_id, Msg::StopSendingOps(doc_id))
+            next.send_to_remote(&host_id, Msg::StopSendingOps { doc: doc_id })
                 .await;
         } else {
             tracing::info!("Doc {} not found, nothing to disconnect", file);
@@ -3876,9 +3930,9 @@ impl Server {
                             &subscriber_id,
                             None,
                             if delete {
-                                Msg::FileDeleted(file.clone())
+                                Msg::FileDeleted { file: file.clone() }
                             } else {
-                                Msg::FileClosed(file.clone())
+                                Msg::FileClosed { file: file.clone() }
                             },
                         )
                         .await;
@@ -3908,7 +3962,9 @@ impl Server {
         if !self.config.delete_allowed(&requester) {
             next.send_to_remote(
                 &requester,
-                Msg::PermissionDenied("Permission denied for deleting/closing file".to_string()),
+                Msg::PermissionDenied {
+                    reason: "Permission denied for deleting/closing file".to_string(),
+                },
             )
             .await;
             return Ok(());
@@ -3921,9 +3977,13 @@ impl Server {
                 // Send FileDeleted message to all subscribers.
                 for subscriber_id in &subscribers {
                     let msg = if delete {
-                        Msg::FileDeleted(file_desc.clone())
+                        Msg::FileDeleted {
+                            file: file_desc.clone(),
+                        }
                     } else {
-                        Msg::FileClosed(file_desc.clone())
+                        Msg::FileClosed {
+                            file: file_desc.clone(),
+                        }
                     };
                     if subscriber_id == &requester {
                         next.send_to_remote(subscriber_id, msg).await;
@@ -3935,9 +3995,13 @@ impl Server {
 
                 // If the requester is not a subscriber, still send them a response.
                 let msg = if delete {
-                    Msg::FileDeleted(file_desc.clone())
+                    Msg::FileDeleted {
+                        file: file_desc.clone(),
+                    }
                 } else {
-                    Msg::FileClosed(file_desc.clone())
+                    Msg::FileClosed {
+                        file: file_desc.clone(),
+                    }
                 };
                 if !requester_notified {
                     next.send_to_remote(&requester, msg).await;
@@ -4092,8 +4156,11 @@ impl Server {
         // Send InfoFromServer to all subscribers except the excluded host.
         for (subscriber_host_id, _) in &doc.subscribers {
             if subscriber_host_id != sender {
-                next.send_to_remote(subscriber_host_id, Msg::InfoFromServer(info.clone()))
-                    .await;
+                next.send_to_remote(
+                    subscriber_host_id,
+                    Msg::InfoFromServer { info: info.clone() },
+                )
+                .await;
             }
         }
         Ok(())
@@ -4408,11 +4475,13 @@ impl Server {
                     // other end fires `mark_connected`. We do this here
                     // (rather than inside the webchannel) so the SSH
                     // transport gets the same handshake.
-                    let hey = Msg::Hey(message::HeyMessage {
-                        message: "Nice to meet ya".to_string(),
-                        credentials: "".to_string(),
-                        version: "v1.0.0".to_string(),
-                    });
+                    let hey = Msg::Hey {
+                        hey: message::HeyMessage {
+                            message: "Nice to meet ya".to_string(),
+                            credentials: "".to_string(),
+                            version: "v1.0.0".to_string(),
+                        },
+                    };
                     if let Err(err) = webchannel_clone.send(&peer_id_clone, None, hey).await {
                         tracing::warn!("Failed to send Hey to {}: {}", peer_id_clone, err);
                     }
@@ -4424,10 +4493,10 @@ impl Server {
                         Some(WebChannelError::ConnectionExists(peer_id)) => {
                             let msg = webchannel::Message {
                                 host: my_host_id,
-                                body: Msg::IceProgress(
-                                    peer_id.to_string(),
-                                    "Already connected".to_string(),
-                                ),
+                                body: Msg::IceProgress {
+                                    peer: peer_id.to_string(),
+                                    message: "Already connected".to_string(),
+                                },
                                 req_id: None,
                             };
                             let _ = msg_tx_clone.send(msg).await;
@@ -4436,7 +4505,10 @@ impl Server {
                             // Send FailedToConnect message to main loop
                             let msg = webchannel::Message {
                                 host: my_host_id,
-                                body: Msg::FailedToConnect(peer_id_clone.clone(), err.to_string()),
+                                body: Msg::FailedToConnect {
+                                    peer: peer_id_clone.clone(),
+                                    reason: err.to_string(),
+                                },
                                 req_id: None,
                             };
                             let _ = msg_tx_clone.send(msg).await;

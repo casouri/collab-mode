@@ -58,7 +58,9 @@ impl IoRemote {
                     .remote_msg_tx
                     .send(Message {
                         host: self.peer_id.clone(),
-                        body: Msg::ConnectionBroke(self.peer_id.clone()),
+                        body: Msg::ConnectionBroke {
+                            peer: self.peer_id.clone(),
+                        },
                         req_id: None,
                     })
                     .await;
@@ -105,11 +107,13 @@ mod tests {
     use tokio::time::timeout;
 
     fn hey() -> Msg {
-        Msg::Hey(HeyMessage {
-            message: "hi".into(),
-            credentials: "".into(),
-            version: "v1.0.0".into(),
-        })
+        Msg::Hey {
+            hey: HeyMessage {
+                message: "hi".into(),
+                credentials: "".into(),
+                version: "v1.0.0".into(),
+            },
+        }
     }
 
     fn key_cert() -> ArcKeyCert {
@@ -152,7 +156,7 @@ mod tests {
             .expect("recv timed out")
             .expect("dual_b closed");
         assert_eq!(msg.host, "a");
-        assert!(matches!(msg.body, Msg::Hey(_)));
+        assert!(matches!(msg.body, Msg::Hey { hey: _ }));
     }
 
     #[tokio::test]
@@ -165,7 +169,7 @@ mod tests {
             .await
             .expect("recv timed out")
             .expect("dual_a closed");
-        assert!(matches!(msg.body, Msg::ConnectionBroke(_)));
+        assert!(matches!(msg.body, Msg::ConnectionBroke { peer: _ }));
     }
 
     #[tokio::test]

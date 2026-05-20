@@ -137,7 +137,11 @@ mod e2e_tests {
         loop {
             if let Ok(Some(msg)) = timeout(Duration::from_millis(500), rx.recv()).await {
                 match msg.body {
-                    Msg::Hey(_) | Msg::IceProgress(_, _) => continue,
+                    Msg::Hey { hey: _ }
+                    | Msg::IceProgress {
+                        peer: _,
+                        message: _,
+                    } => continue,
                     _ => break,
                 }
             } else {
@@ -334,7 +338,7 @@ mod e2e_tests {
         consume_automatic_messages(&mut rx1).await;
 
         // Test message exchange
-        let test_msg = Msg::FileShared(42);
+        let test_msg = Msg::FileShared { doc: 42 };
         tracing::info!("Sending test message from {} to {}", id2, id1);
         let send_result = channel2.send(&id1, None, test_msg.clone()).await;
         assert!(send_result.is_ok(), "Send should succeed");
@@ -348,7 +352,7 @@ mod e2e_tests {
         tracing::info!("Received message from {}: {:?}", msg.host, msg.body);
         assert_eq!(msg.host, id2);
         match msg.body {
-            Msg::FileShared(doc_id) => assert_eq!(doc_id, 42),
+            Msg::FileShared { doc: doc_id } => assert_eq!(doc_id, 42),
             _ => panic!("Unexpected message type: {:?}", msg.body),
         }
 
@@ -487,14 +491,14 @@ mod e2e_tests {
         // Test B → A message
         tracing::info!("Sending B → A");
         channel_b
-            .send(&id_a, None, Msg::FileShared(100))
+            .send(&id_a, None, Msg::FileShared { doc: 100 })
             .await
             .unwrap();
 
         // Test D → C message
         tracing::info!("Sending D → C");
         channel_d
-            .send(&id_c, None, Msg::FileShared(200))
+            .send(&id_c, None, Msg::FileShared { doc: 200 })
             .await
             .unwrap();
 
@@ -504,7 +508,7 @@ mod e2e_tests {
         let msg_a = received_a.unwrap().unwrap();
         assert_eq!(msg_a.host, id_b);
         match msg_a.body {
-            Msg::FileShared(doc_id) => assert_eq!(doc_id, 100),
+            Msg::FileShared { doc: doc_id } => assert_eq!(doc_id, 100),
             _ => panic!("Unexpected message type"),
         }
 
@@ -513,7 +517,7 @@ mod e2e_tests {
         let msg_c = received_c.unwrap().unwrap();
         assert_eq!(msg_c.host, id_d);
         match msg_c.body {
-            Msg::FileShared(doc_id) => assert_eq!(doc_id, 200),
+            Msg::FileShared { doc: doc_id } => assert_eq!(doc_id, 200),
             _ => panic!("Unexpected message type"),
         }
 
@@ -614,7 +618,10 @@ mod e2e_tests {
         tracing::info!("Sending {} messages", num_messages);
 
         for i in 0..num_messages {
-            channel2.send(&id1, None, Msg::FileShared(i)).await.unwrap();
+            channel2
+                .send(&id1, None, Msg::FileShared { doc: i })
+                .await
+                .unwrap();
         }
 
         // Receive all messages
@@ -628,7 +635,7 @@ mod e2e_tests {
             );
             let msg = received.unwrap().unwrap();
             match msg.body {
-                Msg::FileShared(doc_id) => {
+                Msg::FileShared { doc: doc_id } => {
                     received_ids.push(doc_id);
                 }
                 _ => panic!("Unexpected message type: {:?}", msg.body),
@@ -684,7 +691,11 @@ mod e2e_tests {
         loop {
             match timeout(Duration::from_millis(500), rx1.recv()).await {
                 Ok(Some(msg)) => {
-                    if let Msg::IceProgress(_, state) = msg.body {
+                    if let Msg::IceProgress {
+                        peer: _,
+                        message: state,
+                    } = msg.body
+                    {
                         ice_states.push(state);
                     }
                 }

@@ -460,7 +460,10 @@ impl WebChannel {
                 let _ = progress_msg_tx
                     .send(Message {
                         host: my_id.clone(),
-                        body: Msg::IceProgress(peer_for_progress.clone(), progress.to_string()),
+                        body: Msg::IceProgress {
+                            peer: peer_for_progress.clone(),
+                            message: progress.to_string(),
+                        },
                         req_id: None,
                     })
                     .await;
@@ -547,7 +550,7 @@ impl WebChannel {
                     .remote_msg_tx
                     .send(Message {
                         host: peer.clone(),
-                        body: Msg::ConnectionBroke(peer.clone()),
+                        body: Msg::ConnectionBroke { peer: peer.clone() },
                         req_id: None,
                     })
                     .await;
@@ -673,7 +676,9 @@ impl SctpRemote {
                     .remote_msg_tx
                     .send(Message {
                         host: self.peer_id.clone(),
-                        body: Msg::ConnectionBroke(self.peer_id.clone()),
+                        body: Msg::ConnectionBroke {
+                            peer: self.peer_id.clone(),
+                        },
                         req_id: None,
                     })
                     .await;
@@ -695,7 +700,9 @@ impl SctpRemote {
                     .remote_msg_tx
                     .send(Message {
                         host: self.peer_id.clone(),
-                        body: Msg::ConnectionBroke(self.peer_id.clone()),
+                        body: Msg::ConnectionBroke {
+                            peer: self.peer_id.clone(),
+                        },
                         req_id: None,
                     })
                     .await;
@@ -917,7 +924,9 @@ impl SctpRemote {
                     .remote_msg_tx
                     .send(Message {
                         host: self.peer_id.clone(),
-                        body: Msg::SerializationErr(self.peer_id.clone()),
+                        body: Msg::SerializationErr {
+                            reason: self.peer_id.clone(),
+                        },
                         req_id: None,
                     })
                     .await;
@@ -999,10 +1008,12 @@ async fn read_from_stream(
                 let _ = msg_tx
                     .send(Message {
                         host: remote_hostid.clone(),
-                        body: Msg::SerializationErr(format!(
-                            "Failed to read full length (8 bytes) prefix: only got {} bytes",
-                            n
-                        )),
+                        body: Msg::SerializationErr {
+                            reason: format!(
+                                "Failed to read full length (8 bytes) prefix: only got {} bytes",
+                                n
+                            ),
+                        },
                         req_id: None,
                     })
                     .await;
@@ -1021,7 +1032,7 @@ async fn read_from_stream(
             );
             let _ = msg_tx.send(Message {
                 host: remote_hostid.clone(),
-                body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
+                body: Msg::SerializationErr { reason: format!("Failed to read from stream because buffer too short which should never happen").to_string() },
                 req_id: None,
             }).await;
             let _ = stream.shutdown(std::net::Shutdown::Both).await;
@@ -1046,11 +1057,13 @@ async fn read_from_stream(
                     let _ = msg_tx
                         .send(Message {
                             host: remote_hostid.clone(),
-                            body: Msg::SerializationErr(format!(
-                                "EOF while reading content: expected {} bytes, got {}",
-                                content_length,
-                                full_buffer.len()
-                            )),
+                            body: Msg::SerializationErr {
+                                reason: format!(
+                                    "EOF while reading content: expected {} bytes, got {}",
+                                    content_length,
+                                    full_buffer.len()
+                                ),
+                            },
                             req_id: None,
                         })
                         .await;
@@ -1069,7 +1082,7 @@ async fn read_from_stream(
                 );
                 let _ = msg_tx.send(Message {
                     host: remote_hostid.clone(),
-                    body: Msg::SerializationErr(format!("Failed to read from stream because buffer too short which should never happen").to_string()),
+                    body: Msg::SerializationErr { reason: format!("Failed to read from stream because buffer too short which should never happen").to_string() },
                     req_id: None,
                 }).await;
                 let _ = stream.shutdown(std::net::Shutdown::Both).await;
@@ -1100,7 +1113,9 @@ async fn read_from_stream(
             let _ = msg_tx
                 .send(Message {
                     host: remote_hostid.clone(),
-                    body: Msg::SerializationErr(format!("Failed to deserialize message: {}", e)),
+                    body: Msg::SerializationErr {
+                        reason: format!("Failed to deserialize message: {}", e),
+                    },
                     req_id: None,
                 })
                 .await;
@@ -1307,13 +1322,13 @@ mod tests {
         chan_a.connect_test(chan_b.hostid()).await.unwrap();
 
         chan_a
-            .send(&chan_b.hostid(), None, Msg::FileShared(42))
+            .send(&chan_b.hostid(), None, Msg::FileShared { doc: 42 })
             .await
             .unwrap();
 
         let msg = dual_b.recv().await.unwrap();
         assert_eq!(msg.host, chan_a.hostid());
-        assert!(matches!(msg.body, Msg::FileShared(42)));
+        assert!(matches!(msg.body, Msg::FileShared { doc: 42 }));
     }
 
     #[tokio::test]
@@ -1323,13 +1338,13 @@ mod tests {
         chan_a.connect_test(chan_b.hostid()).await.unwrap();
 
         chan_a
-            .send(&chan_b.hostid(), None, Msg::FileShared(99))
+            .send(&chan_b.hostid(), None, Msg::FileShared { doc: 99 })
             .await
             .unwrap();
 
         let msg = dual_b.recv().await.unwrap();
         assert_eq!(msg.host, chan_a.hostid());
-        assert!(matches!(msg.body, Msg::FileShared(99)));
+        assert!(matches!(msg.body, Msg::FileShared { doc: 99 }));
     }
 
     /// In the actor model there is no `deliverable` flag — a send to
@@ -1340,7 +1355,7 @@ mod tests {
 
         // No connect call.
         let result = chan_a
-            .send(&chan_b.hostid(), None, Msg::FileShared(1))
+            .send(&chan_b.hostid(), None, Msg::FileShared { doc: 1 })
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Not connected"));
@@ -1368,17 +1383,17 @@ mod tests {
         chan_sender.connect_test(id_recv2.clone()).await.unwrap();
 
         chan_sender
-            .broadcast(None, Msg::FileShared(123))
+            .broadcast(None, Msg::FileShared { doc: 123 })
             .await
             .unwrap();
 
         let msg1 = dual_recv1.recv().await.unwrap();
         assert_eq!(msg1.host, id_sender);
-        assert!(matches!(msg1.body, Msg::FileShared(123)));
+        assert!(matches!(msg1.body, Msg::FileShared { doc: 123 }));
 
         let msg2 = dual_recv2.recv().await.unwrap();
         assert_eq!(msg2.host, id_sender);
-        assert!(matches!(msg2.body, Msg::FileShared(123)));
+        assert!(matches!(msg2.body, Msg::FileShared { doc: 123 }));
     }
 }
 

@@ -172,7 +172,9 @@ fn run_envoy() -> anyhow::Result<()> {
                     &mut stdout,
                     &webchannel::Message {
                         host: "envoy".into(),
-                        body: Msg::EnvoyInitError(err.clone()),
+                        body: Msg::EnvoyInitError {
+                            reason: err.clone(),
+                        },
                         req_id: None,
                     },
                 )
@@ -201,11 +203,13 @@ fn run_envoy() -> anyhow::Result<()> {
             let mut stdout = tokio::io::stdout();
             let hey = webchannel::Message {
                 host: envoy_id.clone(),
-                body: Msg::Hey(collab_mode::message::HeyMessage::new(
-                    "Nice to meet ya".into(),
-                    "".into(),
-                    "v1.0.0".into(),
-                )),
+                body: Msg::Hey {
+                    hey: collab_mode::message::HeyMessage::new(
+                        "Nice to meet ya".into(),
+                        "".into(),
+                        "v1.0.0".into(),
+                    ),
+                },
                 req_id: None,
             };
             frame_write(&mut stdout, &hey).await?;

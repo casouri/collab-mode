@@ -470,20 +470,29 @@ impl HeyMessage {
     }
 }
 
+// Use struct style to be more JSON-friendly, in case of possible
+// future inter-op.
 #[derive(Debug, Clone, Serialize, Deserialize, fmt_derive::Display)]
 #[non_exhaustive]
+#[serde(tag = "kind")]
 pub enum Msg {
     ShareSingleFile {
         filename: String,
         meta: String,
         content: FileContentOrPath,
     },
-    FileShared(DocId),
+    FileShared {
+        doc: DocId,
+    },
     ListFiles {
         dir: Option<FileDesc>,
     },
-    FileList(Vec<ListFilesEntry>),
-    OpFromClient(ContextOps),
+    FileList {
+        files: Vec<ListFilesEntry>,
+    },
+    OpFromClient {
+        ops: ContextOps,
+    },
     OpFromServer {
         doc: DocId,
         ops: Vec<FatOp>,
@@ -492,9 +501,16 @@ pub enum Msg {
         doc: DocId,
         after: GlobalSeq,
     },
-    RequestFile(FileDesc, OpenMode),
-    MakeDirectory(FileDesc),
-    DirectoryMade(FileDesc),
+    RequestFile {
+        file: FileDesc,
+        mode: OpenMode,
+    },
+    MakeDirectory {
+        file: FileDesc,
+    },
+    DirectoryMade {
+        file: FileDesc,
+    },
     MoveFile {
         project: ProjectId,
         source: String,
@@ -505,23 +521,46 @@ pub enum Msg {
         source: String,
         dest: String,
     },
-    SaveFile(DocId),
-    FileSaved(DocId),
+    SaveFile {
+        doc: DocId,
+    },
+    FileSaved {
+        doc: DocId,
+    },
     CloseFile {
         file: FileDesc,
         delete: bool,
     },
-    FileDeleted(FileDesc),
-    FileClosed(FileDesc),
-    Snapshot(NewSnapshot),
-    ResetFile(DocId),
-    Info(Info),
-    InfoFromClient(Info),
-    InfoFromServer(Info),
+    FileDeleted {
+        file: FileDesc,
+    },
+    FileClosed {
+        file: FileDesc,
+    },
+    Snapshot {
+        snapshot: NewSnapshot,
+    },
+    ResetFile {
+        doc: DocId,
+    },
+    Info {
+        info: Info,
+    },
+    InfoFromClient {
+        info: Info,
+    },
+    InfoFromServer {
+        info: Info,
+    },
 
     // Misc
-    IceProgress(ServerId, String),
-    Hey(HeyMessage),
+    IceProgress {
+        peer: ServerId,
+        message: String,
+    },
+    Hey {
+        hey: HeyMessage,
+    },
     /// Close the connection and don’t try to reconnect to me.
     Bye,
     /// Self-message asking the main loop to run `fix_world` now,
@@ -543,18 +582,36 @@ pub enum Msg {
 
     /// Sent from envoy to host if anything goes wrong when handling
     /// `EnvoyInit`. The envoy then exits.
-    EnvoyInitError(String),
+    EnvoyInitError {
+        reason: String,
+    },
 
     // Errors
-    FailedToConnect(ServerId, String),
-    ConnectionBroke(ServerId),
-    StopSendingOps(DocId),
-    SerializationErr(String),
-    PermissionDenied(String),
-    BadRequest(String),
+    FailedToConnect {
+        peer: ServerId,
+        reason: String,
+    },
+    ConnectionBroke {
+        peer: ServerId,
+    },
+    StopSendingOps {
+        doc: DocId,
+    },
+    SerializationErr {
+        reason: String,
+    },
+    PermissionDenied {
+        reason: String,
+    },
+    BadRequest {
+        reason: String,
+    },
     // Fatal error that shouldn't happen (not a fault, ie, a bug in
     // code), must reset the doc.
-    DocFatal(DocId, String),
+    DocFatal {
+        doc: DocId,
+        reason: String,
+    },
     // If we need to respond to a request from a remote's editor with
     // an error, use this message.
     ErrorResp {

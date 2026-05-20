@@ -121,7 +121,9 @@ async fn send_connection_broke(tx: &mpsc::Sender<Message>, peer_id: &ServerId) {
     let _ = tx
         .send(Message {
             host: peer_id.clone(),
-            body: Msg::ConnectionBroke(peer_id.clone()),
+            body: Msg::ConnectionBroke {
+                peer: peer_id.clone(),
+            },
             req_id: None,
         })
         .await;
@@ -139,11 +141,13 @@ mod tests {
     }
 
     fn hey() -> Msg {
-        Msg::Hey(HeyMessage {
-            message: "hi".into(),
-            credentials: "".into(),
-            version: "v1.0.0".into(),
-        })
+        Msg::Hey {
+            hey: HeyMessage {
+                message: "hi".into(),
+                credentials: "".into(),
+                version: "v1.0.0".into(),
+            },
+        }
     }
 
     /// Requires setting up `ssh yuan@localhost` to work. Run with
@@ -176,6 +180,6 @@ mod tests {
             .expect("recv timed out")
             .expect("dual closed");
         assert_eq!(msg.host, "me");
-        assert!(matches!(msg.body, Msg::Hey(_)));
+        assert!(matches!(msg.body, Msg::Hey { hey: _ }));
     }
 }
