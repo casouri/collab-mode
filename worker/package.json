@@ -1,0 +1,20 @@
+{
+  "name": "worker",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "typescript": "^5.5.2",
+    "wrangler": "^4.90.1"
+  },
+  "dependencies": {
+    "@peculiar/x509": "^2.0.0",
+    "pvtsutils": "^1.3.5"
+  }
+}
