@@ -21,19 +21,26 @@
 //! validity of the provided cert.
 
 use crate::signaling::auth::verify_identity;
-use crate::signaling::{EndpointId, SignalingMsg};
+use crate::signaling::{
+    decode_trusted_header, parse_identity_header, EndpointId, SignalingMsg, Signature,
+    BIND_HEADER_ID, BIND_HEADER_IDENTITY, BIND_HEADER_SIGNATURE, BIND_HEADER_TRUSTED,
+};
 use crate::types::id_hash;
 use futures_util::{SinkExt, StreamExt};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::time;
 use tokio_tungstenite as tung;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::{
+    response::Builder as ResponseBuilder, HeaderMap, StatusCode,
+};
 use tokio_tungstenite::tungstenite::{
     protocol::{frame::coding::CloseCode, CloseFrame},
     Message,
@@ -41,12 +48,19 @@ use tokio_tungstenite::tungstenite::{
 use tokio_tungstenite::WebSocketStream;
 use tracing::{instrument, Instrument};
 
-use super::SignalingResult;
+/// Maximum lifetime of a single WebSocket connection. After this, the
+/// server closes the stream regardless of activity; the client must
+/// re-bind on a fresh connection. This forces periodic re-authentication
+/// via the bind headers.
+const MAX_CONNECTION_LIFETIME_SECS: u64 = 12 * 60 * 60;
+/// Timeout for cleaning up stale connection.
+const INACTIVE_TIMEOUT_SECS: u64 = 600; // 10 minutes.
 
 /// Run the signaling server on `addr` (form: `"ip:port"`).
 pub async fn run_signaling_server(addr: &str) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let server = Server::new();
+
     while let Ok((stream, client_addr)) = listener.accept().await {
         tracing::info!("Accepted a connection from {}", client_addr);
         let server = server.clone();
@@ -81,6 +95,9 @@ struct EndpointInfo {
     /// Connection request and client candidate are sent to this
     /// channel.
     msg_tx: mpsc::Sender<Message>,
+    /// Endpoint ids allowed to send Connect/SDP/Candidate addressed
+    /// to this endpoint.
+    trusted: HashSet<EndpointId>,
 }
 
 /// Signaling server.
@@ -96,74 +113,12 @@ impl Server {
         }
     }
 
-    /// Bind a collab server to `id`. Return error if some endpoint is
-    /// already connected with that id.
-    async fn bind_endpoint(
-        &self,
-        id: EndpointId,
-        msg_tx: mpsc::Sender<Message>,
-    ) -> SignalingResult<()> {
-        tracing::info!(%id, "Handle req: bind()");
-        let info = EndpointInfo {
-            msg_tx: msg_tx.clone(),
-        };
-        let inserted = self.insert_endpoint(id.clone(), info).await;
-        if !inserted {
-            let _ = msg_tx
-                .send(SignalingMsg::BindErr(id.clone(), "ID already taken".to_string()).into())
-                .await;
-            return Err(super::SignalingError::OtherError(
-                "ID already taken".to_string(),
-            ));
-        }
-        let _ = msg_tx.send(SignalingMsg::Bound(id).into()).await;
-        Ok(())
-    }
-
-    // Send connect request to the endpoint with `receiver_id`.
-    async fn connect_to_endpoint(
-        &self,
-        sender_id: &EndpointId,
-        receiver_id: EndpointId,
-        initiator: bool,
-        resp_tx: &mpsc::Sender<Message>,
-    ) -> SignalingResult<()> {
-        tracing::info!(sender_id, receiver_id, initiator, "Handle req: connect()");
-        let endpoint_info = self.get_endpoint_info(&receiver_id).await;
-        match endpoint_info {
-            Some(info) => {
-                let connect_req =
-                    SignalingMsg::Connect(sender_id.clone(), receiver_id.clone(), initiator);
-                let _ = info.msg_tx.send(connect_req.into()).await;
-                tracing::info!(
-                    "Sent Connect message to {} on behalf of {}",
-                    receiver_id,
-                    sender_id
-                );
-                Ok(())
-            }
-            None => {
-                // Didn't find the endpoint with this id.
-                let resp = SignalingMsg::IdNotFound(
-                    sender_id.clone(),
-                    format!("No endpoint found for id: {}", receiver_id),
-                );
-                let _ = resp_tx.send(resp.into()).await;
-                tracing::info!("No endpoint for id: {}", receiver_id);
-                Ok(())
-            }
-        }
-    }
-
-    /// Insert `id=info` into the endpoint map. Return false if `id`
-    /// is taken in the map, return true if inserted successfully.
-    async fn insert_endpoint(&self, id: EndpointId, info: EndpointInfo) -> bool {
+    /// Override the trust list for `id`. No-op if `id` is not
+    /// bound.
+    async fn update_trust(&self, id: &EndpointId, trusted: HashSet<EndpointId>) {
         let mut map = self.endpoint_map.write().await;
-        if map.contains_key(&id) {
-            return false;
-        } else {
-            map.insert(id, info);
-            return true;
+        if let Some(info) = map.get_mut(id) {
+            info.trusted = trusted;
         }
     }
 
@@ -179,20 +134,98 @@ impl Server {
     }
 }
 
-/// Handle a connection from a collab server or client. If the
-/// connected endpoint is a collab server and requested to bind,
-/// `endpoint_id` is set to the allocated id.
+/// Pull the named header out of `headers` as an owned String. Errors if the
+/// header is missing or its value isn’t valid UTF-8.
+fn header_str(headers: &HeaderMap, name: &str) -> Result<String, String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("missing {name}"))
+}
+
+/// Validate the `X-Collab-*` bind headers from a WebSocket upgrade
+/// request. On success returns `(endpoint_id, trusted_set)` so the
+/// outer task can register the endpoint after the upgrade completes.
+fn validate_bind(headers: &HeaderMap) -> Result<(EndpointId, HashSet<EndpointId>), String> {
+    let id = header_str(headers, BIND_HEADER_ID)?;
+
+    let identity_str = header_str(headers, BIND_HEADER_IDENTITY)?;
+    let identity =
+        parse_identity_header(&identity_str).map_err(|e| format!("{BIND_HEADER_IDENTITY}: {e}"))?;
+
+    let sig_str = header_str(headers, BIND_HEADER_SIGNATURE)?;
+    let signature = Signature(sig_str);
+
+    let trusted_str = header_str(headers, BIND_HEADER_TRUSTED)?;
+    let trusted: Vec<EndpointId> =
+        decode_trusted_header(&trusted_str).map_err(|e| format!("{BIND_HEADER_TRUSTED}: {e}"))?;
+
+    let cert_hash =
+        verify_identity(&identity, &signature).map_err(|e| format!("identity verify: {e}"))?;
+    if id_hash(&id) != cert_hash {
+        return Err(format!(
+            "bind id hash {} != cert hash {}",
+            id_hash(&id),
+            cert_hash
+        ));
+    }
+    Ok((id, trusted.into_iter().collect()))
+}
+
+/// Handle a connection from client. Read headers and validate auth,
+/// if pass, start conversation with it.
 async fn handle_connection(
     server: &Server,
     stream: TcpStream,
     endpoint_id: &mut Option<EndpointId>,
 ) -> anyhow::Result<()> {
-    let stream = tung::accept_async(stream).await?;
+    // Set this in the callback, read it once stream is created.
+    let bind_info: Arc<StdMutex<Option<(EndpointId, HashSet<EndpointId>)>>> =
+        Arc::new(StdMutex::new(None));
+    let bind_info_clone = bind_info.clone();
+    let callback = move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+        match validate_bind(req.headers()) {
+            Ok((id, trusted)) => {
+                *bind_info_clone.lock().unwrap() = Some((id, trusted));
+                Ok(resp)
+            }
+            Err(reason) => {
+                tracing::info!(%reason, "Rejected bind during upgrade");
+                let err: ErrorResponse = ResponseBuilder::new()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(Some(reason))
+                    .unwrap();
+                Err(err)
+            }
+        }
+    };
+    let stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
+    let (id, trust_set) = bind_info
+        .lock()
+        .unwrap()
+        .take()
+        .expect("validate_bind populated this on Ok");
 
     let (req_tx, mut req_rx) = mpsc::channel(1);
     let (resp_tx, resp_rx) = mpsc::channel(1);
 
-    // Track last ping time for inactivity detection
+    // Register the bound endpoint. If there’s an existing entry, just
+    // override it. After the auth we’re sure it’s the same client
+    // making another binding request.
+    {
+        let mut map = server.endpoint_map.write().await;
+        map.insert(
+            id.clone(),
+            EndpointInfo {
+                msg_tx: resp_tx.clone(),
+                trusted: trust_set,
+            },
+        );
+    }
+    *endpoint_id = Some(id);
+
+    // Track last ping time for inactivity detection.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -234,64 +267,52 @@ async fn handle_message(
         Message::Text(msg) => {
             let msg: SignalingMsg = serde_json::from_str(&msg)?;
             match msg {
-                SignalingMsg::Bind(id, identity, signature) => {
-                    verify_signature(&id, &identity, &signature, resp_tx).await?;
-                    server.bind_endpoint(id.clone(), resp_tx.clone()).await?;
-                    *endpoint_id = Some(id);
-                }
-                SignalingMsg::Connect(sender_id, receiver_id, initiator) => {
-                    check_id(&sender_id, endpoint_id, &resp_tx).await?;
-                    if endpoint_id.is_none() {
-                        let resp = resp_unsupported("You should send Bind before Connect");
-                        resp_tx.send(resp).await?;
-                        return Ok(());
-                    }
+                SignalingMsg::Trust { sender, trusted } => {
+                    check_id(&sender, endpoint_id, &resp_tx).await?;
                     server
-                        .connect_to_endpoint(&sender_id, receiver_id, initiator, resp_tx)
-                        .await?;
+                        .update_trust(&sender, trusted.iter().cloned().collect())
+                        .await;
+                    let resp = SignalingMsg::Trusted {
+                        id: sender,
+                        trusted,
+                    };
+                    resp_tx.send(resp.into()).await?;
                 }
-                SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
-                    check_id(&sender_id, endpoint_id, &resp_tx).await?;
-
-                    if endpoint_id.is_none() {
-                        let resp = resp_unsupported("You should send Bind or Connect before SDP");
-                        resp_tx.send(resp).await?;
+                SignalingMsg::Connect {
+                    ref sender,
+                    ref receiver,
+                    ..
+                }
+                | SignalingMsg::SDP {
+                    ref sender,
+                    ref receiver,
+                    ..
+                }
+                | SignalingMsg::Candidate {
+                    ref sender,
+                    ref receiver,
+                    ..
+                } => {
+                    let sender = sender.clone();
+                    let receiver = receiver.clone();
+                    check_id(&sender, endpoint_id, &resp_tx).await?;
+                    let Some(receiver_info) = server.get_endpoint_info(&receiver).await else {
+                        let resp = SignalingMsg::IdNotFound {
+                            id: sender,
+                            reason: format!("No endpoint found for id: {}", receiver),
+                        };
+                        resp_tx.send(resp.into()).await?;
+                        return Ok(());
+                    };
+                    if !receiver_info.trusted.contains(&sender) {
+                        let resp = SignalingMsg::Rejected {
+                            id: sender,
+                            reason: format!("Sender not in {}’s trust list", receiver),
+                        };
+                        resp_tx.send(resp.into()).await?;
                         return Ok(());
                     }
-                    if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
-                        let msg = SignalingMsg::SDP(sender_id.clone(), receiver_id.clone(), sdp);
-                        their_info.msg_tx.send(msg.into()).await?;
-                    } else {
-                        let msg = SignalingMsg::IdNotFound(
-                            sender_id.clone(),
-                            format!("No endpoint found for id: {}", receiver_id),
-                        );
-                        resp_tx.send(msg.into()).await?;
-                    }
-                }
-                SignalingMsg::Candidate(sender_id, receiver_id, candidate) => {
-                    check_id(&sender_id, endpoint_id, &resp_tx).await?;
-
-                    if endpoint_id.is_none() {
-                        let resp =
-                            resp_unsupported("You should send Bind or Connect before Candidate");
-                        resp_tx.send(resp).await?;
-                        return Ok(());
-                    }
-                    if let Some(their_info) = server.get_endpoint_info(&receiver_id).await {
-                        let msg = SignalingMsg::Candidate(
-                            sender_id.clone(),
-                            receiver_id.clone(),
-                            candidate,
-                        );
-                        their_info.msg_tx.send(msg.into()).await?;
-                    } else {
-                        let msg = SignalingMsg::IdNotFound(
-                            sender_id.clone(),
-                            format!("No endpoint found for id: {}", receiver_id),
-                        );
-                        resp_tx.send(msg.into()).await?;
-                    }
+                    receiver_info.msg_tx.send(msg.into()).await?;
                 }
                 SignalingMsg::Ping => {
                     let now = std::time::SystemTime::now()
@@ -301,10 +322,10 @@ async fn handle_message(
                     last_ping.store(now, Ordering::Relaxed);
                     tracing::debug!("Received ping, updated last_ping");
                 }
+                SignalingMsg::Pong => {}
                 _ => {
-                    let resp = resp_unsupported(
-                        "You should only send Bind, Connect, SDP, Candidate, or Ping message to the signal server",
-                        );
+                    let resp =
+                        resp_unsupported("Send Connect, SDP, Candidate, Trust, or Ping only");
                     resp_tx.send(resp).await?;
                 }
             }
@@ -320,50 +341,6 @@ async fn handle_message(
     Ok(())
 }
 
-/// Verify the [`Identity`]/[`Signature`] pair attached to a `Bind`,
-/// and verify that `id`'s hash portion matches the verified cert
-/// hash. On failure, sends an `IdTaken` to the client and returns an
-/// error so caller closes the connection.
-async fn verify_signature(
-    id: &EndpointId,
-    identity: &super::Identity,
-    signature: &super::Signature,
-    resp_tx: &mpsc::Sender<Message>,
-) -> anyhow::Result<()> {
-    let verified_hash = match verify_identity(identity, signature) {
-        Ok(h) => h,
-        Err(err) => {
-            let _ = resp_tx
-                .send(
-                    SignalingMsg::BindErr(
-                        id.clone(),
-                        format!("Identity verification failed: {err}"),
-                    )
-                    .into(),
-                )
-                .await;
-            return Err(err);
-        }
-    };
-    if id_hash(id) != verified_hash {
-        let _ = resp_tx
-            .send(
-                SignalingMsg::BindErr(
-                    id.clone(),
-                    format!(
-                        "Bind id hash {} doesn't match identity cert hash {}",
-                        id_hash(id),
-                        verified_hash
-                    ),
-                )
-                .into(),
-            )
-            .await;
-        return Err(anyhow::anyhow!("Bind id hash mismatch with identity cert"));
-    }
-    Ok(())
-}
-
 // *** Subroutines for handle_connection
 
 /// Sends and receives messages from `stream`.
@@ -374,29 +351,38 @@ async fn send_receive_stream(
     mut resp_rx: mpsc::Receiver<Message>,
     last_ping: Arc<AtomicU64>,
 ) {
-    // Check inactivity every 1 minute.
+    // Check inactivity every 1 minute. Closes the connection if no
+    // ping for 10 minutes, or after the 12-hour lifetime cap.
     let mut check_interval = time::interval(Duration::from_secs(60));
     check_interval.tick().await; // Skip immediate first tick
-
-    const INACTIVE_TIMEOUT_SECS: u64 = 600; // 10 minutes
+    let bound_at = Instant::now();
 
     loop {
         tokio::select! {
             _ = check_interval.tick() => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                let last = last_ping.load(Ordering::Relaxed);
-                if now - last > INACTIVE_TIMEOUT_SECS {
-                    let msg = SignalingMsg::Inactive(
-                        "No ping received in 10 minutes".to_string()
-                    );
-                    tracing::info!("Closing connection due to inactivity");
-                    // Use a timeout because if the peer is
-                    // unreachable (e.g. laptop asleep), the close
-                    // handshake reads forever and would prevent
-                    // remove_endpoint from running.
+                let reason = if bound_at.elapsed()
+                    > Duration::from_secs(MAX_CONNECTION_LIFETIME_SECS)
+                {
+                    Some("12-hour limit reached, need re-auth")
+                } else {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let last = last_ping.load(Ordering::Relaxed);
+                    if now - last > INACTIVE_TIMEOUT_SECS {
+                        Some("No ping received in 10 minutes")
+                    } else {
+                        None
+                    }
+                };
+                if let Some(reason) = reason {
+                    tracing::info!(%reason, "Closing connection");
+                    let msg = SignalingMsg::Terminate { reason: reason.to_string() };
+                    // Use a timeout because if the peer is unreachable
+                    // (e.g. laptop asleep), the close handshake reads
+                    // forever and would prevent remove_endpoint from
+                    // running.
                     let _ = time::timeout(Duration::from_secs(5), async {
                         let _ = stream.send(msg.into()).await;
                         let _ = stream.close(None).await;

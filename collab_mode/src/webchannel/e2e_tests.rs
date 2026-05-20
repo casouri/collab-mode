@@ -125,7 +125,7 @@ mod e2e_tests {
             .await
             .expect("Timeout waiting for Bound message")
             .expect("Expected Bound message");
-        if let Ok(SignalingMsg::Bound(id)) = signaling_message.msg {
+        if let Ok(SignalingMsg::Bound { id, trusted: _ }) = signaling_message.msg {
             assert_eq!(id, expected_id, "Bound ID mismatch");
         } else {
             panic!("Expected Bound message, got {:?}", signaling_message.msg);
@@ -151,6 +151,7 @@ mod e2e_tests {
         id: String,
         key_cert: ArcKeyCert,
         signaling_url: String,
+        trusted: Vec<String>,
     ) -> anyhow::Result<(
         crate::signaling::client_new::SignalingClient,
         mpsc::Receiver<crate::signaling::SignalingMessage>,
@@ -162,6 +163,7 @@ mod e2e_tests {
             key_cert,
             sig_tx,
             None,
+            trusted,
         )
         .await?;
 
@@ -185,21 +187,30 @@ mod e2e_tests {
             .map_err(|_| anyhow::anyhow!("Timeout waiting for Connect message"))?
             .ok_or(anyhow::anyhow!("Channel closed"))?;
 
-        if let Ok(SignalingMsg::Connect(sender_id, receiver_id, initiator)) = signaling_message.msg
+        if let Ok(SignalingMsg::Connect {
+            sender: sender_id,
+            receiver: receiver_id,
+            initiator,
+        }) = signaling_message.msg
         {
             assert_eq!(receiver_id, my_id, "Connect receiver ID mismatch");
             if let Some(expected) = expected_peer_id {
                 assert_eq!(sender_id, expected, "Connect sender ID mismatch");
             }
 
-            // Only send Connect response if this is an initial request (initiator=true)
-            // If initiator=false, this is already a response, so don't respond to it
+            // Only send Connect response if this is an initial request (initiator=true).
+            // If initiator=false, this is already a response, so don't respond to it.
             if initiator {
-                let response = SignalingMsg::Connect(receiver_id, sender_id.clone(), false);
-                sig_client.send(response).await?;
+                sig_client
+                    .send(SignalingMsg::Connect {
+                        sender: receiver_id,
+                        receiver: sender_id.clone(),
+                        initiator: false,
+                    })
+                    .await?;
             }
 
-            // Create Sock for peer
+            // Create Sock for peer.
             let sock = sig_client.create_sock(sender_id).await;
             Ok(sock)
         } else {
@@ -228,6 +239,7 @@ mod e2e_tests {
             id_a.clone(),
             key_cert_a.clone(),
             signaling_url.to_string(),
+            vec![id_b.clone()],
         )
         .await?;
 
@@ -235,12 +247,18 @@ mod e2e_tests {
             id_b.clone(),
             key_cert_b.clone(),
             signaling_url.to_string(),
+            vec![id_a.clone()],
         )
         .await?;
 
         // A initiates connection.
-        let connect_msg = SignalingMsg::Connect(id_a.clone(), id_b.clone(), true);
-        sig_client_a.send(connect_msg).await?;
+        sig_client_a
+            .send(SignalingMsg::Connect {
+                sender: id_a.clone(),
+                receiver: id_b.clone(),
+                initiator: true,
+            })
+            .await?;
 
         // B receives Connect and creates Sock
         let sock_b_task = tokio::spawn({

@@ -102,20 +102,6 @@ impl PathId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-pub enum AcceptMode {
-    /// Accept all hosts, even those not in the trusted hosts list.
-    All,
-    /// Accept only hosts in the trusted hosts list.
-    TrustedOnly,
-}
-
-impl Default for AcceptMode {
-    fn default() -> Self {
-        AcceptMode::TrustedOnly
-    }
-}
-
 /// Stores relevant data for a document, used by the server.
 #[derive(Debug)]
 struct Doc {
@@ -200,9 +186,10 @@ fn unix_epoch_secs() -> u64 {
 // second toward the first.
 
 /// Status of a connection to a signaling server.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SignalingStatus {
     /// Declared but not yet attempted. Equivalent to “no entry”.
+    #[default]
     Pending,
     /// `bind()` in flight, awaiting `Bound`.
     Binding { since: Instant },
@@ -217,10 +204,18 @@ pub enum SignalingStatus {
     Failed { reason: String },
 }
 
-/// State of a signaling server entry in `WorldState`.
-#[derive(Debug, Clone)]
+/// State of a signaling server entry in `WorldState`. In
+/// `ideal_world.signaling[addr]`, `trusted` is the list of endpoints
+/// we want the signaling server to accept Connect/SDP/Candidate from
+/// on our behalf. In `current_world.signaling[addr]`, `trusted` is
+/// the list the signaling server has confirmed (via `Bound` or
+/// `Trusted`). `trust_sent_at` (current side only) dedupes Trust
+/// resends in `fix_world_signaling`.
+#[derive(Debug, Clone, Default)]
 pub struct SignalingState {
     pub status: SignalingStatus,
+    pub trusted: HashSet<ServerId>,
+    pub trust_sent_at: Option<u64>,
 }
 
 /// Status of a connection to a remote peer.
@@ -261,9 +256,6 @@ pub struct RemoteState {
 pub struct WorldState {
     pub signaling: HashMap<String, SignalingState>,
     pub remotes: HashMap<ServerId, RemoteState>,
-    /// Declared trusted peers. On the current side this has no writer
-    /// yet; reserved for the future signaling-Trust refactor.
-    pub trusted: HashSet<ServerId>,
 }
 
 impl WorldState {
@@ -354,22 +346,29 @@ impl WorldState {
     }
 
     pub fn set_signaling_binding(&mut self, addr: &str) {
-        self.signaling.insert(
-            addr.to_string(),
-            SignalingState {
+        // Preserve any existing trust/trust_sent_at on transition.
+        self.signaling
+            .entry(addr.to_string())
+            .and_modify(|s| {
+                s.status = SignalingStatus::Binding {
+                    since: Instant::now(),
+                }
+            })
+            .or_insert_with(|| SignalingState {
                 status: SignalingStatus::Binding {
                     since: Instant::now(),
                 },
-            },
-        );
+                ..Default::default()
+            });
     }
 
     pub fn mark_signaling_bound(&mut self, addr: &str) {
         self.signaling
             .entry(addr.to_string())
             .and_modify(|s| s.status = SignalingStatus::Bound)
-            .or_insert(SignalingState {
+            .or_insert_with(|| SignalingState {
                 status: SignalingStatus::Bound,
+                ..Default::default()
             });
     }
 
@@ -390,8 +389,9 @@ impl WorldState {
                     reason: reason.clone(),
                 }
             })
-            .or_insert(SignalingState {
+            .or_insert_with(|| SignalingState {
                 status: SignalingStatus::Failed { reason },
+                ..Default::default()
             });
     }
 
@@ -1233,8 +1233,19 @@ impl Server {
                 }),
             )
             .await;
+            let trusted_vec: Vec<ServerId> = self
+                .ideal_world
+                .signaling
+                .get(&addr)
+                .map(|s| s.trusted.iter().cloned().collect())
+                .unwrap_or_default();
             let res = signaling_channel
-                .bind(addr.clone(), self.host_id.clone(), self.key_cert.clone())
+                .bind(
+                    addr.clone(),
+                    self.host_id.clone(),
+                    self.key_cert.clone(),
+                    trusted_vec,
+                )
                 .await;
             if let Err(err) = res {
                 tracing::warn!("Failed to bind to signaling server {}: {}", addr, err);
@@ -1246,6 +1257,42 @@ impl Server {
                     AcceptingStoppedNote { addr },
                 )
                 .await;
+            }
+        }
+
+        // 4. Sync trust lists for Bound entries whose ideal != current.
+        //    Resend at most every 5s while waiting for `Trusted`.
+        let now_sec = unix_epoch_secs();
+        let to_sync: Vec<(String, Vec<ServerId>)> = self
+            .current_world
+            .signaling
+            .iter()
+            .filter_map(|(addr, cur)| {
+                if !matches!(cur.status, SignalingStatus::Bound) {
+                    return None;
+                }
+                let ideal = self.ideal_world.signaling.get(addr)?;
+                if ideal.trusted == cur.trusted {
+                    return None;
+                }
+                if let Some(t) = cur.trust_sent_at {
+                    if now_sec.saturating_sub(t) < 5 {
+                        return None;
+                    }
+                }
+                Some((addr.clone(), ideal.trusted.iter().cloned().collect()))
+            })
+            .collect();
+        for (addr, trusted) in to_sync {
+            if let Some(s) = self.current_world.signaling.get_mut(&addr) {
+                s.trust_sent_at = Some(now_sec);
+            }
+            let msg = crate::signaling::SignalingMsg::Trust {
+                sender: self.host_id.clone(),
+                trusted,
+            };
+            if let Err(err) = signaling_channel.send(&addr, msg).await {
+                tracing::warn!("Failed to send Trust for {}: {}", addr, err);
             }
         }
     }
@@ -1548,30 +1595,11 @@ impl Server {
                 .await;
                 self.fix_world_next(next.webchannel).await;
             }
-            "SetAcceptMode" => {
-                let mut params: SetAcceptModeParams = serde_json::from_value(notif.params)?;
-                params.addr = normalize_signaling_addr(&params.addr);
-                self.handle_set_accept_mode(next, params.addr, params.mode)
-                    .await?;
-            }
-
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
                 // TODO: send back an error response.
             }
         }
-        Ok(())
-    }
-
-    // Handle setting accept mode, used by both editor notifications and
-    // internal messages.
-    async fn handle_set_accept_mode(
-        &mut self,
-        _next: &Next<'_>,
-        _addr: String,
-        _mode: AcceptMode,
-    ) -> anyhow::Result<()> {
-        // No-op until the trust refactor removes AcceptMode entirely.
         Ok(())
     }
 
@@ -2211,12 +2239,12 @@ impl Server {
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
         initiator: bool,
     ) {
-        let connect_msg = crate::signaling::SignalingMsg::Connect(
-            self.host_id.clone(),
-            peer_id.clone(),
+        let msg = crate::signaling::SignalingMsg::Connect {
+            sender: self.host_id.clone(),
+            receiver: peer_id.clone(),
             initiator,
-        );
-        let res = signaling_channel.send(signaling_addr, connect_msg).await;
+        };
+        let res = signaling_channel.send(signaling_addr, msg).await;
         if let Err(err) = res {
             tracing::warn!("Failed to send Connect message: {}", err);
 
@@ -3443,17 +3471,12 @@ impl Server {
         }
 
         // Collect accepting signaling addresses (only Bound servers).
-        // AcceptMode is going away in the trust refactor; report
-        // TrustedOnly until the field is removed.
         let accepting: Vec<AcceptingEntry> = self
             .current_world
             .signaling
             .iter()
             .filter(|(_addr, state)| matches!(state.status, SignalingStatus::Bound))
-            .map(|(addr, _)| AcceptingEntry {
-                addr: addr.clone(),
-                mode: AcceptMode::TrustedOnly,
-            })
+            .map(|(addr, _)| AcceptingEntry { addr: addr.clone() })
             .collect();
 
         // Collect owned docs from self.docs.
@@ -4100,8 +4123,13 @@ impl Server {
 
         config.trusted_hosts = params.config.trusted_hosts.clone();
         self.trusted_hosts = params.config.trusted_hosts.clone();
-        // Declare the trusted set in ideal_world.
-        self.ideal_world.trusted = params.config.trusted_hosts;
+        // Propagate the new trust list to every signaling entry in
+        // ideal_world. `fix_world_signaling` will sync the change to
+        // each signaling server via `Trust`.
+        let snapshot: HashSet<ServerId> = self.trusted_hosts.clone();
+        for (_addr, state) in self.ideal_world.signaling.iter_mut() {
+            state.trusted = snapshot.clone();
+        }
 
         config.permission = params.config.permission;
 
@@ -4152,13 +4180,31 @@ impl Server {
     ) -> anyhow::Result<()> {
         tracing::info!("From signaling server: {:?}", &msg);
         match msg {
-            SignalingMsg::Bound(_id) => {
-                self.handle_signaling_bound_msg(signaling_addr, next, msg_tx, signaling_channel)
-                    .await;
+            SignalingMsg::Bound { id: _, trusted } => {
+                self.handle_signaling_bound_msg(
+                    signaling_addr,
+                    trusted,
+                    next,
+                    msg_tx,
+                    signaling_channel,
+                )
+                .await;
                 Ok(())
             }
 
-            SignalingMsg::Connect(peer_id, _my_id, initiator) => {
+            SignalingMsg::Trusted { id: _, trusted } => {
+                if let Some(s) = self.current_world.signaling.get_mut(&signaling_addr) {
+                    s.trusted = trusted.into_iter().collect();
+                    s.trust_sent_at = None;
+                }
+                Ok(())
+            }
+
+            SignalingMsg::Connect {
+                sender: peer_id,
+                receiver: _,
+                initiator,
+            } => {
                 self.handle_signaling_connect_msg(
                     signaling_addr,
                     peer_id,
@@ -4174,47 +4220,34 @@ impl Server {
             // Our connect message is rejected by remote_id. Reasons
             // can be invalid certificate, etc. Mark the connection as
             // failed so we don’t retry.
-            SignalingMsg::Rejected(remote_id, message) => {
+            SignalingMsg::Rejected {
+                id: remote_id,
+                reason,
+            } => {
                 self.current_world
-                    .mark_remote_failed(&remote_id, format!("Rejected by signaling: {}", message));
+                    .mark_remote_failed(&remote_id, format!("Rejected by signaling: {}", reason));
                 let msg = ErrorResponseNote {
                     code: ErrorCode::NetworkError,
                     file: None,
-                    message: format!("Connection to {} rejected: {}", remote_id, message),
+                    message: format!("Connection to {} rejected: {}", remote_id, reason),
                 };
                 next.send_notif(NotificationCode::FailedToConnect, msg)
                     .await;
                 Ok(())
             }
 
-            // For IdTaken, signaling server closes the connection so
-            // we don’t need to do anything here (The AcceptStopped
-            // handler will do the work). For IdNotFound the peer was
-            // never bound on that signaling server; treat it as a hard
-            // failure on the remote side.
-            SignalingMsg::BindErr(_endpoint_id, message) => {
+            SignalingMsg::IdNotFound {
+                id: endpoint_id,
+                reason,
+            } => {
                 self.current_world
-                    .mark_signaling_failed(&signaling_addr, format!("BindErr: {}", message));
+                    .mark_remote_failed(&endpoint_id, format!("IdNotFound: {}", reason));
                 next.send_notif(
                     NotificationCode::ErrorResponse,
                     ErrorResponseNote {
                         code: ErrorCode::NetworkError,
                         file: None,
-                        message: format!("Signaling error: {}", message),
-                    },
-                )
-                .await;
-                Ok(())
-            }
-            SignalingMsg::IdNotFound(endpoint_id, message) => {
-                self.current_world
-                    .mark_remote_failed(&endpoint_id, format!("IdNotFound: {}", message));
-                next.send_notif(
-                    NotificationCode::ErrorResponse,
-                    ErrorResponseNote {
-                        code: ErrorCode::NetworkError,
-                        file: None,
-                        message: format!("Signaling error: {}", message),
+                        message: format!("Signaling error: {}", reason),
                     },
                 )
                 .await;
@@ -4232,6 +4265,7 @@ impl Server {
     async fn handle_signaling_bound_msg<'a>(
         &mut self,
         signaling_addr: String,
+        trusted: Vec<ServerId>,
         next: &Next<'a>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &mut dyn crate::signaling::client_new::SignalingChannelTrait,
@@ -4239,10 +4273,13 @@ impl Server {
         let _ = msg_tx;
         let _ = signaling_channel;
         self.current_world.mark_signaling_bound(&signaling_addr);
+        // Record the trust list the signaling server confirmed.
+        if let Some(s) = self.current_world.signaling.get_mut(&signaling_addr) {
+            s.trusted = trusted.into_iter().collect();
+            s.trust_sent_at = None;
+        }
         tracing::info!("Successfully bound to signaling server {}", signaling_addr);
-        // AcceptMode is going away in the trust refactor; report
-        // TrustedOnly until it’s removed entirely.
-        // fix_world will pick up any Pending remotes for this signaling
+        // fix_world picks up any Pending remotes for this signaling
         // server on the next tick.
         let _ = next
             .webchannel
@@ -4305,10 +4342,10 @@ impl Server {
                 ),
             };
             next.send_notif(NotificationCode::ErrorResponse, msg).await;
-            let reject_msg = SignalingMsg::Rejected(
-                peer_id.clone(),
-                "Provided certificate not in my trusted list".to_string(),
-            );
+            let reject_msg = SignalingMsg::Rejected {
+                id: peer_id.clone(),
+                reason: "Provided certificate not in my trusted list".to_string(),
+            };
             let _ = signaling_channel.send(&signaling_addr, reject_msg).await;
             self.current_world
                 .mark_remote_failed(&peer_id, "certificate not trusted".to_string());
@@ -4422,11 +4459,15 @@ impl Server {
     ) {
         tracing::info!("AcceptConnection: addr={}", params.addr);
 
+        let trusted: HashSet<ServerId> = params.trusted.unwrap_or_default().into_iter().collect();
+
         // Declare intent in ideal_world.
         self.ideal_world.signaling.insert(
             params.addr.clone(),
             SignalingState {
                 status: SignalingStatus::Bound,
+                trusted: trusted.clone(),
+                trust_sent_at: None,
             },
         );
 
@@ -4447,13 +4488,15 @@ impl Server {
             }
         }
 
-        // Start binding inline.
+        // Start binding inline. Pass the trust list declared above.
         self.current_world.set_signaling_binding(&params.addr);
+        let trusted_vec: Vec<ServerId> = trusted.into_iter().collect();
         let result = signaling_channel
             .bind(
                 params.addr.clone(),
                 self.host_id.clone(),
                 self.key_cert.clone(),
+                trusted_vec,
             )
             .await;
         if let Err(err) = result {

@@ -6,7 +6,10 @@
 
 use crate::config_man::ArcKeyCert;
 use crate::signaling::auth::sign_identity;
-use crate::signaling::{EndpointId, ICECandidate, SignalingMsg, SDP};
+use crate::signaling::{
+    encode_trusted_header, EndpointId, ICECandidate, SignalingMsg, BIND_HEADER_ID,
+    BIND_HEADER_IDENTITY, BIND_HEADER_SIGNATURE, BIND_HEADER_TRUSTED, SDP,
+};
 use crate::types::id_hash;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -19,16 +22,54 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite as tung;
 use tracing::Instrument;
 
+/// Build the WebSocket upgrade request with the four `X-Collab-*`
+/// bind headers attached. The server's `accept_hdr_async` callback
+/// validates them; if anything is missing or wrong, the upgrade is
+/// rejected with HTTP 401.
+fn build_bind_request(
+    addr: &str,
+    id: &str,
+    identity_str: &str,
+    signature_str: &str,
+    trusted_header: &str,
+) -> anyhow::Result<tung::tungstenite::http::Request<()>> {
+    use tung::tungstenite::handshake::client::generate_key;
+    use tung::tungstenite::http::{Request, Uri};
+    let uri: Uri = addr.parse().context("invalid signaling addr")?;
+    let host = uri
+        .authority()
+        .ok_or_else(|| anyhow!("signaling addr missing host"))?
+        .as_str()
+        .to_string();
+    let req = Request::builder()
+        .method("GET")
+        .uri(addr)
+        .header("Host", host)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", generate_key())
+        .header(BIND_HEADER_ID, id)
+        .header(BIND_HEADER_IDENTITY, identity_str)
+        .header(BIND_HEADER_SIGNATURE, signature_str)
+        .header(BIND_HEADER_TRUSTED, trusted_header)
+        .body(())
+        .context("building upgrade request")?;
+    Ok(req)
+}
+
 /// Trait for signaling channel operations. Provides async methods for
 /// binding, sending, and creating socks.
 #[async_trait]
 pub trait SignalingChannelTrait: Send + Sync {
-    /// Bind to a signaling server address.
+    /// Bind to a signaling server address. `trusted` is the initial
+    /// trust list installed on the signaling server.
     async fn bind(
         &mut self,
         addr: String,
         id: EndpointId,
         key_cert: ArcKeyCert,
+        trusted: Vec<EndpointId>,
     ) -> anyhow::Result<()>;
 
     /// Send a message to a signaling server.
@@ -53,6 +94,7 @@ impl SignalingChannelTrait for NoopSignalingChannel {
         _addr: String,
         _id: EndpointId,
         _key_cert: ArcKeyCert,
+        _trusted: Vec<EndpointId>,
     ) -> anyhow::Result<()> {
         Err(anyhow!("Envoy mode shouldn’t use signaling"))
     }
@@ -92,18 +134,19 @@ impl SignalingChannel {
     /// Bind to a signaling server address.
     ///
     /// Creates a new SignalingClient for the given address if one
-    /// doesn't exist. Doesn't block
+    /// doesn't exist. Doesn't block.
     pub async fn bind(
         &mut self,
         addr: String,
         id: EndpointId,
         key_cert: ArcKeyCert,
+        trusted: Vec<EndpointId>,
     ) -> anyhow::Result<()> {
         if self.clients.lock().unwrap().contains_key(&addr) {
             return Ok(());
         }
 
-        // Create cleanup closure that removes client from the map
+        // Create cleanup closure that removes client from the map.
         let clients_clone = self.clients.clone();
         let addr_clone = addr.clone();
         let cleanup = Box::new(move || {
@@ -116,6 +159,7 @@ impl SignalingChannel {
             key_cert,
             self.signaling_msg_tx.clone(),
             Some(cleanup),
+            trusted,
         )
         .await?;
 
@@ -164,8 +208,9 @@ impl SignalingChannelTrait for SignalingChannel {
         addr: String,
         id: EndpointId,
         key_cert: ArcKeyCert,
+        trusted: Vec<EndpointId>,
     ) -> anyhow::Result<()> {
-        self.bind(addr, id, key_cert).await
+        self.bind(addr, id, key_cert, trusted).await
     }
 
     async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
@@ -189,12 +234,8 @@ pub struct SignalingClient {
     _addr: String,
     /// My endpoint ID
     id: EndpointId,
-    /// My key/cert for authentication
-    _my_key_cert: ArcKeyCert,
     /// Channel to send outgoing messages to signaling server
     msg_out_tx: mpsc::Sender<SignalingMsg>,
-    /// Whether we're bound to signaling server
-    bound: Arc<Mutex<bool>>,
     /// Map of active peer connections, when we receive SDP or
     /// candidate for a peer from the main ws stream, use these tx to
     /// send to the appropriate Sock.
@@ -221,61 +262,19 @@ pub struct Sock {
 }
 
 impl SignalingClient {
-    /// Create and bind a new signaling client.
-    ///
-    /// This connects to the signaling server, sends a Bind message,
-    /// and spawns a background task to handle messages.
+    /// Bind to a signaling server. The bind payload (id, identity,
+    /// signature, trust list) goes into `X-Collab-*` headers of the
+    /// WebSocket upgrade. If connection succeeds, create a
+    /// `SignalingMsg::Bound` message and send to `signaling_msg_tx`.
     pub async fn bind(
         addr: String,
         id: EndpointId,
         my_key_cert: ArcKeyCert,
         signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
         cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
+        trusted: Vec<EndpointId>,
     ) -> anyhow::Result<Self> {
-        // Create channels for outgoing messages.
-        let (msg_out_tx, msg_out_rx) = mpsc::channel(16);
-
-        // Create shutdown channel.
-        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
-
-        // Shared state.
-        let bound = Arc::new(Mutex::new(false));
-        let socks = Arc::new(Mutex::new(HashMap::new()));
-
-        // Spawn background task.
-        let addr_clone = addr.clone();
-        let id_clone = id.clone();
-        let my_key_cert_clone = my_key_cert.clone();
-        let signaling_msg_tx_clone = signaling_msg_tx.clone();
-        let bound_clone = bound.clone();
-        let socks_clone = socks.clone();
-
-        let span = tracing::info_span!(
-            "SignalingClient send_receive_stream",
-            endpoint = %id,
-            signaling_addr = %addr
-        );
-
-        // When the client is dropped, the shutdown_tx will be
-        // dropped, and background task will terminate and call the
-        // cleanup function (if any).
-        let task_handle = tokio::spawn(
-            send_receive_stream(
-                addr_clone,
-                id_clone,
-                my_key_cert_clone,
-                signaling_msg_tx_clone,
-                msg_out_rx,
-                bound_clone,
-                socks_clone,
-                shutdown_rx,
-                cleanup,
-            )
-            .instrument(span),
-        );
-
-        // Sanity check: make sure the id's hash portion match our
-        // cert hash.
+        // Cert-hash sanity check.
         let cert_hash = my_key_cert.cert_der_hash();
         if id_hash(&id) != cert_hash {
             return Err(anyhow!(
@@ -284,19 +283,61 @@ impl SignalingClient {
                 cert_hash
             ));
         }
+
+        // Build the bind headers.
         let (identity, signature) = sign_identity(&my_key_cert)?;
-        let bind_msg = SignalingMsg::Bind(id.clone(), identity, signature);
-        msg_out_tx
-            .send(bind_msg)
+        let trusted_header = encode_trusted_header(&trusted)?;
+        let req = build_bind_request(
+            &addr,
+            &id,
+            &identity.to_string(),
+            &signature.0,
+            &trusted_header,
+        )?;
+
+        let (stream, _resp) = tung::connect_async(req)
             .await
-            .context("Failed to send Bind message")?;
+            .context("WebSocket bind upgrade failed")?;
+
+        let bound = crate::signaling::SignalingMessage {
+            signaling_addr: addr.clone(),
+            msg: Ok(SignalingMsg::Bound {
+                id: id.clone(),
+                trusted: trusted.clone(),
+            }),
+        };
+        let _ = signaling_msg_tx.send(bound).await;
+
+        // Wire up the message loop.
+        let (msg_out_tx, msg_out_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+        let socks = Arc::new(Mutex::new(HashMap::new()));
+
+        let span = tracing::info_span!(
+            "SignalingClient send_receive_stream",
+            endpoint = %id,
+            signaling_addr = %addr
+        );
+
+        // When the client is dropped, `shutdown_tx` is dropped too;
+        // the background task will run `cleanup` and terminate.
+        let task_handle = tokio::spawn(
+            send_receive_stream(
+                stream,
+                addr.clone(),
+                signaling_msg_tx,
+                msg_out_rx,
+                socks.clone(),
+                shutdown_rx,
+                cleanup,
+            )
+            .instrument(span),
+        );
 
         Ok(SignalingClient {
             _addr: addr,
             id,
-            _my_key_cert: my_key_cert,
             msg_out_tx,
-            bound,
             sock_tx_map: socks,
             _task_handle: Arc::new(task_handle),
             _shutdown_tx: shutdown_tx,
@@ -340,11 +381,6 @@ impl SignalingClient {
         }
     }
 
-    /// Check if bound on signaling server.
-    pub async fn is_bound(&self) -> bool {
-        self.bound.lock().unwrap().clone()
-    }
-
     /// Remove a Sock from the map.
     pub async fn remove_sock(&self, peer_id: &str) {
         self.sock_tx_map.lock().unwrap().remove(peer_id);
@@ -354,7 +390,11 @@ impl SignalingClient {
 impl Sock {
     /// Send SDP to peer through signaling server.
     pub async fn send_sdp(&self, sdp: SDP) -> anyhow::Result<()> {
-        let msg = SignalingMsg::SDP(self.my_id.clone(), self.peer_id.clone(), sdp);
+        let msg = SignalingMsg::SDP {
+            sender: self.my_id.clone(),
+            receiver: self.peer_id.clone(),
+            sdp,
+        };
         self.msg_out_tx
             .send(msg)
             .await
@@ -371,7 +411,11 @@ impl Sock {
 
     /// Send ICE candidate to peer.
     pub async fn send_candidate(&self, candidate: ICECandidate) -> anyhow::Result<()> {
-        let msg = SignalingMsg::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
+        let msg = SignalingMsg::Candidate {
+            sender: self.my_id.clone(),
+            receiver: self.peer_id.clone(),
+            candidate,
+        };
         self.msg_out_tx
             .send(msg)
             .await
@@ -417,7 +461,11 @@ pub struct CandidateSender {
 impl CandidateSender {
     /// Send ICE candidate to peer.
     pub async fn send_candidate(&mut self, candidate: ICECandidate) -> anyhow::Result<()> {
-        let msg = SignalingMsg::Candidate(self.my_id.clone(), self.peer_id.clone(), candidate);
+        let msg = SignalingMsg::Candidate {
+            sender: self.my_id.clone(),
+            receiver: self.peer_id.clone(),
+            candidate,
+        };
         self.candidate_tx
             .send(msg)
             .await
@@ -433,43 +481,24 @@ impl CandidateSender {
 /// - Sends outgoing messages to signaling server
 /// - Reports errors to Server
 async fn send_receive_stream(
+    stream: tung::WebSocketStream<tung::MaybeTlsStream<tokio::net::TcpStream>>,
     addr: String,
-    id: EndpointId,
-    _my_key_cert: ArcKeyCert,
     signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
     mut msg_out_rx: mpsc::Receiver<SignalingMsg>,
-    bound: Arc<Mutex<bool>>,
     socks: Arc<Mutex<HashMap<EndpointId, SockTx>>>,
     mut shutdown_rx: mpsc::Receiver<()>,
     cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
 ) {
-    // Connect to signaling server
-    let stream_result = tung::connect_async(&addr).await;
-    if let Err(e) = stream_result {
-        tracing::warn!("Failed to connect to signaling server {}: {}", addr, e);
-        // Send AcceptStopped message
-        let signaling_message = crate::signaling::SignalingMessage {
-            signaling_addr: addr.clone(),
-            msg: Err(crate::signaling::AcceptStopped(format!(
-                "Failed to connect: {}",
-                e
-            ))),
-        };
-        let _ = signaling_msg_tx.send(signaling_message).await;
-        return;
-    }
-
-    let (stream, _) = stream_result.unwrap();
     let (mut ws_tx, mut ws_rx) = stream.split();
 
-    // Ping interval for keepalive (9 min, before server's 10 min timeout)
+    // Ping interval for keepalive (9 min, before server's 10 min inactivity timeout).
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(540));
-    ping_interval.tick().await; // Skip immediate first tick
+    ping_interval.tick().await; // Skip immediate first tick.
 
     let mut termination_reason = "".to_string();
     loop {
         tokio::select! {
-            // Send ping to keep connection alive
+            // Send ping to keep connection alive.
             _ = ping_interval.tick() => {
                 let ping_msg = SignalingMsg::Ping;
                 let text = serde_json::to_string(&ping_msg).unwrap();
@@ -481,7 +510,7 @@ async fn send_receive_stream(
                 tracing::debug!("Sent ping to signaling server");
             }
 
-            // Receive from websocket
+            // Receive from websocket.
             msg = ws_rx.next() => {
                 if let Some(msg_result) = msg {
                     match msg_result {
@@ -492,9 +521,7 @@ async fn send_receive_stream(
                                     if let Err(e) = handle_incoming_message(
                                         signaling_msg,
                                         &addr,
-                                        &id,
                                         &signaling_msg_tx,
-                                        &bound,
                                         &socks,
                                     ).await {
                                         tracing::warn!("Error handling incoming message: {}", e);
@@ -570,18 +597,11 @@ async fn send_receive_stream(
 async fn handle_incoming_message(
     msg: SignalingMsg,
     addr: &str,
-    _my_id: &EndpointId,
     signaling_msg_tx: &mpsc::Sender<crate::signaling::SignalingMessage>,
-    bound: &Arc<Mutex<bool>>,
     socks: &Arc<Mutex<HashMap<EndpointId, SockTx>>>,
 ) -> anyhow::Result<()> {
     match &msg {
-        SignalingMsg::Bound(_id) => {
-            // Set bound flag
-            {
-                *bound.lock().unwrap() = true;
-            }
-            // Forward to Server
+        SignalingMsg::Trusted { .. } => {
             let signaling_message = crate::signaling::SignalingMessage {
                 signaling_addr: addr.to_string(),
                 msg: Ok(msg),
@@ -589,7 +609,7 @@ async fn handle_incoming_message(
             let _ = signaling_msg_tx.send(signaling_message).await;
         }
 
-        SignalingMsg::Connect(..) => {
+        SignalingMsg::Connect { .. } => {
             let signaling_message = crate::signaling::SignalingMessage {
                 signaling_addr: addr.to_string(),
                 msg: Ok(msg),
@@ -597,44 +617,41 @@ async fn handle_incoming_message(
             let _ = signaling_msg_tx.send(signaling_message).await;
         }
 
-        SignalingMsg::SDP(sender_id, _my_id, sdp) => {
-            // Route SDP to the appropriate sock
+        SignalingMsg::SDP { sender, sdp, .. } => {
+            // Route SDP to the appropriate sock.
             let sock_tx = {
                 let socks_map = socks.lock().unwrap();
-                socks_map.get(sender_id).map(|tx| tx.sdp_tx.clone())
+                socks_map.get(sender).map(|tx| tx.sdp_tx.clone())
             };
 
             if let Some(sdp_tx) = sock_tx {
                 if sdp_tx.send(sdp.clone()).await.is_err() {
-                    tracing::debug!("Failed to send SDP to peer {}", sender_id);
+                    tracing::debug!("Failed to send SDP to peer {}", sender);
                 }
             } else {
-                tracing::debug!("Received SDP from unknown peer {}, dropping", sender_id);
+                tracing::debug!("Received SDP from unknown peer {}, dropping", sender);
             }
         }
 
-        SignalingMsg::Candidate(sender_id, _my_id, candidate) => {
-            // Route candidate to the appropriate sock
+        SignalingMsg::Candidate {
+            sender, candidate, ..
+        } => {
+            // Route candidate to the appropriate sock.
             let sock_tx = {
                 let socks_map = socks.lock().unwrap();
-                socks_map.get(sender_id).map(|tx| tx.candidate_tx.clone())
+                socks_map.get(sender).map(|tx| tx.candidate_tx.clone())
             };
 
             if let Some(candidate_tx) = sock_tx {
                 if candidate_tx.send(candidate.clone()).is_err() {
-                    tracing::debug!("Failed to send candidate to peer {}", sender_id);
+                    tracing::debug!("Failed to send candidate to peer {}", sender);
                 }
             } else {
-                tracing::debug!(
-                    "Received candidate from unknown peer {}, dropping",
-                    sender_id
-                );
+                tracing::debug!("Received candidate from unknown peer {}, dropping", sender);
             }
         }
 
-        SignalingMsg::BindErr(_endpoint_id, _message)
-        | SignalingMsg::IdNotFound(_endpoint_id, _message)
-        | SignalingMsg::Rejected(_endpoint_id, _message) => {
+        SignalingMsg::IdNotFound { .. } | SignalingMsg::Rejected { .. } => {
             // Forward the error to Server.
             let signaling_message = crate::signaling::SignalingMessage {
                 signaling_addr: addr.to_string(),
@@ -642,6 +659,9 @@ async fn handle_incoming_message(
             };
             let _ = signaling_msg_tx.send(signaling_message).await;
         }
+
+        // Heart-beat reply from the Cloudflare worker. Nothing to do.
+        SignalingMsg::Pong => {}
 
         _ => {
             tracing::debug!("Received unexpected signaling message: {:?}", msg);
@@ -655,11 +675,15 @@ async fn handle_incoming_message(
 // Test infrastructure
 // ============================================================================
 
-/// State for a single endpoint in the test factory
+/// State for a single endpoint in the test factory.
 struct TestEndpointState {
-    /// Channel to send signaling messages to Server
+    /// Channel to send signaling messages to Server.
     signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
-    /// Map of active peer socks for routing SDP and candidates
+    /// Endpoints this endpoint is willing to receive from. Mirrors
+    /// the production trust enforcement; updated by `bind` and the
+    /// Trust handler.
+    trusted: std::collections::HashSet<EndpointId>,
+    /// Map of active peer socks for routing SDP and candidates.
     sock_tx_map: HashMap<EndpointId, SockTx>,
 }
 
@@ -695,113 +719,105 @@ impl TestSignalingChannelFactory {
         }
     }
 
-    /// Route a Connect message from sender to receiver
-    fn route_connect(
-        &self,
-        signaling_addr: &str,
-        sender_id: &EndpointId,
-        receiver_id: &EndpointId,
-        initiator: bool,
-    ) -> anyhow::Result<()> {
+    /// Route a Connect/SDP/Candidate message from sender to receiver.
+    /// Looks up the receiver, runs the trust check (sending `Rejected`
+    /// back to the sender on failure), then dispatches the payload:
+    ///   - `Connect`   -> receiver's `signaling_msg_tx`
+    ///   - `SDP`       -> receiver's `sock_tx_map[sender].sdp_tx`
+    ///   - `Candidate` -> receiver's `sock_tx_map[sender].candidate_tx`
+    fn route(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
+        // Pull sender/receiver out without consuming msg.
+        let (sender, receiver) = match &msg {
+            SignalingMsg::Connect {
+                sender, receiver, ..
+            }
+            | SignalingMsg::SDP {
+                sender, receiver, ..
+            }
+            | SignalingMsg::Candidate {
+                sender, receiver, ..
+            } => (sender.clone(), receiver.clone()),
+            other => return Err(anyhow!("route: unexpected variant {:?}", other)),
+        };
+
         let state = self.state.lock().unwrap();
-        let key = (signaling_addr.to_string(), receiver_id.clone());
-
-        if let Some(endpoint_state) = state.endpoints.get(&key) {
-            let msg = SignalingMsg::Connect(sender_id.clone(), receiver_id.clone(), initiator);
-            let signaling_message = crate::signaling::SignalingMessage {
-                signaling_addr: signaling_addr.to_string(),
-                msg: Ok(msg),
-            };
-
-            // Send asynchronously - don't block on the result
-            let tx = endpoint_state.signaling_msg_tx.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(signaling_message).await;
-            });
-            Ok(())
-        } else {
-            Err(anyhow!(
+        let key = (signaling_addr.to_string(), receiver.clone());
+        let endpoint_state = state.endpoints.get(&key).ok_or_else(|| {
+            anyhow!(
                 "Receiver {} not bound to signaling addr {}",
-                receiver_id,
+                receiver,
                 signaling_addr
-            ))
+            )
+        })?;
+
+        // Trust check. On failure, deliver Rejected back to the sender
+        // (matches the real signaling server's behaviour for all three
+        // message types).
+        if !endpoint_state.trusted.contains(&sender) {
+            if let Some(sender_state) = state
+                .endpoints
+                .get(&(signaling_addr.to_string(), sender.clone()))
+            {
+                let signaling_message = crate::signaling::SignalingMessage {
+                    signaling_addr: signaling_addr.to_string(),
+                    msg: Ok(SignalingMsg::Rejected {
+                        id: sender.clone(),
+                        reason: format!("{} does not trust sender", receiver),
+                    }),
+                };
+                let tx = sender_state.signaling_msg_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(signaling_message).await;
+                });
+            }
+            return Ok(());
         }
-    }
 
-    /// Route SDP from sender to receiver
-    fn route_sdp(
-        &self,
-        signaling_addr: &str,
-        sender_id: &EndpointId,
-        receiver_id: &EndpointId,
-        sdp: SDP,
-    ) -> anyhow::Result<()> {
-        let state = self.state.lock().unwrap();
-        let key = (signaling_addr.to_string(), receiver_id.clone());
-
-        if let Some(endpoint_state) = state.endpoints.get(&key) {
-            if let Some(sock_tx) = endpoint_state.sock_tx_map.get(sender_id) {
+        match msg {
+            SignalingMsg::Connect { .. } => {
+                let signaling_message = crate::signaling::SignalingMessage {
+                    signaling_addr: signaling_addr.to_string(),
+                    msg: Ok(msg),
+                };
+                let tx = endpoint_state.signaling_msg_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(signaling_message).await;
+                });
+            }
+            SignalingMsg::SDP { sdp, .. } => {
+                let sock_tx = endpoint_state.sock_tx_map.get(&sender).ok_or_else(|| {
+                    anyhow!(
+                        "Sock for peer {} not found in receiver {}",
+                        sender,
+                        receiver
+                    )
+                })?;
                 let tx = sock_tx.sdp_tx.clone();
-                // Send asynchronously
                 tokio::spawn(async move {
                     let _ = tx.send(sdp).await;
                 });
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "Sock for peer {} not found in receiver {}",
-                    sender_id,
-                    receiver_id
-                ))
             }
-        } else {
-            Err(anyhow!(
-                "Receiver {} not bound to signaling addr {}",
-                receiver_id,
-                signaling_addr
-            ))
-        }
-    }
-
-    /// Route candidate from sender to receiver
-    fn route_candidate(
-        &self,
-        signaling_addr: &str,
-        sender_id: &EndpointId,
-        receiver_id: &EndpointId,
-        candidate: ICECandidate,
-    ) -> anyhow::Result<()> {
-        let state = self.state.lock().unwrap();
-        let key = (signaling_addr.to_string(), receiver_id.clone());
-
-        if let Some(endpoint_state) = state.endpoints.get(&key) {
-            if let Some(sock_tx) = endpoint_state.sock_tx_map.get(sender_id) {
-                let tx = sock_tx.candidate_tx.clone();
-                // Send asynchronously - unbounded channel, won't block
-                let _ = tx.send(candidate);
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "Sock for peer {} not found in receiver {}",
-                    sender_id,
-                    receiver_id
-                ))
+            SignalingMsg::Candidate { candidate, .. } => {
+                let sock_tx = endpoint_state.sock_tx_map.get(&sender).ok_or_else(|| {
+                    anyhow!(
+                        "Sock for peer {} not found in receiver {}",
+                        sender,
+                        receiver
+                    )
+                })?;
+                let _ = sock_tx.candidate_tx.send(candidate);
             }
-        } else {
-            Err(anyhow!(
-                "Receiver {} not bound to signaling addr {}",
-                receiver_id,
-                signaling_addr
-            ))
+            _ => unreachable!(),
         }
+        Ok(())
     }
 }
 
-/// Test signaling channel that uses in-memory message passing
+/// Test signaling channel that uses in-memory message passing.
 pub struct TestSignalingChannel {
     signaling_msg_tx: mpsc::Sender<crate::signaling::SignalingMessage>,
     factory: Arc<TestSignalingChannelFactory>,
-    /// Tracks bound endpoints: (signaling_addr, endpoint_id)
+    /// Tracks bound endpoints: (signaling_addr, endpoint_id).
     bound_endpoints: Arc<Mutex<Vec<(String, EndpointId)>>>,
 }
 
@@ -812,27 +828,35 @@ impl SignalingChannelTrait for TestSignalingChannel {
         addr: String,
         id: EndpointId,
         _key_cert: ArcKeyCert,
+        trusted: Vec<EndpointId>,
     ) -> anyhow::Result<()> {
-        // Register this endpoint with the factory
+        let trust_set: std::collections::HashSet<EndpointId> = trusted.iter().cloned().collect();
+        // Register this endpoint with the factory.
         {
             let mut state = self.factory.state.lock().unwrap();
             state.endpoints.insert(
                 (addr.clone(), id.clone()),
                 TestEndpointState {
                     signaling_msg_tx: self.signaling_msg_tx.clone(),
+                    trusted: trust_set,
                     sock_tx_map: HashMap::new(),
                 },
             );
         }
 
-        // Track this binding in our local state
+        // Track this binding in our local state.
         {
             let mut endpoints = self.bound_endpoints.lock().unwrap();
-            endpoints.push((addr.clone(), id.clone()));
+            if !endpoints.iter().any(|(a, i)| a == &addr && i == &id) {
+                endpoints.push((addr.clone(), id.clone()));
+            }
         }
 
-        // Immediately send Bound message
-        let msg = SignalingMsg::Bound(id.clone());
+        // Send a Bound message.
+        let msg = SignalingMsg::Bound {
+            id: id.clone(),
+            trusted,
+        };
         let signaling_message = crate::signaling::SignalingMessage {
             signaling_addr: addr,
             msg: Ok(msg),
@@ -846,23 +870,38 @@ impl SignalingChannelTrait for TestSignalingChannel {
     }
 
     async fn send(&self, signaling_addr: &str, msg: SignalingMsg) -> anyhow::Result<()> {
-        // Route the message based on type
         match msg {
-            SignalingMsg::Connect(sender_id, receiver_id, initiator) => {
-                self.factory
-                    .route_connect(signaling_addr, &sender_id, &receiver_id, initiator)?;
+            SignalingMsg::Connect { .. }
+            | SignalingMsg::SDP { .. }
+            | SignalingMsg::Candidate { .. } => {
+                self.factory.route(signaling_addr, msg)?;
             }
-            SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
-                self.factory
-                    .route_sdp(signaling_addr, &sender_id, &receiver_id, sdp)?;
-            }
-            SignalingMsg::Candidate(sender_id, receiver_id, candidate) => {
-                self.factory.route_candidate(
-                    signaling_addr,
-                    &sender_id,
-                    &receiver_id,
-                    candidate,
-                )?;
+            SignalingMsg::Trust { sender, trusted } => {
+                // Update the factory's stored trust list and echo
+                // `Trusted` back through `signaling_msg_tx`, mirroring
+                // what the real signaling server does.
+                let trust_set: std::collections::HashSet<EndpointId> =
+                    trusted.iter().cloned().collect();
+                {
+                    let mut state = self.factory.state.lock().unwrap();
+                    if let Some(entry) = state
+                        .endpoints
+                        .get_mut(&(signaling_addr.to_string(), sender.clone()))
+                    {
+                        entry.trusted = trust_set;
+                    }
+                }
+                let signaling_message = crate::signaling::SignalingMessage {
+                    signaling_addr: signaling_addr.to_string(),
+                    msg: Ok(SignalingMsg::Trusted {
+                        id: sender,
+                        trusted,
+                    }),
+                };
+                self.signaling_msg_tx
+                    .send(signaling_message)
+                    .await
+                    .context("Failed to send Trusted message")?;
             }
             _ => (),
         }
@@ -909,18 +948,9 @@ impl SignalingChannelTrait for TestSignalingChannel {
         let signaling_addr_clone = signaling_addr.to_string();
         tokio::spawn(async move {
             while let Some(msg) = msg_out_rx.recv().await {
-                match msg {
-                    SignalingMsg::SDP(sender_id, receiver_id, sdp) => {
-                        let _ =
-                            factory.route_sdp(&signaling_addr_clone, &sender_id, &receiver_id, sdp);
-                    }
-                    SignalingMsg::Candidate(sender_id, receiver_id, candidate) => {
-                        let _ = factory.route_candidate(
-                            &signaling_addr_clone,
-                            &sender_id,
-                            &receiver_id,
-                            candidate,
-                        );
+                match &msg {
+                    SignalingMsg::SDP { .. } | SignalingMsg::Candidate { .. } => {
+                        let _ = factory.route(&signaling_addr_clone, msg);
                     }
                     _ => {
                         tracing::warn!("Unexpected message from sock: {:?}", msg);
@@ -939,6 +969,6 @@ impl SignalingChannelTrait for TestSignalingChannel {
     }
 
     fn remove(&mut self, _signaling_addr: &str) {
-        // No-op as requested
+        // No-op. Not needed.
     }
 }

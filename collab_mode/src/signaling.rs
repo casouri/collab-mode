@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! endpoint      signal server      endpoint
-//! | -------Bind-----> |                   |
+//! | ---WS upgrade---> |                   |
 //! |                   | <----Connect----- |
 //! | <----Connect----- |                   |
 //! | -----Connect----> |                   |
@@ -37,6 +37,50 @@ pub type ICECandidate = String;
 pub type EndpointId = String;
 /// Certificate in DER format hashed by SHA-256 and printed in hex.
 pub type CertDerHash = String;
+
+/// HTTP header names carrying the params during the WebSocket
+/// upgrade.
+pub const BIND_HEADER_ID: &str = "X-Collab-Endpoint-Id";
+pub const BIND_HEADER_IDENTITY: &str = "X-Collab-Identity";
+pub const BIND_HEADER_SIGNATURE: &str = "X-Collab-Signature";
+pub const BIND_HEADER_TRUSTED: &str = "X-Collab-Trusted";
+
+/// Encode a trust list as a comma-separated string suitable for use
+/// as an HTTP header value. Endpoint ids have the shape
+/// `<name>::<cert_hash>` so they don't contain commas, but as a
+/// defensive measure any comma is rejected.
+pub fn encode_trusted_header(trusted: &[EndpointId]) -> anyhow::Result<String> {
+    for id in trusted {
+        if id.contains(',') {
+            return Err(anyhow::anyhow!(
+                "endpoint id {id:?} contains a comma; cannot encode in header"
+            ));
+        }
+    }
+    Ok(trusted.join(","))
+}
+
+/// Inverse of [`encode_trusted_header`]. An empty header value decodes
+/// to an empty list (rather than a list with a single empty string).
+pub fn decode_trusted_header(value: &str) -> anyhow::Result<Vec<EndpointId>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(value.split(',').map(|s| s.to_string()).collect())
+}
+
+/// Parse the `<timestamp>:<base64-cert>` form of an [`Identity`] from a
+/// header string. Matches `Identity`'s `Serialize`/`Deserialize` shape.
+pub fn parse_identity_header(s: &str) -> anyhow::Result<Identity> {
+    let (ts_str, cert_b64) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Identity missing ':' separator"))?;
+    let timestamp: u64 = ts_str.parse()?;
+    let cert = B64
+        .decode(cert_b64)
+        .map_err(|e| anyhow::anyhow!("cert base64: {e}"))?;
+    Ok(Identity { timestamp, cert })
+}
 
 /// Authentication payload sent in [`SignalingMsg::Bind`]. Carries the
 /// endpoint's cert (base64‑encoded DER) and a unix epoch timestamp;
@@ -150,33 +194,58 @@ impl From<tung::tungstenite::Error> for SignalingError {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind")]
 pub enum SignalingMsg {
-    /// An endpoint sends this message to bind to the id on the
-    /// signaling server. The id's hash portion must match
-    /// `hash_der(identity.cert)`, and the [`Signature`] must verify
-    /// against the cert's public key over [`Identity::to_signed_bytes`].
-    Bind(EndpointId, Identity, Signature),
-    /// Acknowledge bind request, echoing the bound id back.
-    Bound(EndpointId),
-    /// Connect request. (sender_id, receiver_id, initiator). The
-    /// initiator field indicates whether the sender initiated the
-    /// connection. The receiver verifies the cert hash in `sender_id`
-    /// matches the provided cert during DTLS.
-    Connect(EndpointId, EndpointId, bool),
-    /// Send SDP. (sender_id, receiver_id, sender_sdp).
-    SDP(EndpointId, EndpointId, SDP),
-    /// Send candidate. (sender_id, receiver_id, sender_candidate).
-    Candidate(EndpointId, EndpointId, ICECandidate),
-    /// Bind error. (endpoint_id, error_description).
-    BindErr(EndpointId, String),
-    /// ID not found error. (endpoint_id, error_description).
-    IdNotFound(EndpointId, String),
-    /// Connection rejected by the receiver. (endpoint_id, error_description).
-    Rejected(EndpointId, String),
+    /// Internal notification message that the connection is
+    /// established. Created by the signaling client.
+    Bound {
+        id: EndpointId,
+        trusted: Vec<EndpointId>,
+    },
+    /// Connect request. The `initiator` field indicates whether the
+    /// sender initiated the connection. The receiver verifies the cert
+    /// hash in `sender` matches the provided cert during DTLS.
+    Connect {
+        sender: EndpointId,
+        receiver: EndpointId,
+        initiator: bool,
+    },
+    /// Send SDP from sender to receiver.
+    SDP {
+        sender: EndpointId,
+        receiver: EndpointId,
+        sdp: SDP,
+    },
+    /// Send ICE candidate from sender to receiver.
+    Candidate {
+        sender: EndpointId,
+        receiver: EndpointId,
+        candidate: ICECandidate,
+    },
+    /// Override the sender's trust list on the signaling server. The
+    /// server replies with [`SignalingMsg::Trusted`] echoing the new
+    /// list. Trust is overriding, the new list replaces the old list.
+    Trust {
+        sender: EndpointId,
+        trusted: Vec<EndpointId>,
+    },
+    /// Confirms the sender's trust list now stored on the server.
+    Trusted {
+        id: EndpointId,
+        trusted: Vec<EndpointId>,
+    },
+    /// ID not found error.
+    IdNotFound { id: EndpointId, reason: String },
+    /// Connection rejected by the receiver.
+    Rejected { id: EndpointId, reason: String },
     /// Client sends this to keep connection alive.
     Ping,
+    /// Keep-alive reply from the Cloudflare worker’s auto-response. The
+    /// in-process Rust server doesn’t send this; the client treats it as a
+    /// no-op.
+    Pong,
     /// Server sends this when client has been inactive too long.
-    Inactive(String),
+    Terminate { reason: String },
 }
 
 impl Into<tung::tungstenite::Message> for SignalingMsg {

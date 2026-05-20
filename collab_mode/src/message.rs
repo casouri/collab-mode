@@ -1,6 +1,6 @@
 use crate::{
     config_man::{ConfigProject, Permission},
-    server::{self, AcceptMode},
+    server,
     types::*,
     webchannel::TransportConfig,
 };
@@ -33,8 +33,6 @@ pub enum NotificationCode {
     AcceptingConnection,
     /// Editor should show that we’re not accepting connections anymore.
     AcceptStopped,
-    /// Accept mode changed for a signaling server.
-    AcceptModeChanged,
     /// Editor should mark the remote as connected.
     Connected,
     /// A file moved, editor should update it accordingly.
@@ -151,19 +149,16 @@ pub struct InitResp {
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
     pub addr: String,
+    /// Endpoints permitted to send Connect/SDP/Candidate to us via
+    /// this signaling server. `None` resolves to an empty list.
+    #[serde(default)]
+    pub trusted: Option<Vec<ServerId>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StopAcceptingParams {
     pub addr: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAcceptModeParams {
-    pub addr: String,
-    pub mode: server::AcceptMode,
 }
 
 // **** Update config (trusted hosts and permissions)
@@ -416,7 +411,6 @@ pub struct ConnectedDocEntry {
 #[serde(rename_all = "camelCase")]
 pub struct AcceptingEntry {
     pub addr: String,
-    pub mode: AcceptMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

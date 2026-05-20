@@ -32,14 +32,24 @@ async fn test_sdp_and_ice_candidate_routing() {
     let key_cert_b = Arc::new(config_b.get_key_and_cert("endpoint-b").unwrap());
     let id_b = format!("endpoint-b::{}", key_cert_b.cert_der_hash());
 
-    // Both endpoints bind to the signaling address
+    // Both endpoints bind to the signaling address, mutually trusting each other.
     channel_a
-        .bind(signaling_addr.clone(), id_a.clone(), key_cert_a.clone())
+        .bind(
+            signaling_addr.clone(),
+            id_a.clone(),
+            key_cert_a.clone(),
+            vec![id_b.clone()],
+        )
         .await
         .unwrap();
 
     channel_b
-        .bind(signaling_addr.clone(), id_b.clone(), key_cert_b.clone())
+        .bind(
+            signaling_addr.clone(),
+            id_b.clone(),
+            key_cert_b.clone(),
+            vec![id_a.clone()],
+        )
         .await
         .unwrap();
 
@@ -125,14 +135,24 @@ async fn test_connect_message_routing() {
     let key_cert_b = Arc::new(config_b.get_key_and_cert("endpoint-b").unwrap());
     let id_b = format!("endpoint-b::{}", key_cert_b.cert_der_hash());
 
-    // Both endpoints bind to the signaling address
+    // Both endpoints bind to the signaling address, mutually trusting each other.
     channel_a
-        .bind(signaling_addr.clone(), id_a.clone(), key_cert_a.clone())
+        .bind(
+            signaling_addr.clone(),
+            id_a.clone(),
+            key_cert_a.clone(),
+            vec![id_b.clone()],
+        )
         .await
         .unwrap();
 
     channel_b
-        .bind(signaling_addr.clone(), id_b.clone(), key_cert_b.clone())
+        .bind(
+            signaling_addr.clone(),
+            id_b.clone(),
+            key_cert_b.clone(),
+            vec![id_a.clone()],
+        )
         .await
         .unwrap();
 
@@ -141,9 +161,15 @@ async fn test_connect_message_routing() {
     let _ = signaling_rx_b.recv().await.unwrap();
 
     // Endpoint A sends a Connect message to endpoint B.
-    let connect_msg = SignalingMsg::Connect(id_a.clone(), id_b.clone(), true);
     channel_a
-        .send(&signaling_addr, connect_msg.clone())
+        .send(
+            &signaling_addr,
+            SignalingMsg::Connect {
+                sender: id_a.clone(),
+                receiver: id_b.clone(),
+                initiator: true,
+            },
+        )
         .await
         .unwrap();
 
@@ -152,18 +178,28 @@ async fn test_connect_message_routing() {
     assert_eq!(received_message.signaling_addr, signaling_addr);
 
     match received_message.msg {
-        Ok(SignalingMsg::Connect(sender_id, receiver_id, initiator)) => {
-            assert_eq!(sender_id, id_a);
-            assert_eq!(receiver_id, id_b);
+        Ok(SignalingMsg::Connect {
+            sender,
+            receiver,
+            initiator,
+        }) => {
+            assert_eq!(sender, id_a);
+            assert_eq!(receiver, id_b);
             assert_eq!(initiator, true);
         }
         _ => panic!("Expected Connect message, got {:?}", received_message.msg),
     }
 
     // Reverse: B sends Connect to A.
-    let connect_msg_b = SignalingMsg::Connect(id_b.clone(), id_a.clone(), false);
     channel_b
-        .send(&signaling_addr, connect_msg_b.clone())
+        .send(
+            &signaling_addr,
+            SignalingMsg::Connect {
+                sender: id_b.clone(),
+                receiver: id_a.clone(),
+                initiator: false,
+            },
+        )
         .await
         .unwrap();
 
@@ -172,9 +208,13 @@ async fn test_connect_message_routing() {
     assert_eq!(received_message.signaling_addr, signaling_addr);
 
     match received_message.msg {
-        Ok(SignalingMsg::Connect(sender_id, receiver_id, initiator)) => {
-            assert_eq!(sender_id, id_b);
-            assert_eq!(receiver_id, id_a);
+        Ok(SignalingMsg::Connect {
+            sender,
+            receiver,
+            initiator,
+        }) => {
+            assert_eq!(sender, id_b);
+            assert_eq!(receiver, id_a);
             assert_eq!(initiator, false);
         }
         _ => panic!("Expected Connect message, got {:?}", received_message.msg),

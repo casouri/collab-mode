@@ -665,7 +665,8 @@ pub async fn setup_hub_and_spoke_servers(
         })
     };
 
-    // Hub starts accepting connections.
+    // Hub starts accepting connections. Trust the known spoke IDs so the
+    // signaling server admits their Connect messages.
     tracing::info!("Hub server {} starting to accept connections", hub_id);
     hub_editor
         .send_notification(
@@ -674,7 +675,7 @@ pub async fn setup_hub_and_spoke_servers(
                 "hostId": hub_id.clone(),
                 "addr": "test",
                 "transportType": "SCTP",
-                "mode": "All",
+                "trusted": spoke_ids.clone(),
             }),
         )
         .await?;
@@ -731,7 +732,8 @@ pub async fn setup_hub_and_spoke_servers(
             })
         };
 
-        // Spoke binds to signaling server first.
+        // Spoke binds to signaling server first. Trust the hub so it can
+        // initiate Connect messages back.
         tracing::info!("Spoke server {} binding to signaling server", spoke_id);
         spoke_editor
             .send_notification(
@@ -739,7 +741,7 @@ pub async fn setup_hub_and_spoke_servers(
                 serde_json::json!({
                     "addr": "test",
                     "transportType": "SCTP",
-                    "mode": "All",
+                    "trusted": [hub_id.clone()],
                 }),
             )
             .await?;
