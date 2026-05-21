@@ -935,13 +935,16 @@ To prevent them from being invoked."
     (setq-local collab--my-site-id nil)))
 
 (defun collab--tramp-filename (file-desc)
-  "Return the /collab: Tramp filename for FILE-DESC."
+  "Return the /collab: Tramp filename for FILE-DESC.
+The host id (HOST::CERT-HASH) contains colons, so we wrap it in
+the IPv6-style `[...]` brackets that TRAMP recognises as a single
+host token."
   (let ((host-id (plist-get file-desc :hostId))
         (project (plist-get file-desc :project))
         (file (plist-get file-desc :file)))
     (if (equal file "")
-        (format "/collab:%s:/%s/" host-id project)
-      (format "/collab:%s:/%s/%s" host-id project file))))
+        (format "/collab:[%s]:/%s/" host-id project)
+      (format "/collab:[%s]:/%s/%s" host-id project file))))
 
 (defun collab--enable (file-desc my-site-id path)
   "Enable ‘collab-monitored-mode’ in the current buffer.
@@ -2062,7 +2065,14 @@ PRESS \\[collab--toggle-accept-connection] TO TOGGLE ACCEPTING REMOTE CONNECTION
                       'ConnectionState #'collab--connection-state-req)
                      :data))
     (when (and connected connection-state)
-      ;; Fetch file list for connected hosts.
+      ;; Fetch the file list for ourselves.
+      (when collab--my-host-id
+        (collab--list-files-req
+         nil collab--my-host-id
+         (lambda (status resp)
+           (collab--list-files-callback
+            collab--my-host-id nil status resp))))
+      ;; Fetch file list for connected remote hosts.
       (seq-doseq (entry (plist-get connection-state :connections))
         (let ((host-id (plist-get entry :hostId))
               (state (plist-get entry :state)))
