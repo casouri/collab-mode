@@ -4586,8 +4586,7 @@ pub async fn listen_for_signal(shutdown: Arc<tokio::sync::Notify>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut term =
-            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        let mut term = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
             _ = term.recv() => tracing::info!("SIGTERM received"),

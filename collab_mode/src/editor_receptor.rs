@@ -2,17 +2,23 @@
 // functions that that starts an actor on either a pipe or a socket.
 // And the actor simply moves JSONRPC messages around.
 
+use std::sync::Arc;
+
 use lsp_server::{Connection, Message};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::trace;
 
 /// Run the editor receptor on stdio. Returns when fatal error occurs.
-pub fn run_stdio(msg_tx: mpsc::Sender<Message>, msg_rx: mpsc::Receiver<Message>) {
+pub fn run_stdio(
+    msg_tx: mpsc::Sender<Message>,
+    msg_rx: mpsc::Receiver<Message>,
+    shutdown: Arc<Notify>,
+) {
     tracing::info!("Started listening for messages from editor");
     // We don't need to join the io_threads, as the main_loop will get
     // io errors anyway. Blocks until a connection is made.
     let (connection, _io_threads) = Connection::stdio();
-    main_loop(connection, msg_tx, msg_rx);
+    main_loop(connection, msg_tx, msg_rx, shutdown);
 }
 
 /// Run the editor receptor on socket. Returns when fatal error occurs.
@@ -20,12 +26,13 @@ pub fn run_socket(
     addr: &str,
     msg_tx: mpsc::Sender<Message>,
     msg_rx: mpsc::Receiver<Message>,
+    shutdown: Arc<Notify>,
 ) -> anyhow::Result<()> {
     tracing::info!("Started listening for messages from editor on {}", &addr);
-    // We don't need to join the io_threads, as the main_loop will get
-    // io errors anyway. Blocks until a connection is made.
+    // We don't need to join the io_threads, the main_loop will get io
+    // errors anyway. Blocks until a connection is made.
     let (connection, _io_threads) = Connection::listen(addr)?;
-    main_loop(connection, msg_tx, msg_rx);
+    main_loop(connection, msg_tx, msg_rx, shutdown);
     Ok(())
 }
 
@@ -35,6 +42,7 @@ fn main_loop(
     connection: Connection,
     msg_tx: mpsc::Sender<Message>,
     mut msg_rx: mpsc::Receiver<Message>,
+    shutdown: Arc<Notify>,
 ) {
     let (err_tx, mut err_rx) = mpsc::channel::<String>(1);
 
@@ -88,4 +96,6 @@ fn main_loop(
     if let Some(err) = err {
         tracing::warn!("Collab peer terminated due to error: {:#?}", err);
     }
+
+    shutdown.notify_waiters();
 }

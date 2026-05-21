@@ -85,19 +85,34 @@ fn main() -> anyhow::Result<()> {
             let mut server = Server::new(host_id.clone(), config_man)?;
             let (server_in_tx, server_in_rx) = tokio::sync::mpsc::channel(32);
             let (server_out_tx, server_out_rx) = tokio::sync::mpsc::channel(32);
-            let port = socket_port.clone();
-
-            // Listen for SIGINT/SIGTERM and send as a shutdown
-            // notify. Spawn the signal handler inside the runtime
-            // since `listen_for_signal` uses tokio I/O.
+            let use_socket = *socket;
+            let port = *socket_port;
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+
+            // Run editor receptor.
+            let editor_shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                if !use_socket {
+                    editor_receptor::run_stdio(server_in_tx, server_out_rx, editor_shutdown);
+                } else if let Err(err) = editor_receptor::run_socket(
+                    &format!("localhost:{}", port),
+                    server_in_tx,
+                    server_out_rx,
+                    editor_shutdown,
+                ) {
+                    tracing::error!("Failed to listen on local port: {:#?}", err);
+                }
+            });
+
+            // Run Ctrl-C listener.
             let shutdown_for_signal = shutdown.clone();
             runtime.spawn(async move {
                 collab_mode::server::listen_for_signal(shutdown_for_signal).await;
             });
 
+            // Run server.
             let shutdown_for_server = shutdown.clone();
-            let server_handle = runtime.spawn(async move {
+            runtime.block_on(async move {
                 use collab_mode::{server::*, signaling, webchannel};
                 let host_id_for_factory = host_id.clone();
                 let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
@@ -120,22 +135,6 @@ fn main() -> anyhow::Result<()> {
                 }
             });
 
-            // Block on editor receptor (sync). Returns when editor
-            // disconnects.
-            if !socket {
-                editor_receptor::run_stdio(server_in_tx, server_out_rx);
-            } else {
-                editor_receptor::run_socket(
-                    &format!("localhost:{}", port),
-                    server_in_tx,
-                    server_out_rx,
-                )
-                .with_context(|| "Failed to listen on local port")?;
-            }
-
-            // We’re done, shutdown server.
-            shutdown.notify_waiters();
-            let _ = runtime.block_on(server_handle);
             Ok(())
         }
         Some(Commands::Envoy) => run_envoy(),
