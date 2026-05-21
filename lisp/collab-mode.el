@@ -38,11 +38,6 @@
   "The display name of the user."
   :type 'string)
 
-(defcustom collab-local-host-config nil
-  "A list storing configuration for the local host.
-The list should be (HOST-ID SIGNALING-SERVER-ADDR)."
-  :type '(list string))
-
 (defcustom collab-accept-connection-on-startup t
   "Whether to start accepting remote connection on start-up."
   :type 'boolean)
@@ -102,7 +97,7 @@ to perform NAT traversal.")
 (defvar collab-command "~/p/collab/target/debug/collab"
   "Path to the collab process executable.")
 
-(defvar collab-default-signaling-server "s.collab-mode.org"
+(defvar collab-default-signaling-server "collab-signaling.casouri.workers.dev"
   "Default signaling server’s address.
 
 Signaling server is for NAT-traversal and host authentication.")
@@ -1156,9 +1151,9 @@ Return nil if there’s no parent."
           (setq collab--my-host-id (plist-get resp :hostId))
 
           (when (and collab-accept-connection-on-startup
-                     (nth 1 collab-local-host-config))
+                     collab-default-signaling-server)
             (jsonrpc-notify conn 'AcceptConnection
-                            `(:addr ,(nth 1 collab-local-host-config))))
+                            `(:addr ,collab-default-signaling-server)))
 
           (when collab--jsonrpc-connection
             (jsonrpc-shutdown collab--jsonrpc-connection))
@@ -2581,9 +2576,9 @@ Disconnect for remote doc, close for owned doc."
   "Toggle accepting remote connections.
 
 If currently accepting, stop.  Otherwise start accepting on the
-signaling address from ‘collab-local-host-config’."
+signaling address from ‘collab-default-signaling-server’."
   (interactive)
-  (let* ((signaling-addr (nth 1 collab-local-host-config))
+  (let* ((signaling-addr collab-default-signaling-server)
          (state (collab--connection-state-req))
          (accepting (plist-get state :accepting))
          (currently-accepting-p (> (seq-length accepting) 0)))
@@ -2648,7 +2643,7 @@ files. Uses ‘collab--default-directory’ as initial input."
 (defun collab--notify-newly-shared-doc (file-desc)
   "In collab hub, insert a notice of the newly shared doc or project (FILE-DESC)."
   (with-current-buffer (collab--hub-buffer)
-    (collab--accept-connection-notif (nth 1 collab-local-host-config))
+    (collab--accept-connection-notif collab-default-signaling-server)
     (let* ((link (format "%s%s" collab-default-signaling-server
                          (collab--encode-filename file-desc))))
       (puthash 'CurrentMessage
@@ -2856,7 +2851,7 @@ detailed history."
 (defun collab ()
   "The main entry point of ‘collab-mode’."
   (interactive)
-  (unless (and collab-display-name collab-local-host-config)
+  (unless collab-display-name
     (collab-initial-setup))
   (let ((resp (read-multiple-choice
                (collab--fairy "Heya! It’s nice to see you. What do you want me to do?\n")
