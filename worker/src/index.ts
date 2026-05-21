@@ -1,6 +1,12 @@
 // Worker entrypoint and SignalingEndpoint Durable Object. API mirrors
 // collab_mode/src/signaling/server.rs.
 
+// `@peculiar/x509` (used by ./auth) pulls in `tsyringe`, which expects
+// a `Reflect.metadata` polyfill. workerd doesn't ship one, so import
+// this at the top of the entry point — must come before any module
+// that transitively loads tsyringe.
+import 'reflect-metadata';
+
 import { DurableObject } from 'cloudflare:workers';
 import {
   AuthError,

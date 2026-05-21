@@ -13,13 +13,13 @@
   },
   "devDependencies": {
     "@types/node": "^25.7.0",
-    "reflect-metadata": "^0.2.2",
     "typescript": "^5.5.2",
     "vitest": "^4.1.0",
     "wrangler": "^4.90.1"
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",
-    "pvtsutils": "^1.3.5"
+    "pvtsutils": "^1.3.5",
+    "reflect-metadata": "^0.2.2"
   }
 }
