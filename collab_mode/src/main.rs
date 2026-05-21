@@ -87,9 +87,14 @@ fn main() -> anyhow::Result<()> {
             let (server_out_tx, server_out_rx) = tokio::sync::mpsc::channel(32);
             let port = socket_port.clone();
 
-            // Listen for SIGINT/SIGTERM and surface as a shutdown
-            // notify that the server can wait on.
-            let shutdown = collab_mode::server::listen_for_signal();
+            // Listen for SIGINT/SIGTERM and send as a shutdown
+            // notify. Spawn the signal handler inside the runtime
+            // since `listen_for_signal` uses tokio I/O.
+            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let shutdown_for_signal = shutdown.clone();
+            runtime.spawn(async move {
+                collab_mode::server::listen_for_signal(shutdown_for_signal).await;
+            });
 
             let shutdown_for_server = shutdown.clone();
             let server_handle = runtime.spawn(async move {
@@ -234,7 +239,13 @@ fn run_envoy() -> anyhow::Result<()> {
         // Hold tempdir for the process lifetime.
         let _hold_temp = temp;
 
-        let shutdown = collab_mode::server::listen_for_signal();
+        // Already inside the runtime via block_on, so spawn the
+        // signal task directly.
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let shutdown_for_signal = shutdown.clone();
+        tokio::spawn(async move {
+            collab_mode::server::listen_for_signal(shutdown_for_signal).await;
+        });
 
         server
             .run(sink_tx, editor_rx, web_factory, sig_factory, shutdown)

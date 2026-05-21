@@ -4579,30 +4579,26 @@ impl Server {
 
 // *** Helper functions
 
-/// Spawn a background task that installs SIGINT/SIGTERM handlers and
-/// notifies the returned `Notify` once either signal arrives.
-pub fn listen_for_signal() -> Arc<tokio::sync::Notify> {
-    let shutdown = Arc::new(tokio::sync::Notify::new());
-    let shutdown_for_sig = shutdown.clone();
-    tokio::spawn(async move {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut term =
-                signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
-                _ = term.recv() => tracing::info!("SIGTERM received"),
-            }
+/// Install SIGINT/SIGTERM handlers and notify `shutdown` when either
+/// signal arrives. Caller is responsible for owning the `Arc<Notify>`
+/// and for spawning this future inside a tokio runtime context.
+pub async fn listen_for_signal(shutdown: Arc<tokio::sync::Notify>) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
+            _ = term.recv() => tracing::info!("SIGTERM received"),
         }
-        #[cfg(not(unix))]
-        {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("Ctrl-C received");
-        }
-        shutdown_for_sig.notify_waiters();
-    });
-    shutdown
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Ctrl-C received");
+    }
+    shutdown.notify_waiters();
 }
 
 /// The [Next] object stores references to channels and have a borrow
