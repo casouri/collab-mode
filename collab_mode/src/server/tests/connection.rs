@@ -81,7 +81,6 @@ async fn test_accept_connect() {
                 "hostId": id1.clone(),
                 "addr": "test",
                 "transportType": "SCTP",
-                "trusted": [id2.clone()],
             }),
         )
         .await
@@ -103,7 +102,6 @@ async fn test_accept_connect() {
             serde_json::json!({
                 "addr": "test",
                 "transportType": "SCTP",
-                "trusted": [id1.clone()],
             }),
         )
         .await

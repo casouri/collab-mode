@@ -204,13 +204,9 @@ pub enum SignalingStatus {
     Failed { reason: String },
 }
 
-/// State of a signaling server entry in `WorldState`. In
-/// `ideal_world.signaling[addr]`, `trusted` is the list of endpoints
-/// we want the signaling server to accept Connect/SDP/Candidate from
-/// on our behalf. In `current_world.signaling[addr]`, `trusted` is
-/// the list the signaling server has confirmed (via `Bound` or
-/// `Trusted`). `trust_sent_at` (current side only) dedupes Trust
-/// resends in `fix_world_signaling`.
+/// State of a signaling server entry in `WorldState`. `trusted` is
+/// the list the signaling server has confirmed via `Bound`/`Trusted`
+/// (only used by current world).
 #[derive(Debug, Clone, Default)]
 pub struct SignalingState {
     pub status: SignalingStatus,
@@ -256,6 +252,8 @@ pub struct RemoteState {
 pub struct WorldState {
     pub signaling: HashMap<String, SignalingState>,
     pub remotes: HashMap<ServerId, RemoteState>,
+    /// Global trusted-host set. Only used by `ideal_world`
+    pub trusted: HashSet<ServerId>,
 }
 
 impl WorldState {
@@ -426,10 +424,6 @@ pub struct Server {
     config: ConfigManager,
     /// Key and certificate for the server.
     key_cert: Arc<KeyCert>,
-    /// Trusted host ids (full `name::cert_hash`). Trust check
-    /// compares the hash portion of an incoming id against the hash
-    /// portion of each entry.
-    trusted_hosts: HashSet<ServerId>,
     /// Declared world state: what the editor wants us to be doing.
     /// Only editor handlers write here. `fix_world` reads only.
     pub ideal_world: WorldState,
@@ -716,7 +710,10 @@ impl Server {
         key_cert: ArcKeyCert,
     ) -> anyhow::Result<Self> {
         let current_config = config.config();
-        let trusted_hosts = current_config.trusted_hosts;
+        let ideal_world = WorldState {
+            trusted: current_config.trusted_hosts,
+            ..Default::default()
+        };
 
         let server = Server {
             host_id,
@@ -730,8 +727,7 @@ impl Server {
             site_id_map: HashMap::new(),
             config,
             key_cert,
-            trusted_hosts,
-            ideal_world: WorldState::default(),
+            ideal_world,
             current_world: WorldState::default(),
             local_trusted_hosts: HashSet::new(),
         };
@@ -771,7 +767,7 @@ impl Server {
             );
         }
 
-        self.trusted_hosts.insert(host_id.clone());
+        self.ideal_world.trusted.insert(host_id.clone());
 
         // Trust the host that initiated us.
         self.config.add_permission(
@@ -1007,7 +1003,10 @@ impl Server {
 
     /// Check whether `cert_hash` is trusted.
     pub fn is_cert_trusted(&self, cert_hash: &str) -> bool {
-        self.trusted_hosts.iter().any(|id| id_hash(id) == cert_hash)
+        self.ideal_world
+            .trusted
+            .iter()
+            .any(|id| id_hash(id) == cert_hash)
             || self
                 .local_trusted_hosts
                 .iter()
@@ -1260,9 +1259,11 @@ impl Server {
             }
         }
 
-        // 4. Sync trust lists for Bound entries whose ideal != current.
-        //    Resend at most every 5s while waiting for `Trusted`.
+        // 4. Sync trust lists for Bound entries whose confirmed
+        //    `current` list doesn't match the global trust list in
+        //    `self.ideal_world.trusted`.
         let now_sec = unix_epoch_secs();
+        let ideal_trusted = &self.ideal_world.trusted;
         let to_sync: Vec<(String, Vec<ServerId>)> = self
             .current_world
             .signaling
@@ -1271,8 +1272,7 @@ impl Server {
                 if !matches!(cur.status, SignalingStatus::Bound) {
                     return None;
                 }
-                let ideal = self.ideal_world.signaling.get(addr)?;
-                if ideal.trusted == cur.trusted {
+                if cur.trusted == *ideal_trusted {
                     return None;
                 }
                 if let Some(t) = cur.trust_sent_at {
@@ -1280,7 +1280,7 @@ impl Server {
                         return None;
                     }
                 }
-                Some((addr.clone(), ideal.trusted.iter().cloned().collect()))
+                Some((addr.clone(), ideal_trusted.iter().cloned().collect()))
             })
             .collect();
         for (addr, trusted) in to_sync {
@@ -1673,7 +1673,7 @@ impl Server {
                 // We might get new trusted host from accepting
                 // connection, try to save it.
                 let mut config = self.config.config();
-                config.trusted_hosts = self.trusted_hosts.clone();
+                config.trusted_hosts = self.ideal_world.trusted.clone();
                 let res = self.config.replace_and_save(config);
 
                 if let Err(err) = res {
@@ -3573,7 +3573,7 @@ impl Server {
             live,
             connected,
             projects,
-            trusted_hosts: config.trusted_hosts,
+            trusted_hosts: self.ideal_world.trusted.clone(),
             permission: config.permission,
             cert_hash: self.key_cert.cert_der_hash(),
         };
@@ -4189,14 +4189,7 @@ impl Server {
         let mut config = self.config.config();
 
         config.trusted_hosts = params.config.trusted_hosts.clone();
-        self.trusted_hosts = params.config.trusted_hosts.clone();
-        // Propagate the new trust list to every signaling entry in
-        // ideal_world. `fix_world_signaling` will sync the change to
-        // each signaling server via `Trust`.
-        let snapshot: HashSet<ServerId> = self.trusted_hosts.clone();
-        for (_addr, state) in self.ideal_world.signaling.iter_mut() {
-            state.trusted = snapshot.clone();
-        }
+        self.ideal_world.trusted = params.config.trusted_hosts;
 
         config.permission = params.config.permission;
 
@@ -4397,7 +4390,7 @@ impl Server {
         let peer_cert_hash = id_hash(&peer_id).to_string();
         let trusted = self.is_cert_trusted(&peer_cert_hash);
         if trusted {
-            self.trusted_hosts.insert(peer_id.clone());
+            self.ideal_world.trusted.insert(peer_id.clone());
         }
         if !trusted {
             let msg = ErrorResponseNote {
@@ -4531,15 +4524,11 @@ impl Server {
     ) {
         tracing::info!("AcceptConnection: addr={}", params.addr);
 
-        let trusted: HashSet<ServerId> = params.trusted.unwrap_or_default().into_iter().collect();
-
-        // Declare intent in ideal_world.
         self.ideal_world.signaling.insert(
             params.addr.clone(),
             SignalingState {
                 status: SignalingStatus::Bound,
-                trusted: trusted.clone(),
-                trust_sent_at: None,
+                ..Default::default()
             },
         );
 
@@ -4560,9 +4549,9 @@ impl Server {
             }
         }
 
-        // Start binding inline. Pass the trust list declared above.
+        // Start binding inline. Pass the current global trust list.
         self.current_world.set_signaling_binding(&params.addr);
-        let trusted_vec: Vec<ServerId> = trusted.into_iter().collect();
+        let trusted_vec: Vec<ServerId> = self.ideal_world.trusted.iter().cloned().collect();
         let result = signaling_channel
             .bind(
                 params.addr.clone(),

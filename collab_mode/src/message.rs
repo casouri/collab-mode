@@ -149,10 +149,6 @@ pub struct InitResp {
 #[serde(rename_all = "camelCase")]
 pub struct AcceptConnectionParams {
     pub addr: String,
-    /// Endpoints permitted to send Connect/SDP/Candidate to us via
-    /// this signaling server. `None` resolves to an empty list.
-    #[serde(default)]
-    pub trusted: Option<Vec<ServerId>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

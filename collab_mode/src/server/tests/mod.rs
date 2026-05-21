@@ -675,7 +675,6 @@ pub async fn setup_hub_and_spoke_servers(
                 "hostId": hub_id.clone(),
                 "addr": "test",
                 "transportType": "SCTP",
-                "trusted": spoke_ids.clone(),
             }),
         )
         .await?;
@@ -741,7 +740,6 @@ pub async fn setup_hub_and_spoke_servers(
                 serde_json::json!({
                     "addr": "test",
                     "transportType": "SCTP",
-                    "trusted": [hub_id.clone()],
                 }),
             )
             .await?;

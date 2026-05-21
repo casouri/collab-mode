@@ -1158,8 +1158,7 @@ Return nil if there’s no parent."
           (when (and collab-accept-connection-on-startup
                      (nth 1 collab-local-host-config))
             (jsonrpc-notify conn 'AcceptConnection
-                            `( :addr ,(nth 1 collab-local-host-config)
-                               :mode "TrustedOnly")))
+                            `(:addr ,(nth 1 collab-local-host-config))))
 
           (when collab--jsonrpc-connection
             (jsonrpc-shutdown collab--jsonrpc-connection))
@@ -1244,11 +1243,8 @@ If we receive a ServerError notification, just display a warning."
                         (lambda ()
                           (collab--connection-state-req)))
        (collab--hub-rerender)))
-    ((or 'AcceptingConnection 'AcceptModeChanged)
-     (collab--msg-event 'success
-                        (pcase method
-                          ('AcceptingConnection "Now accepting remote connections")
-                          ('AcceptModeChanged "Accept mode changed")))
+    ('AcceptingConnection
+     (collab--msg-event 'success "Now accepting remote connections")
      ;; Refresh accept state.
      (collab--refetch 'ConnectionState
                       (lambda ()
@@ -1401,8 +1397,8 @@ the full plist response). STATUS can be ‘:success’, ‘:error’, and
 
 Returns a plist
 
-    (:connections CONNECTION
-     :accepting ADDRS
+    (:connections CONNECTIONS
+     :accepting ACCEPTING
      :live LIVE-FILES
      :connected CONNECTED-FILES)
 
@@ -1416,8 +1412,8 @@ CONNECTION-STATE can be:
   - “FailedToConnect”: Connection was never established.
                        Server doesn’t try to reconnect.
 
-ADDRS is a vector of signaling addresses on which the collab server is
-accepting connections.
+ACCEPTING is a vector of entries, each (:addr ADDR), one per
+signaling server we have successfully bound to.
 
 LIVE-FILES is a vector of (:file :subscribers filename :meta :seq),
 CONNECTED-FILES is a vector of (:file :filename :meta)."
@@ -1504,14 +1500,13 @@ Return (:siteId SITE-ID :content CONTENT)."
                      `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
-(defun collab--accept-connection-notif (signaling-addr mode)
-  "Accept connections on SIGNALING-ADDR with MODE.
-MODE is a string (e.g. \"All\" or \"TrustedOnly\") or nil to let the
-collab process pick its default."
+(defun collab--accept-connection-notif (signaling-addr)
+  "Accept connections on SIGNALING-ADDR.
+The trust list comes from the collab process's current
+‘trusted_hosts’; manage it via ‘collab-config-edit-trusted-hosts’."
   (let ((conn (collab--connect-process)))
     (jsonrpc-notify conn 'AcceptConnection
-                    `( :addr ,signaling-addr
-                       :mode ,mode))))
+                    `(:addr ,signaling-addr))))
 
 (defun collab--stop-accepting-notif (signaling-addr)
   "Tell the collab process to stop accepting on SIGNALING-ADDR."
@@ -1999,12 +1994,7 @@ Also insert ‘collab--current-message’ if it’s non-nil."
         (insert (format "AT %s/%s\t"
                         (plist-get entry :addr)
                         (propertize (or collab--my-host-id "???") 'face 'italic))
-                (propertize "YES " 'face 'success)
-                (if (equal (plist-get entry :mode) "All")
-                    (propertize "(accepts anyone)"
-                                'face 'warning)
-                  (propertize "(known remote only)"
-                              'face 'success)))))
+                (propertize "YES" 'face 'success))))
     (insert "\n\n")
 
     ;; 2. Insert notice message, if any.
@@ -2587,14 +2577,12 @@ Disconnect for remote doc, close for owned doc."
       (collab--delete-file-req file-desc))
     (collab--refresh)))
 
-(defun collab--toggle-accept-connection (&optional all-mode)
+(defun collab--toggle-accept-connection ()
   "Toggle accepting remote connections.
 
 If currently accepting, stop.  Otherwise start accepting on the
-signaling address from ‘collab-local-host-config’.  With prefix arg
-ALL-MODE, accept anyone (mode \"All\"); without it, fall back to the
-collab process default (TrustedOnly)."
-  (interactive "P")
+signaling address from ‘collab-local-host-config’."
+  (interactive)
   (let* ((signaling-addr (nth 1 collab-local-host-config))
          (state (collab--connection-state-req))
          (accepting (plist-get state :accepting))
@@ -2606,12 +2594,8 @@ collab process default (TrustedOnly)."
         (collab--msg-event 'success
                            "Stopping accepting remote connections"))
        (t
-        (collab--accept-connection-notif signaling-addr
-                                         (when all-mode "All"))
-        (collab--msg-event
-         'success
-         (format "Attempting to start accepting (%s)"
-                 (if all-mode "All" "TrustedOnly"))))))
+        (collab--accept-connection-notif signaling-addr)
+        (collab--msg-event 'success "Attempting to start accepting"))))
     (collab--refetch 'ConnectionState
                      (lambda () (collab--connection-state-req)))
     (collab--hub-rerender)))
@@ -2664,7 +2648,7 @@ files. Uses ‘collab--default-directory’ as initial input."
 (defun collab--notify-newly-shared-doc (file-desc)
   "In collab hub, insert a notice of the newly shared doc or project (FILE-DESC)."
   (with-current-buffer (collab--hub-buffer)
-    (collab--accept-connection-notif (nth 1 collab-local-host-config) nil)
+    (collab--accept-connection-notif (nth 1 collab-local-host-config))
     (let* ((link (format "%s%s" collab-default-signaling-server
                          (collab--encode-filename file-desc))))
       (puthash 'CurrentMessage
