@@ -15,14 +15,14 @@
   ],
   "host_id": "alice",
   "permission": {
-    "cat::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13": {
-      "write": true,
-      "create": true,
-      "delete": false
-    },
     "bob::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13": {
       "write": false,
       "create": false,
+      "delete": false
+    },
+    "cat::FB:CE:97:D8:AD:1B:55:8E:50:FA:E9:B4:BC:73:7D:F0:70:47:EB:EA:02:72:44:71:CA:CB:DD:56:74:03:C8:13": {
+      "write": true,
+      "create": true,
       "delete": false
     }
   }
