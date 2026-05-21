@@ -253,18 +253,18 @@ tooltip shows the full host-id on hover."
      (name
       (let* ((full-str (copy-sequence host-id))
              (split (length name)))
-        (put-text-property split (length full-str)
-                           'display "@" full-str)
-        (put-text-property split (length full-str)
+        (put-text-property (+ split 4) (- (length full-str) 2)
+                           'display ".." full-str)
+        (put-text-property 0 (length full-str)
                            'help-echo host-id full-str)
         full-str))
-     ;; No name, show the first two bytes.
+     ;; No name, show the first and last byte.
      (t
       (let ((full-str (copy-sequence host-id)))
         (when (> (length full-str) 5)
-          (put-text-property 5 (length full-str)
-                             'display "@" full-str)
-          (put-text-property 5 (length full-str)
+          (put-text-property 4 (- (length full-str) 2)
+                             display ".." full-str)
+          (put-text-property 0 (length full-str)
                              'help-echo host-id full-str))
         full-str)))))
 
@@ -1988,7 +1988,10 @@ Also insert ‘collab--current-message’ if it’s non-nil."
       (seq-doseq (entry accepting)
         (insert (format "AT %s/%s\t"
                         (plist-get entry :addr)
-                        (propertize (or collab--my-host-id "???") 'face 'italic))
+                        (propertize
+                         (collab--prettify-host-id
+                          (or collab--my-host-id "???"))
+                         'face 'italic))
                 (propertize "YES" 'face 'success))))
     (insert "\n\n")
 
