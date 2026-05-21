@@ -1646,8 +1646,20 @@ impl Server {
                 Ok(())
             }
             Msg::ConnectionBroke { peer: host_id } => {
-                self.current_world.mark_remote_disconnected(&host_id);
-                self.fix_world_next(next.webchannel).await;
+                // Mark as failed if connection never established.
+                let ever = self
+                    .current_world
+                    .remotes
+                    .get(&host_id)
+                    .map(|r| r.ever_connected)
+                    .unwrap_or(false);
+                if ever {
+                    self.current_world.mark_remote_disconnected(&host_id);
+                    self.fix_world_next(next.webchannel).await;
+                } else {
+                    self.current_world
+                        .mark_remote_failed(&host_id, "broke before reaching Connected".into());
+                }
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
                     ConnectionBrokeNote {
