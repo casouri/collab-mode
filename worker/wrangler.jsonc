@@ -30,7 +30,7 @@
 		{
 			"binding": "DB",
 			"database_name": "collab-signaling",
-			"database_id": "REPLACE_WITH_D1_ID"
+			"database_id": "00ed6fde-c3d1-4eb7-a7c8-3d0512826230"
 		}
 	],
 	"unsafe": {
