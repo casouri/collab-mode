@@ -4424,10 +4424,20 @@ impl Server {
             return;
         }
 
-        // Mark as connecting to prevent duplicate connection attempts.
+        // Declare the peer in ideal_world so fix_world doesn’t tear
+        // down the connection we’re about to build, and mark
+        // current_world connecting to prevent duplicate attempts.
         let sctp_transport = webchannel::TransportConfig::SCTP {
             signaling_addr: signaling_addr.clone(),
         };
+        self.ideal_world.remotes.insert(
+            peer_id.clone(),
+            RemoteState {
+                transport: sctp_transport.clone(),
+                status: RemoteStatus::Connected,
+                ever_connected: true,
+            },
+        );
         self.current_world
             .set_remote_connecting2(&peer_id, sctp_transport);
 
