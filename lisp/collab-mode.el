@@ -97,7 +97,7 @@ to perform NAT traversal.")
 (defvar collab-command "~/p/collab/target/debug/collab"
   "Path to the collab process executable.")
 
-(defvar collab-default-signaling-server "collab-signaling.casouri.workers.dev"
+(defvar collab-default-signaling-server "s.collab-mode.org"
   "Default signaling server’s address.
 
 Signaling server is for NAT-traversal and host authentication.")
