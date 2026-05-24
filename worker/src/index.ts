@@ -254,7 +254,7 @@ export class SignalingEndpoint extends DurableObject<Env> {
       return;
     }
 
-    // Bound / Trusted / IdNotFound / Rejected / Inactive aren’t valid request.
+    // Bound / Trusted / IdNotFound / Rejected / Terminate aren’t valid request.
     ws.close(1003, 'Send Connect, SDP, Candidate, Trust, or Ping only');
   }
 
@@ -282,7 +282,7 @@ export class SignalingEndpoint extends DurableObject<Env> {
       const lastPing = lastPingTs ? lastPingTs.getTime() : att.boundAt;
       if (now - lastPing > INACTIVE_TIMEOUT_MS) {
         trySend(ws, {
-          kind: 'Inactive',
+          kind: 'Terminate',
           reason: 'No ping received in 10 minutes',
         });
         tryClose(ws, 1000, 'inactive');
@@ -291,7 +291,7 @@ export class SignalingEndpoint extends DurableObject<Env> {
 
       if (now - att.boundAt > MAX_LIFETIME_MS) {
         trySend(ws, {
-          kind: 'Inactive',
+          kind: 'Terminate',
           reason: '12-hour connection lifetime reached, please re-bind',
         });
         tryClose(ws, 1000, 'lifetime');
