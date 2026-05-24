@@ -8,7 +8,7 @@ pub use super::*;
 use crate::config_man::{ConfigManager, Permission};
 use crate::message::{SendOpsResp, UndoResp};
 use crate::signaling;
-use crate::signaling::client_new::{SignalingChannel, TestFactoryState};
+use crate::signaling::client::{SignalingChannel, TestFactoryState};
 use crate::webchannel::{self, TestFactory, TravelTime, WebChannel};
 use rand::Rng;
 use std::sync::atomic::{AtomicI32, Ordering};

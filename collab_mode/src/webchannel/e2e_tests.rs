@@ -159,11 +159,11 @@ mod e2e_tests {
         signaling_url: String,
         trusted: Vec<String>,
     ) -> anyhow::Result<(
-        crate::signaling::client_new::SignalingChannel,
+        crate::signaling::client::SignalingChannel,
         mpsc::Receiver<crate::signaling::SignalingMessage>,
     )> {
         let (sig_tx, mut sig_rx) = mpsc::channel(10);
-        let channel = crate::signaling::client_new::SignalingChannel::new(sig_tx);
+        let channel = crate::signaling::client::SignalingChannel::new(sig_tx);
         channel
             .bind(signaling_url, id.clone(), key_cert, trusted)
             .await?;
@@ -177,11 +177,11 @@ mod e2e_tests {
     /// Wait for Connect message and create Sock
     async fn wait_for_connect_and_create_sock(
         sig_rx: &mut mpsc::Receiver<crate::signaling::SignalingMessage>,
-        sig_channel: &crate::signaling::client_new::SignalingChannel,
+        sig_channel: &crate::signaling::client::SignalingChannel,
         signaling_url: &str,
         my_id: String,
         expected_peer_id: Option<String>,
-    ) -> anyhow::Result<crate::signaling::client_new::Sock> {
+    ) -> anyhow::Result<crate::signaling::client::Sock> {
         use crate::signaling::SignalingMsg;
 
         let signaling_message = timeout(Duration::from_secs(5), sig_rx.recv())

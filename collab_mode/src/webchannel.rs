@@ -81,8 +81,8 @@ pub enum Transport {
     /// Connect via WebRTC (SCTP/DTLS/ICE) using a [`Sock`] from the
     /// signaling client.
     ///
-    /// [`Sock`]: crate::signaling::client_new::Sock
-    Sock(crate::signaling::client_new::Sock),
+    /// [`Sock`]: crate::signaling::client::Sock
+    Sock(crate::signaling::client::Sock),
     /// Connect by spawning ssh to `ssh_host` and running `command` on
     /// the remote, using its stdio as the data channel. `comamnd`
     /// should end up running `collab-mode envoy`. Each segment is
@@ -378,7 +378,7 @@ impl WebChannel {
     /// determined by host ID ordering rather than initiator/acceptor roles.
     pub async fn connect_with_sock(
         &self,
-        sock: crate::signaling::client_new::Sock,
+        sock: crate::signaling::client::Sock,
         my_key_cert: ArcKeyCert,
     ) -> anyhow::Result<()> {
         let peer_id = sock.id().to_string();
@@ -439,7 +439,7 @@ impl WebChannel {
     /// SCTP association’s `net_conn`, so we don’t need to return it.
     async fn establish_sctp(
         &self,
-        sock: crate::signaling::client_new::Sock,
+        sock: crate::signaling::client::Sock,
         my_key_cert: ArcKeyCert,
         as_server: bool,
         peer_id: &ServerId,

@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::super::client_new::*;
+    use super::super::client::*;
     use crate::config_man::create_key_cert;
     use crate::message::Msg;
     use crate::signaling::{SignalingError, SignalingMessage};

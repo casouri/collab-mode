@@ -31,7 +31,7 @@ pub struct ICECredential {
 /// The `is_server` parameter determines ICE agent role (must differ between peers).
 #[instrument(skip(progress_tx, sock))]
 pub async fn ice_connect_with_sock(
-    mut sock: crate::signaling::client_new::Sock,
+    mut sock: crate::signaling::client::Sock,
     progress_tx: Option<mpsc::Sender<ConnectionState>>,
     is_server: bool,
 ) -> WebrpcResult<(Arc<dyn Conn + Send + Sync>, CertDerHash, Arc<Agent>)> {
@@ -112,7 +112,7 @@ fn get_ice_credential_from_sdp(sdp: &str) -> WebrpcResult<(String, String)> {
 /// Exchange ICE candidates with peer using Sock.
 fn ice_exchange_candidates_with_sock(
     agent: Arc<Agent>,
-    mut sock: crate::signaling::client_new::Sock,
+    mut sock: crate::signaling::client::Sock,
     error_tx: mpsc::Sender<WebrpcError>,
     connected_rx: watch::Receiver<()>,
 ) -> WebrpcResult<JoinHandle<()>> {

@@ -26,7 +26,7 @@ use thiserror::Error;
 use tokio_tungstenite as tung;
 
 pub mod auth;
-pub mod client_new;
+pub mod client;
 pub mod server;
 
 /// We treat SDP as a black box.

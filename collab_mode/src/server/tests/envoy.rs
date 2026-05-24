@@ -1,7 +1,7 @@
 use super::*;
 use crate::config_man::ConfigManager;
 use crate::server::{Server, SignalingChannelFactory, WebChannelFactory};
-use crate::signaling::client_new::SignalingChannel;
+use crate::signaling::client::SignalingChannel;
 use crate::webchannel::WebChannel;
 
 /// Tempdirs and channels held by an envoy e2e test. Drops

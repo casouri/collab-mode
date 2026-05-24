@@ -1,7 +1,7 @@
 //! Tests for the in-memory test signaling routing.
 
 use super::*;
-use crate::signaling::client_new::{SignalingChannel, TestFactoryState};
+use crate::signaling::client::{SignalingChannel, TestFactoryState};
 use crate::signaling::{SignalingMessage, SignalingMsg};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;

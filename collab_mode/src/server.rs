@@ -1,7 +1,7 @@
 //! Main body of the collab server.
 //!
 //! Uses [`webchannel`] for communicating with remote servers, and
-//! [`crate::signaling::client_new`] for communicating with the signaling server.
+//! [`crate::signaling::client`] for communicating with the signaling server.
 //!
 //! The main entry point is [`Server::run`], which runs in a loop and calls:
 //! - [`Server::handle_editor_message`] for messages from the editor
@@ -69,11 +69,11 @@ pub type WebChannelFactory = Box<
 
 /// Closure for the signaling channel used by the `Server`.
 /// [`Server::run`] passes `signaling_msg_tx` and the closure returns
-/// a constructed [`signaling::client_new::SignalingChannel`].
+/// a constructed [`signaling::client::SignalingChannel`].
 pub type SignalingChannelFactory = Box<
     dyn FnOnce(
             mpsc::Sender<crate::signaling::SignalingMessage>,
-        ) -> crate::signaling::client_new::SignalingChannel
+        ) -> crate::signaling::client::SignalingChannel
         + Send,
 >;
 
@@ -1028,7 +1028,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         webchannel: &WebChannel,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         self.fix_world_signaling(editor_tx, signaling_channel).await;
         self.fix_world_remotes(editor_tx, msg_tx, webchannel, signaling_channel)
@@ -1042,7 +1042,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         webchannel: &WebChannel,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         let now = Instant::now();
 
@@ -1164,7 +1164,7 @@ impl Server {
     async fn fix_world_signaling(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         let now = Instant::now();
 
@@ -1304,7 +1304,7 @@ impl Server {
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
@@ -1530,7 +1530,7 @@ impl Server {
         next: &Next<'a>,
         notif: lsp_server::Notification,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) -> anyhow::Result<()> {
         match notif.method.as_str() {
             "AcceptConnection" => {
@@ -2103,7 +2103,7 @@ impl Server {
         host_id: ServerId,
         transport_config: webchannel::TransportConfig,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         if host_id == self.host_id {
             return;
@@ -2136,7 +2136,7 @@ impl Server {
         host_id: ServerId,
         transport_config: webchannel::TransportConfig,
         _msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         let signaling_addr = match &transport_config {
             webchannel::TransportConfig::SCTP { signaling_addr } => signaling_addr.clone(),
@@ -2283,7 +2283,7 @@ impl Server {
         next: &Next<'a>,
         peer_id: ServerId,
         signaling_addr: &str,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
         initiator: bool,
     ) {
         let msg = crate::signaling::SignalingMsg::Connect {
@@ -4248,7 +4248,7 @@ impl Server {
         msg: crate::signaling::SignalingMsg,
         next: &Next<'a>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) -> anyhow::Result<()> {
         tracing::info!("From signaling server: {:?}", &msg);
         match msg {
@@ -4340,7 +4340,7 @@ impl Server {
         trusted: Vec<ServerId>,
         next: &Next<'a>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         let _ = msg_tx;
         let _ = signaling_channel;
@@ -4376,7 +4376,7 @@ impl Server {
         initiator: bool,
         next: &Next<'a>,
         msg_tx: &mpsc::Sender<webchannel::Message>,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         // Check if we're already connecting or connected to this peer.
         let is_connecting_or_connected =
@@ -4542,7 +4542,7 @@ impl Server {
         &mut self,
         next: &Next<'a>,
         params: AcceptConnectionParams,
-        signaling_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         tracing::info!("AcceptConnection: addr={}", params.addr);
 
