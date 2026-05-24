@@ -1,7 +1,7 @@
 use super::*;
 use crate::config_man::ConfigManager;
 use crate::server::{Server, SignalingChannelFactory, WebChannelFactory};
-use crate::signaling::client_new::NoopSignalingChannel;
+use crate::signaling::client_new::SignalingChannel;
 use crate::webchannel::WebChannel;
 
 /// Tempdirs and channels held by an envoy e2e test. Drops
@@ -39,7 +39,7 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
     let host_id_for_factory = host_id.to_string();
     let web_factory: WebChannelFactory =
         Box::new(move |msg_tx, self_tx| WebChannel::new(host_id_for_factory, msg_tx, self_tx));
-    let sig_factory: SignalingChannelFactory = Box::new(|_| Box::new(NoopSignalingChannel));
+    let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
 
     let server_handle = tokio::spawn(async move {
         let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());

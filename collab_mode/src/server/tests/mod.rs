@@ -8,7 +8,7 @@ pub use super::*;
 use crate::config_man::{ConfigManager, Permission};
 use crate::message::{SendOpsResp, UndoResp};
 use crate::signaling;
-use crate::signaling::client_new::TestSignalingChannelFactory;
+use crate::signaling::client_new::{SignalingChannel, TestFactoryState};
 use crate::webchannel::{self, TestFactory, TravelTime, WebChannel};
 use rand::Rng;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -644,17 +644,18 @@ pub async fn setup_hub_and_spoke_servers(
     let mut hub_server = Server::new(hub_id.clone(), hub_config)?;
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
 
-    let signaling_factory = Arc::new(TestSignalingChannelFactory::new());
+    let signaling_state = Arc::new(std::sync::Mutex::new(TestFactoryState::default()));
     let hub_handle = {
         let channel_factory = factory.clone();
-        let signaling_factory = signaling_factory.clone();
+        let signaling_state = signaling_state.clone();
         let hub_id_for_factory = hub_id.clone();
         tokio::spawn(async move {
             let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
                 channel_factory.get_channel(hub_id_for_factory, msg_tx, self_tx)
             });
-            let sig_factory: crate::server::SignalingChannelFactory =
-                Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
+            let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_msg_tx| {
+                SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
+            });
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             if let Err(e) = hub_server
                 .run(hub_tx, hub_rx, web_factory, sig_factory, shutdown)
@@ -712,7 +713,7 @@ pub async fn setup_hub_and_spoke_servers(
 
         let spoke_handle = {
             let channel_factory = factory.clone();
-            let signaling_factory = signaling_factory.clone();
+            let signaling_state = signaling_state.clone();
             let spoke_id_for_factory = spoke_id.clone();
             tokio::spawn(async move {
                 let web_factory: crate::server::WebChannelFactory =
@@ -720,7 +721,9 @@ pub async fn setup_hub_and_spoke_servers(
                         channel_factory.get_channel(spoke_id_for_factory, msg_tx, self_tx)
                     });
                 let sig_factory: crate::server::SignalingChannelFactory =
-                    Box::new(move |sig_msg_tx| Box::new(signaling_factory.get_channel(sig_msg_tx)));
+                    Box::new(move |sig_msg_tx| {
+                        SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
+                    });
                 let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
                 if let Err(e) = spoke_server
                     .run(spoke_tx, spoke_rx, web_factory, sig_factory, shutdown)

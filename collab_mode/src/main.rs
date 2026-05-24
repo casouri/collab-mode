@@ -118,9 +118,8 @@ fn main() -> anyhow::Result<()> {
                 let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
                     webchannel::WebChannel::new(host_id_for_factory, msg_tx, self_tx)
                 });
-                let sig_factory: SignalingChannelFactory = Box::new(move |sig_tx| {
-                    Box::new(signaling::client_new::SignalingChannel::new(sig_tx))
-                });
+                let sig_factory: SignalingChannelFactory =
+                    Box::new(move |sig_tx| signaling::client_new::SignalingChannel::new(sig_tx));
                 let res = server
                     .run(
                         server_out_tx,
@@ -150,7 +149,7 @@ fn main() -> anyhow::Result<()> {
 fn run_envoy() -> anyhow::Result<()> {
     use collab_mode::message::Msg;
     use collab_mode::server::*;
-    use collab_mode::signaling::client_new::NoopSignalingChannel;
+    use collab_mode::signaling::client_new::SignalingChannel;
     use collab_mode::webchannel;
     use collab_mode::webchannel::{frame_read, frame_write};
 
@@ -233,7 +232,7 @@ fn run_envoy() -> anyhow::Result<()> {
         let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
             webchannel::WebChannel::new(envoy_id_for_factory, msg_tx, self_tx)
         });
-        let sig_factory: SignalingChannelFactory = Box::new(|_| Box::new(NoopSignalingChannel));
+        let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
 
         // Hold tempdir for the process lifetime.
         let _hold_temp = temp;

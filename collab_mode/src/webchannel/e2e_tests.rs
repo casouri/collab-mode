@@ -150,37 +150,35 @@ mod e2e_tests {
         }
     }
 
-    /// Create SignalingClient and wait for it to bind
+    /// Create a SignalingChannel, bind it for an endpoint, and wait
+    /// for Bound. Returns the channel plus the receiver the server
+    /// would normally read from.
     async fn create_bound_signaling_client(
         id: String,
         key_cert: ArcKeyCert,
         signaling_url: String,
         trusted: Vec<String>,
     ) -> anyhow::Result<(
-        crate::signaling::client_new::SignalingClient,
+        crate::signaling::client_new::SignalingChannel,
         mpsc::Receiver<crate::signaling::SignalingMessage>,
     )> {
         let (sig_tx, mut sig_rx) = mpsc::channel(10);
-        let client = crate::signaling::client_new::SignalingClient::bind(
-            signaling_url,
-            id.clone(),
-            key_cert,
-            sig_tx,
-            None,
-            trusted,
-        )
-        .await?;
+        let channel = crate::signaling::client_new::SignalingChannel::new(sig_tx);
+        channel
+            .bind(signaling_url, id.clone(), key_cert, trusted)
+            .await?;
 
         // Wait for Bound
         wait_for_bound(&mut sig_rx, &id).await;
 
-        Ok((client, sig_rx))
+        Ok((channel, sig_rx))
     }
 
     /// Wait for Connect message and create Sock
     async fn wait_for_connect_and_create_sock(
         sig_rx: &mut mpsc::Receiver<crate::signaling::SignalingMessage>,
-        sig_client: &crate::signaling::client_new::SignalingClient,
+        sig_channel: &crate::signaling::client_new::SignalingChannel,
+        signaling_url: &str,
         my_id: String,
         expected_peer_id: Option<String>,
     ) -> anyhow::Result<crate::signaling::client_new::Sock> {
@@ -205,17 +203,20 @@ mod e2e_tests {
             // Only send Connect response if this is an initial request (initiator=true).
             // If initiator=false, this is already a response, so don't respond to it.
             if initiator {
-                sig_client
-                    .send(SignalingMsg::Connect {
-                        sender: receiver_id,
-                        receiver: sender_id.clone(),
-                        initiator: false,
-                    })
+                sig_channel
+                    .send(
+                        signaling_url,
+                        SignalingMsg::Connect {
+                            sender: receiver_id,
+                            receiver: sender_id.clone(),
+                            initiator: false,
+                        },
+                    )
                     .await?;
             }
 
             // Create Sock for peer.
-            let sock = sig_client.create_sock(sender_id).await;
+            let sock = sig_channel.create_sock(signaling_url, sender_id).await?;
             Ok(sock)
         } else {
             Err(anyhow::anyhow!(
@@ -257,21 +258,31 @@ mod e2e_tests {
 
         // A initiates connection.
         sig_client_a
-            .send(SignalingMsg::Connect {
-                sender: id_a.clone(),
-                receiver: id_b.clone(),
-                initiator: true,
-            })
+            .send(
+                signaling_url,
+                SignalingMsg::Connect {
+                    sender: id_a.clone(),
+                    receiver: id_b.clone(),
+                    initiator: true,
+                },
+            )
             .await?;
 
         // B receives Connect and creates Sock
         let sock_b_task = tokio::spawn({
             let sig_client_b = sig_client_b.clone();
+            let signaling_url = signaling_url.to_string();
             let id_b = id_b.clone();
             let id_a = id_a.clone();
             async move {
-                wait_for_connect_and_create_sock(&mut sig_rx_b, &sig_client_b, id_b, Some(id_a))
-                    .await
+                wait_for_connect_and_create_sock(
+                    &mut sig_rx_b,
+                    &sig_client_b,
+                    &signaling_url,
+                    id_b,
+                    Some(id_a),
+                )
+                .await
             }
         });
 
@@ -279,6 +290,7 @@ mod e2e_tests {
         let sock_a = wait_for_connect_and_create_sock(
             &mut sig_rx_a,
             &sig_client_a,
+            signaling_url,
             id_a.clone(),
             Some(id_b.clone()),
         )

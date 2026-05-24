@@ -128,15 +128,20 @@ async fn test_server_run_config_projects_expansion() {
     // network path, so use a dummy channel.
     let test_web_factory =
         crate::webchannel::TestFactory::new(crate::webchannel::TravelTime::Instant);
-    let test_signaling_factory =
-        Arc::new(crate::signaling::client_new::TestSignalingChannelFactory::new());
+    let test_signaling_state = Arc::new(std::sync::Mutex::new(
+        crate::signaling::client_new::TestFactoryState::default(),
+    ));
     let host_id_for_factory = host_id.clone();
     let server_task = tokio::spawn(async move {
         let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
             test_web_factory.build_channel(host_id_for_factory, msg_tx, self_tx)
         });
-        let sig_factory: crate::server::SignalingChannelFactory =
-            Box::new(move |sig_tx| Box::new(test_signaling_factory.get_channel(sig_tx)));
+        let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_tx| {
+            crate::signaling::client_new::SignalingChannel::new_for_test(
+                sig_tx,
+                test_signaling_state,
+            )
+        });
         let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
         server
             .run(
