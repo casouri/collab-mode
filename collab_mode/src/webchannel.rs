@@ -415,7 +415,7 @@ impl WebChannel {
         let setup = self
             .establish_sctp(sock, my_key_cert, as_server, &peer_id)
             .await;
-        let (sctp_assoc, dtls_conn, ice_agent) = match setup {
+        let (sctp_assoc, ice_agent) = match setup {
             Ok(t) => t,
             Err(e) => {
                 self.remote_map.lock().unwrap().remove(&peer_id);
@@ -426,7 +426,6 @@ impl WebChannel {
         let remote = SctpRemote::new(
             peer_id,
             sctp_assoc,
-            dtls_conn,
             ice_agent,
             stream_id,
             self.remote_msg_tx.clone(),
@@ -436,18 +435,15 @@ impl WebChannel {
         Ok(())
     }
 
-    /// ICE/DTLS/SCTP establishment.
+    /// ICE/DTLS/SCTP establishment. The DTLS conn is kept alive by the
+    /// SCTP association’s `net_conn`, so we don’t need to return it.
     async fn establish_sctp(
         &self,
         sock: crate::signaling::client_new::Sock,
         my_key_cert: ArcKeyCert,
         as_server: bool,
         peer_id: &ServerId,
-    ) -> anyhow::Result<(
-        Arc<association::Association>,
-        Arc<DTLSConn>,
-        Arc<webrtc_ice::agent::Agent>,
-    )> {
+    ) -> anyhow::Result<(Arc<association::Association>, Arc<webrtc_ice::agent::Agent>)> {
         // Forward ICE progress to the server as IceProgress messages.
         // Exits when progress_tx drops (i.e. ICE finishes / fails).
         let (progress_tx, mut progress_rx) = mpsc::channel::<ConnectionState>(1);
@@ -483,7 +479,7 @@ impl WebChannel {
             create_sctp_client(dtls_conn.clone()).await?
         };
 
-        Ok((sctp_assoc, dtls_conn, ice_agent))
+        Ok((sctp_assoc, ice_agent))
     }
 
     /// Send a message to a remote host. Doesn't block.
@@ -604,7 +600,6 @@ impl WebChannel {
 struct SctpRemote {
     peer_id: ServerId,
     sctp_assoc: Arc<association::Association>,
-    dtls_conn: Arc<DTLSConn>,
     ice_agent: Arc<webrtc_ice::agent::Agent>,
     /// Next stream ID this actor will use for an outgoing message.
     /// Increments by 2 with wrapping; parity preserved.
@@ -634,7 +629,6 @@ impl SctpRemote {
     fn new(
         peer_id: ServerId,
         sctp_assoc: Arc<association::Association>,
-        dtls_conn: Arc<DTLSConn>,
         ice_agent: Arc<webrtc_ice::agent::Agent>,
         stream_id_init: u16,
         remote_msg_tx: mpsc::Sender<Message>,
@@ -644,7 +638,6 @@ impl SctpRemote {
         Self {
             peer_id,
             sctp_assoc,
-            dtls_conn,
             ice_agent,
             next_stream_id: stream_id_init,
             stream_id_parity: stream_id_init,
@@ -789,19 +782,17 @@ impl SctpRemote {
         None
     }
 
-    /// Best-effort teardown of SCTP/DTLS/ICE, capped by a timeout so a
-    /// wedged peer can’t block shutdown forever.
+    /// Shutdown SCTP, DTLS, and ICE connections.
     async fn cleanup(&self) -> anyhow::Result<()> {
-        let timeout = Duration::from_secs(5);
-        tokio::time::timeout(timeout, async {
-            let _ = self.sctp_assoc.shutdown().await;
-            // These aren’t strictly necessary but they don’t hurt.
-            let _ = self.sctp_assoc.close().await;
-            let _ = self.dtls_conn.close().await;
-            let _ = self.ice_agent.close().await;
-        })
-        .await
-        .map_err(|_| anyhow!("cleanup timed out for {}", self.peer_id))?;
+        // shutdown will wait for ack from other side indefinitely, so
+        // we have to bound it with a timeout. Graceful close or not,
+        // it’s simpler to just try graceful shutdown regardless.
+        let _ = tokio::time::timeout(Duration::from_millis(500), self.sctp_assoc.shutdown()).await;
+        // `sctp_assoc.close()` stops background tasks and closes the
+        // underlying transport, which calls DTLS close. Also bound it
+        // for safety.
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.sctp_assoc.close()).await;
+        let _ = self.ice_agent.close().await;
         Ok(())
     }
 }
