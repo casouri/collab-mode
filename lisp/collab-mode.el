@@ -536,6 +536,11 @@ If MARK non-nil, show active region."
   (make-hash-table :test #'equal)
   "Hash table mapping FILE-DESC to dispatcher timers.")
 
+(defvar collab--latest-resp-id-map (make-hash-table :test #'eq)
+  "Maps response type symbol to max resp id we’ve received for that type.
+Used to discard stale async responses. The id is the ‘float-time’
+captured when the request was sent.")
+
 (defvar collab--events nil
   "A list of events for display.
 Each event is a string.")
@@ -1377,17 +1382,29 @@ the full plist response). STATUS can be ‘:success’, ‘:error’, and
              `(:dir ,dir)
            `(:hostId ,host))))
     (if callback
-        ;; Async request.
-        (jsonrpc-async-request
-         conn (if dir 'ListFiles 'ListProjects)
-         request-object
-         :success-fn (lambda (resp)
-                       (funcall callback :success resp))
-         :error-fn (lambda (resp)
-                     (funcall callback :error resp))
-         :timeout-fn (lambda ()
-                       (funcall callback :timeout nil))
-         :timeout collab-connection-timeout)
+        ;; Async request. Stamp the request with ‘float-time’ and
+        ;; drop the response if a newer one for the same type has
+        ;; already been processed.
+        (let* ((type (if dir 'ListFiles 'ListProjects))
+               (req-id (float-time))
+               (fresh-p (lambda ()
+                          (let ((latest (gethash type collab--latest-resp-id-map 0)))
+                            (when (> req-id latest)
+                              (puthash type req-id collab--latest-resp-id-map)
+                              t)))))
+          (jsonrpc-async-request
+           conn type
+           request-object
+           :success-fn (lambda (resp)
+                         (when (funcall fresh-p)
+                           (funcall callback :success resp)))
+           :error-fn (lambda (resp)
+                       (when (funcall fresh-p)
+                         (funcall callback :error resp)))
+           :timeout-fn (lambda ()
+                         (when (funcall fresh-p)
+                           (funcall callback :timeout nil)))
+           :timeout collab-connection-timeout))
       ;; Sync request.
       (jsonrpc-request
        conn (if dir 'ListFiles 'ListProjects)
