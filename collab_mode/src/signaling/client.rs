@@ -12,7 +12,7 @@ use crate::signaling::{
     encode_trusted_header, EndpointId, ICECandidate, SignalingMessage, SignalingMsg,
     BIND_HEADER_ID, BIND_HEADER_IDENTITY, BIND_HEADER_SIGNATURE, BIND_HEADER_TRUSTED, SDP,
 };
-use crate::types::id_hash;
+use crate::types::{id_hash, id_short};
 use anyhow::{anyhow, Context};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
@@ -537,10 +537,13 @@ impl RealSignalingClient {
             SignalingMsg::SDP { sender, sdp, .. } => {
                 if let Some(sock_tx) = self.socks.get(sender) {
                     if sock_tx.sdp_tx.send(sdp.clone()).await.is_err() {
-                        tracing::debug!("Failed to send SDP to peer {}", sender);
+                        tracing::debug!("Failed to send SDP to peer {}", id_short(sender));
                     }
                 } else {
-                    tracing::debug!("Received SDP from unknown peer {}, dropping", sender);
+                    tracing::debug!(
+                        "Received SDP from unknown peer {}, dropping",
+                        id_short(sender)
+                    );
                 }
             }
             SignalingMsg::Candidate {
@@ -548,10 +551,13 @@ impl RealSignalingClient {
             } => {
                 if let Some(sock_tx) = self.socks.get(sender) {
                     if sock_tx.candidate_tx.send(candidate.clone()).await.is_err() {
-                        tracing::debug!("Failed to send candidate to peer {}", sender);
+                        tracing::debug!("Failed to send candidate to peer {}", id_short(sender));
                     }
                 } else {
-                    tracing::debug!("Received candidate from unknown peer {}, dropping", sender);
+                    tracing::debug!(
+                        "Received candidate from unknown peer {}, dropping",
+                        id_short(sender)
+                    );
                 }
             }
             // Heart-beat reply from the Cloudflare worker.

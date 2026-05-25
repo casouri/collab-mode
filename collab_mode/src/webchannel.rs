@@ -678,7 +678,10 @@ impl SctpRemote {
         {
             Ok(stream) => stream,
             Err(e) => {
-                tracing::warn!("Failed to open ping stream for {}: {e}", self.peer_id);
+                tracing::warn!(
+                    "Failed to open ping stream for {}: {e}",
+                    id_short(&self.peer_id)
+                );
                 let _ = self.cleanup().await;
                 let _ = self
                     .remote_msg_tx
@@ -750,14 +753,18 @@ impl SctpRemote {
                 res = ping_stream.read(&mut ping_buf) => {
                     match res {
                         Ok(0) => {
-                            tracing::warn!("Ping stream closed by {}", self.peer_id);
+                            tracing::warn!("Ping stream closed by {}", id_short(&self.peer_id));
                             return Exit::PingTimeout;
                         }
                         Ok(_) => {
                             self.last_ping_recv.store(now_secs(), Ordering::Relaxed);
                         }
                         Err(err) => {
-                            tracing::warn!("Ping stream read error for {}: {:?}", self.peer_id, err);
+                            tracing::warn!(
+                                "Ping stream read error for {}: {:?}",
+                                id_short(&self.peer_id),
+                                err
+                            );
                             return Exit::PingTimeout;
                         }
                     }
@@ -779,7 +786,7 @@ impl SctpRemote {
         if now.saturating_sub(last_recv) > PING_TIMEOUT_SECS {
             tracing::warn!(
                 "Ping timeout for {}: last recv {}s ago",
-                self.peer_id,
+                id_short(&self.peer_id),
                 now.saturating_sub(last_recv)
             );
             return Some(Exit::PingTimeout);
@@ -790,7 +797,10 @@ impl SctpRemote {
         }
 
         if let Err(e) = ping_stream.write(&bytes::Bytes::from_static(&[0u8])).await {
-            tracing::warn!("Failed to write ping byte to {}: {e}", self.peer_id);
+            tracing::warn!(
+                "Failed to write ping byte to {}: {e}",
+                id_short(&self.peer_id)
+            );
             return Some(Exit::OutgoingErr);
         }
         self.last_ping_sent = now;
@@ -989,7 +999,11 @@ impl SctpRemote {
             return;
         }
 
-        tracing::info!("New stream (#{}) from {}", stream_id, self.peer_id);
+        tracing::info!(
+            "New stream (#{}) from {}",
+            stream_id,
+            id_short(&self.peer_id)
+        );
         let tx = self.remote_msg_tx.clone();
         let peer = self.peer_id.clone();
         let last_ping_recv = self.last_ping_recv.clone();

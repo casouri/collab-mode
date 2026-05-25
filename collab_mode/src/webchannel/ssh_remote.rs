@@ -12,7 +12,7 @@
 
 use super::{Command, IoRemote, Message, ReaderWriter};
 use crate::message::Msg;
-use crate::types::ServerId;
+use crate::types::{id_short, ServerId};
 use tokio::sync::mpsc;
 
 pub(super) struct SshRemote {
@@ -55,7 +55,7 @@ impl SshRemote {
         } = self;
 
         if command.is_empty() {
-            tracing::warn!("SshRemote for {peer_id} got empty command");
+            tracing::warn!("SshRemote for {} got empty command", id_short(&peer_id));
             send_connection_broke(&remote_msg_tx, &peer_id).await;
             return;
         }
@@ -65,7 +65,10 @@ impl SshRemote {
         {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("openssh connect to {ssh_host} for {peer_id} failed: {e}");
+                tracing::warn!(
+                    "openssh connect to {ssh_host} for {} failed: {e}",
+                    id_short(&peer_id)
+                );
                 send_connection_broke(&remote_msg_tx, &peer_id).await;
                 return;
             }
@@ -85,8 +88,9 @@ impl SshRemote {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    "openssh spawn {} on {ssh_host} for {peer_id} failed: {e}",
-                    command[0]
+                    "openssh spawn {} on {ssh_host} for {} failed: {e}",
+                    command[0],
+                    id_short(&peer_id)
                 );
                 let _ = session.close().await;
                 send_connection_broke(&remote_msg_tx, &peer_id).await;
@@ -97,7 +101,10 @@ impl SshRemote {
         let (stdin, stdout) = match (child.stdin().take(), child.stdout().take()) {
             (Some(i), Some(o)) => (i, o),
             _ => {
-                tracing::warn!("openssh child missing stdin/stdout for {peer_id}");
+                tracing::warn!(
+                    "openssh child missing stdin/stdout for {}",
+                    id_short(&peer_id)
+                );
                 drop(child);
                 let _ = session.close().await;
                 send_connection_broke(&remote_msg_tx, &peer_id).await;

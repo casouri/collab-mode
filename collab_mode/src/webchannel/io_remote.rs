@@ -8,7 +8,7 @@
 
 use super::{frame_read, frame_write, Command, Message, ReaderWriter};
 use crate::message::Msg;
-use crate::types::ServerId;
+use crate::types::{id_short, ServerId};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
@@ -77,7 +77,7 @@ impl IoRemote {
                     Some(Command::Shutdown(tx)) => return Exit::Shutdown(tx),
                     Some(Command::Msg(msg)) => {
                         if let Err(e) = frame_write(&mut self.writer, &msg).await {
-                            tracing::warn!("IoRemote write to {} failed: {e}", self.peer_id);
+                            tracing::warn!("IoRemote write to {} failed: {e}", id_short(&self.peer_id));
                             return Exit::OutgoingErr;
                         }
                     }
@@ -90,7 +90,7 @@ impl IoRemote {
                         }
                     }
                     Err(e) => {
-                        tracing::info!("IoRemote inbound for {} ended: {e}", self.peer_id);
+                        tracing::info!("IoRemote inbound for {} ended: {e}", id_short(&self.peer_id));
                         return Exit::InboundClosed;
                     }
                 },

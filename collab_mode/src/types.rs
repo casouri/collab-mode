@@ -65,6 +65,29 @@ pub fn make_id(name: Option<&str>, cert_hash: &str) -> ServerId {
         _ => cert_hash.to_string(),
     }
 }
+
+/// Return a short, easy-to-read version of `id`: keep the name part
+/// and truncate the hash.
+pub fn id_short(id: &str) -> String {
+    match id_name(id) {
+        Some(name) => {
+            let cut = name.len() + 4;
+            if id.len() <= cut + 2 {
+                id.to_string()
+            } else {
+                format!("{}..{}", &id[..cut], &id[id.len() - 2..])
+            }
+        }
+        None => {
+            if id.len() <= 6 {
+                id.to_string()
+            } else {
+                format!("{}..{}", &id[..4], &id[id.len() - 2..])
+            }
+        }
+    }
+}
+
 /// A file in a directory that’s not yet a doc. The path is a relative
 /// path. We don’t want to use full path since some people might
 /// consider the full path sensitive?

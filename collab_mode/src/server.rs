@@ -1323,7 +1323,7 @@ impl Server {
         }
     }
 
-    #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
+    #[tracing::instrument(skip_all, fields(my_id = id_short(&self.host_id)))]
     async fn handle_editor_message(
         &mut self,
         msg: lsp_server::Message,
@@ -1630,7 +1630,7 @@ impl Server {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(my_id = self.host_id))]
+    #[tracing::instrument(skip_all, fields(my_id = id_short(&self.host_id)))]
     async fn handle_remote_message(
         &mut self,
         msg: webchannel::Message,
@@ -1986,9 +1986,17 @@ impl Server {
                 // Remove the remote host from the doc's subscriber list.
                 if let Some(doc) = self.docs.get_mut(&doc_id) {
                     if doc.subscribers.remove(&msg.host).is_some() {
-                        tracing::info!("Removed {} from subscribers of doc {}", msg.host, doc_id);
+                        tracing::info!(
+                            "Removed {} from subscribers of doc {}",
+                            id_short(&msg.host),
+                            doc_id
+                        );
                     } else {
-                        tracing::warn!("Host {} was not subscribed to doc {}", msg.host, doc_id);
+                        tracing::warn!(
+                            "Host {} was not subscribed to doc {}",
+                            id_short(&msg.host),
+                            doc_id
+                        );
                     }
                 } else {
                     tracing::warn!(
@@ -2035,7 +2043,11 @@ impl Server {
                 // Received from a client, broadcast to all subscribers
                 let res = self.broadcast_info(&next, info).await;
                 if let Err(err) = res {
-                    tracing::warn!("{} when handling InfoFromClient from {}", err, msg.host);
+                    tracing::warn!(
+                        "{} when handling InfoFromClient from {}",
+                        err,
+                        id_short(&msg.host)
+                    );
                 }
                 Ok(())
             }
@@ -2288,7 +2300,7 @@ impl Server {
             .await;
 
             if let Err(err) = res {
-                tracing::warn!("Failed to connect to {}: {}", envoy_id, err);
+                tracing::warn!("Failed to connect to {}: {}", id_short(&envoy_id), err);
                 let msg = webchannel::Message {
                     host: my_host_id,
                     body: Msg::FailedToConnect {
@@ -4499,7 +4511,11 @@ impl Server {
         {
             Ok(sock) => sock,
             Err(e) => {
-                tracing::warn!("Failed to create sock for peer {}: {}", peer_id, e);
+                tracing::warn!(
+                    "Failed to create sock for peer {}: {}",
+                    id_short(&peer_id),
+                    e
+                );
                 return;
             }
         };
@@ -4521,7 +4537,10 @@ impl Server {
                 .await
             {
                 Ok(()) => {
-                    tracing::info!("Successfully connected to peer {}", peer_id_clone);
+                    tracing::info!(
+                        "Successfully connected to peer {}",
+                        id_short(&peer_id_clone)
+                    );
                     // Send Hey to the peer; the existing handler at the
                     // other end fires `mark_connected`. We do this here
                     // (rather than inside the webchannel) so the SSH
@@ -4534,11 +4553,19 @@ impl Server {
                         },
                     };
                     if let Err(err) = webchannel_clone.send(&peer_id_clone, None, hey).await {
-                        tracing::warn!("Failed to send Hey to {}: {}", peer_id_clone, err);
+                        tracing::warn!(
+                            "Failed to send Hey to {}: {}",
+                            id_short(&peer_id_clone),
+                            err
+                        );
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("Failed to connect to peer {}: {}", peer_id_clone, err);
+                    tracing::warn!(
+                        "Failed to connect to peer {}: {}",
+                        id_short(&peer_id_clone),
+                        err
+                    );
                     let condition: Option<&WebChannelError> = err.downcast_ref();
                     match condition {
                         Some(WebChannelError::ConnectionExists(peer_id)) => {
@@ -4745,7 +4772,7 @@ async fn send_to_remote(
     req_id: Option<lsp_server::RequestId>,
     msg: Msg,
 ) {
-    tracing::info!("Send to {}: {:?}", host_id, &msg);
+    tracing::info!("Send to {}: {:?}", id_short(host_id), &msg);
     // We don’t let caller handle disconnect errors. Because
     // disconnect error is caught by the receiving end of each
     // connection, and it’ll send a ConnectionBroke message.
