@@ -209,6 +209,8 @@ pub struct SignalingState {
     pub status: SignalingStatus,
     pub trusted: HashSet<ServerId>,
     pub trust_sent_at: Option<u64>,
+    /// Stride used for the next reconnect attempt, in seconds.
+    pub retry_stride_secs: u64,
 }
 
 /// Status of a connection to a remote peer.
@@ -239,6 +241,8 @@ pub struct RemoteState {
     /// True once we have reached `Connected` for this peer at least once.
     /// Used on timeout to decide between `Failed` and `Disconnected`.
     pub ever_connected: bool,
+    /// Stride used for the next reconnect attempt, in seconds.
+    pub retry_stride_secs: u64,
 }
 
 /// Declarative connection state. In `Server.ideal_world` this records
@@ -253,17 +257,26 @@ pub struct WorldState {
     pub trusted: HashSet<ServerId>,
 }
 
+/// Initial reconnect stride and the cap, both in seconds. Stride
+/// doubles on each consecutive failure: 1, 2, 4, …, 60.
+const INITIAL_RETRY_STRIDE_SECS: u64 = 1;
+const MAX_RETRY_STRIDE_SECS: u64 = 60;
+
+fn next_stride(cur: u64) -> u64 {
+    cur.saturating_mul(2).min(MAX_RETRY_STRIDE_SECS)
+}
+
 impl WorldState {
     pub fn set_remote_connecting1(
         &mut self,
         peer: &ServerId,
         transport: webchannel::TransportConfig,
     ) {
-        let ever = self
+        let (ever, stride) = self
             .remotes
             .get(peer)
-            .map(|r| r.ever_connected)
-            .unwrap_or(false);
+            .map(|r| (r.ever_connected, r.retry_stride_secs))
+            .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS));
         self.remotes.insert(
             peer.clone(),
             RemoteState {
@@ -272,6 +285,7 @@ impl WorldState {
                     since: Instant::now(),
                 },
                 ever_connected: ever,
+                retry_stride_secs: stride,
             },
         );
     }
@@ -281,11 +295,11 @@ impl WorldState {
         peer: &ServerId,
         transport: webchannel::TransportConfig,
     ) {
-        let ever = self
+        let (ever, stride) = self
             .remotes
             .get(peer)
-            .map(|r| r.ever_connected)
-            .unwrap_or(false);
+            .map(|r| (r.ever_connected, r.retry_stride_secs))
+            .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS));
         self.remotes.insert(
             peer.clone(),
             RemoteState {
@@ -294,22 +308,24 @@ impl WorldState {
                     since: Instant::now(),
                 },
                 ever_connected: ever,
+                retry_stride_secs: stride,
             },
         );
     }
 
     pub fn set_remote_pending(&mut self, peer: &ServerId, transport: webchannel::TransportConfig) {
-        let ever = self
+        let (ever, stride) = self
             .remotes
             .get(peer)
-            .map(|r| r.ever_connected)
-            .unwrap_or(false);
+            .map(|r| (r.ever_connected, r.retry_stride_secs))
+            .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS));
         self.remotes.insert(
             peer.clone(),
             RemoteState {
                 transport,
                 status: RemoteStatus::Pending,
                 ever_connected: ever,
+                retry_stride_secs: stride,
             },
         );
     }
@@ -318,15 +334,18 @@ impl WorldState {
         if let Some(state) = self.remotes.get_mut(peer) {
             state.status = RemoteStatus::Connected;
             state.ever_connected = true;
+            state.retry_stride_secs = INITIAL_RETRY_STRIDE_SECS;
         }
     }
 
     pub fn mark_remote_disconnected(&mut self, peer: &ServerId) {
         if let Some(state) = self.remotes.get_mut(peer) {
+            let stride = state.retry_stride_secs;
             state.status = RemoteStatus::Disconnected {
-                next_retry_at: Instant::now(),
-                stride_secs: 1,
+                next_retry_at: Instant::now() + Duration::from_secs(stride),
+                stride_secs: stride,
             };
+            state.retry_stride_secs = next_stride(stride);
         }
     }
 
@@ -360,7 +379,10 @@ impl WorldState {
     pub fn mark_signaling_bound(&mut self, addr: &str) {
         self.signaling
             .entry(addr.to_string())
-            .and_modify(|s| s.status = SignalingStatus::Bound)
+            .and_modify(|s| {
+                s.status = SignalingStatus::Bound;
+                s.retry_stride_secs = INITIAL_RETRY_STRIDE_SECS;
+            })
             .or_insert_with(|| SignalingState {
                 status: SignalingStatus::Bound,
                 ..Default::default()
@@ -369,10 +391,16 @@ impl WorldState {
 
     pub fn mark_signaling_disconnected(&mut self, addr: &str) {
         if let Some(state) = self.signaling.get_mut(addr) {
-            state.status = SignalingStatus::Disconnected {
-                next_retry_at: Instant::now(),
-                stride_secs: 1,
+            let stride = if state.retry_stride_secs == 0 {
+                INITIAL_RETRY_STRIDE_SECS
+            } else {
+                state.retry_stride_secs
             };
+            state.status = SignalingStatus::Disconnected {
+                next_retry_at: Instant::now() + Duration::from_secs(stride),
+                stride_secs: stride,
+            };
+            state.retry_stride_secs = next_stride(stride);
         }
     }
 
@@ -790,6 +818,7 @@ impl Server {
                 transport: envoy_transport.clone(),
                 status: RemoteStatus::Connected,
                 ever_connected: false,
+                retry_stride_secs: INITIAL_RETRY_STRIDE_SECS,
             },
         );
         self.current_world
@@ -1550,6 +1579,7 @@ impl Server {
                         transport: params.transport_config.clone(),
                         status: RemoteStatus::Connected,
                         ever_connected: false,
+                        retry_stride_secs: INITIAL_RETRY_STRIDE_SECS,
                     },
                 );
                 // Reset a Failed entry to Pending so fix_world retries.
@@ -4441,6 +4471,7 @@ impl Server {
                 transport: sctp_transport.clone(),
                 status: RemoteStatus::Connected,
                 ever_connected: true,
+                retry_stride_secs: INITIAL_RETRY_STRIDE_SECS,
             },
         );
         self.current_world
