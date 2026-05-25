@@ -44,7 +44,7 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
 const SHUTDOWN_TIMEOUT: u64 = 10;
@@ -459,6 +459,8 @@ pub struct Server {
     /// eg. the temp envoy cert generated during outgoing SSH connect.
     /// Not user-declared, so does not belong in `WorldState.trusted`.
     pub local_trusted_hosts: HashSet<ServerId>,
+    /// Signaled when we need to run fix_world.
+    fix_world_notify: Arc<Notify>,
 }
 
 // *** Impl Doc
@@ -755,6 +757,7 @@ impl Server {
             ideal_world,
             current_world: WorldState::default(),
             local_trusted_hosts: HashSet::new(),
+            fix_world_notify: Arc::new(Notify::new()),
         };
         Ok(server)
     }
@@ -867,6 +870,8 @@ impl Server {
         // Skip the immediate first tick; we want intervals, not edge-trigger on start.
         fix_world_ticker.tick().await;
 
+        let fix_world_notify = self.fix_world_notify.clone();
+
         loop {
             tokio::select! {
                 // Shutdown signal, can be editor disconnect, SIGINT,
@@ -885,16 +890,12 @@ impl Server {
                 },
                 // Handle messages from remote peers and self.
                 Some(web_msg) = dual_rx.recv() => {
-                    if matches!(&web_msg.body, Msg::FixWorld) {
-                        self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel).await;
-                    } else {
-                        let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
-                        // Normally the handler shouldn't return an error.
-                        // Most errors ar handled by sending error
-                        // response to editor/remote.
-                        if let Err(err) = res {
-                            tracing::warn!("Failed to handle remote message: {}", err);
-                        }
+                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                    // Normally the handler shouldn't return an error.
+                    // Most errors ar handled by sending error
+                    // response to editor/remote.
+                    if let Err(err) = res {
+                        tracing::warn!("Failed to handle remote message: {}", err);
                     }
                 },
                 // Handle messages from signaling clients.
@@ -921,11 +922,15 @@ impl Server {
                                 }),
                             )
                             .await;
-                            self.fix_world_next(&webchannel).await;
+                            self.fix_world_next();
                         }
                     }
                 },
-                // Declarative world reconciliation tick.
+                // Run fix_world to reconnect, etc.
+                _ = fix_world_notify.notified() => {
+                    self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel).await;
+                }
+                // Trigger fix_world every 1s.
                 _ = fix_world_ticker.tick() => {
                     self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel).await;
                 }
@@ -1039,16 +1044,13 @@ impl Server {
                 .any(|id| id_hash(id) == cert_hash)
     }
 
-    /// Queue a `Msg::FixWorld` self-message so the main loop runs
-    /// `fix_world` on its next iteration. Use after writing to
-    /// `current_world` so reconciliation happens promptly instead of
-    /// waiting for the 1s ticker.
-    async fn fix_world_next(&self, webchannel: &WebChannel) {
-        let _ = webchannel.send(&self.host_id, None, Msg::FixWorld).await;
+    /// Ask the main loop to run `fix_world` on its next iteration.
+    fn fix_world_next(&self) {
+        self.fix_world_notify.notify_one();
     }
 
     /// Reconcile `current_world` toward `ideal_world`. Idempotent.
-    /// Runs every 1s and on `Msg::FixWorld` self-messages.
+    /// Runs every 1s and on `fix_world_notify` pokes.
     async fn fix_world(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
@@ -1598,7 +1600,7 @@ impl Server {
                     )
                     .await;
                 }
-                self.fix_world_next(next.webchannel).await;
+                self.fix_world_next();
             }
             "SendInfo" => {
                 let params: SendInfoParams = serde_json::from_value(notif.params)?;
@@ -1620,7 +1622,7 @@ impl Server {
                     }),
                 )
                 .await;
-                self.fix_world_next(next.webchannel).await;
+                self.fix_world_next();
             }
             _ => {
                 tracing::warn!("Unknown notification method: {}", notif.method);
@@ -1640,11 +1642,6 @@ impl Server {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
         let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
         match msg.body {
-            Msg::FixWorld => {
-                // Dispatched at the top level in `run()` so we have
-                // access to signaling_channel; should not reach here.
-                Ok(())
-            }
             Msg::IceProgress {
                 peer: remote_hostid,
                 message: progress,
@@ -1682,7 +1679,7 @@ impl Server {
                     .unwrap_or(false);
                 if ever {
                     self.current_world.mark_remote_disconnected(&host_id);
-                    self.fix_world_next(next.webchannel).await;
+                    self.fix_world_next();
                 } else {
                     self.current_world
                         .mark_remote_failed(&host_id, "broke before reaching Connected".into());
@@ -2107,7 +2104,7 @@ impl Server {
                 let host = msg.host;
                 self.current_world.remove_remote(&host);
                 next.webchannel.disconnect(&host);
-                self.fix_world_next(next.webchannel).await;
+                self.fix_world_next();
                 next.send_notif(
                     NotificationCode::RemoteLeft,
                     HostAndMessageNote {
@@ -4400,10 +4397,7 @@ impl Server {
         tracing::info!("Successfully bound to signaling server {}", signaling_addr);
         // fix_world picks up any Pending remotes for this signaling
         // server on the next tick.
-        let _ = next
-            .webchannel
-            .send(&self.host_id, None, Msg::FixWorld)
-            .await;
+        self.fix_world_next();
 
         // Notify editor that we’re accepting.
         next.send_notif(

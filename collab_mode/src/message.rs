@@ -563,9 +563,6 @@ pub enum Msg {
     },
     /// Close the connection and don’t try to reconnect to me.
     Bye,
-    /// Self-message asking the main loop to run `fix_world` now,
-    /// without waiting for the next 1s tick. Never sent over the wire.
-    FixWorld,
 
     /// Sent from the host to an envoy as the first message on the SSH
     /// stdio stream. Sets the envoy's id, the host's id, certs for
