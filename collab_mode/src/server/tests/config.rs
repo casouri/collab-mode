@@ -132,17 +132,20 @@ async fn test_server_run_config_projects_expansion() {
         crate::signaling::client::TestFactoryState::default(),
     ));
     let host_id_for_factory = host_id.clone();
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown_for_factory = shutdown.clone();
     let server_task = tokio::spawn(async move {
         let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-            test_web_factory.build_channel(host_id_for_factory, msg_tx, self_tx)
-        });
-        let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_tx| {
-            crate::signaling::client::SignalingChannel::new_for_test(
-                sig_tx,
-                test_signaling_state,
+            test_web_factory.build_channel(
+                host_id_for_factory,
+                msg_tx,
+                self_tx,
+                shutdown_for_factory,
             )
         });
-        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_tx| {
+            crate::signaling::client::SignalingChannel::new_for_test(sig_tx, test_signaling_state)
+        });
         server
             .run(
                 server_to_editor_tx,

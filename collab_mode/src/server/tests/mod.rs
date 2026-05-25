@@ -60,9 +60,14 @@ impl TestChannelFactory {
         &self,
         host_id: ServerId,
         msg_tx: mpsc::Sender<webchannel::Message>,
-        self_tx: mpsc::UnboundedSender<webchannel::Message>,
+        self_tx: mpsc::Sender<webchannel::Message>,
     ) -> WebChannel {
-        self.factory.build_channel(host_id, msg_tx, self_tx)
+        self.factory.build_channel(
+            host_id,
+            msg_tx,
+            self_tx,
+            Arc::new(tokio::sync::Notify::new()),
+        )
     }
 }
 

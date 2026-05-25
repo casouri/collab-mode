@@ -37,12 +37,14 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
     // refactor will restore it). This factory just hands back a vanilla
     // WebChannel so the file compiles.
     let host_id_for_factory = host_id.to_string();
-    let web_factory: WebChannelFactory =
-        Box::new(move |msg_tx, self_tx| WebChannel::new(host_id_for_factory, msg_tx, self_tx));
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown_for_factory = shutdown.clone();
+    let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
+        WebChannel::new(host_id_for_factory, msg_tx, self_tx, shutdown_for_factory)
+    });
     let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
 
     let server_handle = tokio::spawn(async move {
-        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
         if let Err(e) = host_server
             .run(
                 server_to_editor_tx,

@@ -112,11 +112,17 @@ fn main() -> anyhow::Result<()> {
 
             // Run server.
             let shutdown_for_server = shutdown.clone();
+            let shutdown_for_factory = shutdown.clone();
             runtime.block_on(async move {
                 use collab_mode::{server::*, signaling, webchannel};
                 let host_id_for_factory = host_id.clone();
                 let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-                    webchannel::WebChannel::new(host_id_for_factory, msg_tx, self_tx)
+                    webchannel::WebChannel::new(
+                        host_id_for_factory,
+                        msg_tx,
+                        self_tx,
+                        shutdown_for_factory,
+                    )
                 });
                 let sig_factory: SignalingChannelFactory =
                     Box::new(move |sig_tx| signaling::client::SignalingChannel::new(sig_tx));
@@ -228,9 +234,11 @@ fn run_envoy() -> anyhow::Result<()> {
         // actor-model WebChannel doesn’t implement yet. The IoRemote
         // refactor will restore this; for now we hand back a vanilla
         // WebChannel so the binary builds.
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let shutdown_for_factory = shutdown.clone();
         let envoy_id_for_factory = envoy_id.clone();
         let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
-            webchannel::WebChannel::new(envoy_id_for_factory, msg_tx, self_tx)
+            webchannel::WebChannel::new(envoy_id_for_factory, msg_tx, self_tx, shutdown_for_factory)
         });
         let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
 
@@ -239,7 +247,6 @@ fn run_envoy() -> anyhow::Result<()> {
 
         // Already inside the runtime via block_on, so spawn the
         // signal task directly.
-        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
         let shutdown_for_signal = shutdown.clone();
         tokio::spawn(async move {
             collab_mode::server::listen_for_signal(shutdown_for_signal).await;

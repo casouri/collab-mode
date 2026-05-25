@@ -158,7 +158,12 @@ mod tests {
     #[ignore]
     async fn openssh_localhost_roundtrip() {
         let (mut dual, tx, self_tx) = DualReceiver::new();
-        let chan = WebChannel::new("me".into(), tx, self_tx);
+        let chan = WebChannel::new(
+            "me".into(),
+            tx,
+            self_tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        );
 
         chan.connect(
             "peer".into(),

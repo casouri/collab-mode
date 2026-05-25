@@ -135,23 +135,23 @@ pub struct Message {
 }
 
 /// A receiver that combines a bounded channel for remote messages and
-/// an unbounded channel for self-messages. If we don’t use a separate
-/// loopback channel, sending a message to ourselves will block the
-/// main loop in server.rs. I don’t want to give remote messages a
-/// unbounded channel either. So two channels it is. Technically the
-/// loopback channel doesn’t need to be unbounded if we try_send to
-/// self, but in most cases unbounded channel should be fine.
+/// a separate bounded channel for self-messages. If we don’t use a
+/// separate loopback channel, sending a message to ourselves will
+/// block the main loop in server.rs. The loopback channel is bounded
+/// (capacity 1000) and the sender uses `try_send`, so sending to self
+/// never blocks; overflow should never happen, if it does happen, we
+/// just shutdown.
 pub struct DualReceiver {
     remote_rx: mpsc::Receiver<Message>,
-    loopback_rx: mpsc::UnboundedReceiver<Message>,
+    loopback_rx: mpsc::Receiver<Message>,
 }
 
 impl DualReceiver {
     /// Create a new dual receiver. Returns the dual receiver, and the
     /// remote and self-message tx.
-    pub fn new() -> (Self, mpsc::Sender<Message>, mpsc::UnboundedSender<Message>) {
+    pub fn new() -> (Self, mpsc::Sender<Message>, mpsc::Sender<Message>) {
         let (remote_tx, remote_rx) = mpsc::channel::<Message>(1);
-        let (loopback_tx, loopback_rx) = mpsc::unbounded_channel::<Message>();
+        let (loopback_tx, loopback_rx) = mpsc::channel::<Message>(1000);
         (
             Self {
                 remote_rx,
@@ -206,9 +206,14 @@ pub struct WebChannel {
     /// peer messages, `ConnectionBroke`, `SerializationErr`, and
     /// `IceProgress` onto this.
     remote_msg_tx: mpsc::Sender<Message>,
-    /// Side channel for self-addressed messages so they don’t fight the
-    /// bounded `remote_msg_tx` for capacity.
-    loopback_tx: mpsc::UnboundedSender<Message>,
+    /// Side channel for self-addressed messages so sending messages
+    /// so sending self-messages never blocks.
+    loopback_tx: mpsc::Sender<Message>,
+    /// Server shutdown handle. Only used for gracefully panicing when
+    /// the loopback channel is full. Semantically it’s an unbounded
+    /// channel but I don’t want to actually use an unbounded channel,
+    /// so we just shutdown if it ever gets full (shouldn’t happen).
+    shutdown: Arc<tokio::sync::Notify>,
     /// One entry per peer (live or recently-dead).
     remote_map: Arc<Mutex<HashMap<ServerId, RemoteHandle>>>,
     /// Populated only when this WebChannel is wired into a test
@@ -224,12 +229,14 @@ impl WebChannel {
     pub fn new(
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
-        loopback_tx: mpsc::UnboundedSender<Message>,
+        loopback_tx: mpsc::Sender<Message>,
+        shutdown: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
             my_hostid,
             remote_msg_tx,
             loopback_tx,
+            shutdown,
             remote_map: Arc::new(Mutex::new(HashMap::new())),
             test_factory_state: None,
             test_travel_time: TravelTime::Instant,
@@ -242,7 +249,8 @@ impl WebChannel {
     pub fn new_for_test(
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
-        loopback_tx: mpsc::UnboundedSender<Message>,
+        loopback_tx: mpsc::Sender<Message>,
+        shutdown: Arc<tokio::sync::Notify>,
         factory_state: Arc<Mutex<FactoryState>>,
         travel_time: TravelTime,
     ) -> Self {
@@ -258,6 +266,7 @@ impl WebChannel {
             my_hostid,
             remote_msg_tx,
             loopback_tx,
+            shutdown,
             remote_map: Arc::new(Mutex::new(HashMap::new())),
             test_factory_state: Some(factory_state),
             test_travel_time: travel_time,
@@ -496,9 +505,15 @@ impl WebChannel {
         };
 
         if recipient == &self.my_hostid {
-            // Send to self via the unbounded channel.
-            if let Err(err) = self.loopback_tx.send(message) {
-                tracing::error!("Failed to send message to ourselves: {:?}", err);
+            // Send to self through the loopback channel. The loopback
+            // channel should never be full, if it is, panic and
+            // shutdown.
+            if let Err(err) = self.loopback_tx.try_send(message) {
+                tracing::error!("Fatal: loopback try_send failed: {:?}; shutting down", err);
+                self.shutdown.notify_waiters();
+                return Err(anyhow!(
+                    "Loopback channel is full which shouldn’t happen; shutting down"
+                ));
             }
             return Ok(());
         }
@@ -1197,12 +1212,14 @@ impl TestFactory {
         &self,
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
-        loopback_tx: mpsc::UnboundedSender<Message>,
+        loopback_tx: mpsc::Sender<Message>,
+        shutdown: Arc<tokio::sync::Notify>,
     ) -> WebChannel {
         WebChannel::new_for_test(
             my_hostid,
             remote_msg_tx,
             loopback_tx,
+            shutdown,
             self.state.clone(),
             self.travel_time.clone(),
         )
@@ -1301,8 +1318,10 @@ mod tests {
         let id_b = create_test_id("b");
         let (dual_a, tx_a, self_tx_a) = DualReceiver::new();
         let (dual_b, tx_b, self_tx_b) = DualReceiver::new();
-        let chan_a = factory.build_channel(id_a, tx_a, self_tx_a);
-        let chan_b = factory.build_channel(id_b, tx_b, self_tx_b);
+        let chan_a =
+            factory.build_channel(id_a, tx_a, self_tx_a, Arc::new(tokio::sync::Notify::new()));
+        let chan_b =
+            factory.build_channel(id_b, tx_b, self_tx_b, Arc::new(tokio::sync::Notify::new()));
         (chan_a, dual_a, chan_b, dual_b)
     }
 
@@ -1364,9 +1383,24 @@ mod tests {
         let (mut dual_recv1, tx_recv1, self_tx_recv1) = DualReceiver::new();
         let (mut dual_recv2, tx_recv2, self_tx_recv2) = DualReceiver::new();
 
-        let chan_sender = factory.build_channel(id_sender.clone(), tx_sender, self_tx_sender);
-        let _chan_recv1 = factory.build_channel(id_recv1.clone(), tx_recv1, self_tx_recv1);
-        let _chan_recv2 = factory.build_channel(id_recv2.clone(), tx_recv2, self_tx_recv2);
+        let chan_sender = factory.build_channel(
+            id_sender.clone(),
+            tx_sender,
+            self_tx_sender,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let _chan_recv1 = factory.build_channel(
+            id_recv1.clone(),
+            tx_recv1,
+            self_tx_recv1,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let _chan_recv2 = factory.build_channel(
+            id_recv2.clone(),
+            tx_recv2,
+            self_tx_recv2,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         // Sender connects to both receivers (broadcast iterates the
         // sender's remote_map — receivers don't need to connect back).

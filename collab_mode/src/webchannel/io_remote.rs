@@ -126,8 +126,18 @@ mod tests {
         let (a, b) = tokio::io::duplex(8192);
         let (dual_a, tx_a, self_tx_a) = DualReceiver::new();
         let (dual_b, tx_b, self_tx_b) = DualReceiver::new();
-        let chan_a = WebChannel::new("a".into(), tx_a, self_tx_a);
-        let chan_b = WebChannel::new("b".into(), tx_b, self_tx_b);
+        let chan_a = WebChannel::new(
+            "a".into(),
+            tx_a,
+            self_tx_a,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let chan_b = WebChannel::new(
+            "b".into(),
+            tx_b,
+            self_tx_b,
+            Arc::new(tokio::sync::Notify::new()),
+        );
         chan_a
             .connect(
                 "b".into(),
@@ -175,7 +185,12 @@ mod tests {
     #[tokio::test]
     async fn send_to_unconnected_fails() {
         let (_dual_a, tx_a, self_tx_a) = DualReceiver::new();
-        let chan_a = WebChannel::new("a".into(), tx_a, self_tx_a);
+        let chan_a = WebChannel::new(
+            "a".into(),
+            tx_a,
+            self_tx_a,
+            Arc::new(tokio::sync::Notify::new()),
+        );
         let res = chan_a.send(&"b".into(), None, hey()).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Not connected"));

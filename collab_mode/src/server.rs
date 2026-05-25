@@ -60,10 +60,7 @@ pub enum ServerError {
 /// passes tokio message channels (`msg_tx`, `self_tx`) and the
 /// closure returns a constructed [`WebChannel`].
 pub type WebChannelFactory = Box<
-    dyn FnOnce(
-            mpsc::Sender<webchannel::Message>,
-            mpsc::UnboundedSender<webchannel::Message>,
-        ) -> WebChannel
+    dyn FnOnce(mpsc::Sender<webchannel::Message>, mpsc::Sender<webchannel::Message>) -> WebChannel
         + Send,
 >;
 

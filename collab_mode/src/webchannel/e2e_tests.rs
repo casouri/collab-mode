@@ -317,8 +317,8 @@ mod e2e_tests {
         // Create channels for both sides
         let (tx1, mut rx1) = mpsc::channel::<Message>(100);
         let (tx2, _rx2) = mpsc::channel::<Message>(100);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
+        let (self_tx1, _self_rx1) = mpsc::channel::<Message>(100);
+        let (self_tx2, _self_rx2) = mpsc::channel::<Message>(100);
 
         // Create key/cert pairs and matching IDs.
         let key_cert1 = create_test_key_cert("host1");
@@ -328,8 +328,18 @@ mod e2e_tests {
         tracing::info!("Created test IDs: {} and {}", id1, id2);
 
         // Create WebChannels
-        let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            self_tx1,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            self_tx2,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         // Establish bidirectional connection using helper
         tracing::info!("Establishing connection between {} and {}", id1, id2);
@@ -378,16 +388,26 @@ mod e2e_tests {
 
         let (tx1, mut rx1) = mpsc::channel::<Message>(100);
         let (tx2, _rx2) = mpsc::channel::<Message>(100);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
+        let (self_tx1, _self_rx1) = mpsc::channel::<Message>(100);
+        let (self_tx2, _self_rx2) = mpsc::channel::<Message>(100);
 
         let key_cert1 = create_test_key_cert("host1");
         let key_cert2 = create_test_key_cert("host2");
         let id1 = create_test_id("host1", &key_cert1);
         let id2 = create_test_id("host2", &key_cert2);
 
-        let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            self_tx1,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            self_tx2,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         establish_connection_pair(
             &channel1,
@@ -449,10 +469,10 @@ mod e2e_tests {
         let (tx_b, _rx_b) = mpsc::channel::<Message>(100);
         let (tx_c, mut rx_c) = mpsc::channel::<Message>(100);
         let (tx_d, _rx_d) = mpsc::channel::<Message>(100);
-        let (self_tx_a, _self_rx_a) = mpsc::unbounded_channel::<Message>();
-        let (self_tx_b, _self_rx_b) = mpsc::unbounded_channel::<Message>();
-        let (self_tx_c, _self_rx_c) = mpsc::unbounded_channel::<Message>();
-        let (self_tx_d, _self_rx_d) = mpsc::unbounded_channel::<Message>();
+        let (self_tx_a, _self_rx_a) = mpsc::channel::<Message>(100);
+        let (self_tx_b, _self_rx_b) = mpsc::channel::<Message>(100);
+        let (self_tx_c, _self_rx_c) = mpsc::channel::<Message>(100);
+        let (self_tx_d, _self_rx_d) = mpsc::channel::<Message>(100);
 
         let key_cert_a = create_test_key_cert("host_a");
         let key_cert_b = create_test_key_cert("host_b");
@@ -463,10 +483,30 @@ mod e2e_tests {
         let id_c = create_test_id("host_c", &key_cert_c);
         let id_d = create_test_id("host_d", &key_cert_d);
 
-        let channel_a = WebChannel::new(id_a.clone(), tx_a, self_tx_a);
-        let channel_b = WebChannel::new(id_b.clone(), tx_b, self_tx_b);
-        let channel_c = WebChannel::new(id_c.clone(), tx_c, self_tx_c);
-        let channel_d = WebChannel::new(id_d.clone(), tx_d, self_tx_d);
+        let channel_a = WebChannel::new(
+            id_a.clone(),
+            tx_a,
+            self_tx_a,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel_b = WebChannel::new(
+            id_b.clone(),
+            tx_b,
+            self_tx_b,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel_c = WebChannel::new(
+            id_c.clone(),
+            tx_c,
+            self_tx_c,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel_d = WebChannel::new(
+            id_d.clone(),
+            tx_d,
+            self_tx_d,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         // Establish A ↔ B connection
         tracing::info!("Establishing A ↔ B connection");
@@ -549,16 +589,26 @@ mod e2e_tests {
 
         let (tx1, _rx1) = mpsc::channel::<Message>(100);
         let (tx2, _rx2) = mpsc::channel::<Message>(100);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
+        let (self_tx1, _self_rx1) = mpsc::channel::<Message>(100);
+        let (self_tx2, _self_rx2) = mpsc::channel::<Message>(100);
 
         let key_cert1 = create_test_key_cert("host1");
         let key_cert2 = create_test_key_cert("host2");
         let id1 = create_test_id("host1", &key_cert1);
         let id2 = create_test_id("host2", &key_cert2);
 
-        let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            self_tx1,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            self_tx2,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         // Get expected certificate hashes before connection
         let expected_cert1 = key_cert1.cert_der_hash();
@@ -600,16 +650,26 @@ mod e2e_tests {
 
         let (tx1, mut rx1) = mpsc::channel::<Message>(1000);
         let (tx2, _rx2) = mpsc::channel::<Message>(1000);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
+        let (self_tx1, _self_rx1) = mpsc::channel::<Message>(100);
+        let (self_tx2, _self_rx2) = mpsc::channel::<Message>(100);
 
         let key_cert1 = create_test_key_cert("host1");
         let key_cert2 = create_test_key_cert("host2");
         let id1 = create_test_id("host1", &key_cert1);
         let id2 = create_test_id("host2", &key_cert2);
 
-        let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            self_tx1,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            self_tx2,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         establish_connection_pair(
             &channel1,
@@ -675,16 +735,26 @@ mod e2e_tests {
 
         let (tx1, mut rx1) = mpsc::channel::<Message>(100);
         let (tx2, _rx2) = mpsc::channel::<Message>(100);
-        let (self_tx1, _self_rx1) = mpsc::unbounded_channel::<Message>();
-        let (self_tx2, _self_rx2) = mpsc::unbounded_channel::<Message>();
+        let (self_tx1, _self_rx1) = mpsc::channel::<Message>(100);
+        let (self_tx2, _self_rx2) = mpsc::channel::<Message>(100);
 
         let key_cert1 = create_test_key_cert("host1");
         let key_cert2 = create_test_key_cert("host2");
         let id1 = create_test_id("host1", &key_cert1);
         let id2 = create_test_id("host2", &key_cert2);
 
-        let channel1 = WebChannel::new(id1.clone(), tx1, self_tx1);
-        let channel2 = WebChannel::new(id2.clone(), tx2, self_tx2);
+        let channel1 = WebChannel::new(
+            id1.clone(),
+            tx1,
+            self_tx1,
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let channel2 = WebChannel::new(
+            id2.clone(),
+            tx2,
+            self_tx2,
+            Arc::new(tokio::sync::Notify::new()),
+        );
 
         establish_connection_pair(
             &channel1,
