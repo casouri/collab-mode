@@ -383,6 +383,10 @@ pub struct ConnectionStateEntry {
     pub host_id: ServerId,
     pub state: server::ConnectionState,
     pub transport: TransportConfig,
+    /// Seconds until the server will next attempt to reconnect. Only
+    /// set when `state` is `Disconnected`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

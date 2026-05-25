@@ -3512,6 +3512,7 @@ impl Server {
     async fn handle_connection_state_from_editor<'a>(&self, next: &Next<'a>) -> () {
         // Collect current remotes for the wire response.
         let mut connections = Vec::new();
+        let now = Instant::now();
         for (host_id, remote) in &self.current_world.remotes {
             let state = match &remote.status {
                 RemoteStatus::Pending => ConnectionState::Pending,
@@ -3525,10 +3526,17 @@ impl Server {
                 RemoteStatus::Disconnected { .. } => ConnectionState::Disconnected,
                 RemoteStatus::Failed { .. } => ConnectionState::FailedToConnect,
             };
+            let next_retry_in_secs =
+                if let RemoteStatus::Disconnected { next_retry_at, .. } = &remote.status {
+                    Some(next_retry_at.saturating_duration_since(now).as_secs())
+                } else {
+                    None
+                };
             connections.push(message::ConnectionStateEntry {
                 host_id: host_id.clone(),
                 state,
                 transport: remote.transport.clone(),
+                next_retry_in_secs,
             });
         }
 

@@ -331,6 +331,17 @@ Return nil if no info for HOST-ID is found."
           (plist-get entry :state)
         nil))))
 
+(defun collab--host-retry-secs (host-id connection-state)
+  "Return seconds until next reconnect attempt for HOST-ID, or nil.
+
+Only set when the host is in the “Disconnected” state. See
+‘collab--connection-state-req’."
+  (unless (equal host-id collab--my-host-id)
+    (let ((entry (seq-find (lambda (entry)
+                             (equal (plist-get entry :hostId) host-id))
+                           connection-state)))
+      (plist-get entry :nextRetryInSecs))))
+
 ;;; Icons
 
 (defvar collab--load-directory
@@ -1421,8 +1432,8 @@ Returns a plist
      :live LIVE-FILES
      :connected CONNECTED-FILES)
 
-CONNECTIONS is a vector of (:hostId HOST-ID :state CONNECTION-STATE),
-CONNECTION-STATE can be:
+CONNECTIONS is a vector of (:hostId HOST-ID :state CONNECTION-STATE
+:nextRetryInSecs SECS), CONNECTION-STATE can be:
 
   - “Connected”: Connected and well.
   - “Connecting”: Trying to (re)connect.
@@ -1430,6 +1441,9 @@ CONNECTION-STATE can be:
                     Server will try to reconnect.
   - “FailedToConnect”: Connection was never established.
                        Server doesn’t try to reconnect.
+
+:nextRetryInSecs is only present when CONNECTION-STATE is
+“Disconnected” and gives the seconds until the next reconnect attempt.
 
 ACCEPTING is a vector of entries, each (:addr ADDR), one per
 signaling server we have successfully bound to.
@@ -1851,7 +1865,7 @@ each file with it."
                     collab-filename ,filename
                     collab-directory-p ,directoryp))))
 
-(defun collab--insert-host-1 (host resp status &optional error)
+(defun collab--insert-host-1 (host resp status &optional error retry-secs)
   "Insert HOST, its STATUS, and its files in RESP.
 
 STATUS can be “Connected”, “Disconnected”, “Connecting”,
@@ -1861,7 +1875,10 @@ RESP can be the response object of ListFiles request or nil.
 Insert (empty) if RESP is nil; insert ... if STATUS is not ‘up’.
 
 If ERROR (string) is non-nil, also insert the error. ERROR
-shouldn’t end with a newline."
+shouldn’t end with a newline.
+
+If RETRY-SECS is non-nil and STATUS is “Disconnected”, also show
+the seconds until the next reconnect attempt."
   (let* ((beg (point))
          (files (seq-map #'identity (plist-get resp :files))))
     ;; 1. Insert host line.
@@ -1875,7 +1892,12 @@ shouldn’t end with a newline."
       (insert (pcase status
                 ("Connecting" (propertize " CONNECTING" 'face 'shadow))
                 ("Connected" (propertize " UP" 'face 'success))
-                ("Disconnected" (propertize " DOWN" 'face 'error))
+                ("Disconnected"
+                 (propertize
+                  (if retry-secs
+                      (format " DOWN (retry in %ds)" retry-secs)
+                    " DOWN")
+                  'face 'error))
                 ("FailedToConnect" (propertize " DOWN" 'face 'error))
                 (_ ""))))
     (insert (propertize "\n" 'line-spacing 0.4))
@@ -2031,11 +2053,13 @@ Also insert ‘collab--current-message’ if it’s non-nil."
     (dolist (host hosts)
       (if (not connected)
           (collab--insert-host-1 host nil nil)
-        (let ((list-files-resp (gethash (list 'ListFiles host nil)
-                                        collab--cached-responses))
-              (state (collab--host-state
-                      host (plist-get conn-state-data :connections))))
-          (collab--insert-host-1 host (plist-get list-files-resp :data) state)))
+        (let* ((entries (plist-get conn-state-data :connections))
+               (list-files-resp (gethash (list 'ListFiles host nil)
+                                         collab--cached-responses))
+               (state (collab--host-state host entries))
+               (retry-secs (collab--host-retry-secs host entries)))
+          (collab--insert-host-1
+           host (plist-get list-files-resp :data) state nil retry-secs)))
       (insert "\n"))
     (insert "\n")
 
