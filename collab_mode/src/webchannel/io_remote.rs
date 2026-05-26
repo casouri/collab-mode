@@ -172,8 +172,6 @@ mod tests {
     #[tokio::test]
     async fn eof_emits_connection_broke() {
         let (_chan_a, mut dual_a, chan_b, _dual_b) = pair().await;
-        // Shutdown on B drives its IoRemote to exit cleanly; dropping
-        // its writer half closes the duplex; A’s frame_read hits EOF.
         chan_b.shutdown().await.unwrap();
         let msg = timeout(Duration::from_secs(2), dual_a.recv())
             .await

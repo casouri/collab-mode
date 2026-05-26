@@ -1189,7 +1189,7 @@ impl Server {
         self.fix_world_timeouts(editor_tx, webchannel).await;
     }
 
-    /// Remote pass: drive `current_world.remotes` toward `ideal_world.remotes`.
+    /// Remove pass: handle reconnect/etc for remotes.
     async fn fix_world_remotes(
         &mut self,
         editor_tx: &mpsc::Sender<lsp_server::Message>,

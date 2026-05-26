@@ -69,6 +69,17 @@ impl TestChannelFactory {
             Arc::new(tokio::sync::Notify::new()),
         )
     }
+
+    /// Synthesize a transport-layer message into `host`’s inbox. Test
+    /// escape hatch for events the in-process transport doesn’t generate
+    /// on its own (e.g. `ConnectionBroke`).
+    pub async fn inject_message(
+        &self,
+        host: &ServerId,
+        msg: webchannel::Message,
+    ) -> anyhow::Result<()> {
+        self.factory.inject_message(host, msg).await
+    }
 }
 
 fn get_random_port() -> u16 {

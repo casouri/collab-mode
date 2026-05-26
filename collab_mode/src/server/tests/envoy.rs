@@ -32,10 +32,6 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
 
     let (mut mock_editor, server_to_editor_tx, editor_to_server_rx) = MockEditor::new();
 
-    // NOTE: envoy tests are `#[ignore]`d — they need Transport::Ssh,
-    // which the actor-model WebChannel doesn’t handle yet (the SshRemote
-    // refactor will restore it). This factory just hands back a vanilla
-    // WebChannel so the file compiles.
     let host_id_for_factory = host_id.to_string();
     let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
     let shutdown_for_factory = shutdown.clone();
@@ -131,7 +127,7 @@ async fn teardown(harness: EnvoyHarness) {
 #[tokio::test]
 #[ignore]
 async fn envoy_e2e_ssh_localhost() {
-    let harness = connect_envoy_via_ssh("envoy-test-host").await;
+    let harness = connect_envoy_via_ssh("envoy-test-host::test-cert-hash").await;
     tracing::info!("Envoy connected — handshake completed");
     teardown(harness).await;
 }
@@ -144,7 +140,7 @@ async fn envoy_e2e_ssh_localhost() {
 #[tokio::test]
 #[ignore]
 async fn envoy_e2e_create_write_save() {
-    let mut harness = connect_envoy_via_ssh("envoy-test-host-create").await;
+    let mut harness = connect_envoy_via_ssh("envoy-test-host-create::test-cert-hash").await;
 
     let file_desc = serde_json::json!({
         "hostId": "envoy-peer",

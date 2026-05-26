@@ -346,10 +346,7 @@ impl WebChannel {
         Ok(())
     }
 
-    /// In-process routing via `TestRemote`. Same map-reserve dance as
-    /// `connect_with_sock` so concurrent connects to the same peer
-    /// behave identically. `pub(crate)` so the in-file unit tests can
-    /// drive a connect without constructing a mock `Sock`.
+    /// In-process routing via `TestRemote`.
     pub(crate) async fn connect_test(&self, peer_id: ServerId) -> anyhow::Result<()> {
         let factory_state = self
             .test_factory_state
@@ -1237,6 +1234,15 @@ impl TestFactory {
             self.state.clone(),
             self.travel_time.clone(),
         )
+    }
+
+    /// Inject a message directly into `host`’s inbox and deliver it,
+    /// bypassing any `TestRemote`. Test-only escape hatch for
+    /// synthesizing transport-layer events (e.g. `ConnectionBroke`)
+    /// that the in-process test transport doesn’t generate on its own.
+    pub async fn inject_message(&self, host: &ServerId, msg: Message) -> anyhow::Result<()> {
+        self.state.lock().unwrap().push(host, msg)?;
+        TestRemote::deliver(&self.state, host).await
     }
 }
 

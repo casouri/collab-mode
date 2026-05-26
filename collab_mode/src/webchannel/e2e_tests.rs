@@ -576,12 +576,6 @@ mod e2e_tests {
         tracing::info!("test_multiple_concurrent_connections completed successfully");
     }
 
-    #[ignore] // No recovery in webchannel.
-    #[tokio::test]
-    async fn test_connection_failure_recovery() {
-        todo!("Test needs complete rewrite for new SignalingClient-based API")
-    }
-
     #[tokio::test]
     async fn test_certificate_validation() {
         tracing::info!("Starting test_certificate_validation");
