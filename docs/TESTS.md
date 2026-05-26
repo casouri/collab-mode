@@ -106,6 +106,20 @@ File: `collab_mode/src/signaling/client_new_tests.rs`
 
 Run: `cargo test -p collab_mode signaling`
 
+### `filewatch_receptor` — OS file-watch event forwarder
+File: `collab_mode/src/filewatch_receptor.rs` (inline `mod tests`)
+
+Unit tests use a real `notify::recommended_watcher` against a `tempfile::TempDir`.
+
+- `watch_then_modify_emits_filechanged` — write to a watched file, expect a `FileChanged`
+- `modify_unwatched_sibling_no_event` — write to a sibling not in the watched set, expect no event
+- `unwatch_via_empty_list` — `WatchFiles { paths: [] }` clears the set; subsequent writes produce nothing
+- `delete_event_filtered_out` — `remove_file` produces no `FileChanged` (we only forward Create/Modify)
+- `atomic_rename_into_watched_name` *(ignored — flaky under parallel `cargo test` on macOS FSEvents; passes alone)* — write to `a.txt.tmp` then `rename` over the watched `a.txt`, expect a `FileChanged` for `a.txt`
+
+Run: `cargo test -p collab_mode filewatch_receptor`
+Run the ignored one alone: `cargo test -p collab_mode atomic_rename_into_watched_name -- --ignored`
+
 ### `server` — top-level server (`src/server.rs`) integration tests
 Files: `collab_mode/src/server/tests/*.rs` (one file per request type or feature)
 
@@ -117,6 +131,7 @@ Files: `collab_mode/src/server/tests/*.rs` (one file per request type or feature
 | `connection.rs` | `test_accept_connect` |
 | `delete_file.rs` | `test_delete_file`, `test_delete_file_permission_denied` |
 | `doc_project.rs` | `test_doc_project_handling` |
+| `filewatch.rs` *(all `#[ignore]`)* | `external_change_broadcasts_to_subscribers`, `rewrite_with_same_content_no_broadcast`, `close_stops_propagation` |
 | `list_files.rs` | `test_list_files_project_directory`, `test_list_files_from_remote`, `test_list_files_project_not_found`, `test_list_files_not_directory`, `test_list_files_empty_directory`, `test_list_files_nested_structure`, `test_list_files_sorted_alphanumerically` |
 | `list_projects.rs` | `test_list_files_top_level` |
 | `local_remote_ops.rs` | `test_local_ops_sent_to_remote_subscribers`, `test_bidirectional_ops_hub_owned_file` |
@@ -191,9 +206,10 @@ Small ERT smoke test that calls `collab-test-run-transcript` on `transcripts/tes
 
 ## Binaries (manual / interactive testing)
 
-`collab_mode/src/bin/` has two manual harnesses (built by `cargo build`, not run by `cargo test`):
+`collab_mode/src/bin/` has three manual harnesses (built by `cargo build`, not run by `cargo test`):
 - `test-editor-receptor` — exercises the editor-side socket protocol
 - `test-websocket-receptor` — exercises the websocket receptor
+- `test-filewatch-probe` — runs a fixed set of filesystem operations (create, modify, append, chmod, delete, atomic rename swap, move in/out, rapid writes) against a `notify::recommended_watcher` on a temp dir and prints each event with its latency. Useful for diagnosing platform-specific `notify` behavior. Run: `cargo run -p collab_mode --bin test-filewatch-probe`.
 
 And `collab-signal` is the signaling-server binary used by Makefile targets `signaling`, `session-1`, `session-2`.
 
@@ -205,6 +221,10 @@ And `collab-signal` is the signaling-server binary used by Makefile targets `sig
   - Run: `cargo test -p collab_mode ssh_channel openssh_localhost -- --ignored`
 - `webchannel::e2e_tests::e2e_tests::test_connection_failure_recovery` — currently `todo!()`; left as a reminder that the connection-recovery test needs rewriting against the new `SignalingClient` API.
   - Run: `cargo test -p collab_mode test_connection_failure_recovery -- --ignored` (will panic with the `todo!`).
+- `filewatch_receptor::tests::atomic_rename_into_watched_name` — real `notify` watcher; flaky under parallel `cargo test` on macOS FSEvents when many watchers compete.
+  - Run: `cargo test -p collab_mode atomic_rename_into_watched_name -- --ignored`
+- `server::tests::filewatch::*` (3 tests: `external_change_broadcasts_to_subscribers`, `rewrite_with_same_content_no_broadcast`, `close_stops_propagation`) — end-to-end with a real `filewatch_receptor` wired to the hub, driven by real disk writes through hub→spoke. Filesystem-timing sensitive, hence `#[ignore]`.
+  - Run: `cargo test -p collab_mode server::tests::filewatch -- --ignored`
 
 Run all ignored tests at once:
 ```sh

@@ -1,6 +1,9 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use collab_mode::{config_man, editor_receptor, server::Server};
+use collab_mode::{
+    config_man, editor_receptor, filewatch_receptor, filewatch_receptor::WatchFileMessage,
+    server::Server,
+};
 
 #[derive(Parser)]
 struct Cli {
@@ -85,6 +88,10 @@ fn main() -> anyhow::Result<()> {
             let mut server = Server::new(host_id.clone(), config_man)?;
             let (server_in_tx, server_in_rx) = tokio::sync::mpsc::channel(32);
             let (server_out_tx, server_out_rx) = tokio::sync::mpsc::channel(32);
+            let (filewatch_to_server_tx, filewatch_to_server_rx) =
+                tokio::sync::mpsc::channel::<WatchFileMessage>(32);
+            let (server_to_filewatch_tx, server_to_filewatch_rx) =
+                crossbeam_channel::bounded::<WatchFileMessage>(32);
             let use_socket = *socket;
             let port = *socket_port;
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -101,6 +108,18 @@ fn main() -> anyhow::Result<()> {
                     editor_shutdown,
                 ) {
                     tracing::error!("Failed to listen on local port: {:#?}", err);
+                }
+            });
+
+            // Run filewatch receptor.
+            let filewatch_shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = filewatch_receptor::run(
+                    filewatch_to_server_tx,
+                    server_to_filewatch_rx,
+                    filewatch_shutdown,
+                ) {
+                    tracing::error!("Filewatch receptor exited with error: {:#?}", err);
                 }
             });
 
@@ -130,6 +149,8 @@ fn main() -> anyhow::Result<()> {
                     .run(
                         server_out_tx,
                         server_in_rx,
+                        server_to_filewatch_tx,
+                        filewatch_to_server_rx,
                         web_factory,
                         sig_factory,
                         shutdown_for_server,
@@ -252,8 +273,30 @@ fn run_envoy() -> anyhow::Result<()> {
             collab_mode::server::listen_for_signal(shutdown_for_signal).await;
         });
 
+        let (filewatch_to_server_tx, filewatch_to_server_rx) =
+            tokio::sync::mpsc::channel::<WatchFileMessage>(32);
+        let (server_to_filewatch_tx, server_to_filewatch_rx) =
+            crossbeam_channel::bounded::<WatchFileMessage>(32);
+        let filewatch_shutdown = shutdown.clone();
+        std::thread::spawn(move || {
+            if let Err(err) = filewatch_receptor::run(
+                filewatch_to_server_tx,
+                server_to_filewatch_rx,
+                filewatch_shutdown,
+            ) {
+                tracing::error!("Filewatch receptor exited with error: {:#?}", err);
+            }
+        });
         server
-            .run(sink_tx, editor_rx, web_factory, sig_factory, shutdown)
+            .run(
+                sink_tx,
+                editor_rx,
+                server_to_filewatch_tx,
+                filewatch_to_server_rx,
+                web_factory,
+                sig_factory,
+                shutdown,
+            )
             .await
     })
 }

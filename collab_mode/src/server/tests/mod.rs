@@ -577,6 +577,14 @@ pub struct ServerSetup {
 pub struct HubAndSpokeSetup {
     pub hub: ServerSetup,
     pub spokes: Vec<ServerSetup>,
+    /// Test-side endpoints for the hub’s filewatch channel pair. The
+    /// hub server holds the matched ends. e2e file-watch tests use
+    /// `hub_filewatch_to_server_tx` to inject synthetic `FileChanged`
+    /// events into the hub and `hub_server_to_filewatch_rx` to observe
+    /// the `WatchFiles` messages the hub emits on open/close.
+    pub hub_filewatch_to_server_tx: mpsc::Sender<crate::filewatch_receptor::WatchFileMessage>,
+    pub hub_server_to_filewatch_rx:
+        crossbeam_channel::Receiver<crate::filewatch_receptor::WatchFileMessage>,
 }
 
 impl HubAndSpokeSetup {
@@ -649,6 +657,18 @@ pub async fn setup_hub_and_spoke_servers(
     let mut hub_server = Server::new(hub_id.clone(), hub_config)?;
     let (mut hub_editor, hub_tx, hub_rx) = MockEditor::new();
 
+    // Hub’s filewatch channel pair. The test takes the “receptor
+    // side” (filewatch_to_server_tx, server_to_filewatch_rx) so e2e
+    // tests can inject synthetic FileChanged events and observe
+    // WatchFiles. The server to receptor direction is a crossbeam
+    // channel (selectable in the receptor’s sync loop); the receptor
+    // to server direction is a tokio mpsc (consumed by the server’s
+    // tokio::select!).
+    let (hub_filewatch_to_server_tx, hub_filewatch_to_server_rx) =
+        mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(32);
+    let (hub_server_to_filewatch_tx, hub_server_to_filewatch_rx) =
+        crossbeam_channel::bounded::<crate::filewatch_receptor::WatchFileMessage>(32);
+
     let signaling_state = Arc::new(std::sync::Mutex::new(TestFactoryState::default()));
     let hub_handle = {
         let channel_factory = factory.clone();
@@ -663,7 +683,15 @@ pub async fn setup_hub_and_spoke_servers(
             });
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
             if let Err(e) = hub_server
-                .run(hub_tx, hub_rx, web_factory, sig_factory, shutdown)
+                .run(
+                    hub_tx,
+                    hub_rx,
+                    hub_server_to_filewatch_tx,
+                    hub_filewatch_to_server_rx,
+                    web_factory,
+                    sig_factory,
+                    shutdown,
+                )
                 .await
             {
                 tracing::error!("Hub server error: {}", e);
@@ -720,6 +748,15 @@ pub async fn setup_hub_and_spoke_servers(
             let channel_factory = factory.clone();
             let signaling_state = signaling_state.clone();
             let spoke_id_for_factory = spoke_id.clone();
+            // Spokes get dummy filewatch channels; only the hub’s pair
+            // is exercised by file-watch e2e tests.
+            let (spoke_filewatch_to_server_tx, spoke_filewatch_to_server_rx) =
+                mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
+            let (spoke_server_to_filewatch_tx, _spoke_server_to_filewatch_rx) =
+                crossbeam_channel::bounded::<crate::filewatch_receptor::WatchFileMessage>(1);
+            // Keep the tx alive so send() on the server side doesn’t
+            // error out from a closed channel.
+            let _hold_spoke_filewatch_tx = spoke_filewatch_to_server_tx;
             tokio::spawn(async move {
                 let web_factory: crate::server::WebChannelFactory =
                     Box::new(move |msg_tx, self_tx| {
@@ -731,7 +768,15 @@ pub async fn setup_hub_and_spoke_servers(
                     });
                 let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
                 if let Err(e) = spoke_server
-                    .run(spoke_tx, spoke_rx, web_factory, sig_factory, shutdown)
+                    .run(
+                        spoke_tx,
+                        spoke_rx,
+                        spoke_server_to_filewatch_tx,
+                        spoke_filewatch_to_server_rx,
+                        web_factory,
+                        sig_factory,
+                        shutdown,
+                    )
                     .await
                 {
                     tracing::error!("Spoke server {} error: {}", i + 1, e);
@@ -807,6 +852,8 @@ pub async fn setup_hub_and_spoke_servers(
             _temp_dir: hub_temp_dir,
         },
         spokes,
+        hub_filewatch_to_server_tx,
+        hub_server_to_filewatch_rx,
     })
 }
 
@@ -890,6 +937,7 @@ mod connection;
 mod delete_file;
 mod doc_project;
 mod envoy;
+mod filewatch;
 mod list_files;
 mod list_projects;
 mod local_remote_ops;

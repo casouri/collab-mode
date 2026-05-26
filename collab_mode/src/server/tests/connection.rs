@@ -46,8 +46,21 @@ async fn test_accept_connect() {
                 SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
             });
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let (fw_a_tx, fw_a_rx) =
+                tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
+            let (fw_b_tx, _fw_b_rx) =
+                crossbeam_channel::bounded::<crate::filewatch_receptor::WatchFileMessage>(1);
+            let _hold_fw_a_tx = fw_a_tx;
             if let Err(e) = server1
-                .run(server_tx1, server_rx1, web_factory, sig_factory, shutdown)
+                .run(
+                    server_tx1,
+                    server_rx1,
+                    fw_b_tx,
+                    fw_a_rx,
+                    web_factory,
+                    sig_factory,
+                    shutdown,
+                )
                 .await
             {
                 tracing::error!("Server1 error: {}", e);
@@ -66,8 +79,21 @@ async fn test_accept_connect() {
                 SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
             });
             let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let (fw_a_tx, fw_a_rx) =
+                tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
+            let (fw_b_tx, _fw_b_rx) =
+                crossbeam_channel::bounded::<crate::filewatch_receptor::WatchFileMessage>(1);
+            let _hold_fw_a_tx = fw_a_tx;
             if let Err(e) = server2
-                .run(server_tx2, server_rx2, web_factory, sig_factory, shutdown)
+                .run(
+                    server_tx2,
+                    server_rx2,
+                    fw_b_tx,
+                    fw_a_rx,
+                    web_factory,
+                    sig_factory,
+                    shutdown,
+                )
                 .await
             {
                 tracing::error!("Server2 error: {}", e);

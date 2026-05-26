@@ -146,10 +146,17 @@ async fn test_server_run_config_projects_expansion() {
         let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_tx| {
             crate::signaling::client::SignalingChannel::new_for_test(sig_tx, test_signaling_state)
         });
+        let (fw_a_tx, fw_a_rx) =
+            tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
+        let (fw_b_tx, _fw_b_rx) =
+            crossbeam_channel::bounded::<crate::filewatch_receptor::WatchFileMessage>(1);
+        let _hold_fw_a_tx = fw_a_tx;
         server
             .run(
                 server_to_editor_tx,
                 editor_to_server_rx,
+                fw_b_tx,
+                fw_a_rx,
                 web_factory,
                 sig_factory,
                 shutdown,

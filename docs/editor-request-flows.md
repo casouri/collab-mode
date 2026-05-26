@@ -1222,7 +1222,7 @@ Backoff is reset when:
 
 ### Reconnection flow
 
-```
+```text
 [ConnectingStage1]
        │
        ├─(10s timeout)→ [FailedToConnect]

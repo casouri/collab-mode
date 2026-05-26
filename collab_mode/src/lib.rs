@@ -4,6 +4,7 @@ pub mod config_man;
 pub mod editor_receptor;
 mod engine;
 mod error;
+pub mod filewatch_receptor;
 mod ice;
 pub mod message;
 mod op;

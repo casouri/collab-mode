@@ -44,11 +44,18 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
     });
     let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
 
+    let (fw_a_tx, fw_a_rx) =
+        tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
+    let (fw_b_tx, _fw_b_rx) =
+        crossbeam_channel::bounded::<crate::filewatch_receptor::WatchFileMessage>(1);
+    let _hold_fw_a_tx = fw_a_tx;
     let server_handle = tokio::spawn(async move {
         if let Err(e) = host_server
             .run(
                 server_to_editor_tx,
                 editor_to_server_rx,
+                fw_b_tx,
+                fw_a_rx,
                 web_factory,
                 sig_factory,
                 shutdown,

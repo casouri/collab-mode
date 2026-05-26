@@ -25,6 +25,7 @@
 use crate::config_man::{ConfigManager, ConfigProject};
 use crate::engine::{ClientEngine, InternalDoc, ServerEngine};
 use crate::error::CollabError;
+use crate::filewatch_receptor::WatchFileMessage;
 use crate::message::{self, *};
 use crate::signaling::SignalingMsg;
 use crate::types::*;
@@ -38,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -48,6 +49,13 @@ use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
 const SHUTDOWN_TIMEOUT: u64 = 10;
+
+/// Host id for ops generated from an external processes modifies a
+/// file.
+const EXTERNAL_PROCESS_HOST_ID: &str = "external_process::file-watcher";
+
+/// site_id in `Op::Ins`/`Op::Mark` for ops made by external processes.
+const EXTERNAL_PROCESS_SITE_ID: SiteId = SiteId::MAX;
 
 // This is the only condition that needs special handling.
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +116,10 @@ struct Doc {
     meta: JsonMap,
     /// The absolute filename of this doc on disk, if exists.
     abs_filename: PathId,
+    /// Canonicalized `abs_filename`. Only used to match the path on
+    /// incoming `FileChanged` events; doc dedup still uses
+    /// `abs_filename` to stay out of symlink edge cases etc.
+    canon_filename: Option<PathBuf>,
     /// File desc of this doc.
     #[allow(dead_code)]
     file_desc: FileDesc,
@@ -121,6 +133,12 @@ struct Doc {
     /// the last local seq received from them. (New ops they send must
     /// have local seq = 1 + the saved local seq.)
     subscribers: HashMap<ServerId, LocalSeq>,
+    /// Mark the last time the doc is saved to disk, external file
+    /// changes before this time can be ignored.
+    last_saved_at: Instant,
+    /// Site seq counter for ops made from external process making
+    /// changes to the file.
+    next_external_site_seq: LocalSeq,
 }
 
 /// Stores relevant data for a remote doc, used by the server.
@@ -478,15 +496,29 @@ impl Doc {
         let mut buffer = GapBuffer::new();
         buffer.insert_many(0, content.chars());
 
+        let canon_filename = match &abs_filename {
+            PathId::Path(p) => match std::fs::canonicalize(p) {
+                Ok(c) => Some(c),
+                Err(err) => {
+                    tracing::warn!("Failed to canonicalize {:?}: {}", p, err);
+                    None
+                }
+            },
+            PathId::Buffer(_) => None,
+        };
+
         Self {
             name,
             meta,
             abs_filename,
+            canon_filename,
             file_desc,
             engine,
             buffer,
             subscribers: HashMap::new(),
             disk_file,
+            last_saved_at: Instant::now(),
+            next_external_site_seq: 1,
         }
     }
 
@@ -550,6 +582,7 @@ impl Doc {
                 .with_context(|| format!("Failed to write to file: {:?}", self.abs_filename))?;
             file.sync_all()
                 .with_context(|| format!("Failed to sync file: {:?}", self.abs_filename))?;
+            self.last_saved_at = Instant::now();
             tracing::info!("Saved file: {:?}", self.abs_filename);
         }
         Ok(())
@@ -715,6 +748,52 @@ impl RemoteDocs {
 
 // *** Impl Server
 
+/// Walk the dissimilar chunk sequence and emit OT ops with positions in
+/// the OLD (left-hand-side) document, then return them in REVERSE order
+/// so each op can be applied at its original old-doc position without
+/// any prior op shifting it. (Highest-position op first means every
+/// subsequent lower-position op is unaffected.)
+fn chunks_to_ops(
+    chunks: &[dissimilar::Chunk<'_>],
+    site_id: SiteId,
+    next_seq: &mut LocalSeq,
+) -> Vec<FatOp> {
+    let mut raw: Vec<Op> = Vec::new();
+    let mut pos: u64 = 0; // chars consumed in OLD document
+    for chunk in chunks {
+        match chunk {
+            dissimilar::Chunk::Equal(s) => {
+                pos += s.chars().count() as u64;
+            }
+            dissimilar::Chunk::Insert(s) => {
+                raw.push(Op::Ins((pos, (*s).to_string()), site_id));
+                // Insertions consume no OLD chars; pos stays.
+            }
+            dissimilar::Chunk::Delete(s) => {
+                let len = s.chars().count() as u64;
+                raw.push(Op::Mark(vec![(pos, (*s).to_string())], false, site_id));
+                pos += len;
+            }
+        }
+    }
+    // Reverse so ops go back to front and we don’t need to worry
+    // about adjusting positions.
+    raw.reverse();
+    raw.into_iter()
+        .map(|op| {
+            let seq = *next_seq;
+            *next_seq += 1;
+            FatOp {
+                seq: None,
+                op,
+                site_seq: seq,
+                kind: OpKind::Original,
+                group_seq: 0,
+            }
+        })
+        .collect()
+}
+
 impl Server {
     pub fn new(host_id: ServerId, config: ConfigManager) -> anyhow::Result<Self> {
         let name = id_name(&host_id)
@@ -834,6 +913,8 @@ impl Server {
         &mut self,
         editor_tx: mpsc::Sender<lsp_server::Message>,
         mut editor_rx: mpsc::Receiver<lsp_server::Message>,
+        filewatch_tx: crossbeam_channel::Sender<crate::filewatch_receptor::WatchFileMessage>,
+        mut filewatch_rx: mpsc::Receiver<crate::filewatch_receptor::WatchFileMessage>,
         webchannel_factory: WebChannelFactory,
         signaling_channel_factory: SignalingChannelFactory,
         shutdown: std::sync::Arc<tokio::sync::Notify>,
@@ -880,7 +961,7 @@ impl Server {
                 // Handle messages from the editor.
                 msg = editor_rx.recv() => {
                     let Some(msg) = msg else { break; };
-                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx, &signaling_channel).await;
+                    let res = self.handle_editor_message(msg, &editor_tx, &webchannel, &msg_tx, &signaling_channel, &filewatch_tx).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -890,7 +971,7 @@ impl Server {
                 },
                 // Handle messages from remote peers and self.
                 Some(web_msg) = dual_rx.recv() => {
-                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel).await;
+                    let res = self.handle_remote_message(web_msg, &editor_tx, &webchannel, &filewatch_tx).await;
                     // Normally the handler shouldn't return an error.
                     // Most errors ar handled by sending error
                     // response to editor/remote.
@@ -900,7 +981,7 @@ impl Server {
                 },
                 // Handle messages from signaling clients.
                 Some(signaling_message) = signaling_msg_rx.recv() => {
-                    let next = Next::new(&editor_tx, None, &webchannel);
+                    let next = Next::new(&editor_tx, None, &webchannel, &filewatch_tx);
                     match signaling_message.msg {
                         Ok(signaling_msg) => {
                             let res = self.handle_signaling_msg(signaling_message.signaling_addr, signaling_msg, &next, &msg_tx, &signaling_channel).await;
@@ -928,11 +1009,29 @@ impl Server {
                 },
                 // Run fix_world to reconnect, etc.
                 _ = fix_world_notify.notified() => {
-                    self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel).await;
+                    self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel, &filewatch_tx).await;
                 }
                 // Trigger fix_world every 1s.
                 _ = fix_world_ticker.tick() => {
-                    self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel).await;
+                    self.fix_world(&editor_tx, &msg_tx, &webchannel, &signaling_channel, &filewatch_tx).await;
+                }
+                // A external process might modified a file.
+                Some(msg) = filewatch_rx.recv() => {
+                    match msg {
+                        WatchFileMessage::FileChanged { path, timestamp } => {
+                            let next = Next::new(&editor_tx, None, &webchannel, &filewatch_tx);
+                            if let Err(err) = self
+                                .handle_external_file_change(&next, &path, timestamp)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to handle external file change for {:?}: {}",
+                                    path, err
+                                );
+                            }
+                        }
+                        WatchFileMessage::WatchFiles { .. } => {}
+                    }
                 }
             }
         }
@@ -982,6 +1081,25 @@ impl Server {
         }
 
         join_all(handles).await;
+    }
+
+    /// Send the currently opened files to the filewatch receptor.
+    fn resend_watch_files<'a>(&self, next: &Next<'a>) {
+        let paths: Vec<PathBuf> = self
+            .docs
+            .values()
+            .filter_map(|d| match &d.abs_filename {
+                PathId::Path(p) => Some(p.clone()),
+                PathId::Buffer(_) => None,
+            })
+            .collect();
+        // It’s a sync channel, don’t block on it.
+        if let Err(err) = next
+            .filewatch_tx
+            .try_send(crate::filewatch_receptor::WatchFileMessage::WatchFiles { paths })
+        {
+            tracing::warn!("Failed to send WatchFiles to receptor: {}", err);
+        }
     }
 
     /// Return all locally hosted docs whose absolute paths are not
@@ -1057,10 +1175,17 @@ impl Server {
         msg_tx: &mpsc::Sender<webchannel::Message>,
         webchannel: &WebChannel,
         signaling_channel: &crate::signaling::client::SignalingChannel,
+        filewatch_tx: &crossbeam_channel::Sender<WatchFileMessage>,
     ) {
         self.fix_world_signaling(editor_tx, signaling_channel).await;
-        self.fix_world_remotes(editor_tx, msg_tx, webchannel, signaling_channel)
-            .await;
+        self.fix_world_remotes(
+            editor_tx,
+            msg_tx,
+            webchannel,
+            signaling_channel,
+            filewatch_tx,
+        )
+        .await;
         self.fix_world_timeouts(editor_tx, webchannel).await;
     }
 
@@ -1071,6 +1196,7 @@ impl Server {
         msg_tx: &mpsc::Sender<webchannel::Message>,
         webchannel: &WebChannel,
         signaling_channel: &crate::signaling::client::SignalingChannel,
+        filewatch_tx: &crossbeam_channel::Sender<WatchFileMessage>,
     ) {
         let now = Instant::now();
 
@@ -1110,7 +1236,7 @@ impl Server {
             })
             .collect();
 
-        let next = Next::new(editor_tx, None, webchannel);
+        let next = Next::new(editor_tx, None, webchannel, filewatch_tx);
         for (peer, transport) in to_start {
             // SCTP requires the corresponding signaling server to be Bound.
             if let webchannel::TransportConfig::SCTP { signaling_addr } = &transport {
@@ -1333,12 +1459,13 @@ impl Server {
         webchannel: &WebChannel,
         msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &crate::signaling::client::SignalingChannel,
+        filewatch_tx: &crossbeam_channel::Sender<crate::filewatch_receptor::WatchFileMessage>,
     ) -> anyhow::Result<()> {
         tracing::info!("From editor: {}", message_to_string(&msg));
         match msg {
             lsp_server::Message::Request(req) => {
                 let req_id = req.id.clone();
-                let next = Next::new(editor_tx, Some(req_id), &webchannel);
+                let next = Next::new(editor_tx, Some(req_id), &webchannel, filewatch_tx);
                 if let Err(err) = self.handle_editor_request(req, &next).await {
                     tracing::error!("Uncaught error when handling editor request: {}", err);
                     // Errors that reach this level are internal error.
@@ -1353,7 +1480,7 @@ impl Server {
             }
             lsp_server::Message::Response(_) => Ok(()),
             lsp_server::Message::Notification(notif) => {
-                let next = Next::new(editor_tx, None, &webchannel);
+                let next = Next::new(editor_tx, None, &webchannel, filewatch_tx);
                 if let Err(err) = self
                     .handle_editor_notification(&next, notif, msg_tx, signaling_channel)
                     .await
@@ -1442,6 +1569,7 @@ impl Server {
                 let params: ShareFileParams = serde_json::from_value(req.params)?;
                 let resp = self.handle_share_file_from_editor(params)?;
                 next.send_resp(resp, None).await;
+                self.resend_watch_files(next);
                 Ok(())
             }
             "UpdateConfig" => {
@@ -1638,9 +1766,10 @@ impl Server {
         msg: webchannel::Message,
         editor_tx: &mpsc::Sender<lsp_server::Message>,
         webchannel: &WebChannel,
+        filewatch_tx: &crossbeam_channel::Sender<crate::filewatch_receptor::WatchFileMessage>,
     ) -> anyhow::Result<()> {
         tracing::info!("From remote: {}", remote_message_to_string(&msg));
-        let next = Next::new(editor_tx, msg.req_id.clone(), webchannel);
+        let next = Next::new(editor_tx, msg.req_id.clone(), webchannel, filewatch_tx);
         match msg.body {
             Msg::IceProgress {
                 peer: remote_hostid,
@@ -2781,6 +2910,7 @@ impl Server {
                 file: file_desc.clone(),
             };
             next.send_resp(resp, None).await;
+            self.resend_watch_files(next);
             return Ok(());
         }
 
@@ -2967,6 +3097,7 @@ impl Server {
                 };
                 next.send_to_remote(&remote_host_id, Msg::Snapshot { snapshot: snapshot })
                     .await;
+                self.resend_watch_files(next);
             }
             FileDesc::Project { .. } => {
                 next.send_to_remote(
@@ -3070,6 +3201,95 @@ impl Server {
     /// Returns the remote doc id and an immutable reference to the doc if found.
     fn get_remote_doc(&self, editor_file: &EditorFileDesc) -> Option<(DocId, &RemoteDoc)> {
         self.remote_docs.get_by_editor_desc(editor_file)
+    }
+
+    /// Handle a `FileChanged` notification from the filewatch
+    /// receptor: read the file fresh, diff against the buffer; if the
+    /// content actually differs, process it as if remote ops.
+    async fn handle_external_file_change<'a>(
+        &mut self,
+        next: &Next<'a>,
+        path: &Path,
+        timestamp: Instant,
+    ) -> anyhow::Result<()> {
+        // Find the doc whose canonicalized filename matches `path`.
+        // The receptor sends FileChanged with paths in canonical form
+        // (that's what notify emits), so we match against each Doc’s
+        // pre-computed `canon_filename` rather than re-canonicalizing
+        // here.
+        let doc_id = self
+            .docs
+            .iter()
+            .find(|(_, d)| d.canon_filename.as_deref() == Some(path))
+            .map(|(id, _)| *id);
+        if doc_id.is_none() {
+            return Ok(());
+        }
+        let doc_id = doc_id.unwrap();
+
+        // File changes before last save can be ignored, since the
+        // last save would override it.
+        if timestamp <= self.docs[&doc_id].last_saved_at {
+            return Ok(());
+        }
+
+        // Open the file fresh and read content. Replacing `disk_file`
+        // also handles the case where an atomic-rename formatter
+        // swapped the inode under us.
+        let mut new_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("Re-opening {}", path.display()))?;
+        let mut new_content = String::new();
+        new_file
+            .read_to_string(&mut new_content)
+            .with_context(|| format!("Reading {}", path.display()))?;
+
+        let doc = self.docs.get_mut(&doc_id).unwrap();
+
+        // Diff buffer vs new_content with dissimilar. Build OT ops
+        // with positions in the OLD buffer. This doubles as a
+        // no-change check, if diff is empty, there’s no change. This
+        // is actually faster than hash check in most cases so we
+        // compute the diff directly.
+        let old_content: String = doc.buffer.iter().collect();
+        let chunks = dissimilar::diff(&old_content, &new_content);
+        let ops = chunks_to_ops(
+            &chunks,
+            EXTERNAL_PROCESS_SITE_ID,
+            &mut doc.next_external_site_seq,
+        );
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // Swap in the fresh handle so future saves write to the right
+        // inode.
+        doc.disk_file = Some(new_file);
+
+        tracing::info!(
+            host = EXTERNAL_PROCESS_HOST_ID,
+            doc = doc_id,
+            n_ops = ops.len(),
+            "Applying external file change",
+        );
+        let context = doc.engine.current_seq();
+        let processed = doc.engine.process_ops(ops, context)?;
+        for op in &processed {
+            doc.apply_op(op.clone())?;
+        }
+        let subscribers: Vec<ServerId> = doc.subscribers.keys().cloned().collect();
+        for sub_id in subscribers {
+            next.send_to_remote(
+                &sub_id,
+                Msg::OpFromServer {
+                    doc: doc_id,
+                    ops: processed.clone(),
+                },
+            )
+            .await;
+        }
+        Ok(())
     }
 
     async fn handle_op_from_client<'a>(
@@ -3973,7 +4193,7 @@ impl Server {
         }
 
         // Local.
-        match self.handle_close_file_locally(&file, delete).await {
+        match self.handle_close_file_locally(next, &file, delete).await {
             Ok(subscribers) => {
                 // Send response to the editor.
                 next.send_resp((), None).await;
@@ -4026,7 +4246,10 @@ impl Server {
             return Ok(());
         }
 
-        match self.handle_close_file_locally(&file_desc, delete).await {
+        match self
+            .handle_close_file_locally(&next, &file_desc, delete)
+            .await
+        {
             Ok(subscribers) => {
                 let mut requester_notified = false;
 
@@ -4078,8 +4301,9 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_close_file_locally(
+    async fn handle_close_file_locally<'a>(
         &mut self,
+        next: &Next<'a>,
         file: &FileDesc,
         delete: bool,
     ) -> anyhow::Result<Vec<ServerId>> {
@@ -4112,6 +4336,8 @@ impl Server {
                 tracing::info!("Deleted file: {}", path.display());
             }
         }
+
+        self.resend_watch_files(next);
 
         Ok(subscribers)
     }
@@ -4689,6 +4915,7 @@ struct Next<'a> {
     editor_tx: &'a mpsc::Sender<lsp_server::Message>,
     req_id: Option<lsp_server::RequestId>,
     pub webchannel: &'a WebChannel,
+    pub filewatch_tx: &'a crossbeam_channel::Sender<crate::filewatch_receptor::WatchFileMessage>,
 }
 
 impl<'a> Next<'a> {
@@ -4696,11 +4923,13 @@ impl<'a> Next<'a> {
         editor_tx: &'a mpsc::Sender<lsp_server::Message>,
         req_id: Option<lsp_server::RequestId>,
         webchannel: &'a WebChannel,
+        filewatch_tx: &'a crossbeam_channel::Sender<crate::filewatch_receptor::WatchFileMessage>,
     ) -> Self {
         Next {
             editor_tx,
             req_id,
             webchannel,
+            filewatch_tx,
         }
     }
 
