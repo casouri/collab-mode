@@ -280,6 +280,13 @@ pub struct WorldState {
 const INITIAL_RETRY_STRIDE_SECS: u64 = 1;
 const MAX_RETRY_STRIDE_SECS: u64 = 60;
 
+/// When we save to disk, record last_saved_at time = now + this
+/// buffer, so the file change event caused by our save is skipped.
+/// The echo event latency is ~10-15ms on my machine (macOS FSEvents);
+/// 100ms should be long enough in most cases, and short enough to not
+/// get too many false negatives.
+const LAST_SAVED_AT_BUFFER: Duration = Duration::from_millis(100);
+
 fn next_stride(cur: u64) -> u64 {
     cur.saturating_mul(2).min(MAX_RETRY_STRIDE_SECS)
 }
@@ -582,7 +589,7 @@ impl Doc {
                 .with_context(|| format!("Failed to write to file: {:?}", self.abs_filename))?;
             file.sync_all()
                 .with_context(|| format!("Failed to sync file: {:?}", self.abs_filename))?;
-            self.last_saved_at = Instant::now();
+            self.last_saved_at = Instant::now() + LAST_SAVED_AT_BUFFER;
             tracing::info!("Saved file: {:?}", self.abs_filename);
         }
         Ok(())
@@ -1021,7 +1028,7 @@ impl Server {
                         WatchFileMessage::FileChanged { path, timestamp } => {
                             let next = Next::new(&editor_tx, None, &webchannel, &filewatch_tx);
                             if let Err(err) = self
-                                .handle_external_file_change(&next, &path, timestamp)
+                                .reset_doc_from_disk(&next, &path, Some(timestamp))
                                 .await
                             {
                                 tracing::warn!(
@@ -1641,6 +1648,18 @@ impl Server {
                 self.handle_save_file_from_editor(next, params).await?;
                 Ok(())
             }
+            "ResetFromDisk" => {
+                let params: ResetFromDiskParams = serde_json::from_value(req.params)?;
+                if !self
+                    .check_connection(next, &params.file.host_id().clone())
+                    .await
+                {
+                    return Ok(());
+                }
+                self.handle_reset_from_disk_from_editor(next, params)
+                    .await?;
+                Ok(())
+            }
             "DisconnectFromFile" => {
                 let params: DisconnectFileParams = serde_json::from_value(req.params)?;
                 if !self
@@ -2080,6 +2099,54 @@ impl Server {
                     Msg::FileSaved { doc: doc_id }
                 };
                 next.send_to_remote(&msg.host, resp).await;
+                Ok(())
+            }
+            Msg::ResetFromDisk { doc: doc_id } => {
+                // Reset overwrites buffer state, treat as a write.
+                if !self.config.write_allowed(&msg.host) {
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::PermissionDenied {
+                            reason: "Write permission denied".to_string(),
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+
+                let path = self
+                    .docs
+                    .get(&doc_id)
+                    .and_then(|d| d.canon_filename.clone());
+                if path.is_none() {
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::ErrorResp {
+                            code: ErrorCode::IoError,
+                            file: self.docs.get(&doc_id).map(|d| d.file_desc.clone()),
+                            message: format!("Doc {} not found or has no path", doc_id),
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+                let path = path.unwrap();
+
+                // Reuse reset_doc_from_disk with no timestamp gate; it
+                // broadcasts Msg::OpFromServer to subscribers, which
+                // includes the requester.
+                let res = self.reset_doc_from_disk(&next, &path, None).await;
+                if let Err(err) = res {
+                    next.send_to_remote(
+                        &msg.host,
+                        Msg::ErrorResp {
+                            code: ErrorCode::IoError,
+                            file: self.docs.get(&doc_id).map(|d| d.file_desc.clone()),
+                            message: err.to_string(),
+                        },
+                    )
+                    .await;
+                }
                 Ok(())
             }
             Msg::FileSaved { doc: doc_id } => {
@@ -3203,14 +3270,16 @@ impl Server {
         self.remote_docs.get_by_editor_desc(editor_file)
     }
 
-    /// Handle a `FileChanged` notification from the filewatch
-    /// receptor: read the file fresh, diff against the buffer; if the
-    /// content actually differs, process it as if remote ops.
-    async fn handle_external_file_change<'a>(
+    /// Reset a doc to the on-disk content: read the file fresh, diff
+    /// against the buffer; if the content actually differs, process it
+    /// as if remote ops. Used both by the filewatch receptor (with a
+    /// timestamp gate) and by the explicit `ResetFromDisk` editor
+    /// request (with `timestamp = None`).
+    async fn reset_doc_from_disk<'a>(
         &mut self,
         next: &Next<'a>,
         path: &Path,
-        timestamp: Instant,
+        timestamp: Option<Instant>,
     ) -> anyhow::Result<()> {
         // Find the doc whose canonicalized filename matches `path`.
         // The receptor sends FileChanged with paths in canonical form
@@ -3228,9 +3297,12 @@ impl Server {
         let doc_id = doc_id.unwrap();
 
         // File changes before last save can be ignored, since the
-        // last save would override it.
-        if timestamp <= self.docs[&doc_id].last_saved_at {
-            return Ok(());
+        // last save would override it. An explicit ResetFromDisk
+        // request passes `None` here to skip this gate.
+        if let Some(ts) = timestamp {
+            if ts <= self.docs[&doc_id].last_saved_at {
+                return Ok(());
+            }
         }
 
         // Open the file fresh and read content. Replacing `disk_file`
@@ -4146,6 +4218,75 @@ impl Server {
             };
             next.send_resp((), Some(err)).await;
         }
+        Ok(())
+    }
+
+    async fn handle_reset_from_disk_from_editor<'a>(
+        &mut self,
+        next: &Next<'a>,
+        params: ResetFromDiskParams,
+    ) -> anyhow::Result<()> {
+        let ResetFromDiskParams { file } = params.clone();
+        let host_id = file.host_id().clone();
+
+        // Remote: forward to the owner, ack the editor immediately. The
+        // resulting buffer change reaches us through Msg::OpFromServer.
+        if host_id != self.host_id {
+            if let Some((doc_id, _)) = self.get_remote_doc(&file) {
+                next.send_to_remote(&host_id, Msg::ResetFromDisk { doc: doc_id })
+                    .await;
+                next.send_resp(ResetFromDiskResp { file }, None).await;
+            } else {
+                let err = lsp_server::ResponseError {
+                    code: ErrorCode::IoError as i32,
+                    message: format!("Remote file not open: {}", file),
+                    data: None,
+                };
+                next.send_resp((), Some(err)).await;
+            }
+            return Ok(());
+        }
+
+        // Local: resolve doc and reuse reset_doc_from_disk with no
+        // timestamp gate.
+        let maybe_doc_id = self.get_remote_doc(&file);
+        if maybe_doc_id.is_none() {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::IoError as i32,
+                message: "File not open".to_string(),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            return Ok(());
+        }
+        let (doc_id, _) = maybe_doc_id.unwrap();
+
+        let path = self
+            .docs
+            .get(&doc_id)
+            .and_then(|d| d.canon_filename.clone());
+        if path.is_none() {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::IoError as i32,
+                message: "Doc has no on-disk file".to_string(),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            return Ok(());
+        }
+        let path = path.unwrap();
+
+        let res = self.reset_doc_from_disk(next, &path, None).await;
+        if let Err(err) = res {
+            let err = lsp_server::ResponseError {
+                code: ErrorCode::IoError as i32,
+                message: err.to_string(),
+                data: None,
+            };
+            next.send_resp((), Some(err)).await;
+            return Ok(());
+        }
+        next.send_resp(ResetFromDiskResp { file }, None).await;
         Ok(())
     }
 

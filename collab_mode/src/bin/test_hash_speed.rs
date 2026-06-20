@@ -1,6 +1,6 @@
 //! Benchmark how long it takes to hash a file under different
 //! strategies — informs the choice we make in
-//! `handle_external_file_change` for the disk-vs-buffer equality
+//! `reset_doc_from_disk` for the disk-vs-buffer equality
 //! check.
 //!
 //! Two axes:
@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
 
     // === Diff: collect buffer to String + dissimilar::diff against ===
     // an equal disk-side String. This is the cost
-    // `handle_external_file_change` pays today on every
+    // `reset_doc_from_disk` pays today on every
     // already-in-sync FileChanged event (the "empty diff" case).
     let (diff_collect_us, diff_only_us, diff_total_us) = bench_diff(&buffer, &content);
 
@@ -130,7 +130,7 @@ fn bench_buffer<D: Digest>(buf: &GapBuffer<char>) -> (f64, String) {
 /// Measure three things for the equal-content (empty diff) case:
 /// (a) time to collect the GapBuffer to a String,
 /// (b) time for `dissimilar::diff` on two equal strings, and
-/// (c) the combined cost — what `handle_external_file_change` pays
+/// (c) the combined cost — what `reset_doc_from_disk` pays
 ///     today on each "save echo" event before any short-circuit.
 fn bench_diff(buf: &GapBuffer<char>, disk_content: &str) -> (f64, f64, f64) {
     let mut collect_ns: u128 = 0;

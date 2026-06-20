@@ -600,6 +600,54 @@ Saves a document to disk.
 - `NotConnected`: If remote host not connected
 - `IoError`: If file not open, write fails, or no `disk_file` handle
 
+### Reset from disk
+
+Discards in-memory edits on the owner side by re-reading the file from
+disk and broadcasting the diff to all subscribers. The owner reuses the
+same `reset_doc_from_disk` path used by the file watcher, but
+skips the “ignore changes older than last save” gate.
+
+**Request**
+```json
+{
+  "method": "ResetFromDisk",
+  "params": {
+    "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
+  }
+}
+```
+
+**Response**
+```json
+{
+  "file": {"hostId": "server-id", "project": "myproject", "file": "doc.txt"}
+}
+```
+
+**Flow**
+1. Editor sends ResetFromDisk request
+2. **If remote**:
+   - Find `doc_id` from remote documents
+   - Send `Msg::ResetFromDisk(doc_id)` to the owner
+   - Reply to the editor immediately with `ResetFromDiskResp`. The
+     buffer update reaches the editor asynchronously through the normal
+     `Msg::OpFromServer` broadcast that the owner emits when it applies
+     the disk diff
+   - **Remote server processing**:
+     - Verifies write permission for the requester
+     - Resolves the doc’s canonical path
+     - Calls `reset_doc_from_disk(path, None)`; the diff is
+       applied locally and sent to all subscribers as `Msg::OpFromServer`
+     - On failure, replies with `Msg::ErrorResp(IoError)`
+3. **If local**:
+   - Resolve doc, call `reset_doc_from_disk(path, None)` directly
+   - Return `ResetFromDiskResp` or `IoError` to the editor
+
+**Errors**
+- `NotConnected`: If remote host not connected
+- `IoError`: If file not open, has no on-disk path, or reading the file fails
+- `PermissionDenied`: If the requester does not have write permission on the owner
+
 ### Close file
 
 Closes a local document, saving it to disk and notifying subscribers.

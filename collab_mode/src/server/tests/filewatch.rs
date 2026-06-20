@@ -1,5 +1,6 @@
 use super::*;
 use crate::filewatch_receptor;
+use crate::server::transcript_tests::MockDocument;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
@@ -76,8 +77,10 @@ async fn external_change_broadcasts_to_subscribers() {
         }))
         .await
         .unwrap();
-    // Spoke opens it too so we have a remote subscriber.
-    let (spoke_file, _, _) = setup.spokes[0]
+    // Spoke opens it too so we have a remote subscriber. Seed a mock
+    // doc with the initial content so we can replay the ops the spoke
+    // receives and compare against disk.
+    let (spoke_file, _, initial_content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
             "hostId": setup.hub.id.clone(),
@@ -86,13 +89,15 @@ async fn external_change_broadcasts_to_subscribers() {
         }))
         .await
         .unwrap();
+    let mut mock_doc = MockDocument::new(&initial_content);
 
     // Give notify a beat to bind to the watched directory.
     tokio::time::sleep(NOTIFY_REGISTER_WAIT).await;
 
     // External program rewrites the file.
     let on_disk = project_dir.path().join("test.txt");
-    std::fs::write(&on_disk, "Formatted: Hello from test.txt").unwrap();
+    let new_content = "Formatted: Hello from test.txt";
+    std::fs::write(&on_disk, new_content).unwrap();
 
     // Spoke should be notified once the real receptor delivers the
     // event and the hub diffs+broadcasts.
@@ -106,10 +111,16 @@ async fn external_change_broadcasts_to_subscribers() {
         .send_ops(spoke_file, vec![])
         .await
         .unwrap();
-    assert_eq!(
-        fetch_resp.doc_len,
-        "Formatted: Hello from test.txt".chars().count() as u64
-    );
+    assert_eq!(fetch_resp.doc_len, new_content.chars().count() as u64);
+
+    // Replay the lean ops the spoke received and confirm the resulting
+    // buffer is byte-for-byte the new on-disk content.
+    for op in &fetch_resp.ops {
+        mock_doc
+            .apply_edit_instruction(&op.op)
+            .expect("applying remote op");
+    }
+    assert_eq!(mock_doc.get_content(), new_content);
 
     setup.cleanup();
 }
@@ -202,7 +213,7 @@ async fn close_stops_propagation() {
         }))
         .await
         .unwrap();
-    let (spoke_file, _, _) = setup.spokes[0]
+    let (spoke_file, _, initial_content) = setup.spokes[0]
         .editor
         .open_file(serde_json::json!({
             "hostId": setup.hub.id.clone(),
@@ -211,23 +222,32 @@ async fn close_stops_propagation() {
         }))
         .await
         .unwrap();
+    let mut mock_doc = MockDocument::new(&initial_content);
 
     tokio::time::sleep(NOTIFY_REGISTER_WAIT).await;
 
     // Sanity: the wiring works while the file is open.
     let on_disk = project_dir.path().join("test.txt");
-    std::fs::write(&on_disk, "first change").unwrap();
+    let first_change = "first change";
+    std::fs::write(&on_disk, first_change).unwrap();
     setup.spokes[0]
         .editor
         .wait_for_notification("RemoteOpsArrived", PROPAGATE_WAIT_SECS)
         .await
         .unwrap();
-    // Drain the ops so subsequent waits don’t see a stale message.
-    setup.spokes[0]
+    // Drain the ops so subsequent waits don’t see a stale message, and
+    // confirm the replayed buffer matches disk.
+    let fetch_resp = setup.spokes[0]
         .editor
         .send_ops(spoke_file.clone(), vec![])
         .await
         .unwrap();
+    for op in &fetch_resp.ops {
+        mock_doc
+            .apply_edit_instruction(&op.op)
+            .expect("applying remote op");
+    }
+    assert_eq!(mock_doc.get_content(), first_change);
 
     // Close the file on the hub. The spoke also receives a FileClosed
     // notification as part of close propagation; consume it.

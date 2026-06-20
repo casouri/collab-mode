@@ -294,6 +294,16 @@ pub struct SaveFileParams {
 
 pub type SaveFileResp = SaveFileParams;
 
+// **** ResetFromDisk
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetFromDiskParams {
+    pub file: EditorFileDesc,
+}
+
+pub type ResetFromDiskResp = ResetFromDiskParams;
+
 // **** DeleteFile & CloseFile
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -540,7 +550,7 @@ pub enum Msg {
     Snapshot {
         snapshot: NewSnapshot,
     },
-    ResetFile {
+    ResetFromDisk {
         doc: DocId,
     },
     Info {

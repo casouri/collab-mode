@@ -895,6 +895,7 @@ To prevent them from being invoked."
                 #'collab--warn-for-unsupported-undo)
     ;; Other commands
     (define-key map [remap save-buffer] #'collab-save-buffer)
+    (define-key map [remap revert-buffer] #'collab-reset-from-disk)
     (define-key map [remap find-file] #'collab-find-file-bifurcated)
     map)
   "Keymap for ‘collab-monitored-mode’.")
@@ -1516,6 +1517,13 @@ Return (:siteId SITE-ID :content CONTENT)."
                      `( :file ,file-desc)
                      :timeout collab-rpc-timeout)))
 
+(defun collab--reset-from-disk-req (file-desc)
+  "Reload FILE-DESC from the owner’s on-disk content."
+  (let ((conn (collab--connect-process)))
+    (jsonrpc-request conn 'ResetFromDisk
+                     `( :file ,file-desc)
+                     :timeout collab-rpc-timeout)))
+
 (defun collab--move-file-req (project-id old-path new-path host)
   "Move file from OLD-PATH to NEW-PATH in PROJECT-ID on HOST."
   (let ((conn (collab--connect-process)))
@@ -1755,6 +1763,16 @@ Saves the buffer on the owner’s machine."
   (collab--catch-error "Can’t save the buffer"
     (collab--save-file-req collab--file))
   (message "Buffer saved"))
+
+(defun collab-reset-from-disk ()
+  "Discard local edits and reload the buffer from the owner’s disk.
+The owner reads the file fresh and broadcasts the diff as ops, so the
+buffer here updates through the normal op delivery path."
+  (interactive)
+  (collab--check-precondition)
+  (collab--catch-error "Can’t reset buffer from disk"
+    (collab--reset-from-disk-req collab--file))
+  (message "Buffer reset from disk"))
 
 ;;; UI
 
