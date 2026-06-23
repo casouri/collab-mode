@@ -1,16 +1,16 @@
 .POSIX:
 
-.PHONY: test test-all session-1 session-2 upload
+.PHONY: test test-slow session-1 session-2 upload
 
-LOG_ENV=RUST_LOG=info
+LOG_ENV=RUST_LOG=debug
 
 RUST_ENV=RUST_BACKTRACE=1 $(LOG_ENV)
 
 test:
 	cargo test -- --test-threads=1 # Avoid too many open files, port alrady used, etc.
 
-test-ignored:
-	cargo test -- --ignored --show-output
+test-slow:
+	cargo test -- --ignored --test-threads=1 --show-output
 
 session-1:
 	$(RUST_ENV) cargo run --bin collab_mode -- run --socket --socket-port 7701 --config ../fixture/Alice/config
@@ -29,3 +29,9 @@ emacs-2:
 
 upload:
 	rsync -rP ~/p/collab-mode yuan@collab-mode: --exclude "target" --exclude ".git" --exclude "release"
+
+# To deploy new signal version:
+# ssh root@collab-mode
+# cd /home/yuan/collab-mode
+# cargo build --bin collab-signal
+# systemctl restart collab-signal
