@@ -143,7 +143,7 @@ impl SignalingChannel {
             ));
         }
 
-        // Build the bind headers and upgrade.
+        // Build the bind headers.
         let (identity, signature) = sign_identity(&my_key_cert)?;
         let trusted_header = encode_trusted_header(&trusted)?;
         let req = build_bind_request(
@@ -153,22 +153,9 @@ impl SignalingChannel {
             &signature.0,
             &trusted_header,
         )?;
-        let (stream, _resp) = tung::connect_async(req)
-            .await
-            .context("WebSocket bind upgrade failed")?;
 
-        let _ = self
-            .signaling_msg_tx
-            .send(SignalingMessage {
-                signaling_addr: addr.clone(),
-                msg: Ok(SignalingMsg::Bound {
-                    id: id.clone(),
-                    trusted: trusted.clone(),
-                }),
-            })
-            .await;
-
-        // Create the actor that manages the connection.
+        // Set up channels and cleanup, then register the client
+        // before we start connecting.
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(16);
         let clients_for_cleanup = self.clients.clone();
         let addr_for_cleanup = addr.clone();
@@ -179,28 +166,81 @@ impl SignalingChannel {
                 .remove(&addr_for_cleanup);
         });
 
-        let actor = RealSignalingClient {
-            id: id.clone(),
-            addr: addr.clone(),
-            stream: Some(stream),
-            signaling_msg_tx: self.signaling_msg_tx.clone(),
-            cmd_rx,
-            cmd_tx: cmd_tx.clone(),
-            socks: HashMap::new(),
-            cleanup: Some(cleanup),
-        };
+        self.clients.lock().unwrap().insert(
+            addr.clone(),
+            ClientHandle {
+                msg_tx: cmd_tx.clone(),
+            },
+        );
 
+        // Connect to server and start the actor on the connection.
         let span = tracing::info_span!(
             "RealSignalingClient",
             endpoint = %id,
             signaling_addr = %addr
         );
-        tokio::spawn(actor.run().instrument(span));
+        let signaling_msg_tx = self.signaling_msg_tx.clone();
+        tokio::spawn(
+            async move {
+                let connect =
+                    tokio::time::timeout(Duration::from_secs(10), tung::connect_async(req)).await;
+                let stream = match connect {
+                    Ok(Ok((stream, _resp))) => stream,
+                    Ok(Err(e)) => {
+                        tracing::warn!("WebSocket bind upgrade failed: {}", e);
+                        cleanup();
+                        let _ = signaling_msg_tx
+                            .send(SignalingMessage {
+                                signaling_addr: addr.clone(),
+                                msg: Err(crate::signaling::AcceptStopped(format!(
+                                    "WebSocket bind upgrade failed: {}",
+                                    e
+                                ))),
+                            })
+                            .await;
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!("WebSocket bind upgrade timed out after 10s");
+                        cleanup();
+                        let _ = signaling_msg_tx
+                            .send(SignalingMessage {
+                                signaling_addr: addr.clone(),
+                                msg: Err(crate::signaling::AcceptStopped(
+                                    "WebSocket bind upgrade timed out".to_string(),
+                                )),
+                            })
+                            .await;
+                        return;
+                    }
+                };
 
-        self.clients
-            .lock()
-            .unwrap()
-            .insert(addr, ClientHandle { msg_tx: cmd_tx });
+                let _ = signaling_msg_tx
+                    .send(SignalingMessage {
+                        signaling_addr: addr.clone(),
+                        msg: Ok(SignalingMsg::Bound {
+                            id: id.clone(),
+                            trusted: trusted.clone(),
+                        }),
+                    })
+                    .await;
+
+                let actor = RealSignalingClient {
+                    id,
+                    addr,
+                    stream: Some(stream),
+                    signaling_msg_tx,
+                    cmd_rx,
+                    cmd_tx,
+                    socks: HashMap::new(),
+                    cleanup: Some(cleanup),
+                };
+
+                actor.run().await;
+            }
+            .instrument(span),
+        );
+
         Ok(())
     }
 
