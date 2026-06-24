@@ -3114,4 +3114,8 @@ detailed history."
 
 (provide 'collab-mode)
 
+;; Load the Tramp backend so the “collab” method gets registered.
+;; HACK, needs to find a better way to do it.
+(require 'tramp-collab)
+
 ;;; collab-mode.el ends here
