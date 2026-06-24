@@ -972,7 +972,7 @@ PATH should be a string HOST/PROJECT/PATH returned by
 ‘collab--encode-filename’."
   (setq collab--file file-desc)
   (setq collab--my-site-id my-site-id)
-  (setq collab--default-directory (file-name-directory path))
+  (setq collab--default-directory (collab--file-name-directory path))
   (let* ((tramp-name (collab--tramp-filename file-desc))
          (tramp-dir (or (file-name-directory tramp-name) tramp-name)))
     (setq buffer-file-name tramp-name)
@@ -2463,6 +2463,22 @@ The host-id in the path is truncated for display but preserved in full."
         (format "/%s/%s" host-id project)
       (format "/%s/%s/%s" host-id project file))))
 
+(defun collab--file-name-directory (path)
+  "Like ‘file-name-directory’ but for a collab PATH.
+
+Bypasses ‘file-name-handler-alist’ because the host-id contains
+“::”, which Tramp interprets as method-name."
+  (let ((slash (cl-position ?/ path :from-end t)))
+    (and slash (substring path 0 (1+ slash)))))
+
+(defun collab--file-name-nondirectory (path)
+  "Like ‘file-name-nondirectory’ but for a collab PATH.
+
+Bypasses ‘file-name-handler-alist’ because the host-id contains
+“::”, which Tramp interprets as method-name."
+  (let ((slash (cl-position ?/ path :from-end t)))
+    (if slash (substring path (1+ slash)) path)))
+
 (defun collab--backup-filename (file-desc)
   "Return the backup file path of FILE-DESC."
   (expand-file-name (string-trim (collab--encode-filename file-desc) "/")
@@ -2690,7 +2706,7 @@ Uses ‘collab--default-directory’ as initial input."
         (if (not parsed)
             (message "Invalid path format: %s" path)
           (collab--open-thing parsed
-                              (file-name-nondirectory path)
+                              (collab--file-name-nondirectory path)
                               nil))))))
 
 (defun collab-find-file-bifurcated ()
