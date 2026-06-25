@@ -1808,8 +1808,23 @@ impl Server {
                 peer: host_id,
                 reason,
             } => {
-                self.current_world
-                    .mark_remote_failed(&host_id, reason.clone());
+                // Usually FailedToConnect only happens on first
+                // connect, but there are places where reconnect can
+                // cause this, so we still need to check if we have
+                // established the connection before.
+                let ever = self
+                    .current_world
+                    .remotes
+                    .get(&host_id)
+                    .map(|r| r.ever_connected)
+                    .unwrap_or(false);
+                if ever {
+                    self.current_world.mark_remote_disconnected(&host_id);
+                    self.fix_world_next();
+                } else {
+                    self.current_world
+                        .mark_remote_failed(&host_id, reason.clone());
+                }
                 next.send_notif(
                     NotificationCode::ConnectionBroke,
                     ConnectionBrokeNote { host_id, reason },
@@ -4799,7 +4814,7 @@ impl Server {
             peer_id,
             is_connecting_or_connected
         );
-        if is_connecting_or_connected && !initiator {
+        if is_connecting_or_connected {
             tracing::info!(
                 "Already connecting/connected to {}, ignoring duplicate connection request",
                 peer_id
@@ -4850,8 +4865,9 @@ impl Server {
         self.current_world
             .set_remote_connecting2(&peer_id, sctp_transport);
 
-        // If the remote initiated the connection, reply with
-        // a connect message.
+        // If the remote initiated the connection, reply with a
+        // connect message. If the connect message is a reply of our
+        // connect message, don’t send it again.
         if initiator {
             self.send_connect_message(
                 next,
