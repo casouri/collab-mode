@@ -2,17 +2,16 @@
 // functions that that starts an actor on either a pipe or a socket.
 // And the actor simply moves JSONRPC messages around.
 
-use std::sync::Arc;
-
+use crate::cancel::CancelManager;
 use lsp_server::{Connection, Message};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tracing::trace;
 
 /// Run the editor receptor on stdio. Returns when fatal error occurs.
 pub fn run_stdio(
     msg_tx: mpsc::Sender<Message>,
     msg_rx: mpsc::Receiver<Message>,
-    shutdown: Arc<Notify>,
+    shutdown: CancelManager,
 ) {
     tracing::info!("Started listening for messages from editor");
     // We don't need to join the io_threads, as the main_loop will get
@@ -26,7 +25,7 @@ pub fn run_socket(
     addr: &str,
     msg_tx: mpsc::Sender<Message>,
     msg_rx: mpsc::Receiver<Message>,
-    shutdown: Arc<Notify>,
+    shutdown: CancelManager,
 ) -> anyhow::Result<()> {
     tracing::info!("Started listening for messages from editor on {}", &addr);
     // We don't need to join the io_threads, the main_loop will get io
@@ -42,7 +41,7 @@ fn main_loop(
     connection: Connection,
     msg_tx: mpsc::Sender<Message>,
     mut msg_rx: mpsc::Receiver<Message>,
-    shutdown: Arc<Notify>,
+    shutdown: CancelManager,
 ) {
     let (err_tx, mut err_rx) = mpsc::channel::<String>(1);
 
@@ -97,5 +96,5 @@ fn main_loop(
         tracing::warn!("Collab peer terminated due to error: {:#?}", err);
     }
 
-    shutdown.notify_waiters();
+    shutdown.cancel();
 }

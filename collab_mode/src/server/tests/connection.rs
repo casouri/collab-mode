@@ -69,7 +69,7 @@ async fn setup_connected_pair() -> ConnectedPair {
             let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_msg_tx| {
                 SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
             });
-            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let shutdown = crate::cancel::CancelManager::new();
             let (fw_a_tx, fw_a_rx) =
                 tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
             let (fw_b_tx, _fw_b_rx) =
@@ -102,7 +102,7 @@ async fn setup_connected_pair() -> ConnectedPair {
             let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_msg_tx| {
                 SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
             });
-            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let shutdown = crate::cancel::CancelManager::new();
             let (fw_a_tx, fw_a_rx) =
                 tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);
             let (fw_b_tx, _fw_b_rx) =
@@ -224,10 +224,17 @@ async fn test_connection_broke_triggers_recovery() {
     // should re-attempt the connection.
     let mut pair = setup_connected_pair().await;
 
+    // Look up the live connection_id so the synthetic
+    // ConnectionBroke passes the handler's stale-check.
+    let connection_id = pair
+        .factory
+        .peer_connection_id(&pair.id2, &pair.id1)
+        .expect("server2 should have an active actor for server1");
     let broke = webchannel::Message {
         host: pair.id2.clone(),
         body: Msg::ConnectionBroke {
             peer: pair.id1.clone(),
+            connection_id,
         },
         req_id: None,
     };

@@ -13,7 +13,7 @@ fn main() {
             }
         }
     });
-    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown = collab_mode::cancel::CancelManager::new();
     let res = collab_mode::editor_receptor::run_socket(
         "localhost:7777",
         to_peer_tx,

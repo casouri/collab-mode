@@ -4,16 +4,40 @@
 //!
 //! Lifecycle: `SshRemote::run` is itself the long-lived task. It opens
 //! the ssh `Session`, spawns the remote command, wraps the child’s
-//! stdio in a [`ReaderWriter`], hands that to an `IoRemote`, and
-//! awaits the actor loop. When `IoRemote` returns, the `ReaderWriter`
-//! and its half-streams drop, the child is dropped (killing the
-//! remote process), and `session.close().await` runs a graceful SSH
-//! teardown — all in the same task, no helper spawn needed.
+//! stdio in a [`ReaderWriter`], and hands that to an `IoRemote`. The
+//! `RemoteChild` and `Session` live inside an [`SshGuard`] whose `Drop`
+//! kills the child and detaches a task that closes the session, so
+//! teardown happens uniformly on success, error, and future
+//! cancellation.
 
 use super::{Command, IoRemote, Message, ReaderWriter};
+use crate::cancel::CancelManager;
 use crate::message::Msg;
 use crate::types::{id_short, ServerId};
+use openssh::Session;
 use tokio::sync::mpsc;
+
+/// Drop guard for the ssh session object, so that the drop logic is
+/// ran async and doesn’t block tokio.
+struct SshSessionDropGuard {
+    session: Option<Session>,
+    ssh_host: String,
+    cancel: CancelManager,
+}
+
+impl Drop for SshSessionDropGuard {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            let ssh_host = self.ssh_host.clone();
+            self.cancel.spawn_uncancelled(async move {
+                if let Err(err) = session.close().await {
+                    tracing::warn!("openssh session close failed for {ssh_host}: {err}");
+                    // TODO: Send the error to editor as well.
+                }
+            });
+        }
+    }
+}
 
 pub(super) struct SshRemote {
     peer_id: ServerId,
@@ -21,6 +45,8 @@ pub(super) struct SshRemote {
     command: Vec<String>,
     remote_msg_tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Command>,
+    connection_id: u128,
+    cancel: CancelManager,
 }
 
 impl SshRemote {
@@ -30,6 +56,8 @@ impl SshRemote {
         command: Vec<String>,
         remote_msg_tx: mpsc::Sender<Message>,
         rx: mpsc::Receiver<Command>,
+        connection_id: u128,
+        cancel: CancelManager,
     ) -> Self {
         Self {
             peer_id,
@@ -37,14 +65,16 @@ impl SshRemote {
             command,
             remote_msg_tx,
             rx,
+            connection_id,
+            cancel,
         }
     }
 
     /// Connect ssh, spawn the remote command, run an `IoRemote` over
-    /// its stdio, then close the session. No nested `tokio::spawn` —
-    /// `SshRemote::run` is already on a spawned task, so the `Session`
-    /// + `RemoteChild` can just live as locals across the whole run.
-    /// On any setup error, push `ConnectionBroke` and return.
+    /// its stdio. All ssh session teardown happens in
+    /// [`SshSessionGuard::drop`]; the `RemoteChild`'s own `Drop` kills
+    /// the remote process. Both fire on success, error, and future
+    /// cancellation.
     pub(super) async fn run(self) {
         let SshRemote {
             peer_id,
@@ -52,30 +82,39 @@ impl SshRemote {
             command,
             remote_msg_tx,
             rx,
+            connection_id,
+            cancel,
         } = self;
 
         if command.is_empty() {
             tracing::warn!("SshRemote for {} got empty command", id_short(&peer_id));
-            send_connection_broke(&remote_msg_tx, &peer_id).await;
+            send_connection_broke(&remote_msg_tx, &peer_id, connection_id).await;
             return;
         }
 
-        // Open ssh session.
-        let session = match openssh::Session::connect(&ssh_host, openssh::KnownHosts::Strict).await
-        {
+        // Open ssh session, wrap in guard immediately so any later
+        // early-return path closes the session via Drop.
+        let session = match Session::connect(&ssh_host, openssh::KnownHosts::Strict).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     "openssh connect to {ssh_host} for {} failed: {e}",
                     id_short(&peer_id)
                 );
-                send_connection_broke(&remote_msg_tx, &peer_id).await;
+                send_connection_broke(&remote_msg_tx, &peer_id, connection_id).await;
                 return;
             }
         };
+        let session_guard = SshSessionDropGuard {
+            session: Some(session),
+            ssh_host: ssh_host.clone(),
+            cancel: cancel.clone(),
+        };
+        // RemoteChild borrows from Session, so we access via &session.
+        let session_ref = session_guard.session.as_ref().unwrap();
 
         // Spawn the remote command.
-        let mut cmd = session.command(&command[0]);
+        let mut cmd = session_ref.command(&command[0]);
         for arg in &command[1..] {
             // .arg() shell-escapes each arg (vs raw_arg which does not).
             cmd.arg(arg);
@@ -92,8 +131,7 @@ impl SshRemote {
                     command[0],
                     id_short(&peer_id)
                 );
-                let _ = session.close().await;
-                send_connection_broke(&remote_msg_tx, &peer_id).await;
+                send_connection_broke(&remote_msg_tx, &peer_id, connection_id).await;
                 return;
             }
         };
@@ -105,31 +143,31 @@ impl SshRemote {
                     "openssh child missing stdin/stdout for {}",
                     id_short(&peer_id)
                 );
-                drop(child);
-                let _ = session.close().await;
-                send_connection_broke(&remote_msg_tx, &peer_id).await;
+                send_connection_broke(&remote_msg_tx, &peer_id, connection_id).await;
                 return;
             }
         };
 
         let rw = ReaderWriter::new(stdout, stdin, ());
-        IoRemote::new(peer_id, rw, remote_msg_tx, rx).run().await;
-
-        // IoRemote::run will do cleanup; here we just need to cleanup
-        // the ssh-related stuff.
-        drop(child);
-        if let Err(err) = session.close().await {
-            tracing::warn!("openssh session close failed for {ssh_host}: {err}");
-        }
+        IoRemote::new(peer_id, rw, remote_msg_tx, rx, connection_id)
+            .run()
+            .await;
+        // child and session guard are dropped and their Drop runs,
+        // child first, session guard second.
     }
 }
 
-async fn send_connection_broke(tx: &mpsc::Sender<Message>, peer_id: &ServerId) {
+async fn send_connection_broke(
+    tx: &mpsc::Sender<Message>,
+    peer_id: &ServerId,
+    connection_id: u128,
+) {
     let _ = tx
         .send(Message {
             host: peer_id.clone(),
             body: Msg::ConnectionBroke {
                 peer: peer_id.clone(),
+                connection_id,
             },
             req_id: None,
         })
@@ -169,7 +207,7 @@ mod tests {
             "me".into(),
             tx,
             self_tx,
-            std::sync::Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         chan.connect(
@@ -179,6 +217,8 @@ mod tests {
                 command: vec!["cat".into()],
             },
             key_cert(),
+            1,
+            crate::cancel::CancelManager::new(),
         )
         .await
         .expect("connect_ssh should return Ok (ssh spawn is async)");

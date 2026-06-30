@@ -597,9 +597,18 @@ pub enum Msg {
     FailedToConnect {
         peer: ServerId,
         reason: String,
+        /// Tracks the connect attempt this failure belongs to. The
+        /// handler ignores messages whose id is less (older) than the
+        /// latest id (see `RemoteState::connection_id`). `0` means
+        /// “untracked / always apply”.
+        #[serde(default)]
+        connection_id: u128,
     },
     ConnectionBroke {
         peer: ServerId,
+        /// See `FailedToConnect::connection_id`.
+        #[serde(default)]
+        connection_id: u128,
     },
     StopSendingOps {
         doc: DocId,

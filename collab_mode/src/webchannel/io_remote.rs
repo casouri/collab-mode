@@ -18,11 +18,11 @@ pub(super) struct IoRemote {
     writer: WriteHalf<ReaderWriter>,
     remote_msg_tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Command>,
+    connection_id: u128,
 }
 
 /// Why the actor’s main loop exited.
 enum Exit {
-    Shutdown(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
     OutgoingErr,
     InboundClosed,
     SenderDropped,
@@ -34,6 +34,7 @@ impl IoRemote {
         rw: ReaderWriter,
         remote_msg_tx: mpsc::Sender<Message>,
         rx: mpsc::Receiver<Command>,
+        connection_id: u128,
     ) -> Self {
         let (reader, writer) = tokio::io::split(rw);
         Self {
@@ -42,30 +43,27 @@ impl IoRemote {
             writer,
             remote_msg_tx,
             rx,
+            connection_id,
         }
     }
 
-    /// Run select in a loop, and handle incoming/outgoing messages,
-    /// as well as shutdown. Cleanup after loop exits.
+    /// Run select in a loop, send `ConnectionBroke` when the loop
+    /// exits.
     pub(super) async fn run(mut self) {
-        let exit = self.run_inner().await;
-        match exit {
-            Exit::Shutdown(tx) => {
-                let _ = tx.send(Ok(()));
-            }
-            Exit::OutgoingErr | Exit::InboundClosed | Exit::SenderDropped => {
-                let _ = self
-                    .remote_msg_tx
-                    .send(Message {
-                        host: self.peer_id.clone(),
-                        body: Msg::ConnectionBroke {
-                            peer: self.peer_id.clone(),
-                        },
-                        req_id: None,
-                    })
-                    .await;
-            }
-        }
+        // If shutdown from the main server thread, we won’t reach
+        // this point. So if we do, it must be connection broke.
+        let _exit = self.run_inner().await;
+        let _ = self
+            .remote_msg_tx
+            .send(Message {
+                host: self.peer_id.clone(),
+                body: Msg::ConnectionBroke {
+                    peer: self.peer_id.clone(),
+                    connection_id: self.connection_id,
+                },
+                req_id: None,
+            })
+            .await;
     }
 
     /// Single select loop over outgoing commands and inbound frames.
@@ -74,7 +72,6 @@ impl IoRemote {
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
-                    Some(Command::Shutdown(tx)) => return Exit::Shutdown(tx),
                     Some(Command::Msg(msg)) => {
                         if let Err(e) = frame_write(&mut self.writer, &msg).await {
                             tracing::warn!("IoRemote write to {} failed: {e}", id_short(&self.peer_id));
@@ -130,19 +127,21 @@ mod tests {
             "a".into(),
             tx_a,
             self_tx_a,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let chan_b = WebChannel::new(
             "b".into(),
             tx_b,
             self_tx_b,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         chan_a
             .connect(
                 "b".into(),
                 Transport::Io(ReaderWriter::from_duplex(a)),
                 key_cert(),
+                1,
+                crate::cancel::CancelManager::new(),
             )
             .await
             .unwrap();
@@ -151,6 +150,8 @@ mod tests {
                 "a".into(),
                 Transport::Io(ReaderWriter::from_duplex(b)),
                 key_cert(),
+                1,
+                crate::cancel::CancelManager::new(),
             )
             .await
             .unwrap();
@@ -177,7 +178,7 @@ mod tests {
             .await
             .expect("recv timed out")
             .expect("dual_a closed");
-        assert!(matches!(msg.body, Msg::ConnectionBroke { peer: _ }));
+        assert!(matches!(msg.body, Msg::ConnectionBroke { .. }));
     }
 
     #[tokio::test]
@@ -187,7 +188,7 @@ mod tests {
             "a".into(),
             tx_a,
             self_tx_a,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let res = chan_a.send(&"b".into(), None, hey()).await;
         assert!(res.is_err());

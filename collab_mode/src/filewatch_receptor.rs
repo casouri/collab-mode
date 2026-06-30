@@ -3,13 +3,13 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
+use crate::cancel::CancelManager;
 use crossbeam_channel::{select, Receiver};
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tracing::trace;
 
 /// Messages relate to file-watching.
@@ -35,7 +35,7 @@ const NOTIFY_CHAN_CAP: usize = 256;
 pub fn run(
     msg_tx: mpsc::Sender<WatchFileMessage>,
     msg_rx: Receiver<WatchFileMessage>,
-    shutdown: Arc<Notify>,
+    shutdown: CancelManager,
 ) -> anyhow::Result<()> {
     tracing::info!("Started filewatch receptor");
 
@@ -85,7 +85,7 @@ pub fn run(
         }
     }
 
-    shutdown.notify_waiters();
+    shutdown.cancel();
     Ok(())
 }
 
@@ -181,18 +181,18 @@ mod tests {
     /// Spawn the receptor on a system thread and return the channel
     /// endpoints the test side keeps: a crossbeam `Sender` to feed
     /// WatchFiles, a tokio `Receiver` to consume FileChanged, and the
-    /// shutdown notify.
+    /// shutdown manager.
     fn spawn_receptor() -> (
         crossbeam_channel::Sender<WatchFileMessage>,
         mpsc::Receiver<WatchFileMessage>,
-        Arc<Notify>,
+        CancelManager,
     ) {
         // server → receptor
         let (server_to_receptor_tx, server_to_receptor_rx) =
             crossbeam_channel::bounded::<WatchFileMessage>(16);
         // receptor → server
         let (receptor_to_server_tx, receptor_to_server_rx) = mpsc::channel(16);
-        let shutdown = Arc::new(Notify::new());
+        let shutdown = CancelManager::new();
         let shutdown_for_run = shutdown.clone();
         std::thread::spawn(move || {
             if let Err(err) = run(

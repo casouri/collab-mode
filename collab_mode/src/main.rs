@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
                 crossbeam_channel::bounded::<WatchFileMessage>(32);
             let use_socket = *socket;
             let port = *socket_port;
-            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let shutdown = collab_mode::cancel::CancelManager::new();
 
             // Run editor receptor.
             let editor_shutdown = shutdown.clone();
@@ -143,8 +143,10 @@ fn main() -> anyhow::Result<()> {
                         shutdown_for_factory,
                     )
                 });
-                let sig_factory: SignalingChannelFactory =
-                    Box::new(move |sig_tx| signaling::client::SignalingChannel::new(sig_tx));
+                let shutdown_for_sig = shutdown_for_server.clone();
+                let sig_factory: SignalingChannelFactory = Box::new(move |sig_tx| {
+                    signaling::client::SignalingChannel::new(sig_tx, shutdown_for_sig)
+                });
                 let res = server
                     .run(
                         server_out_tx,
@@ -255,13 +257,16 @@ fn run_envoy() -> anyhow::Result<()> {
         // actor-model WebChannel doesn’t implement yet. The IoRemote
         // refactor will restore this; for now we hand back a vanilla
         // WebChannel so the binary builds.
-        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let shutdown = collab_mode::cancel::CancelManager::new();
         let shutdown_for_factory = shutdown.clone();
         let envoy_id_for_factory = envoy_id.clone();
         let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
             webchannel::WebChannel::new(envoy_id_for_factory, msg_tx, self_tx, shutdown_for_factory)
         });
-        let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
+
+        let shutdown_for_sig = shutdown.clone();
+        let sig_factory: SignalingChannelFactory =
+            Box::new(move |sig_tx| SignalingChannel::new(sig_tx, shutdown_for_sig));
 
         // Hold tempdir for the process lifetime.
         let _hold_temp = temp;

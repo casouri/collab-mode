@@ -29,10 +29,9 @@ use crate::filewatch_receptor::WatchFileMessage;
 use crate::message::{self, *};
 use crate::signaling::SignalingMsg;
 use crate::types::*;
-use crate::webchannel::{self, WebChannel, WebChannelError};
+use crate::webchannel::{self, WebChannel};
 use anyhow::{anyhow, Context};
 use fmt_derive;
-use futures::future::join_all;
 use gapbuf::GapBuffer;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -46,7 +45,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use tokio::task::JoinHandle;
 
 const SHUTDOWN_TIMEOUT: u64 = 10;
 
@@ -261,6 +259,13 @@ pub struct RemoteState {
     pub ever_connected: bool,
     /// Stride used for the next reconnect attempt, in seconds.
     pub retry_stride_secs: u64,
+    /// Random id for every new reconnect attempt
+    /// (`set_remote_connecting1`/`set_remote_connecting2`). Passed
+    /// around and finally attached to failure messages; the handler
+    /// compares the message's id with this field by equality and only
+    /// handles the error is the id matches (see
+    /// [`is_stale_connection_attempt`]).
+    pub connection_id: u128,
 }
 
 /// Declarative connection state. In `Server.ideal_world` this records
@@ -291,17 +296,38 @@ fn next_stride(cur: u64) -> u64 {
     cur.saturating_mul(2).min(MAX_RETRY_STRIDE_SECS)
 }
 
+/// Create a new connection id.
+fn new_connection_id() -> u128 {
+    rand::random::<u128>()
+}
+
+/// Return true if `msg_connection_id` does not match the peer's
+/// current `connection_id` (the message is from a different connect
+/// attempt and should be dropped). Every connection id is a fresh
+/// random `u128`, so equality is sufficient: a stale msg's id will
+/// never match the live state's id, and a missing-peer case also
+/// returns `true` because there's nothing to update.
+fn is_stale_connection_attempt(
+    world: &WorldState,
+    peer: &ServerId,
+    msg_connection_id: u128,
+) -> bool {
+    world.remotes.get(peer).map(|r| r.connection_id) != Some(msg_connection_id)
+}
+
 impl WorldState {
+    /// Returns the new `connection_id`.
     pub fn set_remote_connecting1(
         &mut self,
         peer: &ServerId,
         transport: webchannel::TransportConfig,
-    ) {
+    ) -> u128 {
         let (ever, stride) = self
             .remotes
             .get(peer)
             .map(|r| (r.ever_connected, r.retry_stride_secs))
             .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS));
+        let connection_id = new_connection_id();
         self.remotes.insert(
             peer.clone(),
             RemoteState {
@@ -311,20 +337,24 @@ impl WorldState {
                 },
                 ever_connected: ever,
                 retry_stride_secs: stride,
+                connection_id,
             },
         );
+        connection_id
     }
 
+    /// Returns the new `connection_id`.
     pub fn set_remote_connecting2(
         &mut self,
         peer: &ServerId,
         transport: webchannel::TransportConfig,
-    ) {
+    ) -> u128 {
         let (ever, stride) = self
             .remotes
             .get(peer)
             .map(|r| (r.ever_connected, r.retry_stride_secs))
             .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS));
+        let connection_id = new_connection_id();
         self.remotes.insert(
             peer.clone(),
             RemoteState {
@@ -334,16 +364,18 @@ impl WorldState {
                 },
                 ever_connected: ever,
                 retry_stride_secs: stride,
+                connection_id,
             },
         );
+        connection_id
     }
 
     pub fn set_remote_pending(&mut self, peer: &ServerId, transport: webchannel::TransportConfig) {
-        let (ever, stride) = self
+        let (ever, stride, connection_id) = self
             .remotes
             .get(peer)
-            .map(|r| (r.ever_connected, r.retry_stride_secs))
-            .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS));
+            .map(|r| (r.ever_connected, r.retry_stride_secs, r.connection_id))
+            .unwrap_or((false, INITIAL_RETRY_STRIDE_SECS, new_connection_id()));
         self.remotes.insert(
             peer.clone(),
             RemoteState {
@@ -351,6 +383,7 @@ impl WorldState {
                 status: RemoteStatus::Pending,
                 ever_connected: ever,
                 retry_stride_secs: stride,
+                connection_id,
             },
         );
     }
@@ -908,6 +941,7 @@ impl Server {
                 status: RemoteStatus::Connected,
                 ever_connected: false,
                 retry_stride_secs: INITIAL_RETRY_STRIDE_SECS,
+                connection_id: new_connection_id(),
             },
         );
         self.current_world
@@ -924,7 +958,7 @@ impl Server {
         mut filewatch_rx: mpsc::Receiver<crate::filewatch_receptor::WatchFileMessage>,
         webchannel_factory: WebChannelFactory,
         signaling_channel_factory: SignalingChannelFactory,
-        shutdown: std::sync::Arc<tokio::sync::Notify>,
+        shutdown: crate::cancel::CancelManager,
     ) -> anyhow::Result<()> {
         // webrtc-dtls uses the ring feature of rustls, so there's an
         // ambiguity of which provider to use. Here we just set the
@@ -964,7 +998,7 @@ impl Server {
             tokio::select! {
                 // Shutdown signal, can be editor disconnect, SIGINT,
                 // or SIGTERM.
-                _ = shutdown.notified() => break,
+                _ = shutdown.cancelled() => break,
                 // Handle messages from the editor.
                 msg = editor_rx.recv() => {
                     let Some(msg) = msg else { break; };
@@ -1043,51 +1077,55 @@ impl Server {
             }
         }
 
-        // Try to shutdown gracefully: close connections grafully,
-        // save all unsaved files.
-        let total_timeout = Duration::from_secs(SHUTDOWN_TIMEOUT);
-        if tokio::time::timeout(total_timeout, self.shutdown(webchannel))
-            .await
-            .is_err()
-        {
-            tracing::warn!("Timeout exceeded ({}s), force quit", SHUTDOWN_TIMEOUT);
-        }
+        // Try to shutdown gracefully with timeout.
+        self.shutdown(webchannel, shutdown).await;
         Ok(())
     }
 
-    /// Save owned docs to disk, send `Bye` to connected peers, then
-    /// flush the webchannel. Each step is best-effort: errors are
-    /// logged and never propagated, so a single failure does not
-    /// prevent the rest of shutdown from running. Be sure to bound
-    /// this with timeout.
-    async fn shutdown(&mut self, webchannel: WebChannel) {
+    /// Send `Bye` to connected peers, save owned docs to disk, and
+    /// shutdown. Roughly bounded by [`SHUTDOWN_TIMEOUT`].
+    async fn shutdown(
+        &mut self,
+        webchannel: WebChannel,
+        root_cancel: crate::cancel::CancelManager,
+    ) {
         tracing::info!("Shuting down");
 
-        let mut handles: Vec<JoinHandle<()>> = Vec::new();
+        // broadcast Bye to peers so they don’t try to reconnect.
+        if let Err(err) = webchannel.broadcast(None, Msg::Bye).await {
+            tracing::warn!("Failed to send Bye to remote hosts: {}", err);
+        }
 
-        // Send Bye to every peer.
-        let handle = tokio::spawn(async move {
-            if let Err(err) = webchannel.broadcast(None, Msg::Bye).await {
-                tracing::warn!("Failed to send Bye to remote hosts: {}", err);
-            }
-            if let Err(err) = webchannel.shutdown().await {
-                tracing::warn!("Error shutting down webchannel: {}", err);
-            }
-        });
-        handles.push(handle);
+        // Wait for 1s, best-effort.
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // Save all docs to disk in parallel.
+        // Shutdown all background tasks and close connections.
+        if let Err(err) = webchannel.shutdown().await {
+            tracing::warn!("Error shutting down webchannel: {}", err);
+        }
+
+        // Save all docs to disk in parallel. They may get stuck but
+        // that’s fine, the final close_and_wait has a timeout.
         for (_id, mut doc) in self.docs.drain() {
-            let handle = tokio::spawn(async move {
+            root_cancel.spawn_uncancelled(async move {
                 let file_desc = doc.file_desc.clone();
                 if let Err(err) = doc.save_to_disk() {
                     tracing::warn!("Failed to save doc {} during shutdown: {}", file_desc, err);
                 }
             });
-            handles.push(handle);
         }
 
-        join_all(handles).await;
+        // Cancel everything tracked and wait, bounded.
+        if root_cancel
+            .close_and_wait(Duration::from_secs(SHUTDOWN_TIMEOUT))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "Shutdown timed out after {}s; runtime will reap stragglers on exit",
+                SHUTDOWN_TIMEOUT
+            );
+        }
     }
 
     /// Send the currently opened files to the filewatch receptor.
@@ -1729,6 +1767,7 @@ impl Server {
                         status: RemoteStatus::Connected,
                         ever_connected: false,
                         retry_stride_secs: INITIAL_RETRY_STRIDE_SECS,
+                        connection_id: new_connection_id(),
                     },
                 );
                 // Reset a Failed entry to Pending so fix_world retries.
@@ -1807,7 +1846,16 @@ impl Server {
             Msg::FailedToConnect {
                 peer: host_id,
                 reason,
+                connection_id,
             } => {
+                if is_stale_connection_attempt(&self.current_world, &host_id, connection_id) {
+                    tracing::info!(
+                        peer = %host_id,
+                        msg_attempt = connection_id,
+                        "Ignoring stale FailedToConnect message"
+                    );
+                    return Ok(());
+                }
                 // Usually FailedToConnect only happens on first
                 // connect, but there are places where reconnect can
                 // cause this, so we still need to check if we have
@@ -1832,7 +1880,18 @@ impl Server {
                 .await;
                 Ok(())
             }
-            Msg::ConnectionBroke { peer: host_id } => {
+            Msg::ConnectionBroke {
+                peer: host_id,
+                connection_id,
+            } => {
+                if is_stale_connection_attempt(&self.current_world, &host_id, connection_id) {
+                    tracing::info!(
+                        peer = %host_id,
+                        msg_attempt = connection_id,
+                        "Ignoring stale ConnectionBroke message"
+                    );
+                    return Ok(());
+                }
                 // Mark as failed if connection never established.
                 let ever = self
                     .current_world
@@ -2434,7 +2493,8 @@ impl Server {
             command: command.clone(),
             projects: projects.clone(),
         };
-        self.current_world
+        let connection_id = self
+            .current_world
             .set_remote_connecting1(&host_id, transport_config);
 
         // Generate key+cert for the envoy to use, and trust it.
@@ -2451,6 +2511,7 @@ impl Server {
                         body: Msg::FailedToConnect {
                             peer: envoy_name,
                             reason: format!("Failed to generate cert: {}", err),
+                            connection_id,
                         },
                         req_id: None,
                     };
@@ -2472,54 +2533,23 @@ impl Server {
             projects,
         };
 
-        let webchannel = next.webchannel.clone();
-        let key_cert = self.key_cert.clone();
-        let my_host_id = self.host_id.clone();
-        let msg_tx = msg_tx.clone();
-
-        tokio::spawn(async move {
-            let res = async {
-                webchannel
-                    .connect(
-                        envoy_id.clone(),
-                        webchannel::Transport::Ssh {
-                            ssh_host: ssh_host.clone(),
-                            command: command.clone(),
-                        },
-                        key_cert,
-                    )
-                    .await?;
-                webchannel.send(&envoy_id, None, envoy_init).await?;
-                webchannel
-                    .send(
-                        &envoy_id,
-                        None,
-                        Msg::Hey {
-                            hey: message::HeyMessage {
-                                message: "Nice to meet ya".to_string(),
-                                credentials: "".to_string(),
-                                version: "v1.0.0".to_string(),
-                            },
-                        },
-                    )
-                    .await?;
-                anyhow::Ok(())
-            }
-            .await;
-
-            if let Err(err) = res {
-                tracing::warn!("Failed to connect to {}: {}", id_short(&envoy_id), err);
-                let msg = webchannel::Message {
-                    host: my_host_id,
-                    body: Msg::FailedToConnect {
-                        peer: envoy_id,
-                        reason: err.to_string(),
-                    },
-                    req_id: None,
-                };
-                let _ = msg_tx.send(msg).await;
-            }
-        });
+        // Connect, this doesn’t block.
+        let hey = Msg::Hey {
+            hey: message::HeyMessage {
+                message: "Nice to meet ya".to_string(),
+                credentials: "".to_string(),
+                version: "v1.0.0".to_string(),
+            },
+        };
+        let ssh_host = ssh_host.clone();
+        let command = command.clone();
+        next.webchannel.start_connect(
+            envoy_id,
+            async move { Ok(webchannel::Transport::Ssh { ssh_host, command }) },
+            self.key_cert.clone(),
+            connection_id,
+            vec![envoy_init, hey],
+        );
     }
 
     /// Helper function for sending connect message to signaling
@@ -4798,7 +4828,7 @@ impl Server {
         peer_id: ServerId,
         initiator: bool,
         next: &Next<'a>,
-        msg_tx: &mpsc::Sender<webchannel::Message>,
+        _msg_tx: &mpsc::Sender<webchannel::Message>,
         signaling_channel: &crate::signaling::client::SignalingChannel,
     ) {
         // Check if we're already connecting or connected to this peer.
@@ -4860,9 +4890,11 @@ impl Server {
                 status: RemoteStatus::Connected,
                 ever_connected: true,
                 retry_stride_secs: INITIAL_RETRY_STRIDE_SECS,
+                connection_id: new_connection_id(),
             },
         );
-        self.current_world
+        let connection_id = self
+            .current_world
             .set_remote_connecting2(&peer_id, sctp_transport);
 
         // If the remote initiated the connection, reply with a
@@ -4879,99 +4911,29 @@ impl Server {
             .await;
         }
 
-        // Create a Sock for this peer connection. Sock
-        // handles sending receiving SDP and ICE candidate
-        // to/from the remote peer through signaling server.
-        let sock = match signaling_channel
-            .create_sock(&signaling_addr, peer_id.clone())
-            .await
-        {
-            Ok(sock) => sock,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to create sock for peer {}: {}",
-                    id_short(&peer_id),
-                    e
-                );
-                return;
-            }
+        // Connect, this doesn’t block.
+        let hey = Msg::Hey {
+            hey: message::HeyMessage {
+                message: "Nice to meet ya".to_string(),
+                credentials: "".to_string(),
+                version: "v1.0.0".to_string(),
+            },
         };
-
-        // Establish WebChannel connection using the sock.
-        let key_cert = self.key_cert.clone();
-        let webchannel_clone = next.webchannel.clone();
-        let peer_id_clone = peer_id.clone();
-        let msg_tx_clone = msg_tx.clone();
-        let my_host_id = self.host_id.clone();
-
-        tokio::spawn(async move {
-            match webchannel_clone
-                .connect(
-                    peer_id_clone.clone(),
-                    webchannel::Transport::Sock(sock),
-                    key_cert,
-                )
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        "Successfully connected to peer {}",
-                        id_short(&peer_id_clone)
-                    );
-                    // Send Hey to the peer; the existing handler at the
-                    // other end fires `mark_connected`. We do this here
-                    // (rather than inside the webchannel) so the SSH
-                    // transport gets the same handshake.
-                    let hey = Msg::Hey {
-                        hey: message::HeyMessage {
-                            message: "Nice to meet ya".to_string(),
-                            credentials: "".to_string(),
-                            version: "v1.0.0".to_string(),
-                        },
-                    };
-                    if let Err(err) = webchannel_clone.send(&peer_id_clone, None, hey).await {
-                        tracing::warn!(
-                            "Failed to send Hey to {}: {}",
-                            id_short(&peer_id_clone),
-                            err
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to connect to peer {}: {}",
-                        id_short(&peer_id_clone),
-                        err
-                    );
-                    let condition: Option<&WebChannelError> = err.downcast_ref();
-                    match condition {
-                        Some(WebChannelError::ConnectionExists(peer_id)) => {
-                            let msg = webchannel::Message {
-                                host: my_host_id,
-                                body: Msg::IceProgress {
-                                    peer: peer_id.to_string(),
-                                    message: "Already connected".to_string(),
-                                },
-                                req_id: None,
-                            };
-                            let _ = msg_tx_clone.send(msg).await;
-                        }
-                        _ => {
-                            // Send FailedToConnect message to main loop
-                            let msg = webchannel::Message {
-                                host: my_host_id,
-                                body: Msg::FailedToConnect {
-                                    peer: peer_id_clone.clone(),
-                                    reason: err.to_string(),
-                                },
-                                req_id: None,
-                            };
-                            let _ = msg_tx_clone.send(msg).await;
-                        }
-                    }
-                }
-            }
-        });
+        let signaling = signaling_channel.clone();
+        let peer_for_fut = peer_id.clone();
+        let signaling_addr_for_fut = signaling_addr.clone();
+        next.webchannel.start_connect(
+            peer_id,
+            async move {
+                signaling
+                    .create_sock(&signaling_addr_for_fut, peer_for_fut)
+                    .await
+                    .map(webchannel::Transport::Sock)
+            },
+            self.key_cert.clone(),
+            connection_id,
+            vec![hey],
+        );
     }
 
     /// Handle AcceptConnection notification from editor. Declares
@@ -5041,10 +5003,11 @@ impl Server {
 
 // *** Helper functions
 
-/// Install SIGINT/SIGTERM handlers and notify `shutdown` when either
-/// signal arrives. Caller is responsible for owning the `Arc<Notify>`
-/// and for spawning this future inside a tokio runtime context.
-pub async fn listen_for_signal(shutdown: Arc<tokio::sync::Notify>) {
+/// Install SIGINT/SIGTERM handlers and cancel `shutdown` when either
+/// signal arrives. Caller is responsible for owning the
+/// `CancelManager` and for spawning this future inside a tokio
+/// runtime context.
+pub async fn listen_for_signal(shutdown: crate::cancel::CancelManager) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -5059,7 +5022,7 @@ pub async fn listen_for_signal(shutdown: Arc<tokio::sync::Notify>) {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("Ctrl-C received");
     }
-    shutdown.notify_waiters();
+    shutdown.cancel();
 }
 
 /// The [Next] object stores references to channels and have a borrow

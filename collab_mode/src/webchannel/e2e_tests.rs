@@ -163,7 +163,10 @@ mod e2e_tests {
         mpsc::Receiver<crate::signaling::SignalingMessage>,
     )> {
         let (sig_tx, mut sig_rx) = mpsc::channel(10);
-        let channel = crate::signaling::client::SignalingChannel::new(sig_tx);
+        let channel = crate::signaling::client::SignalingChannel::new(
+            sig_tx,
+            crate::cancel::CancelManager::new(),
+        );
         channel
             .bind(signaling_url, id.clone(), key_cert, trusted)
             .await?;
@@ -299,8 +302,20 @@ mod e2e_tests {
         let sock_b = sock_b_task.await.unwrap()?;
 
         // Both sides establish WebRTC connection concurrently
-        let connect_a = channel_a.connect(id_b.clone(), Transport::Sock(sock_a), key_cert_a);
-        let connect_b = channel_b.connect(id_a.clone(), Transport::Sock(sock_b), key_cert_b);
+        let connect_a = channel_a.connect(
+            id_b.clone(),
+            Transport::Sock(sock_a),
+            key_cert_a,
+            1,
+            crate::cancel::CancelManager::new(),
+        );
+        let connect_b = channel_b.connect(
+            id_a.clone(),
+            Transport::Sock(sock_b),
+            key_cert_b,
+            1,
+            crate::cancel::CancelManager::new(),
+        );
 
         let (res_a, res_b) = tokio::join!(connect_a, connect_b);
         res_a?;
@@ -332,13 +347,13 @@ mod e2e_tests {
             id1.clone(),
             tx1,
             self_tx1,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel2 = WebChannel::new(
             id2.clone(),
             tx2,
             self_tx2,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         // Establish bidirectional connection using helper
@@ -400,13 +415,13 @@ mod e2e_tests {
             id1.clone(),
             tx1,
             self_tx1,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel2 = WebChannel::new(
             id2.clone(),
             tx2,
             self_tx2,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         establish_connection_pair(
@@ -487,25 +502,25 @@ mod e2e_tests {
             id_a.clone(),
             tx_a,
             self_tx_a,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel_b = WebChannel::new(
             id_b.clone(),
             tx_b,
             self_tx_b,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel_c = WebChannel::new(
             id_c.clone(),
             tx_c,
             self_tx_c,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel_d = WebChannel::new(
             id_d.clone(),
             tx_d,
             self_tx_d,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         // Establish A ↔ B connection
@@ -595,13 +610,13 @@ mod e2e_tests {
             id1.clone(),
             tx1,
             self_tx1,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel2 = WebChannel::new(
             id2.clone(),
             tx2,
             self_tx2,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         // Get expected certificate hashes before connection
@@ -656,13 +671,13 @@ mod e2e_tests {
             id1.clone(),
             tx1,
             self_tx1,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel2 = WebChannel::new(
             id2.clone(),
             tx2,
             self_tx2,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         establish_connection_pair(
@@ -741,13 +756,13 @@ mod e2e_tests {
             id1.clone(),
             tx1,
             self_tx1,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let channel2 = WebChannel::new(
             id2.clone(),
             tx2,
             self_tx2,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
         establish_connection_pair(

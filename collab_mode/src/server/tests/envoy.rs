@@ -33,12 +33,14 @@ async fn connect_envoy_via_ssh(host_id: &str) -> EnvoyHarness {
     let (mut mock_editor, server_to_editor_tx, editor_to_server_rx) = MockEditor::new();
 
     let host_id_for_factory = host_id.to_string();
-    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown = crate::cancel::CancelManager::new();
     let shutdown_for_factory = shutdown.clone();
     let web_factory: WebChannelFactory = Box::new(move |msg_tx, self_tx| {
         WebChannel::new(host_id_for_factory, msg_tx, self_tx, shutdown_for_factory)
     });
-    let sig_factory: SignalingChannelFactory = Box::new(SignalingChannel::new);
+    let sig_shutdown = shutdown.clone();
+    let sig_factory: SignalingChannelFactory =
+        Box::new(move |sig_tx| SignalingChannel::new(sig_tx, sig_shutdown));
 
     let (fw_a_tx, fw_a_rx) =
         tokio::sync::mpsc::channel::<crate::filewatch_receptor::WatchFileMessage>(1);

@@ -66,7 +66,7 @@ impl TestChannelFactory {
             host_id,
             msg_tx,
             self_tx,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         )
     }
 
@@ -79,6 +79,14 @@ impl TestChannelFactory {
         msg: webchannel::Message,
     ) -> anyhow::Result<()> {
         self.factory.inject_message(host, msg).await
+    }
+
+    /// Live `connection_id` for `host`'s actor handling `peer`.
+    /// Tests use this to synthesize `Msg::ConnectionBroke` /
+    /// `Msg::FailedToConnect` whose id matches the handler's stale-
+    /// check.
+    pub fn peer_connection_id(&self, host: &ServerId, peer: &ServerId) -> Option<u128> {
+        self.factory.peer_connection_id(host, peer)
     }
 }
 
@@ -692,7 +700,7 @@ pub async fn setup_hub_and_spoke_servers(
             let sig_factory: crate::server::SignalingChannelFactory = Box::new(move |sig_msg_tx| {
                 SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
             });
-            let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+            let shutdown = crate::cancel::CancelManager::new();
             if let Err(e) = hub_server
                 .run(
                     hub_tx,
@@ -777,7 +785,7 @@ pub async fn setup_hub_and_spoke_servers(
                     Box::new(move |sig_msg_tx| {
                         SignalingChannel::new_for_test(sig_msg_tx, signaling_state)
                     });
-                let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+                let shutdown = crate::cancel::CancelManager::new();
                 if let Err(e) = spoke_server
                     .run(
                         spoke_tx,

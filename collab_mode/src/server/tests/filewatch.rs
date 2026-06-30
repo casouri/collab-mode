@@ -1,8 +1,7 @@
 use super::*;
+use crate::cancel::CancelManager;
 use crate::filewatch_receptor;
 use crate::server::transcript_tests::MockDocument;
-use std::sync::Arc;
-use tokio::sync::Notify;
 
 /// Move the hub’s filewatch channels out of the setup and spawn a
 /// real `filewatch_receptor::run` on a system thread, wired to the
@@ -11,18 +10,18 @@ use tokio::sync::Notify;
 /// configures `notify` to watch the file’s parent directory.
 /// Filesystem changes then flow back through the real receptor.
 ///
-/// The returned `Notify` can be used to ask the receptor to shut
-/// down, but it isn’t strictly required, because when
+/// The returned `CancelManager` can be used to ask the receptor to
+/// shut down, but it isn’t strictly required, because when
 /// `setup.cleanup()` aborts the hub server, the receptor’s channels
 /// close and it exits on its own.
-fn spawn_hub_filewatch_receptor(setup: &mut HubAndSpokeSetup) -> Arc<Notify> {
+fn spawn_hub_filewatch_receptor(setup: &mut HubAndSpokeSetup) -> CancelManager {
     // tx (receptor → server): tokio mpsc.
     let (dummy_send_tx, _dummy_send_rx) = mpsc::channel(1);
     // rx (server → receptor): crossbeam.
     let (_dummy_recv_tx, dummy_recv_rx) = crossbeam_channel::bounded(1);
     let tx = std::mem::replace(&mut setup.hub_filewatch_to_server_tx, dummy_send_tx);
     let rx = std::mem::replace(&mut setup.hub_server_to_filewatch_rx, dummy_recv_rx);
-    let shutdown = Arc::new(Notify::new());
+    let shutdown = CancelManager::new();
     let shutdown_for_run = shutdown.clone();
     std::thread::spawn(move || {
         if let Err(err) = filewatch_receptor::run(tx, rx, shutdown_for_run) {

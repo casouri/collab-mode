@@ -1,5 +1,6 @@
 #![doc = include_str!("README.md")]
 
+pub mod cancel;
 pub mod config_man;
 pub mod editor_receptor;
 mod engine;

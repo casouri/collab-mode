@@ -132,7 +132,7 @@ async fn test_server_run_config_projects_expansion() {
         crate::signaling::client::TestFactoryState::default(),
     ));
     let host_id_for_factory = host_id.clone();
-    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown = crate::cancel::CancelManager::new();
     let shutdown_for_factory = shutdown.clone();
     let server_task = tokio::spawn(async move {
         let web_factory: crate::server::WebChannelFactory = Box::new(move |msg_tx, self_tx| {

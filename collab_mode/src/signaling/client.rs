@@ -32,16 +32,23 @@ use tracing::Instrument;
 pub struct SignalingChannel {
     clients: Arc<Mutex<HashMap<String, ClientHandle>>>,
     signaling_msg_tx: mpsc::Sender<SignalingMessage>,
+    /// Server-wide cancellation handle. Each actor clones a child
+    /// from this.
+    cancel: crate::cancel::CancelManager,
     test_factory_state: Option<Arc<Mutex<TestFactoryState>>>,
 }
 
 impl SignalingChannel {
     /// Create a signaling client that forwards messages from
     /// signaling servers to `signaling_msg_tx`.
-    pub fn new(signaling_msg_tx: mpsc::Sender<SignalingMessage>) -> Self {
+    pub fn new(
+        signaling_msg_tx: mpsc::Sender<SignalingMessage>,
+        cancel: crate::cancel::CancelManager,
+    ) -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
             signaling_msg_tx,
+            cancel,
             test_factory_state: None,
         }
     }
@@ -55,6 +62,7 @@ impl SignalingChannel {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
             signaling_msg_tx,
+            cancel: crate::cancel::CancelManager::new(),
             test_factory_state: Some(factory_state),
         }
     }
@@ -110,9 +118,14 @@ impl SignalingChannel {
     pub fn remove(&self, signaling_addr: &str) {
         let handle = self.clients.lock().unwrap().remove(signaling_addr);
         if let Some(handle) = handle {
-            tokio::spawn(async move {
-                let (reply_tx, _reply_rx) = oneshot::channel();
+            // This runs in the cancel path so itself can’t be subject
+            // to cancellation. But the task waits for the shutdown to
+            // complete, and the shutdown tracker will wait for this
+            // task to complete.
+            self.cancel.spawn_uncancelled(async move {
+                let (reply_tx, reply_rx) = oneshot::channel();
                 let _ = handle.msg_tx.send(Command::Shutdown(reply_tx)).await;
+                let _ = reply_rx.await;
             });
         }
     }
@@ -180,7 +193,9 @@ impl SignalingChannel {
             signaling_addr = %addr
         );
         let signaling_msg_tx = self.signaling_msg_tx.clone();
-        tokio::spawn(
+
+        let actor_cancel = self.cancel.child();
+        actor_cancel.spawn(
             async move {
                 let connect =
                     tokio::time::timeout(Duration::from_secs(10), tung::connect_async(req)).await;
@@ -286,7 +301,8 @@ impl SignalingChannel {
             cmd_rx,
             cmd_tx_for_self: cmd_tx.clone(),
         };
-        tokio::spawn(actor.run());
+
+        self.cancel.child().spawn(actor.run());
 
         self.clients
             .lock()

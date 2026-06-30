@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio_util::sync::DropGuard;
 use webrtc_dtls::conn::DTLSConn;
 use webrtc_ice::state::ConnectionState;
 use webrtc_sctp::chunk::chunk_payload_data::PayloadProtocolIdentifier;
@@ -65,8 +66,6 @@ pub enum WebChannelError {
 ///
 /// The host with lexicographically smaller ID uses odd stream IDs (1, 3, 5...)
 /// The host with larger ID uses even stream IDs (2, 4, 6...)
-///
-/// This ensures both sides agree on stream ID parity without negotiation.
 fn stream_id_init(my_id: &str, peer_id: &str) -> u16 {
     if my_id < peer_id {
         STREAM_ID_CLIENT_INIT // 1 (odd)
@@ -171,29 +170,103 @@ impl DualReceiver {
     }
 }
 
-/// In-band command sent over the per-peer mpsc.
-///
-/// `Msg` carries a regular outgoing message. `Shutdown` asks the actor
-/// to tear down its SCTP/DTLS/ICE state and reply on the oneshot when
-/// cleanup finishes (so callers can join the teardown).
+/// Technically there can be other commands send to actors, but right
+/// now there’s only message.
 pub enum Command {
     Msg(Message),
-    Shutdown(oneshot::Sender<anyhow::Result<()>>),
 }
 
-/// Handle stored in [`WebChannel::remote_map`]. Cloneable.
-#[derive(Clone)]
+/// Inner body of [`WebChannel::start_connect`]: await the future to
+/// get the transport, run `connect` with it, then send all the
+/// post-connect messages to the actor to finish up the connection
+/// setup. On error, send a `Msg::FailedToConnect` to the server.
+async fn start_connect_1<F>(
+    chan: WebChannel,
+    peer_id: ServerId,
+    transport_fut: F,
+    my_key_cert: ArcKeyCert,
+    connection_id: u128,
+    post_connect_msgs: Vec<Msg>,
+    peer_cancel: crate::cancel::CancelManager,
+) where
+    F: std::future::Future<Output = anyhow::Result<Transport>> + Send + 'static,
+{
+    let result: anyhow::Result<()> = async {
+        let transport = transport_fut.await?;
+        chan.connect(
+            peer_id.clone(),
+            transport,
+            my_key_cert,
+            connection_id,
+            peer_cancel,
+        )
+        .await?;
+        for msg in post_connect_msgs {
+            chan.send(&peer_id, None, msg).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(err) = result {
+        tracing::warn!("start_connect failed for {}: {}", id_short(&peer_id), err);
+        let _ = chan
+            .remote_msg_tx
+            .send(Message {
+                host: chan.my_hostid.clone(),
+                body: Msg::FailedToConnect {
+                    peer: peer_id,
+                    reason: err.to_string(),
+                    connection_id,
+                },
+                req_id: None,
+            })
+            .await;
+    }
+}
+
+/// Insert a new `RemoteHandle` for `peer` in `map`, wrapping a
+/// `DropGuard` over the per-peer cancel token. If a live handle
+/// already exists, returns [`WebChannelError::ConnectionExists`]
+/// without changing the map. If a dead handle exists, it is evicted
+/// (which cancels its orphan token via its `DropGuard`) and replaced.
+/// Returns the receiver matching the inserted handle's `msg_tx`.
+fn insert_handle(
+    map: &Arc<Mutex<HashMap<ServerId, RemoteHandle>>>,
+    peer: &ServerId,
+    peer_cancel: &crate::cancel::CancelManager,
+) -> anyhow::Result<mpsc::Receiver<Command>> {
+    let mut map = map.lock().unwrap();
+    if let Some(existing) = map.get(peer) {
+        if !existing.is_dead() {
+            return Err(anyhow!(WebChannelError::ConnectionExists(peer.clone())));
+        }
+        // Is dead, drop and run its cleanup.
+        map.remove(peer);
+    }
+    let (tx, rx) = mpsc::channel::<Command>(16);
+    let handle = RemoteHandle {
+        msg_tx: tx,
+        _cancel_guard: peer_cancel.token().drop_guard(),
+    };
+    map.insert(peer.clone(), handle);
+    Ok(rx)
+}
+
+/// Handle stored in [`WebChannel::remote_map`]. Owns the per-peer
+/// cancel guard: dropping the handle (via `remove`/`clear`/replace)
+/// cancels the underlying [`CancellationToken`] and tears down both
+/// the connect wrapper and the per-peer actor.
 pub struct RemoteHandle {
     msg_tx: mpsc::Sender<Command>,
+    /// On drop, cancels the per-peer `CancellationToken` shared with
+    /// every `spawn_with_cancel` for this peer.
+    _cancel_guard: DropGuard,
 }
 
 impl RemoteHandle {
     /// A handle is “dead” once its actor has dropped the receiver
-    /// (connection broke or shutdown). The map keeps dead handles
-    /// around until the next `send` (which surfaces a
-    /// `ConnectionBroke`) or `connect` (which replaces). But no
-    /// worries because normally whenever the connection is broken,
-    /// main loop receives ConnectionBroke and will try to reconnect.
+    /// (connection broke or shutdown).
     fn is_dead(&self) -> bool {
         self.msg_tx.is_closed()
     }
@@ -209,12 +282,13 @@ pub struct WebChannel {
     /// Side channel for self-addressed messages so sending messages
     /// so sending self-messages never blocks.
     loopback_tx: mpsc::Sender<Message>,
-    /// Server shutdown handle. Only used for gracefully panicing when
-    /// the loopback channel is full. Semantically it’s an unbounded
-    /// channel but I don’t want to actually use an unbounded channel,
-    /// so we just shutdown if it ever gets full (shouldn’t happen).
-    shutdown: Arc<tokio::sync::Notify>,
-    /// One entry per peer (live or recently-dead).
+    /// Server-wide root cancel manager. Each actor gets a child of
+    /// this. The loopback- channel-full fallback fires
+    /// `shutdown.cancel()` to abort the whole server.
+    shutdown: crate::cancel::CancelManager,
+    /// One entry per peer. The handle stores access to the actor that
+    /// does the work, plu a cancel manager drop guard, which on drop,
+    /// cleans up all the tasks spawned for that peer.
     remote_map: Arc<Mutex<HashMap<ServerId, RemoteHandle>>>,
     /// Populated only when this WebChannel is wired into a test
     /// factory. Shared by all WebChannels under the same factory so
@@ -230,7 +304,7 @@ impl WebChannel {
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
         loopback_tx: mpsc::Sender<Message>,
-        shutdown: Arc<tokio::sync::Notify>,
+        shutdown: crate::cancel::CancelManager,
     ) -> Self {
         Self {
             my_hostid,
@@ -250,7 +324,7 @@ impl WebChannel {
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
         loopback_tx: mpsc::Sender<Message>,
-        shutdown: Arc<tokio::sync::Notify>,
+        shutdown: crate::cancel::CancelManager,
         factory_state: Arc<Mutex<FactoryState>>,
         travel_time: TravelTime,
     ) -> Self {
@@ -277,26 +351,55 @@ impl WebChannel {
         self.my_hostid.clone()
     }
 
-    /// Top-level dispatcher. In test mode (`test_factory_state` is
-    /// Some) we ignore the `transport` argument and route through
-    /// `TestRemote`; the server still hands us a real-looking
-    /// `Transport::Sock` from the test signaling layer but it isn’t
-    /// needed for in-process routing.
+    /// Starts the connection process for `peer_id`, which includes
+    /// awaiting the future to get the transport, connecting with the
+    /// peer with the transport, and sending some handshake messages
+    /// (`post_connect_msgs`).
+    pub fn start_connect<F>(
+        &self,
+        peer_id: ServerId,
+        transport_fut: F,
+        my_key_cert: ArcKeyCert,
+        connection_id: u128,
+        post_connect_msgs: Vec<Msg>,
+    ) where
+        F: std::future::Future<Output = anyhow::Result<Transport>> + Send + 'static,
+    {
+        let peer_cancel = self.shutdown.child();
+        let chan = self.clone();
+        peer_cancel.clone().spawn(start_connect_1(
+            chan,
+            peer_id,
+            transport_fut,
+            my_key_cert,
+            connection_id,
+            post_connect_msgs,
+            peer_cancel,
+        ));
+    }
+
+    /// Connects to `remote_id` via the `transport`.
     pub async fn connect(
         &self,
         remote_id: ServerId,
         transport: Transport,
         my_key_cert: ArcKeyCert,
+        connection_id: u128,
+        cancel: crate::cancel::CancelManager,
     ) -> anyhow::Result<()> {
         if self.test_factory_state.is_some() {
-            return self.connect_test(remote_id).await;
+            return self.connect_test(remote_id, connection_id, cancel).await;
         }
         match transport {
-            Transport::Sock(sock) => self.connect_with_sock(sock, my_key_cert).await,
-            Transport::Ssh { ssh_host, command } => {
-                self.connect_ssh(remote_id, ssh_host, command).await
+            Transport::Sock(sock) => {
+                self.connect_with_sock(sock, my_key_cert, connection_id, cancel)
+                    .await
             }
-            Transport::Io(rw) => self.connect_io(remote_id, rw).await,
+            Transport::Ssh { ssh_host, command } => {
+                self.connect_ssh(remote_id, ssh_host, command, connection_id, cancel)
+                    .await
+            }
+            Transport::Io(rw) => self.connect_io(remote_id, rw, connection_id, cancel).await,
         }
     }
 
@@ -306,90 +409,80 @@ impl WebChannel {
         peer_id: ServerId,
         ssh_host: String,
         command: Vec<String>,
+        connection_id: u128,
+        cancel: crate::cancel::CancelManager,
     ) -> anyhow::Result<()> {
-        let rx = {
-            let mut map = self.remote_map.lock().unwrap();
-            if let Some(handle) = map.get(&peer_id) {
-                if !handle.is_dead() {
-                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
-                }
-                map.remove(&peer_id);
-            }
-            let (tx, rx) = mpsc::channel::<Command>(16);
-            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
-            rx
-        };
-
-        let remote = SshRemote::new(peer_id, ssh_host, command, self.remote_msg_tx.clone(), rx);
-        tokio::spawn(remote.run());
+        let rx = insert_handle(&self.remote_map, &peer_id, &cancel)?;
+        let remote = SshRemote::new(
+            peer_id,
+            ssh_host,
+            command,
+            self.remote_msg_tx.clone(),
+            rx,
+            connection_id,
+            cancel.clone(),
+        );
+        cancel.spawn(remote.run());
         Ok(())
     }
 
     /// Spawn an [`IoRemote`] for an already-established byte stream
     /// (envoy stdio, ssh stdio).
-    async fn connect_io(&self, peer_id: ServerId, rw: ReaderWriter) -> anyhow::Result<()> {
-        let rx = {
-            let mut map = self.remote_map.lock().unwrap();
-            if let Some(h) = map.get(&peer_id) {
-                if !h.is_dead() {
-                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
-                }
-                map.remove(&peer_id);
-            }
-            let (tx, rx) = mpsc::channel::<Command>(16);
-            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
-            rx
-        };
-
-        let remote = IoRemote::new(peer_id, rw, self.remote_msg_tx.clone(), rx);
-        tokio::spawn(remote.run());
+    async fn connect_io(
+        &self,
+        peer_id: ServerId,
+        rw: ReaderWriter,
+        connection_id: u128,
+        cancel: crate::cancel::CancelManager,
+    ) -> anyhow::Result<()> {
+        let rx = insert_handle(&self.remote_map, &peer_id, &cancel)?;
+        let remote = IoRemote::new(peer_id, rw, self.remote_msg_tx.clone(), rx, connection_id);
+        cancel.spawn(remote.run());
         Ok(())
     }
 
     /// In-process routing via `TestRemote`.
-    pub(crate) async fn connect_test(&self, peer_id: ServerId) -> anyhow::Result<()> {
+    pub(crate) async fn connect_test(
+        &self,
+        peer_id: ServerId,
+        connection_id: u128,
+        cancel: crate::cancel::CancelManager,
+    ) -> anyhow::Result<()> {
         let factory_state = self
             .test_factory_state
             .as_ref()
             .expect("connect_test called without a test factory")
             .clone();
 
-        let rx = {
-            let mut map = self.remote_map.lock().unwrap();
-            if let Some(h) = map.get(&peer_id) {
-                if !h.is_dead() {
-                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
-                }
-                map.remove(&peer_id);
-            }
-            let (tx, rx) = mpsc::channel::<Command>(16);
-            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
-            rx
-        };
-
+        let rx = insert_handle(&self.remote_map, &peer_id, &cancel)?;
+        // Publish the live connection_id so tests can read it back
+        // and construct synthetic failure messages that pass the
+        // handler's stale-check (see [`FactoryState::peer_connection_id`]).
+        factory_state
+            .lock()
+            .unwrap()
+            .connection_ids
+            .insert((self.my_hostid.clone(), peer_id.clone()), connection_id);
         let remote = TestRemote {
             peer_id,
             factory_state,
             travel_time: self.test_travel_time.clone(),
             rx,
         };
-        tokio::spawn(remote.run());
+        cancel.spawn(remote.run());
         Ok(())
     }
 
     /// Connect using an existing Sock from SignalingClient.
-    ///
-    /// This is the unified connection method that works for both
-    /// initiating and accepting connections. Stream ID parity is
-    /// determined by host ID ordering rather than initiator/acceptor roles.
     pub async fn connect_with_sock(
         &self,
         sock: crate::signaling::client::Sock,
         my_key_cert: ArcKeyCert,
+        connection_id: u128,
+        cancel: crate::cancel::CancelManager,
     ) -> anyhow::Result<()> {
         let peer_id = sock.id().to_string();
 
-        // Stream-ID parity comes from host-ID ordering, not who dialed.
         let stream_id = stream_id_init(&self.my_hostid, &peer_id);
         let as_server = stream_id == STREAM_ID_SERVER_INIT;
 
@@ -400,34 +493,13 @@ impl WebChannel {
             stream_id
         );
 
-        // Reserve the map slot up front. A live handle wins; a dead
-        // one gets evicted. We never concurrently connect but good to
-        // stay clean.
-        let rx = {
-            let mut map = self.remote_map.lock().unwrap();
-            if let Some(h) = map.get(&peer_id) {
-                if !h.is_dead() {
-                    return Err(anyhow!(WebChannelError::ConnectionExists(peer_id)));
-                }
-                map.remove(&peer_id);
-            }
-            let (tx, rx) = mpsc::channel::<Command>(16);
-            map.insert(peer_id.clone(), RemoteHandle { msg_tx: tx });
-            rx
-        };
+        let rx = insert_handle(&self.remote_map, &peer_id, &cancel)?;
 
-        // Establish the wire. If anything below fails, evict our slot
-        // and propagate.
-        let setup = self
+        // Establish connection. If this errors, cleanup is done by
+        // the handle in the map, so no need to worry about it here.
+        let (sctp_assoc, ice_agent) = self
             .establish_sctp(sock, my_key_cert, as_server, &peer_id)
-            .await;
-        let (sctp_assoc, ice_agent) = match setup {
-            Ok(t) => t,
-            Err(e) => {
-                self.remote_map.lock().unwrap().remove(&peer_id);
-                return Err(e);
-            }
-        };
+            .await?;
 
         let remote = SctpRemote::new(
             peer_id,
@@ -436,8 +508,10 @@ impl WebChannel {
             stream_id,
             self.remote_msg_tx.clone(),
             rx,
+            connection_id,
+            cancel.clone(),
         );
-        tokio::spawn(remote.run());
+        cancel.spawn(remote.run());
         Ok(())
     }
 
@@ -507,7 +581,7 @@ impl WebChannel {
             // shutdown.
             if let Err(err) = self.loopback_tx.try_send(message) {
                 tracing::error!("Fatal: loopback try_send failed: {:?}; shutting down", err);
-                self.shutdown.notify_waiters();
+                self.shutdown.cancel();
                 return Err(anyhow!(
                     "Loopback channel is full which shouldn’t happen; shutting down"
                 ));
@@ -554,14 +628,6 @@ impl WebChannel {
         let mut errs = Vec::new();
         for (peer, tx) in peers {
             if tx.send(Command::Msg(message.clone())).await.is_err() {
-                let _ = self
-                    .remote_msg_tx
-                    .send(Message {
-                        host: peer.clone(),
-                        body: Msg::ConnectionBroke { peer: peer.clone() },
-                        req_id: None,
-                    })
-                    .await;
                 errs.push(peer);
             }
         }
@@ -572,33 +638,14 @@ impl WebChannel {
     }
 
     pub fn disconnect(&self, peer: &ServerId) {
-        let handle = self.remote_map.lock().unwrap().remove(peer);
-        if let Some(handle) = handle {
-            // Fire-and-forget: we don’t wait for the cleanup result
-            // here. TODO: think about this more later, maybe this
-            // should be try_send.
-            tokio::spawn(async move {
-                let (tx, _rx) = oneshot::channel();
-                let _ = handle.msg_tx.send(Command::Shutdown(tx)).await;
-            });
-        }
+        // Removing the handle drops its `DropGuard`, which cancels
+        // all the tasks spawned for this peer and runs cleanup.
+        self.remote_map.lock().unwrap().remove(peer);
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
-        let handles: Vec<RemoteHandle> = {
-            let mut map = self.remote_map.lock().unwrap();
-            map.drain().map(|(_, h)| h).collect()
-        };
-        let mut replies = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let (tx, rx) = oneshot::channel();
-            if handle.msg_tx.send(Command::Shutdown(tx)).await.is_ok() {
-                replies.push(rx);
-            }
-        }
-        for rx in replies {
-            let _ = rx.await;
-        }
+        // Like disconnect but for every peer.
+        self.remote_map.lock().unwrap().clear();
         Ok(())
     }
 }
@@ -626,11 +673,16 @@ struct SctpRemote {
     /// Unix-epoch seconds of the last byte received on any stream.
     /// Shared with the per-stream `read_from_stream` tasks.
     last_ping_recv: Arc<AtomicU64>,
+    /// Tags the `ConnectionBroke` we emit on exit so a stale exit
+    /// doesn’t kill a newer attempt. See
+    /// `RemoteState::connection_id`.
+    connection_id: u128,
+    /// Used by [`SctpRemote::drop`] to run cleanup code async.
+    cancel: crate::cancel::CancelManager,
 }
 
-/// Why the actor’s main loop exited. Determines the cleanup.
+/// Why the actor’s main loop exited.
 enum Exit {
-    Shutdown(oneshot::Sender<anyhow::Result<()>>),
     OutgoingErr,
     IncomingClosed,
     SenderDropped,
@@ -645,6 +697,8 @@ impl SctpRemote {
         stream_id_init: u16,
         remote_msg_tx: mpsc::Sender<Message>,
         rx: mpsc::Receiver<Command>,
+        connection_id: u128,
+        cancel: crate::cancel::CancelManager,
     ) -> Self {
         let now = now_secs();
         Self {
@@ -659,13 +713,15 @@ impl SctpRemote {
             // a ping right away.
             last_ping_sent: now.saturating_sub(PING_INTERVAL_SECS),
             last_ping_recv: Arc::new(AtomicU64::new(now)),
+            connection_id,
+            cancel,
         }
     }
 
-    /// Runs select! in a loop, once the loop exits, run cleanup. For
-    /// graceful shutdowns the cleanup result is reported to the
-    /// requester; for everything else we send `ConnectionBroke` to
-    /// the main loop in server.rs to handle.
+    /// Run select! in a loop, once the loop exits, send
+    /// `ConnectionBroke`. Async teardown of SCTP/DTLS/ICE happens in
+    /// Drop handler, so cleanup runs always runs, on normal exit,
+    /// error, and future cancellation.
     async fn run(mut self) {
         // Open ping stream symmetrically.
         let ping_stream = match self
@@ -679,13 +735,13 @@ impl SctpRemote {
                     "Failed to open ping stream for {}: {e}",
                     id_short(&self.peer_id)
                 );
-                let _ = self.cleanup().await;
                 let _ = self
                     .remote_msg_tx
                     .send(Message {
                         host: self.peer_id.clone(),
                         body: Msg::ConnectionBroke {
                             peer: self.peer_id.clone(),
+                            connection_id: self.connection_id,
                         },
                         req_id: None,
                     })
@@ -695,27 +751,22 @@ impl SctpRemote {
         };
 
         // Real work happens here.
-        let exit = self.run_inner(ping_stream).await;
-        let cleanup_res = self.cleanup().await;
+        let _exit = self.run_inner(ping_stream).await;
 
-        // Cleanup.
-        match exit {
-            Exit::Shutdown(tx) => {
-                let _ = tx.send(cleanup_res);
-            }
-            Exit::OutgoingErr | Exit::IncomingClosed | Exit::SenderDropped | Exit::PingTimeout => {
-                let _ = self
-                    .remote_msg_tx
-                    .send(Message {
-                        host: self.peer_id.clone(),
-                        body: Msg::ConnectionBroke {
-                            peer: self.peer_id.clone(),
-                        },
-                        req_id: None,
-                    })
-                    .await;
-            }
-        }
+        // All Exit variants represent an error/broken state; shutdown
+        // will not reach here. Send a ConnectionBroke notification
+        // before Drop runs cleanup.
+        let _ = self
+            .remote_msg_tx
+            .send(Message {
+                host: self.peer_id.clone(),
+                body: Msg::ConnectionBroke {
+                    peer: self.peer_id.clone(),
+                    connection_id: self.connection_id,
+                },
+                req_id: None,
+            })
+            .await;
     }
 
     /// Single select loop over the four event sources. Returns the
@@ -730,7 +781,6 @@ impl SctpRemote {
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
-                    Some(Command::Shutdown(tx)) => return Exit::Shutdown(tx),
                     Some(Command::Msg(msg)) => {
                         if self.handle_outgoing_message(msg).await.is_err() {
                             return Exit::OutgoingErr;
@@ -803,19 +853,25 @@ impl SctpRemote {
         self.last_ping_sent = now;
         None
     }
+}
 
-    /// Shutdown SCTP, DTLS, and ICE connections.
-    async fn cleanup(&self) -> anyhow::Result<()> {
-        // shutdown will wait for ack from other side indefinitely, so
-        // we have to bound it with a timeout. Graceful close or not,
-        // it’s simpler to just try graceful shutdown regardless.
-        let _ = tokio::time::timeout(Duration::from_millis(500), self.sctp_assoc.shutdown()).await;
-        // `sctp_assoc.close()` stops background tasks and closes the
-        // underlying transport, which calls DTLS close. Also bound it
-        // for safety.
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.sctp_assoc.close()).await;
-        let _ = self.ice_agent.close().await;
-        Ok(())
+/// Async teardown of SCTP/DTLS/ICE.
+impl Drop for SctpRemote {
+    fn drop(&mut self) {
+        // `sctp_assoc.shutdown()` waits for ack from the other side
+        // and can hang indefinitely; bound it. `sctp_assoc.close()`
+        // stops background tasks and closes the transport (DTLS close
+        // included). `ice_agent.close()` tears down ICE / mdns last.
+        // Spawn-uncancelled so cancellation of the per-peer scope
+        // doesn’t also kill the teardown; the task tracker still
+        // awaits the tasks on server shutdown.
+        let sctp = self.sctp_assoc.clone();
+        let ice = self.ice_agent.clone();
+        self.cancel.spawn_uncancelled(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(500), sctp.shutdown()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), sctp.close()).await;
+            let _ = ice.close().await;
+        });
     }
 }
 
@@ -1164,13 +1220,24 @@ struct HostState {
 /// `WebChannel::new_for_test`.
 pub struct FactoryState {
     hosts: HashMap<ServerId, HostState>,
+    connection_ids: HashMap<(ServerId, ServerId), u128>,
 }
 
 impl FactoryState {
     pub fn new() -> Self {
         Self {
             hosts: HashMap::new(),
+            connection_ids: HashMap::new(),
         }
+    }
+
+    /// Look up the live `connection_id` registered by the
+    /// `TestRemote` on `my_host` for `peer`. Returns `None` if no
+    /// actor is currently registered.
+    pub fn peer_connection_id(&self, my_host: &ServerId, peer: &ServerId) -> Option<u128> {
+        self.connection_ids
+            .get(&(my_host.clone(), peer.clone()))
+            .copied()
     }
 
     /// Push a message onto the recipient’s inbox.
@@ -1224,7 +1291,7 @@ impl TestFactory {
         my_hostid: ServerId,
         remote_msg_tx: mpsc::Sender<Message>,
         loopback_tx: mpsc::Sender<Message>,
-        shutdown: Arc<tokio::sync::Notify>,
+        shutdown: crate::cancel::CancelManager,
     ) -> WebChannel {
         WebChannel::new_for_test(
             my_hostid,
@@ -1244,6 +1311,14 @@ impl TestFactory {
         self.state.lock().unwrap().push(host, msg)?;
         TestRemote::deliver(&self.state, host).await
     }
+
+    /// Look up the live `connection_id` registered when
+    /// `WebChannel::connect_test` spawned `host`'s actor for
+    /// `peer`. Tests need this to construct synthetic failure
+    /// messages whose id matches the live state.
+    pub fn peer_connection_id(&self, host: &ServerId, peer: &ServerId) -> Option<u128> {
+        self.state.lock().unwrap().peer_connection_id(host, peer)
+    }
 }
 
 /// Per-peer actor for the in-process test transport. Mirrors the
@@ -1261,10 +1336,6 @@ impl TestRemote {
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
-                    Some(Command::Shutdown(tx)) => {
-                        let _ = tx.send(Ok(()));
-                        return;
-                    }
                     Some(Command::Msg(msg)) => {
                         if let Err(e) = self.route(msg).await {
                             tracing::warn!(
@@ -1339,9 +1410,9 @@ mod tests {
         let (dual_a, tx_a, self_tx_a) = DualReceiver::new();
         let (dual_b, tx_b, self_tx_b) = DualReceiver::new();
         let chan_a =
-            factory.build_channel(id_a, tx_a, self_tx_a, Arc::new(tokio::sync::Notify::new()));
+            factory.build_channel(id_a, tx_a, self_tx_a, crate::cancel::CancelManager::new());
         let chan_b =
-            factory.build_channel(id_b, tx_b, self_tx_b, Arc::new(tokio::sync::Notify::new()));
+            factory.build_channel(id_b, tx_b, self_tx_b, crate::cancel::CancelManager::new());
         (chan_a, dual_a, chan_b, dual_b)
     }
 
@@ -1349,7 +1420,10 @@ mod tests {
     async fn test_sync_send_instant() {
         let (chan_a, _dual_a, chan_b, mut dual_b) = pair(TravelTime::Instant);
 
-        chan_a.connect_test(chan_b.hostid()).await.unwrap();
+        chan_a
+            .connect_test(chan_b.hostid(), 1, crate::cancel::CancelManager::new())
+            .await
+            .unwrap();
 
         chan_a
             .send(&chan_b.hostid(), None, Msg::FileShared { doc: 42 })
@@ -1365,7 +1439,10 @@ mod tests {
     async fn test_sync_send_ms_zero() {
         let (chan_a, _dual_a, chan_b, mut dual_b) = pair(TravelTime::Ms(0));
 
-        chan_a.connect_test(chan_b.hostid()).await.unwrap();
+        chan_a
+            .connect_test(chan_b.hostid(), 1, crate::cancel::CancelManager::new())
+            .await
+            .unwrap();
 
         chan_a
             .send(&chan_b.hostid(), None, Msg::FileShared { doc: 99 })
@@ -1407,25 +1484,29 @@ mod tests {
             id_sender.clone(),
             tx_sender,
             self_tx_sender,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let _chan_recv1 = factory.build_channel(
             id_recv1.clone(),
             tx_recv1,
             self_tx_recv1,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
         let _chan_recv2 = factory.build_channel(
             id_recv2.clone(),
             tx_recv2,
             self_tx_recv2,
-            Arc::new(tokio::sync::Notify::new()),
+            crate::cancel::CancelManager::new(),
         );
 
-        // Sender connects to both receivers (broadcast iterates the
-        // sender's remote_map — receivers don't need to connect back).
-        chan_sender.connect_test(id_recv1.clone()).await.unwrap();
-        chan_sender.connect_test(id_recv2.clone()).await.unwrap();
+        chan_sender
+            .connect_test(id_recv1.clone(), 1, crate::cancel::CancelManager::new())
+            .await
+            .unwrap();
+        chan_sender
+            .connect_test(id_recv2.clone(), 1, crate::cancel::CancelManager::new())
+            .await
+            .unwrap();
 
         chan_sender
             .broadcast(None, Msg::FileShared { doc: 123 })
