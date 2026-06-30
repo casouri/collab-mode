@@ -560,6 +560,13 @@ Each event is a string.")
 (defvar collab--pause-auto-update nil
   "If non-nil, Emacs don’t apply changes from remote automatically.")
 
+(defvar collab-global-setup-hook nil
+  "Hook run once per fresh collab connection.
+Runs inside ‘collab--connect-process’ after ‘Initialize’ succeeds and
+after ‘collab--my-host-id’, the global monitoring mode, and the Tramp
+backend have been set up. Use this for one-shot per-connection setup;
+for per-buffer setup use ‘collab-monitored-mode-hook’ instead.")
+
 (defun collab--shutdown-cleanup (&optional _connection)
   "Cleanup function ran when collab is shutdown."
   ;; Disable all collab buffers.
@@ -1169,6 +1176,19 @@ Return nil if there’s no parent."
                (resp (jsonrpc-request conn 'Initialize nil)))
 
           (setq collab--my-host-id (plist-get resp :hostId))
+
+          ;; Install the find-file hook so opening a file under a
+          ;; declared project auto-enables ‘collab-monitored-mode’.
+          ;; Mirrors the ‘(collab--global-monitoring-mode -1)’ in
+          ;; ‘collab--shutdown-cleanup’.
+          (collab--global-monitoring-mode)
+
+          ;; Load the Tramp backend so the “collab” method gets
+          ;; registered. Deferred to first connect so it isn’t paid
+          ;; at file-load time.
+          (require 'tramp-collab)
+
+          (run-hooks 'collab-global-setup-hook)
 
           (when (and collab-accept-connection-on-startup
                      collab-default-signaling-server)
@@ -3113,9 +3133,5 @@ detailed history."
          (message "Failed to update config: %s" err))))))
 
 (provide 'collab-mode)
-
-;; Load the Tramp backend so the “collab” method gets registered.
-;; HACK, needs to find a better way to do it.
-(require 'tramp-collab)
 
 ;;; collab-mode.el ends here
